@@ -30,8 +30,16 @@ rich>=13.9
 # HTTP client
 httpx>=0.27
 
-# PDF text extraction
+# PDF text extraction (fallback — always available)
 pdfplumber>=0.11
+
+# PDF ML conversion — marker-pdf (Faz 3): converts PDF to clean markdown.
+# Heavy install: downloads ~2-3 GB of layout models on first use.
+# Install separately after activating the venv:
+#   pip install marker-pdf
+# The pdf_read tool auto-detects and uses it when installed;
+# falls back to pdfplumber silently if absent.
+# marker-pdf>=1.0
 
 # Excel reading + data analysis + plot generation (Iteration 4 tools)
 pandas>=2.2

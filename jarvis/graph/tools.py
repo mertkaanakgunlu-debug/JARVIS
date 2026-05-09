@@ -18,6 +18,7 @@ from jarvis.tools import files as file_tools
 from jarvis.tools import shell as shell_tools
 from jarvis.tools.notes import append_note
 from jarvis.tools.pdf import read_pdf
+from jarvis.tools.pdf_vision import read_pdf_vision
 from jarvis.tools.web import tavily_search
 from jarvis.tools.latex import latex_write, latex_compile
 from jarvis.tools.excel import read_excel
@@ -75,9 +76,33 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
     @tool
     def pdf_read(path: str) -> str:
-        """Extract text from a PDF. Accepts workspace-relative or absolute paths."""
+        """Convert a PDF to markdown and return its content.
+
+        Uses marker-pdf (ML-based, structure-preserving) when installed — handles text,
+        tables, equations. Results are cached as .md for instant re-reads.
+        Falls back to pdfplumber (text-only) if marker-pdf is not installed.
+        For image-heavy PDFs (maps, seismic sections) use pdf_vision instead.
+        """
         full_path = workspace / path if not Path(path).is_absolute() else Path(path)
-        return read_pdf(full_path)
+        cache_dir = workspace / "data" / "pdf_cache"
+        return read_pdf(full_path, cache_dir)
+
+    @tool
+    def pdf_vision(path: str, question: str, pages: str = "") -> str:
+        """Use Gemini Vision to analyze visual content in a PDF.
+
+        Unlike pdf_read (text extraction), this sends the PDF directly to Gemini's
+        visual AI which can interpret charts, maps, seismic cross-sections, contour
+        maps, and any image-heavy content.
+
+        Args:
+            path:     Path to the PDF (workspace-relative or absolute).
+            question: What to analyze or describe in the PDF.
+            pages:    Optional page subset to send — "1", "2-4", "1,3,5" (1-indexed).
+                      Leave empty to send the entire PDF. Use for large files.
+        """
+        full_path = workspace / path if not Path(path).is_absolute() else Path(path)
+        return read_pdf_vision(full_path, question, settings, pages or None)
 
     @tool
     def excel_read(path: str, sheet: str | None = None) -> str:
@@ -134,7 +159,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
     return [
         shell_run, file_read, file_write, file_list,
-        pdf_read, excel_read, python_run, web_search,
+        pdf_read, pdf_vision, excel_read, python_run, web_search,
         note_append, report_write, report_compile,
         math_solve, write_content, research, generate_code,
     ]
