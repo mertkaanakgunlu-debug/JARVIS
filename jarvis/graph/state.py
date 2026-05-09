@@ -1,0 +1,20 @@
+"""LangGraph state definition for JARVIS."""
+
+from __future__ import annotations
+
+from typing import Annotated
+from typing_extensions import TypedDict
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+
+
+class JarvisState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    user_query: str
+    language: str        # "tr" | "en" | etc.
+    memory_context: str
+    needs_planning: bool
+    response: str        # final text extracted by critic/formatter
+    revise_count: int    # critic revision loop counter (Faz 2+)
+    critic_verdict: str  # "accept" | "revise" | "redirect"
+    critique: str        # feedback for executor (Faz 2+)

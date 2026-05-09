@@ -16,7 +16,13 @@ class Settings(BaseSettings):
     cloud_model: str = "gemini-2.5-flash-lite"   # 1000 RPD free tier; stronger models exhausted in testing
     cloud_model_pro: str = "gemini-2.5-pro"     # pro tier default; override via CLOUD_MODEL_PRO
     cloud_model_fallback: str = "gemini-2.5-flash-lite"  # 1000 RPD on free tier (vs 20 for flash)
-    cloud_tier: str = "flash"  # "flash" (free) or "pro" (Gemini Pro subscription)
+    cloud_tier: str = "flash"  # "vertex" | "aistudio" | "flash" (legacy alias)
+
+    # Vertex AI (Google Cloud credits — ADC via `gcloud auth application-default login`)
+    google_cloud_project: str = ""
+    google_cloud_region: str = "europe-west1"
+    vertex_model_primary: str = "gemini-2.5-pro"
+    vertex_model_fast: str = "gemini-2.5-flash"
 
     escalation_word_threshold: int = 50
 
@@ -38,6 +44,10 @@ class Settings(BaseSettings):
     @property
     def groq_api_url(self) -> str:
         return "https://api.groq.com/openai/v1"
+
+    @property
+    def use_vertex(self) -> bool:
+        return self.cloud_tier == "vertex" and bool(self.google_cloud_project)
 
     @property
     def effective_cloud_model(self) -> str:

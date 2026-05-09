@@ -159,7 +159,8 @@ def _show_model_menu(agent: JarvisAgent) -> None:
             last_provider = provider
 
         active_mark = " [gold3]★[/gold3]" if mid == current_id else ""
-        provider_str = "Gemini" if provider == "gemini" else "Groq"
+        _PROVIDER_LABELS = {"vertex": "Vertex", "aistudio": "AI Studio", "gemini": "Gemini", "groq": "Groq"}
+        provider_str = _PROVIDER_LABELS.get(provider, provider.title())
         table.add_row(str(i), label + active_mark, provider_str, desc)
 
     console.print(table)
