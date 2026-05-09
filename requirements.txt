@@ -1,4 +1,12 @@
-# Core agent framework — OpenAI-compatible (Ollama) + Gemini backends
+# LangGraph orchestration (Faz 1 — replaces pydantic-ai as primary runner)
+langgraph>=0.2.50
+langgraph-checkpoint-sqlite>=2.0
+langchain-core>=0.3
+langchain-google-genai>=2.0           # AI Studio Gemini (free tier fallback)
+langchain-google-vertexai>=2.0        # Vertex AI Gemini (uses GCP credits)
+langchain-groq>=0.2                    # Groq Llama models (fast intent classifier)
+
+# Legacy: pydantic-ai retained while jarvis/legacy/ is reachable
 pydantic-ai[openai,google-gai]>=0.0.14
 
 # Settings from .env
