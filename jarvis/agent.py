@@ -24,7 +24,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from jarvis.config import Settings, LANG_NAMES
 from jarvis.memory import Memory
-from jarvis.graph.graph import build_graph
+from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 
 
@@ -118,8 +118,11 @@ class JarvisAgent:
         self._history: list[Any] = []
         self._using_fallback = False
         self._active_model_id: str | None = None
+        self._turn: int = 0  # increments each turn; used for per-turn thread IDs
 
-        self._graph = build_graph(settings, self.workspace, self.memory)
+        db_path = Path("data") / "jarvis_checkpoints.db"
+        self._checkpointer = make_checkpointer(db_path)
+        self._graph = build_graph(settings, self.workspace, self.memory, self._checkpointer)
 
     @property
     def _cloud_model(self) -> str:
@@ -165,7 +168,7 @@ class JarvisAgent:
             new_settings.cloud_tier = "aistudio"
             new_settings.cloud_model = model_id
 
-        self._graph = build_graph(new_settings, self.workspace, self.memory)
+        self._graph = build_graph(new_settings, self.workspace, self.memory, self._checkpointer)
         self._active_model_id = model_id
         self._using_fallback = False
         return _label_for(model_id)
@@ -174,6 +177,7 @@ class JarvisAgent:
         self, user_input: str, detected_language: str = "en"
     ) -> tuple[str, str]:
         """Run one turn. Returns (response_text, model_label)."""
+        needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
 
         memory_ctx = self.memory.recall(clean_input, n=1)
@@ -188,20 +192,23 @@ class JarvisAgent:
             + [HumanMessage(content=clean_input)]
         )
 
+        self._turn += 1
         state = {
             "messages": initial_messages,
             "user_query": clean_input,
             "language": detected_language,
             "memory_context": memory_ctx,
-            "needs_planning": False,
+            "needs_planning": needs_planning,
+            "plan": "",
             "response": "",
             "revise_count": 0,
             "critic_verdict": "",
             "critique": "",
         }
+        config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
 
         try:
-            result = await self._graph.ainvoke(state)
+            result = await self._graph.ainvoke(state, config=config)
         except Exception as exc:
             msg = str(exc)
             if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
@@ -212,8 +219,8 @@ class JarvisAgent:
                 fb_settings = copy.copy(self.settings)
                 fb_settings.cloud_tier = "aistudio"
                 fb_settings.cloud_model = "gemini-2.5-flash-lite"
-                self._graph = build_graph(fb_settings, self.workspace, self.memory)
-                result = await self._graph.ainvoke(state)
+                self._graph = build_graph(fb_settings, self.workspace, self.memory, self._checkpointer)
+                result = await self._graph.ainvoke(state, config=config)
             else:
                 raise
 
@@ -244,6 +251,7 @@ class JarvisAgent:
         detected_language: str = "en",
     ) -> AsyncGenerator[str, None]:
         """Stream one turn token-by-token. Yields text deltas for voice.speak_stream()."""
+        needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
 
         memory_ctx = self.memory.recall(clean_input, n=1)
@@ -258,20 +266,22 @@ class JarvisAgent:
             + [HumanMessage(content=clean_input)]
         )
 
+        self._turn += 1
         state = {
             "messages": initial_messages,
             "user_query": clean_input,
             "language": detected_language,
             "memory_context": memory_ctx,
-            "needs_planning": False,
+            "needs_planning": needs_planning,
+            "plan": "",
             "response": "",
             "revise_count": 0,
             "critic_verdict": "",
             "critique": "",
         }
+        config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
 
         chunks: list[str] = []
-        config: dict = {}
 
         async for delta in graph_stream_to_text(self._graph, state, config):
             chunks.append(delta)

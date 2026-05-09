@@ -1,15 +1,25 @@
-"""LangGraph StateGraph builder for JARVIS.
+"""LangGraph StateGraph builder for JARVIS — Faz 2.
 
-Faz 1 graph topology:
-  START → agent ↔ tools → critic → END
+Graph topology:
+  START → route_from_start → planner (needs_planning=True) → agent
+                           → agent (otherwise)
+  agent ↔ tools (tool-call loop)
+  agent → critic
+  critic → END (accept or revise_count >= 2)
+  critic → agent (revise/redirect, revise_count < 2)
 
-The LLM is configured based on CLOUD_TIER:
-  vertex   — ChatVertexAI (uses ADC, billing via Vertex credits)
-  aistudio / flash / pro  — ChatGoogleGenerativeAI (API key, free/paid tier)
+LLMs:
+  llm_fast — executor (Vertex Flash, fallback AI Studio Flash → Flash-Lite)
+  llm_pro  — critic + planner (Vertex Pro or AI Studio Pro)
+
+Checkpointing:
+  SqliteSaver (per-turn thread IDs) — records all node executions within a turn
+  for debugging and future crash-recovery support.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,7 +28,14 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 
 from jarvis.graph.state import JarvisState
-from jarvis.graph.nodes import make_agent_node, critic_node, route_from_agent
+from jarvis.graph.nodes import (
+    make_agent_node,
+    make_planner_node,
+    make_critic_node,
+    route_from_start,
+    route_from_agent,
+    route_from_critic,
+)
 from jarvis.graph.tools import make_tools
 
 if TYPE_CHECKING:
@@ -26,12 +43,10 @@ if TYPE_CHECKING:
     from jarvis.memory import Memory
 
 
-def make_llm(settings: "Settings") -> BaseChatModel:
-    """Instantiate the right LangChain LLM based on CLOUD_TIER.
+# ── LLM factories ──────────────────────────────────────────────────────────────
 
-    Vertex (credits) → ChatGoogleGenerativeAI with vertexai=True (ADC)
-    Anything else    → ChatGoogleGenerativeAI with GEMINI_API_KEY
-    """
+def make_llm_fast(settings: "Settings") -> BaseChatModel:
+    """Executor LLM: Vertex Flash with AI Studio fallback chain."""
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     if settings.use_vertex:
@@ -42,7 +57,6 @@ def make_llm(settings: "Settings") -> BaseChatModel:
             location=settings.google_cloud_region,
             max_output_tokens=4096,
         )
-        # Fallback chain: Vertex Flash → AI Studio Flash → AI Studio Flash-Lite
         fallback_flash = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             google_api_key=settings.gemini_api_key or None,
@@ -63,31 +77,95 @@ def make_llm(settings: "Settings") -> BaseChatModel:
     )
 
 
-def build_graph(settings: "Settings", workspace: Path, memory: "Memory"):
-    """Build and compile the JARVIS LangGraph state machine.
+def make_llm_pro(settings: "Settings") -> BaseChatModel:
+    """Critic + planner LLM: Vertex Pro or AI Studio Pro."""
+    from langchain_google_genai import ChatGoogleGenerativeAI
 
-    Returns a compiled graph that accepts JarvisState and produces JarvisState.
-    The graph is stateless across turns; history is managed by JarvisAgent.
+    if settings.use_vertex:
+        return ChatGoogleGenerativeAI(
+            model=settings.vertex_model_primary,  # gemini-2.5-pro
+            vertexai=True,
+            project=settings.google_cloud_project,
+            location=settings.google_cloud_region,
+            max_output_tokens=2048,
+        )
+
+    return ChatGoogleGenerativeAI(
+        model=settings.cloud_model_pro,  # gemini-2.5-pro
+        google_api_key=settings.gemini_api_key or None,
+        max_output_tokens=2048,
+    )
+
+
+# ── Checkpointer ───────────────────────────────────────────────────────────────
+
+def make_checkpointer(db_path: Path):
+    """Create a SqliteSaver checkpointer from a file path.
+
+    Uses check_same_thread=False so the sync SQLite connection works safely
+    when LangGraph runs it from async context via a thread pool.
+    """
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    return SqliteSaver(conn)
+
+
+# ── Graph builder ──────────────────────────────────────────────────────────────
+
+def build_graph(
+    settings: "Settings",
+    workspace: Path,
+    memory: "Memory",
+    checkpointer=None,
+):
+    """Build and compile the JARVIS LangGraph state machine (Faz 2).
+
+    Args:
+        settings:     App settings (model IDs, API keys, etc.)
+        workspace:    Current working directory (passed to tools)
+        memory:       ChromaDB + vault memory instance
+        checkpointer: Optional LangGraph checkpointer (SqliteSaver)
     """
     tools = make_tools(workspace, settings, memory)
-    llm = make_llm(settings)
-    llm_with_tools = llm.bind_tools(tools)
+    llm_fast = make_llm_fast(settings)
+    llm_pro = make_llm_pro(settings)
+
+    llm_with_tools = llm_fast.bind_tools(tools)
 
     agent_node = make_agent_node(llm_with_tools)
+    planner_node = make_planner_node(llm_pro)
+    critic_node = make_critic_node(llm_pro)
     tools_node = ToolNode(tools)
 
     builder = StateGraph(JarvisState)
     builder.add_node("agent", agent_node)
+    builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
     builder.add_node("critic", critic_node)
 
-    builder.add_edge(START, "agent")
+    # START → planner (if /think) or directly to agent
+    builder.add_conditional_edges(
+        START,
+        route_from_start,
+        {"planner": "planner", "agent": "agent"},
+    )
+    builder.add_edge("planner", "agent")
+
+    # agent → tools (tool calls) or critic (final response)
     builder.add_conditional_edges(
         "agent",
         route_from_agent,
         {"tools": "tools", "critic": "critic"},
     )
     builder.add_edge("tools", "agent")
-    builder.add_edge("critic", END)
 
-    return builder.compile()
+    # critic → agent (revise) or END (accept / exhausted)
+    builder.add_conditional_edges(
+        "critic",
+        route_from_critic,
+        {"agent": "agent", END: END},
+    )
+
+    return builder.compile(checkpointer=checkpointer)
