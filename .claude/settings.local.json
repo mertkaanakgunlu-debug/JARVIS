@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.\\\\.venv\\\\Scripts\\\\python.exe -m jarvis)",
+      "Bash(..venvScriptspython.exe -c ' *)",
+      "PowerShell(cd \"C:\\\\Users\\\\mertk\\\\OneDrive\\\\Desktop\\\\Jarvis\"; $env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe _test_iter2.py)",
+      "Bash(.venv\\\\Scripts\\\\pip install *)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Bash(.venv/Scripts/python -c \"import ctranslate2; print\\('ctranslate2:', ctranslate2.__version__\\); print\\('cuda support:', ctranslate2.get_cuda_device_count\\(\\)\\)\")",
+      "Bash(nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader)",
+      "Bash(.venv/Scripts/pip show *)",
+      "Bash(findstr \"Name Version Requires\")",
+      "Bash(where cublas64_12.dll)",
+      "Bash(python -c \"import ctranslate2, os; lib_path = os.path.dirname\\(ctranslate2.__file__\\); print\\(lib_path\\); import glob; dlls = glob.glob\\(lib_path + '/**/*.dll', recursive=True\\); print\\('\\\\n'.join\\(dlls[:20]\\)\\)\")",
+      "Bash(.venv/Scripts/python -c \"import ctranslate2, os, glob; lib_path = os.path.dirname\\(ctranslate2.__file__\\); print\\('pkg dir:', lib_path\\); dlls = glob.glob\\(lib_path + '/**/*.dll', recursive=True\\); print\\('\\\\n'.join\\(dlls\\)\\)\")",
+      "Bash(.venv/Scripts/pip list *)",
+      "Bash(findstr /i \"nvidia cuda\")",
+      "Bash(ls \"/mnt/c/Users/mertk/OneDrive/Desktop/\" 2>/dev/null || ls \"C:/Users/mertk/OneDrive/Desktop/\" 2>/dev/null)",
+      "WebFetch(domain:console.groq.com)",
+      "Bash(.venv\\\\Scripts\\\\python.exe run_hw5.py)",
+      "Bash(.venv/Scripts/python.exe run_hw5.py)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"from pydantic_ai.messages import ToolReturnPart, ModelRequest; import dataclasses; print\\(dataclasses.is_dataclass\\(ToolReturnPart\\)\\); r = ToolReturnPart\\(tool_name='t', content='hello world', tool_call_id='x'\\); print\\(dataclasses.replace\\(r, content='hi'\\)\\)\")",
+      "PowerShell(New-Item -ItemType Directory -Path \"C:\\\\Users\\\\mertk\\\\OneDrive\\\\Desktop\\\\Jarvis\\\\jarvis\\\\prompts\\\\workflows\" -Force)"
+    ]
+  }
+}

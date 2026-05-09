@@ -1,0 +1,8 @@
+\contentsline {section}{\numberline {1}Introduction}{2}{section.1}%
+\contentsline {section}{\numberline {2}Dataset Overview}{2}{section.2}%
+\contentsline {section}{\numberline {3}Results and Discussion}{2}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Plot A: Atmospheric Porosity vs.\ Grain Density}{2}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Plot B: 800~psi Air Permeability vs.\ 800~psi Helium Porosity (Semi-log)}{3}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Plot C: 800~psi Helium Porosity vs.\ Atmospheric Porosity}{3}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Plot D: $K_{\infty }$ vs.\ $K_{air}$ (Log--Log)}{3}{subsection.3.4}%
+\contentsline {section}{\numberline {4}Conclusion}{4}{section.4}%

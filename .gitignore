@@ -1,0 +1,24 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Vector DB (writes frequently, noisy in OneDrive sync)
+data/
+
+# Vault — include markdown, exclude any temp files
+vault/**/*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+desktop.ini

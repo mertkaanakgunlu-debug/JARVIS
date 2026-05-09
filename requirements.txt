@@ -1,0 +1,41 @@
+# Core agent framework — OpenAI-compatible (Ollama) + Gemini backends
+pydantic-ai[openai,google-gai]>=0.0.14
+
+# Settings from .env
+pydantic-settings>=2.6
+
+# Google Gemini SDK (cloud fallback)
+google-generativeai>=0.8
+
+# OpenAI SDK (used for Ollama's OpenAI-compatible endpoint)
+openai>=1.70
+
+# Local vector store
+chromadb>=0.6
+
+# Environment
+python-dotenv>=1.0
+
+# Rich terminal UI
+rich>=13.9
+
+# HTTP client
+httpx>=0.27
+
+# PDF text extraction
+pdfplumber>=0.11
+
+# Excel reading + data analysis + plot generation (Iteration 4 tools)
+pandas>=2.2
+openpyxl>=3.1       # pandas Excel engine for .xlsx
+matplotlib>=3.9     # plot generation executed via python_run tool
+
+# Web search for ResearchAgent
+tavily-python>=0.3
+
+# Voice I/O (Iteration 3)
+faster-whisper>=1.1      # STT — CTranslate2 based, multilingual, no PyTorch
+sounddevice>=0.4         # Audio capture + playback
+edge-tts>=7.0            # TTS — Microsoft Neural (English + Turkish); v6 gives 403
+miniaudio>=1.14          # MP3 decode for edge-tts output (pure Python)
+numpy>=1.24              # Audio array math

@@ -1,0 +1,48 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{geometry}
+\usepackage{hyperref}
+\geometry{a4paper, margin=2.5cm}
+\title{Integration Test}
+\date{\today}
+\begin{document}
+\maketitle
+\section*{Problem 1: Integral of $e^x \cos(x)$}
+To evaluate the integral $\int e^x \cos(x) dx$, we will use integration by parts, which states $\int u \, dv = uv - \int v \, du$. We will apply this method twice.
+
+Let $I = \int e^x \cos(x) dx$.
+
+For the first application of integration by parts, let:
+$u = \cos(x) \implies du = -\sin(x) dx$
+$dv = e^x dx \implies v = e^x$
+
+Applying the integration by parts formula:
+\[ I = e^x \cos(x) - \int e^x (-\sin(x)) dx \]
+\[ I = e^x \cos(x) + \int e^x \sin(x) dx \]
+
+Now, we need to evaluate the integral $\int e^x \sin(x) dx$. Let's call this $J$. We apply integration by parts again to $J$.
+For this second application, let:
+$u = \sin(x) \implies du = \cos(x) dx$
+$dv = e^x dx \implies v = e^x$
+
+Applying the integration by parts formula to $J$:
+\[ J = e^x \sin(x) - \int e^x \cos(x) dx \]
+Notice that the integral on the right side, $\int e^x \cos(x) dx$, is our original integral $I$.
+So, we can write $J$ in terms of $I$:
+\[ J = e^x \sin(x) - I \]
+
+Now substitute this expression for $J$ back into the equation for $I$:
+\[ I = e^x \cos(x) + (e^x \sin(x) - I) \]
+\[ I = e^x \cos(x) + e^x \sin(x) - I \]
+
+Now, we solve this equation for $I$:
+\[ I + I = e^x \cos(x) + e^x \sin(x) \]
+\[ 2I = e^x (\cos(x) + \sin(x)) \]
+\[ I = \frac{e^x}{2} (\cos(x) + \sin(x)) \]
+
+Finally, we add the constant of integration $C$:
+\[ I = \frac{e^x}{2} (\cos(x) + \sin(x)) + C \]
+
+The final answer is $\boxed{\frac{e^x}{2}(\cos(x) + \sin(x)) + C}$.
+\end{document}
