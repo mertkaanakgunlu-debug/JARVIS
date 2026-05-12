@@ -26,6 +26,7 @@ from jarvis.config import Settings, LANG_NAMES
 from jarvis.memory import Memory
 from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
+from jarvis.usage import UsageTracker
 
 
 # ── System prompt helpers (unchanged from pydantic-ai version) ─────────────────
@@ -34,6 +35,39 @@ _DATA_REPORT_KEYWORDS = frozenset([
     "pdf", "excel", "xlsx", "xls", "csv", "report", "rapor", "plot", "grafik",
     "chart", "data", "veri", "analiz", "analysis", "hw", "odev", "ödev",
 ])
+
+# Faz 5: keywords that elevate a query to Pro-agent routing
+_PRO_KEYWORDS = frozenset([
+    "analyze", "analiz", "research", "araştır", "compare", "karşılaştır",
+    "explain", "açıkla", "report", "rapor", "summarize", "özetle",
+    "investigate", "incele", "calculate", "hesapla", "derive", "prove",
+    "deep", "derin", "comprehensive", "kapsamlı", "detailed", "ayrıntılı",
+])
+_HEAVY_EXTS = frozenset(["pdf", "xlsx", "xls", "csv", "docx", "tex"])  # match with or without dot
+
+
+def _is_complex_query(query: str, needs_planning: bool) -> bool:
+    """Return True if the query warrants routing the agent to Gemini Pro.
+
+    Criteria:
+    - /think command (needs_planning)
+    - Long query (>50 words)
+    - Contains heavy file extensions AND an analysis keyword
+    - Query length > 30 words AND contains a Pro keyword
+    """
+    if needs_planning:
+        return True
+    q = query.lower()
+    words = q.split()
+    if len(words) > 50:
+        return True
+    has_file = any(ext in q for ext in _HEAVY_EXTS)
+    has_kw = any(kw in q for kw in _PRO_KEYWORDS)
+    if has_file and has_kw:
+        return True
+    if len(words) > 30 and has_kw:
+        return True
+    return False
 
 
 def _build_env_block(workspace: Path) -> str:
@@ -124,6 +158,9 @@ class JarvisAgent:
         self._checkpointer = make_checkpointer(db_path)
         self._graph = build_graph(settings, self.workspace, self.memory, self._checkpointer)
 
+        # Faz 5: token and cost tracker (persists to data/usage.json)
+        self.usage = UsageTracker(Path("data") / "usage.json")
+
     @property
     def _cloud_model(self) -> str:
         """Display label for the currently active model."""
@@ -179,6 +216,7 @@ class JarvisAgent:
         """Run one turn. Returns (response_text, model_label)."""
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
+        use_pro_agent = _is_complex_query(clean_input, needs_planning)
 
         memory_ctx = self.memory.recall(clean_input, n=1)
         system_prompt = _load_system_prompt(
@@ -199,6 +237,7 @@ class JarvisAgent:
             "language": detected_language,
             "memory_context": memory_ctx,
             "needs_planning": needs_planning,
+            "use_pro_agent": use_pro_agent,
             "plan": "",
             "response": "",
             "revise_count": 0,
@@ -233,6 +272,9 @@ class JarvisAgent:
                     response = m.content
                     break
 
+        # Faz 5: record token usage from all AI messages in result
+        self._record_usage_from_result(result, use_pro_agent)
+
         # Update history (exclude system message — regenerated each turn)
         all_msgs = result.get("messages", [])
         non_system = [m for m in all_msgs if not isinstance(m, SystemMessage)]
@@ -245,6 +287,27 @@ class JarvisAgent:
 
         return response, self.current_model_label
 
+    def _record_usage_from_result(self, result: dict, use_pro_agent: bool) -> None:
+        """Extract usage_metadata from AI messages in the graph result and record it."""
+        from langchain_core.messages import AIMessage as LCAIMessage
+        model_id = self._active_model_id or (
+            f"vertex/{self.settings.vertex_model_primary}" if use_pro_agent
+            else f"vertex/{self.settings.vertex_model_fast}"
+        )
+        for msg in result.get("messages", []):
+            if not isinstance(msg, LCAIMessage):
+                continue
+            um = getattr(msg, "usage_metadata", None)
+            if not um:
+                continue
+            # Prefer the model name from response_metadata when available
+            msg_model = getattr(msg, "response_metadata", {}).get("model_name", model_id)
+            self.usage.record(
+                msg_model,
+                um.get("input_tokens", 0),
+                um.get("output_tokens", 0),
+            )
+
     async def chat_stream(
         self,
         user_input: str,
@@ -253,6 +316,7 @@ class JarvisAgent:
         """Stream one turn token-by-token. Yields text deltas for voice.speak_stream()."""
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
+        use_pro_agent = _is_complex_query(clean_input, needs_planning)
 
         memory_ctx = self.memory.recall(clean_input, n=1)
         system_prompt = _load_system_prompt(
@@ -273,6 +337,7 @@ class JarvisAgent:
             "language": detected_language,
             "memory_context": memory_ctx,
             "needs_planning": needs_planning,
+            "use_pro_agent": use_pro_agent,
             "plan": "",
             "response": "",
             "revise_count": 0,
@@ -296,6 +361,18 @@ class JarvisAgent:
         non_system = [m for m in initial_messages if not isinstance(m, SystemMessage)]
         non_system.append(AIMessage(content=full_response))
         self._history = _trim_history(non_system)
+
+        # Faz 5: estimate token usage from character counts (streaming doesn't return metadata)
+        all_text = " ".join(
+            m.content for m in initial_messages if hasattr(m, "content") and isinstance(m.content, str)
+        )
+        est_in = max(1, len(all_text) // 4)
+        est_out = max(1, len(full_response) // 4)
+        model_id = self._active_model_id or (
+            f"vertex/{self.settings.vertex_model_primary}" if use_pro_agent
+            else f"vertex/{self.settings.vertex_model_fast}"
+        )
+        self.usage.record(model_id, est_in, est_out)
 
         self.memory.store("user", clean_input, self.session_id)
         self.memory.store("assistant", full_response, self.session_id)

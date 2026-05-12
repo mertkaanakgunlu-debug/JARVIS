@@ -132,9 +132,10 @@ def build_graph(
     llm_fast = make_llm_fast(settings)
     llm_pro = make_llm_pro(settings)
 
-    llm_with_tools = llm_fast.bind_tools(tools)
+    llm_fast_with_tools = llm_fast.bind_tools(tools)
+    llm_pro_with_tools = llm_pro.bind_tools(tools)   # Faz 5: Pro agent for complex queries
 
-    agent_node = make_agent_node(llm_with_tools)
+    agent_node = make_agent_node(llm_fast_with_tools, llm_pro_with_tools)
     planner_node = make_planner_node(llm_pro)
     critic_node = make_critic_node(llm_pro)
     tools_node = ToolNode(tools)

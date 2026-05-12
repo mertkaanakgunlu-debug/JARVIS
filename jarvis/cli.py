@@ -29,10 +29,11 @@ BANNER = """[bold gold3]
 
 HELP_TEXT = """\
 [bold]Commands:[/bold]
-  [gold3]/think[/gold3] [dim]<message>[/dim]  Zorlu görevleri zorla cloud modeliyle çalıştır
+  [gold3]/think[/gold3] [dim]<message>[/dim]  Zorlu görevleri Pro model + planlayıcı ile çalıştır
   [gold3]/model[/gold3]             Kullanılabilir modelleri listele ve değiştir
   [gold3]/recall[/gold3] [dim]<query>[/dim]   Ham bellek arama sonuçlarını göster
   [gold3]/status[/gold3]           Model + bellek istatistiklerini göster
+  [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
   [gold3]/reset[/gold3]            Konuşma geçmişini temizle (yeni görev başlarken)
   [gold3]/help[/gold3]             Bu mesajı göster
   [gold3]/exit[/gold3]             Çıkış (Ctrl+C de çalışır)
@@ -199,12 +200,24 @@ async def _run_loop(agent: JarvisAgent) -> None:
         if lower == "/status":
             count = agent.memory.count()
             active = agent._active_model_id or settings.effective_cloud_model
+            cost = agent.usage.session_cost
             console.print(
                 f"[dim]Session ID:[/dim]     [bold]{agent.session_id}[/bold]\n"
                 f"[dim]Memory entries:[/dim]  [bold]{count}[/bold]\n"
                 f"[dim]Active model:[/dim]   [bold]{agent.current_model_label}[/bold] [dim]({active})[/dim]\n"
-                f"[dim]Local model:[/dim]    [bold]{settings.local_model}[/bold]"
+                f"[dim]Local model:[/dim]    [bold]{settings.local_model}[/bold]\n"
+                f"[dim]Session cost:[/dim]   [yellow]~${cost:.5f}[/yellow]"
             )
+            continue
+
+        if lower in ("/budget", "/b"):
+            from rich.panel import Panel as _Panel
+            console.print(_Panel(
+                agent.usage.report(settings.vertex_credit_usd),
+                title="[bold gold3]JARVIS — Usage & Budget[/bold gold3]",
+                border_style="gold3 dim",
+                padding=(0, 2),
+            ))
             continue
 
         if lower in ("/reset", "/clear"):

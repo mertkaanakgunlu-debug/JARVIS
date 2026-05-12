@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     user_name: str = "Sir"
 
+    # Faz 5: Vertex AI credit budget for /budget display (set in .env as VERTEX_CREDIT_USD=350.0)
+    vertex_credit_usd: float = 0.0
+
     whisper_device: str = "auto"         # "auto" | "cuda" | "cpu"
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
 

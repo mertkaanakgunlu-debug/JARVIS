@@ -114,11 +114,17 @@ def _is_simple_exchange(user_query: str, response_text: str) -> bool:
 
 # ── Nodes ──────────────────────────────────────────────────────────────────────
 
-def make_agent_node(llm_with_tools):
-    """Return an async node that calls the LLM with tools bound."""
+def make_agent_node(llm_fast_with_tools, llm_pro_with_tools=None):
+    """Return an async node that picks Flash or Pro based on state["use_pro_agent"].
+
+    Faz 5: if use_pro_agent is True and a Pro model is available, route the agent
+    to Gemini Pro for complex queries; otherwise use the fast Flash model.
+    """
 
     async def agent_node(state: JarvisState) -> dict:
-        response = await llm_with_tools.ainvoke(state["messages"])
+        use_pro = state.get("use_pro_agent", False) and llm_pro_with_tools is not None
+        llm = llm_pro_with_tools if use_pro else llm_fast_with_tools
+        response = await llm.ainvoke(state["messages"])
         return {"messages": [response]}
 
     agent_node.__name__ = "agent_node"
