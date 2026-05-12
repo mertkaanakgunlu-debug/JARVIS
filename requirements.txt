@@ -50,6 +50,10 @@ seaborn>=0.13       # statistical plot styles (used by plot_data)
 # Web search for ResearchAgent
 tavily-python>=0.3
 
+# Deep web research — URL content extraction (Faz 7: url_read, deep_web_research)
+trafilatura>=1.8          # Free best-in-class article text extraction (always used)
+firecrawl-py>=1.0         # Optional: enhanced JS-page crawling (set FIRECRAWL_API_KEY)
+
 # Voice I/O (Iteration 3)
 faster-whisper>=1.1      # STT — CTranslate2 based, multilingual, no PyTorch
 sounddevice>=0.4         # Audio capture + playback

@@ -7,6 +7,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     tavily_api_key: str = ""
+    firecrawl_api_key: str = ""   # Optional — enhances url_read/deep_web_research for JS-heavy sites
     groq_api_key: str = ""
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"

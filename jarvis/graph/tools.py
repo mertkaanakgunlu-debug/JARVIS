@@ -26,6 +26,8 @@ from jarvis.tools import python_exec
 from jarvis.tools.data_analysis import read_csv_file, analyze_data
 from jarvis.tools.plotting import generate_plot
 from jarvis.tools.indexer import index_file
+from jarvis.tools.webfetch import fetch_url
+from jarvis.tools.deep_research import run_deep_research
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -286,6 +288,41 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         full = workspace / path if not Path(path).is_absolute() else Path(path)
         return index_file(full, memory)
 
+    # ── Faz 7: Deep Web Research ──────────────────────────────────────────────
+
+    @tool
+    def url_read(url: str) -> str:
+        """Fetch a URL and return its full readable text content.
+
+        Useful for reading specific articles, documentation pages, or any web URL
+        the user wants JARVIS to analyse. Uses Firecrawl if configured, otherwise
+        trafilatura (free, no API key needed). Returns up to ~8000 characters.
+
+        Args:
+            url: Full URL including http:// or https://.
+        """
+        return fetch_url(url, settings)
+
+    @tool
+    def deep_web_research(topic: str, max_sources: int = 5) -> str:
+        """Deep multi-step research: search the web, read sources, synthesize with citations.
+
+        Unlike web_search (quick snippets), this tool:
+        1. Searches Tavily for relevant URLs
+        2. Fetches and reads the full content of each page
+        3. Synthesizes a structured markdown report with [N] citations
+        4. Includes a References section
+
+        Use for: in-depth technical questions, literature summaries, current-events
+        reports, comparative analyses. Slower than web_search (15-30s typical).
+
+        Args:
+            topic:       Research topic or question (natural language).
+            max_sources: Number of sources to fetch and synthesize (default 5, max 10).
+        """
+        n = min(max(1, max_sources), 10)
+        return run_deep_research(topic, settings, n)
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -293,4 +330,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         math_solve, write_content, research, generate_code,
         csv_read, data_analyze, plot_data, report_compose,
         vault_search, index_doc,  # Faz 6
+        url_read, deep_web_research,  # Faz 7
     ]

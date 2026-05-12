@@ -1,8 +1,30 @@
-"""Tavily web search wrapper for the ResearchAgent."""
+"""Tavily web search wrapper for JARVIS tools."""
 
 from __future__ import annotations
 
 _cache: dict[str, str] = {}
+
+
+def _get_client(api_key: str):
+    try:
+        from tavily import TavilyClient
+        return TavilyClient(api_key=api_key)
+    except ImportError:
+        return None
+
+
+def tavily_search_raw(query: str, api_key: str, max_results: int = 5) -> list[dict]:
+    """Search with Tavily and return raw result dicts (title, url, content, score)."""
+    if not api_key:
+        return []
+    client = _get_client(api_key)
+    if not client:
+        return []
+    try:
+        response = client.search(query=query, max_results=max_results)
+        return response.get("results", [])
+    except Exception:
+        return []
 
 
 def tavily_search(query: str, api_key: str, max_results: int = 5) -> str:
@@ -14,13 +36,11 @@ def tavily_search(query: str, api_key: str, max_results: int = 5) -> str:
     if cache_key in _cache:
         return _cache[cache_key]
 
-    try:
-        from tavily import TavilyClient
-    except ImportError:
+    client = _get_client(api_key)
+    if not client:
         return "[ERROR] tavily-python not installed. Run: pip install tavily-python"
 
     try:
-        client = TavilyClient(api_key=api_key)
         response = client.search(query=query, max_results=max_results)
     except Exception as e:
         return f"[ERROR] Tavily search failed: {e}"
