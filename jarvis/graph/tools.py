@@ -20,9 +20,11 @@ from jarvis.tools.notes import append_note
 from jarvis.tools.pdf import read_pdf
 from jarvis.tools.pdf_vision import read_pdf_vision
 from jarvis.tools.web import tavily_search
-from jarvis.tools.latex import latex_write, latex_compile
+from jarvis.tools.latex import latex_write, latex_compile, compose_report
 from jarvis.tools.excel import read_excel
 from jarvis.tools import python_exec
+from jarvis.tools.data_analysis import read_csv_file, analyze_data
+from jarvis.tools.plotting import generate_plot
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -157,9 +159,92 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         """Delegate to CoderAgent for Python/scripts/algorithms. Returns LaTeX with code blocks."""
         return _run_coro(run_coder(spec, settings))
 
+    # ── Faz 4: Data Analysis + Plotting + Report Compose ──────────────────────
+
+    @tool
+    def csv_read(path: str, rows: int = 100) -> str:
+        """Read a CSV file — returns shape, column types, and the first N rows.
+
+        Args:
+            path: Path to the CSV file (workspace-relative or absolute).
+            rows: Number of preview rows to include (default 100).
+        """
+        full = workspace / path if not Path(path).is_absolute() else Path(path)
+        return read_csv_file(full, rows)
+
+    @tool
+    def data_analyze(path: str, query: str = "") -> str:
+        """Full statistical analysis of a CSV or Excel file.
+
+        Returns: shape, dtypes, descriptive stats, missing-value report,
+        top pairwise correlations (numeric columns), and categorical summaries.
+        Pass an optional query to highlight columns matching that keyword
+        (e.g. query="depth" focuses stats on depth-related columns).
+
+        Args:
+            path:  Path to CSV or Excel file (workspace-relative or absolute).
+            query: Optional keyword to filter column-level stats.
+        """
+        full = workspace / path if not Path(path).is_absolute() else Path(path)
+        return analyze_data(full, query)
+
+    @tool
+    def plot_data(
+        path: str,
+        kind: str,
+        x: str = "",
+        y: str = "",
+        title: str = "",
+        hue: str = "",
+        output: str = "",
+    ) -> str:
+        """Generate a chart from a CSV or Excel file and save as PNG.
+
+        Supported kinds: line, scatter, bar, hist, box, violin, heatmap.
+        - heatmap: auto-uses correlation matrix, no x/y needed.
+        - hist:    only x (the column to histogram) needed.
+        - box/violin: x = grouping column (optional), y = value column.
+
+        Args:
+            path:   Data file path (workspace-relative or absolute).
+            kind:   Chart type (line | scatter | bar | hist | box | violin | heatmap).
+            x:      Column for x-axis (or histogram column for hist).
+            y:      Column for y-axis.
+            title:  Chart title text.
+            hue:    Optional column for colour grouping.
+            output: Output filename stem (auto-generated if empty).
+
+        Returns:
+            Absolute path to the saved PNG file.
+        """
+        full = workspace / path if not Path(path).is_absolute() else Path(path)
+        plots_dir = workspace / "data" / "plots"
+        return generate_plot(full, kind, x, y, title, hue, output, plots_dir)
+
+    @tool
+    def report_compose(title: str, sections_md: str, figures_json: str = "") -> str:
+        """Build a structured LaTeX report from markdown sections + embedded figures.
+
+        Converts markdown (## headings, ### subheadings, plain paragraphs) to LaTeX
+        sections and embeds PNG figures. Call report_compile on the returned .tex path
+        to produce a PDF.
+
+        Args:
+            title:       Report title.
+            sections_md: Markdown body — use ## for sections, ### for subsections.
+            figures_json: JSON array of figure dicts (optional):
+                          [{"path": "/abs/path/to/plot.png", "caption": "Figure caption"}]
+
+        Returns:
+            Path to the written .tex file.
+        """
+        reports_dir = workspace / "vault" / "reports"
+        return compose_report(title, sections_md, figures_json or "[]", reports_dir)
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
         note_append, report_write, report_compile,
         math_solve, write_content, research, generate_code,
+        csv_read, data_analyze, plot_data, report_compose,
     ]

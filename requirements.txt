@@ -41,10 +41,11 @@ pdfplumber>=0.11
 # falls back to pdfplumber silently if absent.
 # marker-pdf>=1.0
 
-# Excel reading + data analysis + plot generation (Iteration 4 tools)
+# Excel reading + data analysis + plot generation (Faz 4 tools)
 pandas>=2.2
 openpyxl>=3.1       # pandas Excel engine for .xlsx
-matplotlib>=3.9     # plot generation executed via python_run tool
+matplotlib>=3.9     # plot_data tool
+seaborn>=0.13       # statistical plot styles (used by plot_data)
 
 # Web search for ResearchAgent
 tavily-python>=0.3

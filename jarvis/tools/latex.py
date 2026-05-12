@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -96,6 +98,95 @@ def latex_compile(tex_path: str | Path) -> str:
             lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
             log_tail = "\n".join(lines[-60:])
         return f"[COMPILE ERROR] pdflatex failed.\n\nLast log lines:\n{log_tail}"
+
+
+def compose_report(
+    title: str,
+    sections_md: str,
+    figures_json: str,
+    reports_dir: Path,
+) -> str:
+    """Build a structured LaTeX report from markdown sections and embedded figures.
+
+    Args:
+        title:       Report title.
+        sections_md: Markdown body — use ## headers for sections, ### for subsections.
+                     Regular paragraphs become LaTeX paragraphs.
+        figures_json: JSON array of figure dicts:
+                      [{"path": "/abs/or/rel/file.png", "caption": "..."}]
+                      Figures are appended in order at the bottom of each section
+                      if their caption matches a section header keyword, otherwise
+                      placed at the end of the document.
+        reports_dir: Directory where the .tex file is written.
+
+    Returns:
+        Path to the written .tex file (caller can pass to latex_compile).
+    """
+    # Parse figures
+    figures: list[dict] = []
+    if figures_json.strip():
+        try:
+            figures = json.loads(figures_json)
+            if not isinstance(figures, list):
+                figures = []
+        except json.JSONDecodeError:
+            figures = []
+
+    body_lines: list[str] = []
+
+    # Convert markdown sections to LaTeX
+    for raw_line in sections_md.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("### "):
+            heading = _escape_latex(line[4:].strip())
+            body_lines.append(rf"\subsubsection{{{heading}}}")
+        elif line.startswith("## "):
+            heading = _escape_latex(line[3:].strip())
+            body_lines.append(rf"\subsection{{{heading}}}")
+        elif line.startswith("# "):
+            heading = _escape_latex(line[2:].strip())
+            body_lines.append(rf"\section{{{heading}}}")
+        elif line.startswith("**") and line.endswith("**"):
+            body_lines.append(rf"\textbf{{{_escape_latex(line[2:-2])}}}")
+        elif line == "":
+            body_lines.append("")
+        else:
+            body_lines.append(_escape_latex(line))
+
+    # Append figures
+    for fig in figures:
+        fig_path = str(fig.get("path", "")).replace("\\", "/")
+        caption = _escape_latex(str(fig.get("caption", "")))
+        body_lines.append(r"\begin{figure}[h!]")
+        body_lines.append(r"  \centering")
+        body_lines.append(rf"  \includegraphics[width=0.9\linewidth]{{{fig_path}}}")
+        if caption:
+            body_lines.append(rf"  \caption{{{caption}}}")
+        body_lines.append(r"\end{figure}")
+        body_lines.append("")
+
+    # Assemble preamble — add graphicx for figures
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in title).strip()
+    safe = safe.replace(" ", "_")
+    tex_path = reports_dir / f"{safe}.tex"
+
+    document = rf"""\documentclass{{article}}
+\usepackage[utf8]{{inputenc}}
+\usepackage{{amsmath, amssymb, amsthm}}
+\usepackage{{geometry}}
+\usepackage{{hyperref}}
+\usepackage{{graphicx}}
+\geometry{{a4paper, margin=2.5cm}}
+\title{{{_escape_latex(title)}}}
+\date{{\today}}
+\begin{{document}}
+\maketitle
+{chr(10).join(body_lines)}
+\end{{document}}
+"""
+    tex_path.write_text(document, encoding="utf-8")
+    return str(tex_path)
 
 
 def _escape_latex(text: str) -> str:
