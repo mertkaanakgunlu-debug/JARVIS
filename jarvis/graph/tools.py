@@ -25,6 +25,7 @@ from jarvis.tools.excel import read_excel
 from jarvis.tools import python_exec
 from jarvis.tools.data_analysis import read_csv_file, analyze_data
 from jarvis.tools.plotting import generate_plot
+from jarvis.tools.indexer import index_file
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -241,10 +242,55 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         reports_dir = workspace / "vault" / "reports"
         return compose_report(title, sections_md, figures_json or "[]", reports_dir)
 
+    # ── Faz 6: Document RAG ───────────────────────────────────────────────────
+
+    @tool
+    def vault_search(query: str, n: int = 5) -> str:
+        """Semantic search over indexed documents in the JARVIS vault (RAG).
+
+        Use this when the user asks questions about previously indexed files,
+        reports, or notes. Returns the most relevant passages and their sources.
+        If no documents are indexed yet, prompt the user to run index_doc first.
+
+        Args:
+            query: Natural-language search query or key terms.
+            n:     Number of result passages to return (default 5, max 20).
+        """
+        hits = memory.search_vault(query, min(n, 20))
+        if not hits:
+            indexed = memory.list_indexed()
+            if not indexed:
+                return "[vault_search] No documents indexed yet. Ask the user to index files with index_doc first."
+            names = ", ".join(Path(p).name for p in indexed)
+            return f"[vault_search] No relevant passages found. Indexed files: {names}"
+        lines = [f"[vault_search] Top {len(hits)} passages:"]
+        for i, h in enumerate(hits, 1):
+            src = Path(h["source"]).name
+            score = h["score"]
+            lines.append(f"\n[{i}] {src} (relevance {score:.2f})\n{h['content'][:600]}")
+        return "\n".join(lines)
+
+    @tool
+    def index_doc(path: str) -> str:
+        """Index a document into the JARVIS vault for semantic search (RAG).
+
+        Reads the file, splits it into overlapping text chunks, and stores them
+        in ChromaDB so vault_search can find relevant passages. Re-indexing a file
+        replaces its previous index entry.
+
+        Supported formats: .pdf, .md, .txt, .tex, .py, .json, .csv
+
+        Args:
+            path: Path to the file (workspace-relative or absolute).
+        """
+        full = workspace / path if not Path(path).is_absolute() else Path(path)
+        return index_file(full, memory)
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
         note_append, report_write, report_compile,
         math_solve, write_content, research, generate_code,
         csv_read, data_analyze, plot_data, report_compose,
+        vault_search, index_doc,  # Faz 6
     ]

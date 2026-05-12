@@ -32,11 +32,15 @@ HELP_TEXT = """\
   [gold3]/think[/gold3] [dim]<message>[/dim]  Zorlu görevleri Pro model + planlayıcı ile çalıştır
   [gold3]/model[/gold3]             Kullanılabilir modelleri listele ve değiştir
   [gold3]/recall[/gold3] [dim]<query>[/dim]   Ham bellek arama sonuçlarını göster
+  [gold3]/indexed[/gold3]          RAG vault'una indexlenmiş dosyaları listele
   [gold3]/status[/gold3]           Model + bellek istatistiklerini göster
   [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
   [gold3]/reset[/gold3]            Konuşma geçmişini temizle (yeni görev başlarken)
   [gold3]/help[/gold3]             Bu mesajı göster
   [gold3]/exit[/gold3]             Çıkış (Ctrl+C de çalışır)
+
+[bold]Doküman RAG (Faz 6):[/bold]
+  [dim]"Index this PDF"     "Search vault for seismic"     "What did I save about X?"[/dim]
 
 [bold]Model değiştirme (doğal dil):[/bold]
   [dim]"Modeli flash yap"   "Gemini Pro'ya geç"   "Switch to llama"[/dim]
@@ -199,15 +203,29 @@ async def _run_loop(agent: JarvisAgent) -> None:
 
         if lower == "/status":
             count = agent.memory.count()
+            docs_count = agent.memory.count_docs()
             active = agent._active_model_id or settings.effective_cloud_model
             cost = agent.usage.session_cost
+            ef_label = "Gemini text-embedding-004" if agent.memory._gemini_ef_active else "default ONNX"
             console.print(
-                f"[dim]Session ID:[/dim]     [bold]{agent.session_id}[/bold]\n"
-                f"[dim]Memory entries:[/dim]  [bold]{count}[/bold]\n"
-                f"[dim]Active model:[/dim]   [bold]{agent.current_model_label}[/bold] [dim]({active})[/dim]\n"
-                f"[dim]Local model:[/dim]    [bold]{settings.local_model}[/bold]\n"
-                f"[dim]Session cost:[/dim]   [yellow]~${cost:.5f}[/yellow]"
+                f"[dim]Session ID:[/dim]      [bold]{agent.session_id}[/bold]\n"
+                f"[dim]Memory turns:[/dim]    [bold]{count}[/bold]\n"
+                f"[dim]Vault chunks:[/dim]    [bold]{docs_count}[/bold] [dim](embed: {ef_label})[/dim]\n"
+                f"[dim]Active model:[/dim]    [bold]{agent.current_model_label}[/bold] [dim]({active})[/dim]\n"
+                f"[dim]Session cost:[/dim]    [yellow]~${cost:.5f}[/yellow]"
             )
+            continue
+
+        if lower == "/indexed":
+            sources = agent.memory.list_indexed()
+            if not sources:
+                console.print("[dim]No documents indexed yet. Ask JARVIS to index a file.[/dim]")
+            else:
+                from pathlib import Path as _Path
+                lines = [f"[bold gold3]Indexed documents ({len(sources)}):[/bold gold3]"]
+                for src in sources:
+                    lines.append(f"  [dim]•[/dim] {_Path(src).name}  [dim]{src}[/dim]")
+                console.print("\n".join(lines))
             continue
 
         if lower in ("/budget", "/b"):
