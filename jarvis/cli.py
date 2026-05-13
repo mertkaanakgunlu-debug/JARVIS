@@ -35,6 +35,7 @@ HELP_TEXT = """\
   [gold3]/indexed[/gold3]          RAG vault'una indexlenmiş dosyaları listele
   [gold3]/status[/gold3]           Model + bellek istatistiklerini göster
   [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
+  [gold3]/monitor[/gold3]          Proaktif monitör durumunu göster
   [gold3]/reset[/gold3]            Konuşma geçmişini temizle (yeni görev başlarken)
   [gold3]/help[/gold3]             Bu mesajı göster
   [gold3]/exit[/gold3]             Çıkış (Ctrl+C de çalışır)
@@ -47,6 +48,9 @@ HELP_TEXT = """\
 
 [bold]Google Calendar (Faz 9 — OAuth credentials in data/calendar_credentials.json):[/bold]
   [dim]"Bu haftaki etkinliklerimi listele"    "Yarın 15:00'e toplantı ekle"    "Standupı iptal et"[/dim]
+
+[bold]Proaktif Monitor (Faz 10 — python -m jarvis --monitor):[/bold]
+  [dim]Arka planda Gmail + Takvim izler, Windows toast bildirimi gönderir.[/dim]
 
 [bold]Model değiştirme (doğal dil):[/bold]
   [dim]"Modeli flash yap"   "Gemini Pro'ya geç"   "Switch to llama"[/dim]
@@ -122,7 +126,7 @@ def _detect_model_switch(user_input: str) -> str | None:
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
 
-def _print_banner(settings: Settings) -> None:
+def _print_banner(settings: Settings, monitor_active: bool = False) -> None:
     console.print(BANNER)
     console.print(Rule(style="gold3 dim"))
     if settings.use_vertex:
@@ -132,8 +136,9 @@ def _print_banner(settings: Settings) -> None:
         )
     else:
         model_str = f"Cloud: [bold]{settings.effective_cloud_model}[/bold]"
+    monitor_str = "  ·  [green]monitor ✓[/green]" if monitor_active else ""
     console.print(
-        f"[dim]  User: [bold]{settings.user_name}[/bold]  ·  {model_str}[/dim]\n"
+        f"[dim]  User: [bold]{settings.user_name}[/bold]  ·  {model_str}{monitor_str}[/dim]\n"
     )
 
 
@@ -184,10 +189,10 @@ def _show_model_menu(agent: JarvisAgent) -> None:
 
 # ── Main loops ─────────────────────────────────────────────────────────────────
 
-async def _run_loop(agent: JarvisAgent) -> None:
+async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
     settings = agent.settings
 
-    _print_banner(settings)
+    _print_banner(settings, monitor_active=monitor is not None)
     console.print(f"[dim]Type [bold gold3]/help[/bold gold3] for commands. Ctrl+C to exit.[/dim]\n")
 
     while True:
@@ -258,6 +263,22 @@ async def _run_loop(agent: JarvisAgent) -> None:
             query = user_input[8:].strip()
             ctx = agent.memory.recall(query, n=8)
             console.print(Panel(ctx or "[dim](no results)[/dim]", title="[gold3]Memory recall[/gold3]", border_style="dim"))
+            continue
+
+        if lower == "/monitor":
+            if monitor is None:
+                console.print(
+                    "[dim]Monitor etkin değil. Başlatmak için:[/dim]\n"
+                    "  [bold gold3]python -m jarvis --monitor[/bold gold3]  (standalone)\n"
+                    "  [bold gold3]python -m jarvis --monitor --voice[/bold gold3]  (sesli mod + monitor)"
+                )
+            else:
+                console.print(Panel(
+                    monitor.status_line(),
+                    title="[bold gold3]JARVIS Monitor[/bold gold3]",
+                    border_style="gold3 dim",
+                    padding=(0, 1),
+                ))
             continue
 
         # ── /model command ──────────────────────────────────────────────────
@@ -335,7 +356,7 @@ async def _run_loop(agent: JarvisAgent) -> None:
         _print_jarvis(response, model_label)
 
 
-async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False) -> None:
+async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=None) -> None:
     try:
         from jarvis.voice import VoiceEngine, is_exit_phrase
     except ImportError as exc:
@@ -349,7 +370,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False) -> None:
     voice = VoiceEngine(settings)
     loop = asyncio.get_running_loop()
 
-    _print_banner(settings)
+    _print_banner(settings, monitor_active=monitor is not None)
     if wakeword:
         console.print('[gold3]Wake-word mode.[/gold3] Say "[bold]Hey JARVIS[/bold]" to activate, then speak.')
     else:
@@ -444,7 +465,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False) -> None:
             _print_jarvis("".join(response_chunks), agent.current_model_label)
 
 
-def run(voice: bool = False, wakeword: bool = False) -> None:
+def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> None:
     settings = Settings()
     if not settings.gemini_api_key and not settings.use_vertex:
         console.print(
@@ -452,11 +473,27 @@ def run(voice: bool = False, wakeword: bool = False) -> None:
             "set GEMINI_API_KEY or CLOUD_TIER=vertex in .env."
         )
 
+    # Start background monitor daemon if requested
+    monitor_instance = None
+    if monitor:
+        from jarvis.monitor import JarvisMonitor
+        monitor_instance = JarvisMonitor(settings)
+        monitor_instance.start()
+        console.print(
+            f"[dim green]Monitor başlatıldı[/dim green] — "
+            f"e-posta: her {settings.monitor_email_interval_min} dk  ·  "
+            f"takvim: her {settings.monitor_calendar_interval_min} dk  ·  "
+            f"önce {settings.monitor_calendar_lookahead_min} dk uyarı[/dim green]"
+        )
+
     agent = JarvisAgent(settings)
     try:
         if voice or wakeword:
-            asyncio.run(_run_voice_loop(agent, wakeword=wakeword))
+            asyncio.run(_run_voice_loop(agent, wakeword=wakeword, monitor=monitor_instance))
         else:
-            asyncio.run(_run_loop(agent))
+            asyncio.run(_run_loop(agent, monitor=monitor_instance))
     except KeyboardInterrupt:
         console.print("\n[dim]JARVIS offline.[/dim]")
+    finally:
+        if monitor_instance:
+            monitor_instance.stop()

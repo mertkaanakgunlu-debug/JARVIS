@@ -71,3 +71,6 @@ numpy>=1.24              # Audio array math
 # REST API server (Faz 9: python -m jarvis --api)
 fastapi>=0.115           # async web framework
 uvicorn[standard]>=0.30  # ASGI server
+
+# Proactive notifications (Faz 10: python -m jarvis --monitor)
+winotify>=1.1            # Windows 10/11 toast notifications

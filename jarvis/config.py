@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # Faz 5: Vertex AI credit budget for /budget display (set in .env as VERTEX_CREDIT_USD=350.0)
     vertex_credit_usd: float = 0.0
 
+    # Faz 10: Proactive monitoring (python -m jarvis --monitor)
+    monitor_email_interval_min: int = 5       # how often to poll Gmail (minutes)
+    monitor_calendar_interval_min: int = 2    # how often to poll Calendar (minutes)
+    monitor_calendar_lookahead_min: int = 15  # notify for events starting within N minutes
+
     whisper_device: str = "auto"         # "auto" | "cuda" | "cpu"
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
 
