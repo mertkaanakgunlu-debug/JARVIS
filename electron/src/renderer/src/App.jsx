@@ -298,10 +298,7 @@ export default function App() {
         />
       </div>
 
-      {/* In-HUD floating orb (bottom-right overlay, pointer-events:none) */}
-      <div className="float-orb">
-        <JarvisOrb size={180} state={state} accent={accent} micLevel={micLevel} />
-      </div>
+      {/* Float orb removed — the separate widget window serves this purpose */}
     </>
   )
 }

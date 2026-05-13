@@ -46,6 +46,10 @@ export default function Widget() {
   const [accent, setAccent] = useState(STATE_ACCENT.idle)
 
   useEffect(() => {
+    // Transparent background — the Electron window has transparent:true but
+    // styles.css sets body{background:#000}. Override it here for widget mode.
+    document.body.style.background = 'transparent'
+    document.documentElement.style.background = 'transparent'
     applyWidgetAccent(accent)
     window.jarvis?.onConfig(cfg => setApiUrl(cfg.apiUrl))
     if (!window.jarvis) setApiUrl('http://127.0.0.1:8000')

@@ -20,6 +20,23 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from jarvis.graph.state import JarvisState
 
+# Import lazily to avoid circular imports when ws module is not yet initialised
+def _bus():
+    try:
+        from jarvis.ws import event_bus  # noqa: PLC0415
+        return event_bus
+    except Exception:
+        return None
+
+
+# Tools that hit a cloud LLM (shown as "cloud" kind in the feed)
+_CLOUD_TOOLS = {
+    "math_solve", "write_content", "research", "generate_code",
+    "deep_web_research", "web_search",
+}
+# Tools that write to the vault/notes
+_NOTE_TOOLS = {"note_append", "vault_search", "index_doc"}
+
 
 # ── Prompt constants ───────────────────────────────────────────────────────────
 
@@ -125,6 +142,24 @@ def make_agent_node(llm_fast_with_tools, llm_pro_with_tools=None):
         use_pro = state.get("use_pro_agent", False) and llm_pro_with_tools is not None
         llm = llm_pro_with_tools if use_pro else llm_fast_with_tools
         response = await llm.ainvoke(state["messages"])
+
+        # Emit tool-call events to the HUD telemetry feed
+        bus = _bus()
+        if bus and getattr(response, "tool_calls", None):
+            for tc in response.tool_calls:
+                name = tc.get("name", "tool")
+                args = tc.get("args", {})
+                # Build a short human-readable body: "tool_name → key: value"
+                if args:
+                    first_key = next(iter(args))
+                    val = str(args[first_key])[:60]
+                    body = f"{name} → {val}"
+                else:
+                    body = name
+                kind = "cloud" if name in _CLOUD_TOOLS else \
+                       "note"  if name in _NOTE_TOOLS  else "tool"
+                bus.tool_call(body, kind)
+
         return {"messages": [response]}
 
     agent_node.__name__ = "agent_node"
