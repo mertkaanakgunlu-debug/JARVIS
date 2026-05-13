@@ -21,8 +21,13 @@ def main() -> None:
         action="store_true",
         help="Start in voice mode (VAD auto-detect + TTS)",
     )
+    parser.add_argument(
+        "--wakeword",
+        action="store_true",
+        help='Enable wake-word mode: say "Hey JARVIS" before each turn (requires --voice)',
+    )
     args = parser.parse_args()
-    run(voice=args.voice)
+    run(voice=args.voice or args.wakeword, wakeword=args.wakeword)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,7 @@ class VoiceEngine:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._model = None
+        self._oww_model = None          # openwakeword model (lazy)
         self._device: str | None = None
         self._sample_rate = 16000
         self._chunk_ms = settings.voice_chunk_ms
@@ -86,6 +87,35 @@ class VoiceEngine:
     def load(self) -> None:
         """Pre-load the Whisper model (first run downloads ~800 MB)."""
         self._ensure_model()
+
+    def load_wakeword(self) -> bool:
+        """Pre-load the hey_jarvis openwakeword model. Returns True on success."""
+        return self._ensure_oww_model()
+
+    def listen_for_wakeword(self, threshold: float = 0.5) -> bool:
+        """Block until 'Hey JARVIS' is detected. Returns True on activation.
+
+        Falls back silently (returns True immediately) if openwakeword is
+        unavailable — the voice loop continues without wake-word gating.
+        """
+        if not self._ensure_oww_model():
+            return True  # graceful degradation
+
+        _OWW_CHUNK = 1280  # 80ms at 16kHz (required by openwakeword)
+
+        with sd.InputStream(
+            samplerate=self._sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=_OWW_CHUNK,
+        ) as stream:
+            while True:
+                data, _ = stream.read(_OWW_CHUNK)
+                chunk = data.flatten().astype(np.float32) / 32768.0
+                prediction = self._oww_model.predict(chunk)
+                for score in prediction.values():
+                    if score >= threshold:
+                        return True
 
     def listen(self) -> tuple[str, str]:
         """Block until speech is detected, record, transcribe.
@@ -166,6 +196,21 @@ class VoiceEngine:
         await player_task
 
     # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _ensure_oww_model(self) -> bool:
+        """Lazily load the hey_jarvis openwakeword ONNX model. Returns True on success."""
+        if self._oww_model is not None:
+            return True
+        try:
+            from openwakeword.model import Model
+
+            self._oww_model = Model(
+                wakeword_models=["hey_jarvis"],
+                inference_framework="onnx",
+            )
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _register_cuda_dll_dirs() -> None:

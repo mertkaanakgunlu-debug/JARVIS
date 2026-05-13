@@ -28,6 +28,7 @@ from jarvis.tools.plotting import generate_plot
 from jarvis.tools.indexer import index_file
 from jarvis.tools.webfetch import fetch_url
 from jarvis.tools.deep_research import run_deep_research
+from jarvis.tools.spotify import spotify_control
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -323,6 +324,29 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         n = min(max(1, max_sources), 10)
         return run_deep_research(topic, settings, n)
 
+    # ── Faz 8: Spotify ────────────────────────────────────────────────────────
+
+    @tool
+    def spotify(action: str, query: str = "") -> str:
+        """Control Spotify music playback.
+
+        Actions:
+          play <query>  — search and immediately play a track (e.g., "play Bohemian Rhapsody")
+          pause         — pause current playback
+          resume        — resume paused playback
+          next          — skip to the next track
+          previous      — go back to the previous track
+          current       — show what's currently playing
+
+        Requires SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env.
+        First call opens a browser for one-time OAuth login.
+
+        Args:
+            action: One of play | pause | resume | next | previous | current.
+            query:  Search terms (only needed for 'play').
+        """
+        return spotify_control(action, query, settings)
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -331,4 +355,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         csv_read, data_analyze, plot_data, report_compose,
         vault_search, index_doc,  # Faz 6
         url_read, deep_web_research,  # Faz 7
+        spotify,  # Faz 8
     ]

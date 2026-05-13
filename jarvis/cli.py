@@ -42,6 +42,9 @@ HELP_TEXT = """\
 [bold]Doküman RAG (Faz 6):[/bold]
   [dim]"Index this PDF"     "Search vault for seismic"     "What did I save about X?"[/dim]
 
+[bold]Spotify (Faz 8 — set SPOTIFY_CLIENT_ID/SECRET in .env):[/bold]
+  [dim]"Play Bohemian Rhapsody"    "Pause music"    "What's playing?"[/dim]
+
 [bold]Model değiştirme (doğal dil):[/bold]
   [dim]"Modeli flash yap"   "Gemini Pro'ya geç"   "Switch to llama"[/dim]
 """
@@ -324,7 +327,7 @@ async def _run_loop(agent: JarvisAgent) -> None:
         _print_jarvis(response, model_label)
 
 
-async def _run_voice_loop(agent: JarvisAgent) -> None:
+async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False) -> None:
     try:
         from jarvis.voice import VoiceEngine, is_exit_phrase
     except ImportError as exc:
@@ -339,14 +342,36 @@ async def _run_voice_loop(agent: JarvisAgent) -> None:
     loop = asyncio.get_running_loop()
 
     _print_banner(settings)
-    console.print("[gold3]Voice mode active.[/gold3] Speak naturally — JARVIS listens automatically.")
+    if wakeword:
+        console.print('[gold3]Wake-word mode.[/gold3] Say "[bold]Hey JARVIS[/bold]" to activate, then speak.')
+    else:
+        console.print("[gold3]Voice mode active.[/gold3] Speak naturally — JARVIS listens automatically.")
     console.print("[dim]Say 'goodbye' / 'güle güle' to exit.  Ctrl+C also works.[/dim]\n")
 
     console.print("[dim]Loading voice models (first run downloads ~800 MB)...[/dim]")
     await loop.run_in_executor(None, voice.load)
-    console.print("[gold3]Ready.[/gold3]\n")
+
+    if wakeword:
+        console.print("[dim]Loading wake-word model (hey_jarvis)...[/dim]")
+        ok = await loop.run_in_executor(None, voice.load_wakeword)
+        if ok:
+            console.print('[gold3]Ready.[/gold3] Waiting for "Hey JARVIS"...\n')
+        else:
+            console.print("[yellow]Wake-word model unavailable — falling back to continuous listen.[/yellow]\n")
+            wakeword = False
+    else:
+        console.print("[gold3]Ready.[/gold3]\n")
 
     while True:
+        if wakeword:
+            console.print('[dim]Waiting for "Hey JARVIS"...[/dim]', end="\r")
+            try:
+                await loop.run_in_executor(None, voice.listen_for_wakeword)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                console.print("\n[dim]JARVIS offline. Goodbye.[/dim]")
+                break
+            console.print("[gold3]Hey! Listening...[/gold3]              ")
+
         console.print("[dim]Listening...[/dim]", end="\r")
         try:
             text, lang = await loop.run_in_executor(None, voice.listen)
@@ -411,7 +436,7 @@ async def _run_voice_loop(agent: JarvisAgent) -> None:
             _print_jarvis("".join(response_chunks), agent.current_model_label)
 
 
-def run(voice: bool = False) -> None:
+def run(voice: bool = False, wakeword: bool = False) -> None:
     settings = Settings()
     if not settings.gemini_api_key:
         console.print(
@@ -421,8 +446,8 @@ def run(voice: bool = False) -> None:
 
     agent = JarvisAgent(settings)
     try:
-        if voice:
-            asyncio.run(_run_voice_loop(agent))
+        if voice or wakeword:
+            asyncio.run(_run_voice_loop(agent, wakeword=wakeword))
         else:
             asyncio.run(_run_loop(agent))
     except KeyboardInterrupt:

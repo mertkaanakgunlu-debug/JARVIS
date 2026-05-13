@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     firecrawl_api_key: str = ""   # Optional — enhances url_read/deep_web_research for JS-heavy sites
     groq_api_key: str = ""
+
+    # Faz 8: Spotify (create app at https://developer.spotify.com — free)
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
+    spotify_redirect_uri: str = "http://localhost:8888/callback"
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"

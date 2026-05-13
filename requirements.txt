@@ -54,6 +54,13 @@ tavily-python>=0.3
 trafilatura>=1.8          # Free best-in-class article text extraction (always used)
 firecrawl-py>=1.0         # Optional: enhanced JS-page crawling (set FIRECRAWL_API_KEY)
 
+# Wake-word detection (Faz 8: "Hey JARVIS" hands-free activation)
+# Models (~6 MB) are auto-downloaded on first voice --wakeword run.
+openwakeword>=0.6         # Uses hey_jarvis_v0.1.onnx; requires onnxruntime (already installed)
+
+# Spotify music control (Faz 8: spotify tool — set SPOTIFY_CLIENT_ID/SECRET in .env)
+spotipy>=2.23             # Spotify Web API wrapper
+
 # Voice I/O (Iteration 3)
 faster-whisper>=1.1      # STT — CTranslate2 based, multilingual, no PyTorch
 sounddevice>=0.4         # Audio capture + playback
