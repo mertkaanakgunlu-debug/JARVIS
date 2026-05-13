@@ -29,6 +29,7 @@ from jarvis.tools.indexer import index_file
 from jarvis.tools.webfetch import fetch_url
 from jarvis.tools.deep_research import run_deep_research
 from jarvis.tools.spotify import spotify_control
+from jarvis.tools.calendar import calendar_control
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -347,6 +348,59 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         """
         return spotify_control(action, query, settings)
 
+    # ── Faz 9: Google Calendar ────────────────────────────────────────────────
+
+    @tool
+    def google_calendar(
+        action: str,
+        title: str = "",
+        date: str = "",
+        time: str = "",
+        duration_minutes: int = 60,
+        description: str = "",
+        location: str = "",
+        days_ahead: int = 7,
+        query: str = "",
+        event_id: str = "",
+    ) -> str:
+        """Manage Google Calendar events.
+
+        Actions:
+          list   — show upcoming events (days_ahead window, default 7)
+          create — create a new event (title + date required; time optional for all-day)
+          delete — delete by event_id, or by query (finds first match)
+          search — search future events by keyword
+          update — update event fields (event_id required)
+
+        Requires GOOGLE_CALENDAR_CREDS_FILE in .env pointing to OAuth credentials JSON.
+        First call opens a browser for one-time consent; token cached at data/.calendar_token.json.
+
+        Args:
+            action:           list | create | delete | search | update
+            title:            Event title (create/update)
+            date:             Date — YYYY-MM-DD, DD/MM/YYYY, 'today', 'tomorrow' (create/update)
+            time:             Start time HH:MM in 24h (create/update; omit for all-day event)
+            duration_minutes: Duration in minutes (default 60)
+            description:      Optional event description
+            location:         Optional event location
+            days_ahead:       How many days ahead to look (list action, default 7)
+            query:            Keyword for search/delete actions
+            event_id:         Calendar event ID for delete/update (use search to find it)
+        """
+        return calendar_control(
+            action=action,
+            title=title,
+            date=date,
+            time=time,
+            duration_minutes=duration_minutes,
+            description=description,
+            location=location,
+            days_ahead=days_ahead,
+            query=query,
+            event_id=event_id,
+            settings=settings,
+        )
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -356,4 +410,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         vault_search, index_doc,  # Faz 6
         url_read, deep_web_research,  # Faz 7
         spotify,  # Faz 8
+        google_calendar,  # Faz 9
     ]

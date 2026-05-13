@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     spotify_client_id: str = ""
     spotify_client_secret: str = ""
     spotify_redirect_uri: str = "http://localhost:8888/callback"
+
+    # Faz 9: Google Calendar (OAuth 2.0 desktop credentials JSON from console.cloud.google.com)
+    google_calendar_creds_file: str = "data/calendar_credentials.json"
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"
