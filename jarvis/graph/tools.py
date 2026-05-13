@@ -30,6 +30,7 @@ from jarvis.tools.webfetch import fetch_url
 from jarvis.tools.deep_research import run_deep_research
 from jarvis.tools.spotify import spotify_control
 from jarvis.tools.calendar import calendar_control
+from jarvis.tools.gmail import gmail_control
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -401,6 +402,52 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             settings=settings,
         )
 
+    # ── Faz 9: Gmail ──────────────────────────────────────────────────────────
+
+    @tool
+    def gmail(
+        action: str,
+        query: str = "",
+        message_id: str = "",
+        to: str = "",
+        subject: str = "",
+        body: str = "",
+        max_results: int = 10,
+    ) -> str:
+        """Manage Gmail — read, send, reply, search, and organise emails.
+
+        Actions:
+          list_unread  — list unread emails in inbox (max_results, default 10)
+          search       — search with Gmail query syntax (e.g. "from:boss subject:report")
+          read         — read full email content (message_id required)
+          send         — send a new email (to, subject, body required)
+          reply        — reply to an email (message_id + body required)
+          trash        — move email to trash (message_id required)
+          mark_read    — mark email as read (message_id required)
+
+        Uses the same OAuth credentials as Google Calendar.
+        First call opens a browser for Gmail consent; token cached at data/.gmail_token.json.
+
+        Args:
+            action:      list_unread | search | read | send | reply | trash | mark_read
+            query:       Gmail search query (search action)
+            message_id:  Email ID from list_unread/search (read/reply/trash/mark_read)
+            to:          Recipient email address (send)
+            subject:     Email subject (send)
+            body:        Email body text (send/reply)
+            max_results: Max emails to return (list_unread/search, default 10)
+        """
+        return gmail_control(
+            action=action,
+            query=query,
+            message_id=message_id,
+            to=to,
+            subject=subject,
+            body=body,
+            max_results=max_results,
+            settings=settings,
+        )
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -411,4 +458,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         url_read, deep_web_research,  # Faz 7
         spotify,  # Faz 8
         google_calendar,  # Faz 9
+        gmail,            # Faz 9
     ]
