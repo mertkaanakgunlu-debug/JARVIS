@@ -2,7 +2,7 @@
  * HudPanels — all wireframe panel components for the JARVIS HUD.
  * Ported from the Claude Design prototype (hud-panels.jsx).
  */
-import { useRef, useEffect } from 'react'
+import React, { useRef, useEffect } from 'react'
 
 // ── Panel chrome ──────────────────────────────────────────────────────────────
 export function Panel({ title, id, status = 'live', live = true, children, scroll = false }) {

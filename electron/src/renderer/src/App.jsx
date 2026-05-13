@@ -6,7 +6,7 @@
  *   thinking/working → yellow (#FFC857)
  *   speaking → red (#FF5577)
  */
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import './styles.css'
 import JarvisOrb, { OrbitalRings, VoiceBars } from './components/JarvisOrb'
 import {

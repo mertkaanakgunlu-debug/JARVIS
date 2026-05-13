@@ -5,7 +5,7 @@
  * Accent color matches main HUD state palette:
  *   idle/listening → cyan, thinking/working → yellow, speaking → red
  */
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import JarvisOrb, { VoiceBars } from './components/JarvisOrb'
 import useJarvisSocket from './hooks/useJarvisSocket'
 import { useFakeMic } from './hooks/useFakeData'
