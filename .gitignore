@@ -15,6 +15,12 @@ data/
 # Vault — include markdown, exclude any temp files
 vault/**/*.tmp
 
+# Node / Electron
+node_modules/
+electron/dist-electron/
+electron/dist/
+electron/out/
+
 # IDE
 .vscode/
 .idea/

@@ -27,6 +27,7 @@ from jarvis.memory import Memory
 from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
+from jarvis.ws import event_bus
 
 
 # ── System prompt helpers (unchanged from pydantic-ai version) ─────────────────
@@ -246,6 +247,10 @@ class JarvisAgent:
         }
         config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
 
+        # ── HUD events ──────────────────────────────────────────────────────────
+        event_bus.message("u", clean_input)
+        event_bus.state("thinking")
+
         try:
             result = await self._graph.ainvoke(state, config=config)
         except Exception as exc:
@@ -284,6 +289,11 @@ class JarvisAgent:
         self.memory.store("assistant", response, self.session_id)
         self.memory.log_turn("user", clean_input)
         self.memory.log_turn("assistant", response)
+
+        # ── HUD events: broadcast response then return to idle ──────────────────
+        event_bus.state("speaking")
+        event_bus.message("j", response)
+        event_bus.state("idle")
 
         return response, self.current_model_label
 
@@ -346,9 +356,17 @@ class JarvisAgent:
         }
         config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
 
+        # ── HUD events ──────────────────────────────────────────────────────────
+        event_bus.message("u", clean_input)
+        event_bus.state("thinking")
+
         chunks: list[str] = []
+        _first_chunk = True
 
         async for delta in graph_stream_to_text(self._graph, state, config):
+            if _first_chunk:
+                event_bus.state("speaking")
+                _first_chunk = False
             chunks.append(delta)
             yield delta
 
@@ -378,3 +396,7 @@ class JarvisAgent:
         self.memory.store("assistant", full_response, self.session_id)
         self.memory.log_turn("user", clean_input)
         self.memory.log_turn("assistant", full_response)
+
+        # ── HUD events: stream done ─────────────────────────────────────────────
+        event_bus.message("j", full_response)
+        event_bus.state("idle")

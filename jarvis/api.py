@@ -1,4 +1,4 @@
-"""JARVIS FastAPI REST server (Faz 9).
+"""JARVIS FastAPI REST server (Faz 9) + HUD WebSocket (Faz 11).
 
 Start with:
     python -m jarvis --api            # default port 8000
@@ -6,13 +6,14 @@ Start with:
 
 Endpoints:
     GET  /health           — liveness check (no auth required)
+    WS   /ws               — WebSocket event stream for the HUD (no auth, local-only)
     POST /chat             — single-turn chat, returns full response
     POST /chat/stream      — streaming chat via Server-Sent Events
     GET  /status           — session + model + cost info
     POST /reset            — clear conversation history
 
 Auth:
-    All endpoints except /health require header:
+    All endpoints except /health and /ws require header:
         X-API-Key: <JARVIS_API_KEY from .env>
     If JARVIS_API_KEY is empty, auth is disabled (local-only use).
 """
@@ -20,20 +21,29 @@ Auth:
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from jarvis.config import Settings
 from jarvis.agent import JarvisAgent
+from jarvis.ws import event_bus, start_metrics_task
+
+# ── App lifespan (starts background metrics push) ─────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_metrics_task()
+    yield
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="JARVIS API", version="0.1.0", docs_url="/docs")
+app = FastAPI(title="JARVIS API", version="0.1.0", docs_url="/docs", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -98,6 +108,33 @@ class StatusResponse(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "0.1.0"}
+
+
+# ── WebSocket — HUD event stream ──────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def ws_endpoint(websocket: WebSocket):
+    """Real-time event stream for the JARVIS HUD (Electron app).
+    No auth — intended for localhost only.
+    """
+    await event_bus.connect(websocket)
+    # Send initial state snapshot
+    agent = _agent
+    if agent:
+        await event_bus.broadcast({"type": "state", "value": "idle"})
+        await event_bus.broadcast({
+            "type": "vault",
+            "entries": [],
+            "count": agent.memory.count_docs(),
+        })
+    try:
+        while True:
+            # Keep connection alive; we don't process incoming messages yet
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        event_bus.disconnect(websocket)
+    except Exception:
+        event_bus.disconnect(websocket)
 
 
 @app.post("/chat", response_model=ChatResponse)
