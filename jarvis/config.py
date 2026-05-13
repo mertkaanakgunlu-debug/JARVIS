@@ -17,6 +17,10 @@ class Settings(BaseSettings):
 
     # Faz 9: Google Calendar (OAuth 2.0 desktop credentials JSON from console.cloud.google.com)
     google_calendar_creds_file: str = "data/calendar_credentials.json"
+
+    # Faz 9: REST API server (python -m jarvis --api)
+    jarvis_api_key: str = ""    # set in .env; empty = auth disabled (local-only)
+    jarvis_api_port: int = 8000
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"

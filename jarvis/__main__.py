@@ -1,4 +1,4 @@
-"""Entry point: python -m jarvis [--voice]"""
+"""Entry point: python -m jarvis [--voice] [--api]"""
 
 import argparse
 import sys
@@ -26,8 +26,27 @@ def main() -> None:
         action="store_true",
         help='Enable wake-word mode: say "Hey JARVIS" before each turn (requires --voice)',
     )
+    parser.add_argument(
+        "--api",
+        action="store_true",
+        help="Start as FastAPI REST server (default port 8000)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port for --api mode (overrides JARVIS_API_PORT in .env)",
+    )
     args = parser.parse_args()
-    run(voice=args.voice or args.wakeword, wakeword=args.wakeword)
+
+    if args.api:
+        from jarvis.config import Settings
+        from jarvis.api import run_server
+        settings = Settings()
+        port = args.port or settings.jarvis_api_port
+        run_server(settings, port=port)
+    else:
+        run(voice=args.voice or args.wakeword, wakeword=args.wakeword)
 
 
 if __name__ == "__main__":

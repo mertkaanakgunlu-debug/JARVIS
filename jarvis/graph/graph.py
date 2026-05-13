@@ -13,13 +13,12 @@ LLMs:
   llm_pro  — critic + planner (Vertex Pro or AI Studio Pro)
 
 Checkpointing:
-  SqliteSaver (per-turn thread IDs) — records all node executions within a turn
-  for debugging and future crash-recovery support.
+  MemorySaver — in-process, supports both sync and async (ainvoke compatible).
+  Cross-turn history is managed by JarvisAgent._history, not the checkpointer.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -99,17 +98,15 @@ def make_llm_pro(settings: "Settings") -> BaseChatModel:
 
 # ── Checkpointer ───────────────────────────────────────────────────────────────
 
-def make_checkpointer(db_path: Path):
-    """Create a SqliteSaver checkpointer from a file path.
+def make_checkpointer(db_path: Path = None):
+    """Return an in-memory checkpointer (MemorySaver).
 
-    Uses check_same_thread=False so the sync SQLite connection works safely
-    when LangGraph runs it from async context via a thread pool.
+    MemorySaver supports both sync and async graph invocation (ainvoke),
+    which is required when running under FastAPI/uvicorn. Cross-turn
+    conversation history is maintained by JarvisAgent._history, not here.
     """
-    from langgraph.checkpoint.sqlite import SqliteSaver
-
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    return SqliteSaver(conn)
+    from langgraph.checkpoint.memory import MemorySaver
+    return MemorySaver()
 
 
 # ── Graph builder ──────────────────────────────────────────────────────────────

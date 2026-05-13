@@ -67,3 +67,7 @@ sounddevice>=0.4         # Audio capture + playback
 edge-tts>=7.0            # TTS — Microsoft Neural (English + Turkish); v6 gives 403
 miniaudio>=1.14          # MP3 decode for edge-tts output (pure Python)
 numpy>=1.24              # Audio array math
+
+# REST API server (Faz 9: python -m jarvis --api)
+fastapi>=0.115           # async web framework
+uvicorn[standard]>=0.30  # ASGI server
