@@ -86,9 +86,9 @@ function createWidgetWindow() {
   })
 
   if (isDev) {
-    widgetWindow.loadURL('http://localhost:5173/widget.html')
+    widgetWindow.loadURL('http://localhost:5173/?mode=widget')
   } else {
-    widgetWindow.loadFile(join(__dirname, '../../renderer/widget.html'))
+    widgetWindow.loadFile(join(__dirname, '../../renderer/index.html'), { query: { mode: 'widget' } })
   }
 
   widgetWindow.on('close', (e) => {

@@ -9,14 +9,6 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
-    plugins: [react()],
-    build: {
-      rollupOptions: {
-        input: {
-          index: 'src/renderer/index.html',
-          widget: 'src/renderer/widget.html'
-        }
-      }
-    }
+    plugins: [react()]
   }
 })
