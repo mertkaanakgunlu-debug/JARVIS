@@ -33,10 +33,13 @@ HELP_TEXT = """\
   [gold3]/model[/gold3]             Kullanılabilir modelleri listele ve değiştir
   [gold3]/recall[/gold3] [dim]<query>[/dim]   Ham bellek arama sonuçlarını göster
   [gold3]/indexed[/gold3]          RAG vault'una indexlenmiş dosyaları listele
-  [gold3]/status[/gold3]           Model + bellek istatistiklerini göster
+  [gold3]/status[/gold3]           Model + bellek + oturum istatistiklerini göster
   [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
   [gold3]/monitor[/gold3]          Proaktif monitör durumunu göster
-  [gold3]/reset[/gold3]            Konuşma geçmişini temizle (yeni görev başlarken)
+  [gold3]/sessions[/gold3]         Son oturumları listele
+  [gold3]/session[/gold3] [dim]<id>[/dim]     Geçmiş oturuma geç
+  [gold3]/entities[/gold3]         Tanınan varlıkları (kişi/proje/dosya) listele
+  [gold3]/reset[/gold3]            Mevcut oturumu arşivle, yeni başlat
   [gold3]/help[/gold3]             Bu mesajı göster
   [gold3]/exit[/gold3]             Çıkış (Ctrl+C de çalışır)
 
@@ -223,8 +226,13 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
             active = agent._active_model_id or settings.effective_cloud_model
             cost = agent.usage.session_cost
             ef_label = "Gemini text-embedding-004" if agent.memory._gemini_ef_active else "default ONNX"
+            total_sessions = agent.session_store.total_sessions()
+            total_entities = agent.session_store.total_entities()
+            history_len = len(agent._history)
             console.print(
-                f"[dim]Session ID:[/dim]      [bold]{agent.session_id}[/bold]\n"
+                f"[dim]Session ID:[/dim]      [bold]{agent.session_id}[/bold] [dim]({history_len} messages loaded)[/dim]\n"
+                f"[dim]Total sessions:[/dim]  [bold]{total_sessions}[/bold]\n"
+                f"[dim]Known entities:[/dim]  [bold]{total_entities}[/bold]\n"
                 f"[dim]Memory turns:[/dim]    [bold]{count}[/bold]\n"
                 f"[dim]Vault chunks:[/dim]    [bold]{docs_count}[/bold] [dim](embed: {ef_label})[/dim]\n"
                 f"[dim]Active model:[/dim]    [bold]{agent.current_model_label}[/bold] [dim]({active})[/dim]\n"
@@ -255,8 +263,92 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
             continue
 
         if lower in ("/reset", "/clear"):
+            old_id = agent.session_id
             agent.reset()
-            console.print("[dim]Conversation history cleared.[/dim]")
+            console.print(
+                f"[dim]Session [bold]{old_id}[/bold] archived. "
+                f"New session: [bold]{agent.session_id}[/bold][/dim]"
+            )
+            continue
+
+        if lower == "/sessions":
+            rows = agent.session_store.list_sessions(n=10)
+            if not rows:
+                console.print("[dim]No sessions yet.[/dim]")
+            else:
+                table = Table(
+                    show_header=True,
+                    header_style="bold gold3",
+                    border_style="dim",
+                    title="[bold gold3]Oturumlar[/bold gold3]",
+                    title_justify="left",
+                )
+                table.add_column("ID", style="bold", width=14)
+                table.add_column("Tarih", width=10)
+                table.add_column("Mesaj", justify="right", width=6)
+                table.add_column("Konu", style="dim")
+                table.add_column("Durum", width=8)
+                for r in rows:
+                    date_str = r["created_at"][:10] if r["created_at"] else "-"
+                    active_mark = "[green]aktif[/green]" if r["id"] == agent.session_id else (
+                        "[dim]arşiv[/dim]" if r["status"] == "archived" else "[dim]—[/dim]"
+                    )
+                    table.add_row(
+                        r["id"],
+                        date_str,
+                        str(r["message_count"] or 0),
+                        (r["topic_hint"] or "—")[:50],
+                        active_mark,
+                    )
+                console.print(table)
+            continue
+
+        if lower.startswith("/session "):
+            sid = user_input[9:].strip()
+            if not sid:
+                _print_error("Kullanım: /session <id>")
+                continue
+            try:
+                n = agent.switch_session(sid)
+                console.print(
+                    f"[gold3]✓[/gold3] Oturum yüklendi: [bold]{sid}[/bold] [dim]({n} mesaj)[/dim]"
+                )
+            except Exception as e:
+                _print_error(f"Oturum yüklenemedi: {e}")
+            continue
+
+        if lower == "/entities":
+            rows = agent.session_store.top_entities(n=20)
+            if not rows:
+                console.print("[dim]Henüz tanınan varlık yok. Birkaç konuşma sonrası oluşur.[/dim]")
+            else:
+                table = Table(
+                    show_header=True,
+                    header_style="bold gold3",
+                    border_style="dim",
+                    title="[bold gold3]Tanınan Varlıklar[/bold gold3]",
+                    title_justify="left",
+                )
+                table.add_column("İsim", style="bold", min_width=14)
+                table.add_column("Tür", width=12)
+                table.add_column("Açıklama", style="dim")
+                table.add_column("Anılma", justify="right", width=6)
+                _TYPE_COLORS = {
+                    "person": "cyan",
+                    "project": "green",
+                    "file": "yellow",
+                    "organization": "magenta",
+                    "topic": "blue",
+                }
+                for r in rows:
+                    color = _TYPE_COLORS.get(r["type"], "white")
+                    table.add_row(
+                        r["name"],
+                        f"[{color}]{r['type']}[/{color}]",
+                        (r["description"] or "—")[:60],
+                        str(r["mention_count"]),
+                    )
+                console.print(table)
             continue
 
         if lower.startswith("/recall "):

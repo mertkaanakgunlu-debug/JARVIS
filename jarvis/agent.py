@@ -5,6 +5,7 @@ Public API (preserved from pydantic-ai version):
   .chat(user_input, detected_language) -> tuple[str, str]   # (response, model_label)
   .chat_stream(user_input, detected_language) -> AsyncGenerator[str, None]
   .switch_model(model_id) -> str
+  .switch_session(session_id) -> int
   .reset()
   ._using_fallback  (bool)
   ._cloud_model     (str — display label)
@@ -14,6 +15,7 @@ cli.py and voice.py import JarvisAgent and AVAILABLE_MODELS from here.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from collections.abc import AsyncGenerator
@@ -23,39 +25,32 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from jarvis.config import Settings, LANG_NAMES
+from jarvis.entity_extractor import extract_entities
 from jarvis.memory import Memory
+from jarvis.session_store import SessionStore
 from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
 
 
-# ── System prompt helpers (unchanged from pydantic-ai version) ─────────────────
+# ── System prompt helpers ──────────────────────────────────────────────────────
 
 _DATA_REPORT_KEYWORDS = frozenset([
     "pdf", "excel", "xlsx", "xls", "csv", "report", "rapor", "plot", "grafik",
     "chart", "data", "veri", "analiz", "analysis", "hw", "odev", "ödev",
 ])
 
-# Faz 5: keywords that elevate a query to Pro-agent routing
 _PRO_KEYWORDS = frozenset([
     "analyze", "analiz", "research", "araştır", "compare", "karşılaştır",
     "explain", "açıkla", "report", "rapor", "summarize", "özetle",
     "investigate", "incele", "calculate", "hesapla", "derive", "prove",
     "deep", "derin", "comprehensive", "kapsamlı", "detailed", "ayrıntılı",
 ])
-_HEAVY_EXTS = frozenset(["pdf", "xlsx", "xls", "csv", "docx", "tex"])  # match with or without dot
+_HEAVY_EXTS = frozenset(["pdf", "xlsx", "xls", "csv", "docx", "tex"])
 
 
 def _is_complex_query(query: str, needs_planning: bool) -> bool:
-    """Return True if the query warrants routing the agent to Gemini Pro.
-
-    Criteria:
-    - /think command (needs_planning)
-    - Long query (>50 words)
-    - Contains heavy file extensions AND an analysis keyword
-    - Query length > 30 words AND contains a Pro keyword
-    """
     if needs_planning:
         return True
     q = query.lower()
@@ -93,11 +88,13 @@ def _load_system_prompt(
     detected_language: str = "en",
     env_block: str = "",
     user_query: str = "",
+    entities_block: str = "",
 ) -> str:
     prompt_path = Path(__file__).parent / "prompts" / "system.md"
     raw = prompt_path.read_text(encoding="utf-8")
     raw = raw.replace("{user_name}", settings.user_name)
     raw = raw.replace("{memory_context}", memory_context or "(no prior context retrieved)")
+    raw = raw.replace("{entities_block}", entities_block or "(none yet)")
 
     if any(kw in user_query.lower() for kw in _DATA_REPORT_KEYWORDS):
         workflow_path = Path(__file__).parent / "prompts" / "workflows" / "data_report.md"
@@ -115,7 +112,6 @@ def _load_system_prompt(
 
 
 def _trim_history(messages: list[Any], max_messages: int = 20) -> list[Any]:
-    """Keep only the last max_messages, preserving System messages."""
     from langchain_core.messages import SystemMessage as SM
     system_msgs = [m for m in messages if isinstance(m, SM)]
     non_system = [m for m in messages if not isinstance(m, SM)]
@@ -126,11 +122,11 @@ def _trim_history(messages: list[Any], max_messages: int = 20) -> list[Any]:
 # ── Model catalogue (Revizyon 2 — Gemini-only, 5 entries) ─────────────────────
 
 AVAILABLE_MODELS: list[tuple[str, str, str, str]] = [
-    ("vertex/gemini-2.5-pro",       "Gemini 2.5 Pro (Vertex)",      "vertex",   "Vertex credits · orchestrator + vision"),
-    ("vertex/gemini-2.5-flash",     "Gemini 2.5 Flash (Vertex)",    "vertex",   "Vertex credits · sub-agent executor"),
-    ("aistudio/gemini-2.5-flash",   "Gemini 2.5 Flash (AI Studio)", "aistudio", "50 RPD free · mid fallback"),
-    ("aistudio/gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite",     "aistudio", "1000 RPD free · emergency fallback"),
-    ("groq/llama-4-scout",          "Llama 4 Scout (Groq)",         "groq",     "optional fast intent classifier"),
+    ("vertex/gemini-2.5-pro",          "Gemini 2.5 Pro (Vertex)",      "vertex",   "Vertex credits · orchestrator + vision"),
+    ("vertex/gemini-2.5-flash",        "Gemini 2.5 Flash (Vertex)",    "vertex",   "Vertex credits · sub-agent executor"),
+    ("aistudio/gemini-2.5-flash",      "Gemini 2.5 Flash (AI Studio)", "aistudio", "50 RPD free · mid fallback"),
+    ("aistudio/gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite",        "aistudio", "1000 RPD free · emergency fallback"),
+    ("groq/llama-4-scout",             "Llama 4 Scout (Groq)",         "groq",     "optional fast intent classifier"),
 ]
 
 
@@ -148,23 +144,32 @@ class JarvisAgent:
         self.settings = settings
         self.memory = Memory(settings)
         self.workspace = Path(".").resolve()
-        self.session_id = str(uuid.uuid4())[:8]
         self._env_block = _build_env_block(self.workspace)
-        self._history: list[Any] = []
         self._using_fallback = False
         self._active_model_id: str | None = None
-        self._turn: int = 0  # increments each turn; used for per-turn thread IDs
+        self._turn: int = 0
 
         db_path = Path("data") / "jarvis_checkpoints.db"
         self._checkpointer = make_checkpointer(db_path)
         self._graph = build_graph(settings, self.workspace, self.memory, self._checkpointer)
 
-        # Faz 5: token and cost tracker (persists to data/usage.json)
         self.usage = UsageTracker(Path("data") / "usage.json")
+
+        # Faz 12-B: persistent session store — auto-resume last session
+        self.session_store = SessionStore(Path("data") / "sessions.db")
+        last = self.session_store.latest_session()
+        if last:
+            self.session_id = last
+            self._history: list[Any] = self.session_store.load_history(last, limit=20)
+        else:
+            self.session_id = self.session_store.new_session()
+            self._history: list[Any] = []
+
+        # Strong refs to background tasks — prevents GC from cancelling them mid-flight
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def _cloud_model(self) -> str:
-        """Display label for the currently active model."""
         if self._active_model_id:
             return _label_for(self._active_model_id)
         if self.settings.use_vertex:
@@ -177,16 +182,26 @@ class JarvisAgent:
         return self._cloud_model
 
     def reset(self) -> None:
-        """Clear conversation history."""
+        """Archive current session and start a fresh one."""
+        self.session_store.archive_session(self.session_id)
+        self.session_id = self.session_store.new_session()
         self._history = []
+        self._turn = 0
+        event_bus.session(self.session_id, None)
+
+    def switch_session(self, session_id: str) -> int:
+        """Load a past session's history. Returns number of messages loaded."""
+        self._history = self.session_store.load_history(session_id, limit=20)
+        self.session_id = session_id
+        self._turn = 0  # reset to avoid thread_id namespace collisions
+        topic = next(
+            (s["topic_hint"] for s in self.session_store.list_sessions(50) if s["id"] == session_id),
+            None,
+        )
+        event_bus.session(session_id, topic)
+        return len(self._history)
 
     def switch_model(self, model_id: str) -> str:
-        """Switch active model and rebuild graph.
-
-        Accepts IDs from AVAILABLE_MODELS or raw Gemini model strings.
-        """
-        # Rebuild graph with a tweaked settings override
-        # For Faz 1: we rebuild the full graph (cheap operation)
         import copy
         new_settings = copy.copy(self.settings)
 
@@ -199,10 +214,8 @@ class JarvisAgent:
             new_settings.cloud_tier = "aistudio"
             new_settings.cloud_model = real_id
         elif model_id.startswith("groq/"):
-            # Groq: only if GROQ_API_KEY set (used as sub-agent, not orchestrator in Faz 1)
-            raise ValueError("Groq is an optional intent classifier in Faz 1 — not a primary orchestrator model.")
+            raise ValueError("Groq is an optional intent classifier — not a primary orchestrator model.")
         else:
-            # Raw Gemini model string
             new_settings.cloud_tier = "aistudio"
             new_settings.cloud_model = model_id
 
@@ -210,6 +223,34 @@ class JarvisAgent:
         self._active_model_id = model_id
         self._using_fallback = False
         return _label_for(model_id)
+
+    # ── Entity extraction (fire-and-forget) ────────────────────────────────────
+
+    def _schedule_entity_extraction(self, user_text: str, response: str) -> None:
+        session_id = self.session_id
+
+        async def _do() -> None:
+            try:
+                entities = await extract_entities(user_text, response, self.settings)
+                for e in entities:
+                    self.session_store.upsert_entity(e.name, e.type, e.description, session_id)
+            except Exception:
+                pass
+
+        task = asyncio.create_task(_do())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    def _build_entities_block(self, n: int = 5) -> str:
+        entities = self.session_store.top_entities(n=n)
+        if not entities:
+            return "(none yet)"
+        return "\n".join(
+            f"- **{e['name']}** ({e['type']}): {e['description'] or 'mentioned in conversation'}"
+            for e in entities
+        )
+
+    # ── Chat ───────────────────────────────────────────────────────────────────
 
     async def chat(
         self, user_input: str, detected_language: str = "en"
@@ -219,10 +260,11 @@ class JarvisAgent:
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = _is_complex_query(clean_input, needs_planning)
 
-        memory_ctx = self.memory.recall(clean_input, n=1)
+        memory_ctx = self.memory.recall(clean_input, n=3)
+        entities_block = self._build_entities_block()
         system_prompt = _load_system_prompt(
             self.settings, memory_ctx, detected_language,
-            self._env_block, clean_input,
+            self._env_block, clean_input, entities_block,
         )
 
         initial_messages = (
@@ -247,7 +289,6 @@ class JarvisAgent:
         }
         config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
 
-        # ── HUD events ──────────────────────────────────────────────────────────
         event_bus.message("u", clean_input)
         event_bus.state("thinking")
 
@@ -258,7 +299,6 @@ class JarvisAgent:
             if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
                 print(f"\n[JARVIS] Quota hit — falling back to AI Studio Flash-Lite.")
                 self._using_fallback = True
-                # Switch graph to AI Studio fallback
                 import copy
                 fb_settings = copy.copy(self.settings)
                 fb_settings.cloud_tier = "aistudio"
@@ -270,27 +310,30 @@ class JarvisAgent:
 
         response = result.get("response", "")
         if not response:
-            # Fallback: extract from last AI message if critic didn't populate
             from langchain_core.messages import AIMessage
             for m in reversed(result.get("messages", [])):
                 if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
                     response = m.content
                     break
 
-        # Faz 5: record token usage from all AI messages in result
         self._record_usage_from_result(result, use_pro_agent)
 
-        # Update history (exclude system message — regenerated each turn)
         all_msgs = result.get("messages", [])
         non_system = [m for m in all_msgs if not isinstance(m, SystemMessage)]
         self._history = _trim_history(non_system)
+
+        # Persist conversation state to SQLite
+        self.session_store.save_turn(self.session_id, self._history, self._turn)
+        if self._turn == 1:
+            self.session_store.set_topic_hint(self.session_id, clean_input[:60])
 
         self.memory.store("user", clean_input, self.session_id)
         self.memory.store("assistant", response, self.session_id)
         self.memory.log_turn("user", clean_input)
         self.memory.log_turn("assistant", response)
 
-        # ── HUD events: broadcast response then return to idle ──────────────────
+        self._schedule_entity_extraction(clean_input, response)
+
         event_bus.state("speaking")
         event_bus.message("j", response)
         event_bus.state("idle")
@@ -298,7 +341,6 @@ class JarvisAgent:
         return response, self.current_model_label
 
     def _record_usage_from_result(self, result: dict, use_pro_agent: bool) -> None:
-        """Extract usage_metadata from AI messages in the graph result and record it."""
         from langchain_core.messages import AIMessage as LCAIMessage
         model_id = self._active_model_id or (
             f"vertex/{self.settings.vertex_model_primary}" if use_pro_agent
@@ -310,7 +352,6 @@ class JarvisAgent:
             um = getattr(msg, "usage_metadata", None)
             if not um:
                 continue
-            # Prefer the model name from response_metadata when available
             msg_model = getattr(msg, "response_metadata", {}).get("model_name", model_id)
             self.usage.record(
                 msg_model,
@@ -328,10 +369,11 @@ class JarvisAgent:
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = _is_complex_query(clean_input, needs_planning)
 
-        memory_ctx = self.memory.recall(clean_input, n=1)
+        memory_ctx = self.memory.recall(clean_input, n=3)
+        entities_block = self._build_entities_block()
         system_prompt = _load_system_prompt(
             self.settings, memory_ctx, detected_language,
-            self._env_block, clean_input,
+            self._env_block, clean_input, entities_block,
         )
 
         initial_messages = (
@@ -356,7 +398,6 @@ class JarvisAgent:
         }
         config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
 
-        # ── HUD events ──────────────────────────────────────────────────────────
         event_bus.message("u", clean_input)
         event_bus.state("thinking")
 
@@ -372,17 +413,26 @@ class JarvisAgent:
 
         full_response = "".join(chunks)
 
-        # Rebuild history from non-streaming invoke to capture tool messages
-        # (streaming only captures text chunks; do a quick non-streaming pass for history)
-        # For simplicity in Faz 1: rebuild history with the known response appended
-        from langchain_core.messages import AIMessage
-        non_system = [m for m in initial_messages if not isinstance(m, SystemMessage)]
-        non_system.append(AIMessage(content=full_response))
-        self._history = _trim_history(non_system)
+        # Rebuild history from checkpointer to preserve tool messages (Faz 12-B fix)
+        try:
+            checkpoint_tuple = self._checkpointer.get_tuple(config)
+            if checkpoint_tuple:
+                real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
+                non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
+                self._history = _trim_history(non_system)
+            else:
+                raise ValueError("no checkpoint")
+        except Exception:
+            # Fallback: rebuild manually (loses tool messages, but doesn't crash)
+            from langchain_core.messages import AIMessage
+            non_system = [m for m in initial_messages if not isinstance(m, SystemMessage)]
+            non_system.append(AIMessage(content=full_response))
+            self._history = _trim_history(non_system)
 
-        # Faz 5: estimate token usage from character counts (streaming doesn't return metadata)
+        # Token usage estimate (streaming doesn't return metadata)
         all_text = " ".join(
-            m.content for m in initial_messages if hasattr(m, "content") and isinstance(m.content, str)
+            m.content for m in initial_messages
+            if hasattr(m, "content") and isinstance(m.content, str)
         )
         est_in = max(1, len(all_text) // 4)
         est_out = max(1, len(full_response) // 4)
@@ -392,11 +442,17 @@ class JarvisAgent:
         )
         self.usage.record(model_id, est_in, est_out)
 
+        # Persist conversation state to SQLite
+        self.session_store.save_turn(self.session_id, self._history, self._turn)
+        if self._turn == 1:
+            self.session_store.set_topic_hint(self.session_id, clean_input[:60])
+
         self.memory.store("user", clean_input, self.session_id)
         self.memory.store("assistant", full_response, self.session_id)
         self.memory.log_turn("user", clean_input)
         self.memory.log_turn("assistant", full_response)
 
-        # ── HUD events: stream done ─────────────────────────────────────────────
+        self._schedule_entity_extraction(clean_input, full_response)
+
         event_bus.message("j", full_response)
         event_bus.state("idle")
