@@ -72,6 +72,7 @@ class SessionStore:
     # ── Connection management ─────────────────────────────────────────────────
 
     def _open(self, path: Path) -> sqlite3.Connection:
+        conn = None
         try:
             conn = sqlite3.connect(
                 str(path),
@@ -84,10 +85,24 @@ class SessionStore:
             conn.executescript(_SCHEMA)
             return conn
         except sqlite3.DatabaseError:
+            # Close before rename — required on Windows (file lock)
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             corrupt = path.with_suffix(f".db.corrupt-{ts}")
-            path.rename(corrupt)
-            print(f"[JARVIS] sessions.db was corrupt — renamed to {corrupt.name}, starting fresh.")
+            try:
+                path.rename(corrupt)
+                print(f"[JARVIS] sessions.db was corrupt — renamed to {corrupt.name}, starting fresh.")
+            except OSError:
+                # If rename still fails (e.g. WAL sidecar locked), just delete
+                try:
+                    path.unlink(missing_ok=True)
+                    print("[JARVIS] sessions.db was corrupt — deleted, starting fresh.")
+                except OSError:
+                    pass
             conn = sqlite3.connect(
                 str(path),
                 check_same_thread=False,
