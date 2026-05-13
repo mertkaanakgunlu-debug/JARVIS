@@ -1,6 +1,10 @@
 /**
  * App.jsx — Full JARVIS HUD.
  * Connects to FastAPI WebSocket, uses fake-data fallback when offline.
+ * Accent color changes automatically based on JARVIS state:
+ *   idle/listening → cyan (#22d3ee)
+ *   thinking/working → yellow (#FFC857)
+ *   speaking → red (#FF5577)
  */
 import { useState, useEffect } from 'react'
 import './styles.css'
@@ -15,7 +19,7 @@ import useJarvisSocket from './hooks/useJarvisSocket'
 import useClock from './hooks/useClock'
 import { useFakeMic, useFakeFeed, useFakeMetrics } from './hooks/useFakeData'
 
-// ── Color helpers (for accent derivation) ────────────────────────────────────
+// ── Color helpers ─────────────────────────────────────────────────────────────
 function toRgb(hex) {
   const h = hex.replace('#', '')
   const v = h.length === 3 ? h.split('').map(c => c + c).join('') : h
@@ -44,6 +48,17 @@ function applyAccent(accent, gridIntensity) {
   root.style.setProperty('--hud-glow-soft',`0 0 8px rgba(${rgb[0]},${rgb[1]},${rgb[2]},.35)`)
 }
 
+// ── State → accent color mapping ─────────────────────────────────────────────
+const STATE_ACCENT = {
+  idle:      '#22d3ee',   // cyan — free
+  listening: '#22d3ee',   // cyan — free
+  thinking:  '#FFC857',   // yellow — reasoning
+  working:   '#FFC857',   // yellow — executing
+  speaking:  '#FF5577',   // red — responding
+}
+
+const GRID_INTENSITY = 0.06
+
 // ── Uptime counter ────────────────────────────────────────────────────────────
 function useUptime() {
   const [s, setS] = useState(0)
@@ -53,21 +68,98 @@ function useUptime() {
   return `${pad(h)}:${pad(m)}:${pad(sec)}`
 }
 
-// ── HUD settings (accent color, density, etc.) ────────────────────────────────
-const DEFAULT_SETTINGS = { accent: '#22d3ee', density: 'comfy', layout: 'default', gridIntensity: 0.06 }
-
-// ── Static placeholder data (shown when live data not yet received) ────────────
-const PLACEHOLDER_PROJECTS = [
-  { title: 'JARVIS — Electron HUD',       progress: 65, due: 'active',  stage: 'Faz 11 implementation', tag: 'project' },
-  { title: 'Vault migration → sync',       progress: 30, due: '— soon',  stage: 'Designing schema',       tag: 'internal' },
-]
+// ── Static placeholder data (rich; shown when WS offline) ────────────────────
 const PLACEHOLDER_EVENTS = [
-  { time: '--:--', title: 'Loading calendar…', where: '', kind: 'idle' },
+  { time: '10:00', title: 'EE-302 · Lecture',           where: 'Hall B-204',      kind: 'live' },
+  { time: '14:00', title: 'Office Hours · Prof. Yıldız', where: 'EE-411',          kind: 'idle' },
+  { time: '17:30', title: 'Senior Project standup',      where: 'Discord · Voice', kind: 'idle' },
+  { time: '21:00', title: 'Gym',                         where: 'Campus rec',      kind: 'idle' },
+  { time: '23:59', title: 'Physics Lab Report · DUE',    where: 'Submit · Moodle', kind: 'red'  },
 ]
+
+const PLACEHOLDER_PROJECTS = [
+  { title: 'EE-302 · Differential Eq · PSet 3',  progress: 84, due: '+ 2d 04h', stage: 'Compiling LaTeX',    tag: 'homework'  },
+  { title: 'Senior · Mark VII Web Dashboard',     progress: 47, due: '+ 12d',    stage: 'FastAPI · WebSocket',tag: 'project'   },
+  { title: 'PHYS-201 · Lab Report',               progress: 92, due: '+ 06h',    stage: 'Final review',       tag: 'homework'  },
+  { title: 'Vault migration → Obsidian sync',     progress: 30, due: '— soon',   stage: 'Designing schema',   tag: 'internal'  },
+]
+
+const PLACEHOLDER_VAULT_ENTRIES = [
+  { title: 'favorite editor → Neovim',         tag: 'memory', ts: '5d ago'    },
+  { title: 'Mark VII · architecture sketch',   tag: 'note',   ts: 'today'     },
+  { title: 'Laplace transforms · cheatsheet',  tag: 'note',   ts: 'yesterday' },
+  { title: 'Conversation · 2026-05-09',         tag: 'convo',  ts: '1d ago'   },
+  { title: 'report · em-pset2.pdf',            tag: 'report', ts: '3d ago'    },
+]
+
+const TASK_BY_STATE = {
+  idle: {
+    name: '—',
+    steps: [],
+  },
+  listening: {
+    name: 'Awaiting voice input…',
+    steps: [
+      { label: "Wake-word detected · 'Jarvis…'",  done: true,   t: '00:00.04' },
+      { label: 'Faster-Whisper STT streaming',     active: true, t: '00:01.12' },
+      { label: 'Intent classification' },
+    ],
+  },
+  thinking: {
+    name: 'EE-302 · Differential Equations · PSet 3',
+    steps: [
+      { label: 'Parse PDF problem set',             done: true,   t: '00:01.20' },
+      { label: 'Extract 6 problems via pdf.read',   done: true,   t: '00:02.84' },
+      { label: 'Delegate Q1–Q4 to MathAgent',       done: true,   t: '00:04.12' },
+      { label: 'Q5 — Laplace transform · Gemini',   active: true, t: '00:14.07' },
+      { label: 'Compose LaTeX report' },
+      { label: 'Compile PDF · pdflatex' },
+    ],
+  },
+  speaking: {
+    name: "Briefing · today's schedule",
+    steps: [
+      { label: 'Recall vault/notes/calendar.md',   done: true,   t: '00:00.18' },
+      { label: 'Compose response (Gemini Flash)',   done: true,   t: '00:00.44' },
+      { label: 'TTS · edge-tts · streaming',        active: true, t: '00:01.92' },
+    ],
+  },
+  working: {
+    name: 'Compile report → em-pset3.pdf',
+    steps: [
+      { label: 'report.write → em-pset3.tex',      done: true,   t: '00:08.41' },
+      { label: 'pdflatex pass 1',                   done: true,   t: '00:11.06' },
+      { label: 'pdflatex pass 2 (cross-refs)',      active: true, t: '00:13.80' },
+      { label: 'Move to vault/reports/' },
+    ],
+  },
+}
+
+const TRANSCRIPT_BY_STATE = {
+  idle: [
+    { who: 'j', text: 'All systems nominal. Three projects active, two with deadlines this week. Shall I begin?' },
+  ],
+  listening: [
+    { who: 'j', text: 'Welcome back, sir. How can I be of service?' },
+    { who: 'u', text: '' },
+  ],
+  thinking: [
+    { who: 'u', text: '/think solve problem 5 from the differential equations pset I uploaded yesterday' },
+    { who: 'j', text: 'Routing to Gemini 2.5 Pro — the Laplace inverse on this one needs partial fractions. Working on it.' },
+  ],
+  speaking: [
+    { who: 'u', text: "what's on the agenda today" },
+    { who: 'j', text: "Three items, sir. EE-302 office hours at fourteen hundred, your physics lab report is due at twenty-three fifty-nine, and Mertcan asked you to call back regarding the senior project — I've left the relevant notes in the vault." },
+  ],
+  working: [
+    { who: 'u', text: 'render the EM pset to PDF and drop it in reports' },
+    { who: 'j', text: 'Compiling. Two passes for the cross-references. Estimated thirty-two seconds.' },
+  ],
+}
 
 export default function App() {
   const [apiUrl, setApiUrl] = useState(null)
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS)
+  const [accent, setAccent]   = useState(STATE_ACCENT.idle)
 
   // Get API URL from Electron main process
   useEffect(() => {
@@ -77,14 +169,22 @@ export default function App() {
     return () => window.jarvis?.removeAllListeners('config')
   }, [])
 
-  // Apply accent on settings change
-  useEffect(() => {
-    applyAccent(settings.accent, settings.gridIntensity)
-  }, [settings.accent, settings.gridIntensity])
-
   // Live data from WebSocket
   const { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress } =
     useJarvisSocket(apiUrl)
+
+  // State → accent: changes color palette when JARVIS switches modes
+  useEffect(() => {
+    const newAccent = STATE_ACCENT[state] || STATE_ACCENT.idle
+    setAccent(newAccent)
+    applyAccent(newAccent, GRID_INTENSITY)
+  }, [state])
+
+  // Initial accent application on mount
+  useEffect(() => {
+    applyAccent(accent, GRID_INTENSITY)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Fake data fallback (active when disconnected)
   const fakeMic      = useFakeMic(state)
@@ -103,22 +203,31 @@ export default function App() {
     : state === 'speaking'  ? ['vault']
     : []
 
-  const calendarEvents = connected && calEvents.length ? calEvents : PLACEHOLDER_EVENTS
-  const projects       = PLACEHOLDER_PROJECTS  // TODO: real project data from backend
+  // Use live data when connected, rich placeholders when offline
+  const calendarEvents  = connected && calEvents.length    ? calEvents    : PLACEHOLDER_EVENTS
+  const projects        = PLACEHOLDER_PROJECTS  // TODO: real project data from backend
+  const vaultEntries    = connected && vaultData.entries.length ? vaultData.entries : PLACEHOLDER_VAULT_ENTRIES
+  const vaultCount      = connected ? vaultData.count : 2847
+  const displayTask     = (connected && task.name) ? task : TASK_BY_STATE[state] || TASK_BY_STATE.idle
+  const displayTranscript = (connected && transcript.length) ? transcript : (TRANSCRIPT_BY_STATE[state] || [])
+
+  // Progress: use WS data or placeholders
+  const cloudSpend = progress.cloudSpend ?? '0.47'
+  const costSaved  = progress.costSaved  ?? '4.18'
 
   return (
     <>
       <div className="hud-grid" />
       <div className="hud-scan" />
 
-      <div className="hud-stage" data-density={settings.density} data-layout={settings.layout}>
+      <div className="hud-stage" data-density="comfy" data-layout="default">
 
         {/* Top bar */}
         <TopBar state={state} clock={clock} onClose={() => window.jarvis?.hideHud()} />
 
         {/* Left column */}
         <div className="slot-l1" style={{ display: 'flex', minHeight: 0 }}>
-          <CurrentTask state={state} taskName={task.name} steps={task.steps} />
+          <CurrentTask state={state} taskName={displayTask.name} steps={displayTask.steps} />
         </div>
         <div className="slot-l2" style={{ display: 'flex', minHeight: 0 }}>
           <SubagentsPanel active={activeAgents} />
@@ -137,13 +246,13 @@ export default function App() {
         <div className="slot-c center-stage">
           <div style={{ position: 'relative', width: 560, height: 560,
             display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <OrbitalRings size={560} accent={settings.accent} />
-            <JarvisOrb size={420} state={state} accent={settings.accent} micLevel={micLevel} />
+            <OrbitalRings size={560} accent={accent} />
+            <JarvisOrb size={420} state={state} accent={accent} micLevel={micLevel} />
           </div>
-          <CenterCaption state={state} name={task.name} />
+          <CenterCaption state={state} name={displayTask.name} />
           <div style={{ display: 'flex', gap: 18, alignItems: 'center', marginTop: 4 }}>
             <span className="dim" style={{ fontSize: 9, letterSpacing: '.22em' }}>VOICE I/O</span>
-            <VoiceBars state={state} accent={settings.accent} count={28} />
+            <VoiceBars state={state} accent={accent} count={28} />
             <span className="dim numeric" style={{ fontSize: 10 }}>{Math.round(micLevel * 100)}%</span>
           </div>
           {/* Connection status dot */}
@@ -160,9 +269,10 @@ export default function App() {
         </div>
         <div className="slot-r2" style={{ display: 'flex', minHeight: 0 }}>
           <ProgressToday
-            jobsDone={progress.jobsDone} jobsTotal={progress.jobsTotal}
+            jobsDone={progress.jobsDone || 11} jobsTotal={progress.jobsTotal || 14}
             runtime={progress.runtime || uptime}
-            tokensIn={progress.tokensIn} tokensOut={progress.tokensOut}
+            tokensIn={progress.tokensIn || 184320} tokensOut={progress.tokensOut || 62870}
+            cloudSpend={cloudSpend} costSaved={costSaved}
           />
         </div>
         <div className="slot-r3" style={{ display: 'flex', minHeight: 0 }}>
@@ -175,17 +285,22 @@ export default function App() {
             <ActivityFeed lines={feed} />
           </div>
           <div style={{ display: 'flex', minHeight: 0 }}>
-            <VaultPanel entries={vaultData.entries} chromaCount={vaultData.count} />
+            <VaultPanel entries={vaultEntries} chromaCount={vaultCount} />
           </div>
           <div style={{ display: 'flex', minHeight: 0 }}>
-            <Transcript turns={transcript} typing={state === 'speaking' || state === 'listening'} />
+            <Transcript turns={displayTranscript} typing={state === 'speaking' || state === 'listening'} />
           </div>
         </div>
 
         <BottomBar
           state={state} micLevel={micLevel} latency={met.latency}
-          vaultCount={vaultData.count} uptime={uptime}
+          vaultCount={vaultCount} uptime={uptime}
         />
+      </div>
+
+      {/* In-HUD floating orb (bottom-right overlay, pointer-events:none) */}
+      <div className="float-orb">
+        <JarvisOrb size={180} state={state} accent={accent} micLevel={micLevel} />
       </div>
     </>
   )

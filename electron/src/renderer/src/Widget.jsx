@@ -2,6 +2,8 @@
  * Widget.jsx — floating orb widget (always-on-top, ~220px).
  * Shown on wake-word / when JARVIS starts speaking.
  * Double-click opens the full HUD.
+ * Accent color matches main HUD state palette:
+ *   idle/listening → cyan, thinking/working → yellow, speaking → red
  */
 import { useState, useEffect } from 'react'
 import JarvisOrb, { VoiceBars } from './components/JarvisOrb'
@@ -9,23 +11,42 @@ import useJarvisSocket from './hooks/useJarvisSocket'
 import { useFakeMic } from './hooks/useFakeData'
 import './styles.css'
 
-const ACCENT = '#22d3ee'
+// ── State → accent palette (mirrors App.jsx) ──────────────────────────────────
+const STATE_ACCENT = {
+  idle:      '#22d3ee',
+  listening: '#22d3ee',
+  thinking:  '#FFC857',
+  working:   '#FFC857',
+  speaking:  '#FF5577',
+}
 
-function applyWidgetAccent() {
+function toRgb(hex) {
+  const h = hex.replace('#', '')
+  const v = h.length === 3 ? h.split('').map(c => c + c).join('') : h
+  return [parseInt(v.slice(0,2),16), parseInt(v.slice(2,4),16), parseInt(v.slice(4,6),16)]
+}
+function lighten(hex, amt) {
+  const [r,g,b] = toRgb(hex)
+  return `rgb(${Math.min(255,r+(255-r)*amt)|0},${Math.min(255,g+(255-g)*amt)|0},${Math.min(255,b+(255-b)*amt)|0})`
+}
+
+function applyWidgetAccent(accent) {
   const root = document.documentElement
-  root.style.setProperty('--hud-cyan',      ACCENT)
-  root.style.setProperty('--hud-cyan-soft', '#67e8f9')
-  root.style.setProperty('--hud-glow-soft', '0 0 8px rgba(34,211,238,.35)')
-  root.style.setProperty('--hud-line',      'rgba(34,211,238,.55)')
+  const [r,g,b] = toRgb(accent)
+  root.style.setProperty('--hud-cyan',      accent)
+  root.style.setProperty('--hud-cyan-soft', lighten(accent, 0.25))
+  root.style.setProperty('--hud-glow-soft', `0 0 8px rgba(${r},${g},${b},.35)`)
+  root.style.setProperty('--hud-line',      `rgba(${r},${g},${b},.55)`)
   root.style.setProperty('--hud-ink',       '#d6f1f7')
   root.style.setProperty('--hud-ink-dim',   '#7ba9b3')
 }
 
 export default function Widget() {
   const [apiUrl, setApiUrl] = useState(null)
+  const [accent, setAccent] = useState(STATE_ACCENT.idle)
 
   useEffect(() => {
-    applyWidgetAccent()
+    applyWidgetAccent(accent)
     window.jarvis?.onConfig(cfg => setApiUrl(cfg.apiUrl))
     if (!window.jarvis) setApiUrl('http://127.0.0.1:8000')
     return () => window.jarvis?.removeAllListeners('config')
@@ -34,6 +55,13 @@ export default function Widget() {
   const { connected, state } = useJarvisSocket(apiUrl)
   const micLevel = useFakeMic(state)
 
+  // Update accent when state changes
+  useEffect(() => {
+    const newAccent = STATE_ACCENT[state] || STATE_ACCENT.idle
+    setAccent(newAccent)
+    applyWidgetAccent(newAccent)
+  }, [state])
+
   const stateLabel = {
     idle:      'STANDBY',
     listening: 'LISTENING…',
@@ -41,14 +69,6 @@ export default function Widget() {
     thinking:  'THINKING',
     working:   'WORKING',
   }[state] || 'STANDBY'
-
-  const stateColor = {
-    listening: '#22d3ee',
-    speaking:  '#67e8f9',
-    thinking:  '#a855f7',
-    working:   '#fbbf24',
-    idle:      '#7ba9b3',
-  }[state] || '#7ba9b3'
 
   return (
     <div
@@ -62,11 +82,11 @@ export default function Widget() {
         position: 'relative',
       }}
     >
-      <JarvisOrb size={180} state={state} accent={ACCENT} micLevel={micLevel} />
+      <JarvisOrb size={180} state={state} accent={accent} micLevel={micLevel} />
 
       <div style={{
         marginTop: 6, fontSize: 9, letterSpacing: '.22em', textTransform: 'uppercase',
-        color: stateColor, textShadow: `0 0 8px ${stateColor}`,
+        color: accent, textShadow: `0 0 8px ${accent}`,
         fontFamily: '"Share Tech Mono", monospace',
       }}>
         {stateLabel}
@@ -74,15 +94,15 @@ export default function Widget() {
 
       {(state === 'listening' || state === 'speaking') && (
         <div style={{ marginTop: 4 }}>
-          <VoiceBars state={state} accent={ACCENT} count={14} />
+          <VoiceBars state={state} accent={accent} count={14} />
         </div>
       )}
 
       <div style={{
         position: 'absolute', bottom: 6, right: 10,
         width: 5, height: 5, borderRadius: '50%',
-        background: connected ? '#22d3ee' : '#fbbf24',
-        boxShadow: connected ? '0 0 4px #22d3ee' : '0 0 4px #fbbf24',
+        background: connected ? accent : '#fbbf24',
+        boxShadow: connected ? `0 0 4px ${accent}` : '0 0 4px #fbbf24',
       }} />
     </div>
   )

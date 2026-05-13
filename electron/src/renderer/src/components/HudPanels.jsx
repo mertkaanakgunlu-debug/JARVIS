@@ -2,6 +2,7 @@
  * HudPanels — all wireframe panel components for the JARVIS HUD.
  * Ported from the Claude Design prototype (hud-panels.jsx).
  */
+import { useRef, useEffect } from 'react'
 
 // ── Panel chrome ──────────────────────────────────────────────────────────────
 export function Panel({ title, id, status = 'live', live = true, children, scroll = false }) {
@@ -134,7 +135,7 @@ export function SystemMetrics({ cpu, gpu, ram, vram, mic, voice, model, latency 
     <Panel title="System Metrics" id="ID/0x0E5">
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
         <MeterRow label="CPU"          value={cpu}   sub="%" />
-        <MeterRow label="GPU"          value={gpu}   sub="%" />
+        <MeterRow label="GPU · RTX 4070" value={gpu}   sub="%" />
         <MeterRow label="RAM"          value={ram}   sub=" GB" max={32} />
         <MeterRow label="VRAM"         value={vram}  sub=" GB" max={12} danger />
         <MeterRow label="MIC LEVEL"    value={mic}   sub="%" />
@@ -143,6 +144,7 @@ export function SystemMetrics({ cpu, gpu, ram, vram, mic, voice, model, latency 
       <div className="hr" />
       <div className="kv"><span className="k">Active model</span><span className="v cyan">{model}</span></div>
       <div className="kv"><span className="k">Round-trip</span><span className="v">{latency} ms</span></div>
+      <div className="kv"><span className="k">Network</span><span className="v">Tailscale · 100.84.12.7</span></div>
     </Panel>
   )
 }
@@ -226,7 +228,7 @@ function RingProgress({ value, size = 80 }) {
   )
 }
 
-export function ProgressToday({ jobsDone = 0, jobsTotal = 0, runtime = '00:00:00', tokensIn = 0, tokensOut = 0 }) {
+export function ProgressToday({ jobsDone = 0, jobsTotal = 0, runtime = '00:00:00', tokensIn = 0, tokensOut = 0, cloudSpend = '0.00', costSaved = '0.00' }) {
   const pct = jobsTotal > 0 ? Math.round((jobsDone / jobsTotal) * 100) : 0
   return (
     <Panel title="Today · Progress" id="ID/0x0I9">
@@ -239,6 +241,9 @@ export function ProgressToday({ jobsDone = 0, jobsTotal = 0, runtime = '00:00:00
           <div className="stat"><span className="v">{(tokensOut / 1000).toFixed(1)}k</span><span className="l">tokens out</span></div>
         </div>
       </div>
+      <div className="hr" />
+      <div className="kv"><span className="k">Cloud spend (today)</span><span className="v cyan">${cloudSpend}</span></div>
+      <div className="kv"><span className="k">Cost saved (local)</span><span className="v">${costSaved}</span></div>
     </Panel>
   )
 }
@@ -250,6 +255,10 @@ export function VaultPanel({ entries = [], chromaCount = 0 }) {
       <div className="kv">
         <span className="k">ChromaDB vectors</span>
         <span className="v cyan numeric">{chromaCount.toLocaleString()}</span>
+      </div>
+      <div className="kv">
+        <span className="k">Vault</span>
+        <span className="v">notes / conversations / reports</span>
       </div>
       <div className="hr" />
       <div className="k-label" style={{ marginBottom: 6 }}>Recent retrievals</div>
@@ -267,9 +276,11 @@ export function VaultPanel({ entries = [], chromaCount = 0 }) {
 
 // ── Activity Feed ──────────────────────────────────────────────────────────────
 export function ActivityFeed({ lines = [] }) {
+  const feedRef = useRef(null)
+  useEffect(() => { if (feedRef.current) feedRef.current.scrollTop = 0 }, [lines])
   return (
     <Panel title="Telemetry · Live" id="ID/0x0G7" scroll>
-      <div className="feed">
+      <div className="feed" ref={feedRef}>
         {lines.slice().reverse().map(l => (
           <div key={l.id} className="line">
             <span className="ts">{l.ts}</span>
@@ -284,6 +295,8 @@ export function ActivityFeed({ lines = [] }) {
 
 // ── Conversation Transcript ───────────────────────────────────────────────────
 export function Transcript({ turns = [], typing = false }) {
+  const endRef = useRef(null)
+  useEffect(() => { if (endRef.current) endRef.current.scrollIntoView({ behavior: 'smooth' }) }, [turns])
   return (
     <Panel title="Conversation" id="ID/0x0H8" scroll>
       <div className="xcript">
@@ -296,6 +309,7 @@ export function Transcript({ turns = [], typing = false }) {
             </span>
           </div>
         ))}
+        <div ref={endRef} />
       </div>
     </Panel>
   )
@@ -360,7 +374,7 @@ export function BottomBar({ state, micLevel, latency, vaultCount = 0, uptime = '
       <span className="sep" />
       <span className="dim">UPTIME</span><span className="cyan numeric">{uptime}</span>
       <span className="grow" />
-      <span className="dim">↑/↓ MODULES   ESC DISMISS</span>
+      <span className="dim">↑/↓ MODULES   ⌥ SPACE PUSH-TO-TALK   ESC DISMISS</span>
     </div>
   )
 }
