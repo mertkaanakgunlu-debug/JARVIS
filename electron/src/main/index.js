@@ -3,7 +3,9 @@ import { join } from 'path'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const JARVIS_API = process.env.JARVIS_API_URL || 'http://127.0.0.1:8000'
-const isDev = !app.isPackaged
+// electron-vite sets ELECTRON_RENDERER_URL only in dev server mode (npm run dev).
+// In preview/production, this is undefined → load from built files.
+const RENDERER_URL = process.env['ELECTRON_RENDERER_URL']
 
 // ── Window handles ─────────────────────────────────────────────────────────────
 let mainWindow = null
@@ -43,11 +45,13 @@ function createMainWindow() {
     },
   })
 
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:5173/index.html')
-    // mainWindow.webContents.openDevTools()
+  if (RENDERER_URL) {
+    mainWindow.loadURL(RENDERER_URL)
+    mainWindow.webContents.openDevTools({ mode: 'detach' })
   } else {
-    mainWindow.loadFile(join(__dirname, '../../renderer/index.html'))
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    // DevTools only auto-opens in dev mode (RENDERER_URL branch)
+    // In preview/production, use: tray → Open DevTools (HUD)
   }
 
   mainWindow.on('close', (e) => {
@@ -56,9 +60,13 @@ function createMainWindow() {
     mainWindow.hide()
   })
 
+  mainWindow.webContents.on('did-fail-load', (_, code, desc, url) => {
+    console.error(`[jarvis:main] renderer failed to load: ${code} ${desc} — ${url}`)
+  })
+
   mainWindow.webContents.on('did-finish-load', () => {
-    // Send API base URL to renderer
     mainWindow.webContents.send('config', { apiUrl: JARVIS_API })
+    mainWindow.show()
   })
 }
 
@@ -85,10 +93,10 @@ function createWidgetWindow() {
     },
   })
 
-  if (isDev) {
-    widgetWindow.loadURL('http://localhost:5173/?mode=widget')
+  if (RENDERER_URL) {
+    widgetWindow.loadURL(RENDERER_URL + '?mode=widget')
   } else {
-    widgetWindow.loadFile(join(__dirname, '../../renderer/index.html'), { query: { mode: 'widget' } })
+    widgetWindow.loadFile(join(__dirname, '../renderer/index.html'), { query: { mode: 'widget' } })
   }
 
   widgetWindow.on('close', (e) => {

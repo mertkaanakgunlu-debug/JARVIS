@@ -2,7 +2,7 @@
  * JarvisOrb — Ultron-vision style spherical particle mesh.
  * Canvas-based, state-reactive. Ported from the Claude Design prototype.
  */
-import { useEffect, useRef, useMemo } from 'react'
+import React, { useEffect, useRef, useMemo } from 'react'
 
 // ── Fibonacci sphere points ────────────────────────────────────────────────────
 function fibonacciSphere(n) {
