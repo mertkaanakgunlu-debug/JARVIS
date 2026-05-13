@@ -38,6 +38,9 @@ def _build_gemini_ef(api_key: str):
             def __call__(self, input: list[str]) -> list[list[float]]:
                 return embedder.embed_documents(input)
 
+            def name(self) -> str:
+                return "gemini-text-embedding-004"
+
         return _GeminiEF()
     except Exception:
         return None
@@ -62,10 +65,15 @@ class Memory:
         # jarvis_docs: document RAG — Gemini embeddings for higher semantic quality
         gemini_ef = _build_gemini_ef(settings.gemini_api_key)
         doc_kwargs = {"embedding_function": gemini_ef} if gemini_ef else {}
-        self._docs_collection = self._client.get_or_create_collection(
-            "jarvis_docs", **doc_kwargs
-        )
-        self._gemini_ef_active = gemini_ef is not None
+        try:
+            self._docs_collection = self._client.get_or_create_collection(
+                "jarvis_docs", **doc_kwargs
+            )
+            self._gemini_ef_active = gemini_ef is not None
+        except ValueError:
+            # EF conflict: collection exists with a different EF — open without custom EF
+            self._docs_collection = self._client.get_or_create_collection("jarvis_docs")
+            self._gemini_ef_active = False
 
     # ------------------------------------------------------------------
     # Semantic memory (conversations)
