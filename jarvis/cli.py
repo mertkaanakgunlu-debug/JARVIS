@@ -45,6 +45,9 @@ HELP_TEXT = """\
 [bold]Spotify (Faz 8 — set SPOTIFY_CLIENT_ID/SECRET in .env):[/bold]
   [dim]"Play Bohemian Rhapsody"    "Pause music"    "What's playing?"[/dim]
 
+[bold]Google Calendar (Faz 9 — OAuth credentials in data/calendar_credentials.json):[/bold]
+  [dim]"Bu haftaki etkinliklerimi listele"    "Yarın 15:00'e toplantı ekle"    "Standupı iptal et"[/dim]
+
 [bold]Model değiştirme (doğal dil):[/bold]
   [dim]"Modeli flash yap"   "Gemini Pro'ya geç"   "Switch to llama"[/dim]
 """
@@ -122,10 +125,15 @@ def _detect_model_switch(user_input: str) -> str | None:
 def _print_banner(settings: Settings) -> None:
     console.print(BANNER)
     console.print(Rule(style="gold3 dim"))
+    if settings.use_vertex:
+        model_str = (
+            f"Vertex AI  ·  fast: [bold]{settings.vertex_model_fast}[/bold]  "
+            f"·  pro: [bold]{settings.vertex_model_primary}[/bold]"
+        )
+    else:
+        model_str = f"Cloud: [bold]{settings.effective_cloud_model}[/bold]"
     console.print(
-        f"[dim]  User: [bold]{settings.user_name}[/bold]  ·  "
-        f"Local: [bold]{settings.local_model}[/bold]  ·  "
-        f"Cloud: [bold]{settings.effective_cloud_model}[/bold][/dim]\n"
+        f"[dim]  User: [bold]{settings.user_name}[/bold]  ·  {model_str}[/dim]\n"
     )
 
 
@@ -438,10 +446,10 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False) -> None:
 
 def run(voice: bool = False, wakeword: bool = False) -> None:
     settings = Settings()
-    if not settings.gemini_api_key:
+    if not settings.gemini_api_key and not settings.use_vertex:
         console.print(
-            "[yellow]Warning:[/yellow] GEMINI_API_KEY not set in .env — "
-            "cloud fallback (/think) will fail. Local model only."
+            "[yellow]Warning:[/yellow] GEMINI_API_KEY not set and Vertex AI not configured — "
+            "set GEMINI_API_KEY or CLOUD_TIER=vertex in .env."
         )
 
     agent = JarvisAgent(settings)
