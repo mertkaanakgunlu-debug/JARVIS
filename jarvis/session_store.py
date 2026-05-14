@@ -86,6 +86,9 @@ class SessionStore:
         # Faz 13-D: todos table
         from jarvis.todo_store import _TODO_TABLE
         conn.executescript(_TODO_TABLE)
+        # Faz 16: finance tables
+        from jarvis.finance_store import _FINANCE_TABLES
+        conn.executescript(_FINANCE_TABLES)
 
     def _open(self, path: Path) -> sqlite3.Connection:
         conn = None

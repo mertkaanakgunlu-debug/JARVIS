@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     drive_cache_dir: Path = Path("data/drive_cache")   # downloaded Drive files
     drive_default_folder_id: str = ""                  # optional default folder ID
 
+    # Faz 16: Finance analytics
+    finance_data_dir: Path = Path("data/finance")   # charts + reports output dir
+    finance_bank: str = "burgan"                     # primary bank identifier
+    finance_sender_filter: str = "burgan"            # Gmail from: filter string
+    finance_extractor_model: str = "gemini-2.5-flash"
+    monitor_finance_interval_min: int = 30           # finance sync + budget check interval
+
     # Faz 15: ITU Webmail (IMAP + SMTP)
     itu_username: str = ""                   # e.g. akgunlu22@itu.edu.tr
     itu_password: str = ""                   # ITU LDAP password (or app password)

@@ -59,10 +59,13 @@ HELP_TEXT = """\
 
 [bold]ITU Webmail (Faz 15 — ITU_USERNAME/ITU_PASSWORD in .env):[/bold]
   [dim]"ITU inboxumu göster"    "Hocama mail at"    "Ödev konulu maili bul"[/dim]
-  [dim]itu_mail("list_unread")  ·  itu_mail("search", query="SUBJECT:ödev")  ·  itu_mail("reply", uid="..."[/dim]
+
+[bold]Finans Analizi (Faz 16 — Burgan Bank + Gmail):[/bold]
+  [dim]"Bu ayki harcamalarımı özetle"    "Yemek bütçesi koy 1500 TL"    "Grafik oluştur"[/dim]
+  [dim]finance("sync")  ·  finance("summary")  ·  finance("budget_status")  ·  finance("chart")[/dim]
 
 [bold]Proaktif Monitor (Faz 10 — python -m jarvis --monitor):[/bold]
-  [dim]Arka planda Gmail + Takvim + ITU mail izler, Windows toast bildirimi gönderir.[/dim]
+  [dim]Arka planda Gmail + Takvim + ITU mail + Burgan bütçe izler, Windows toast bildirimi gönderir.[/dim]
 
 [bold]Model değiştirme (doğal dil):[/bold]
   [dim]"Modeli flash yap"   "Gemini Pro'ya geç"   "Switch to llama"[/dim]

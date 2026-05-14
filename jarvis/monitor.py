@@ -45,6 +45,7 @@ class JarvisMonitor:
         self._email_ok = False   # True after first successful Gmail call
         self._cal_ok = False     # True after first successful Calendar call
         self._itu_mail_ok = False  # Faz 15
+        self._finance_ok = False   # Faz 16
 
         # Faz 13-C: SchedulerStore instance (injected by agent.py or __main__.py)
         self._scheduler = scheduler
@@ -88,6 +89,7 @@ class JarvisMonitor:
         cal_interval      = getattr(s, "monitor_calendar_interval_min", 2) * 60
         sched_interval    = getattr(s, "monitor_schedule_interval_sec", 60)
         itu_mail_interval = getattr(s, "monitor_itu_mail_interval_min", 5) * 60
+        finance_interval  = getattr(s, "monitor_finance_interval_min", 30) * 60
 
         # Initialise state silently (avoid startup spam)
         self._init_email_state()
@@ -99,6 +101,7 @@ class JarvisMonitor:
         last_sched    = 0.0
         last_todo     = 0.0
         last_itu_mail = 0.0
+        last_finance  = 0.0
 
         while not self._stop.is_set():
             now = time.monotonic()
@@ -117,6 +120,9 @@ class JarvisMonitor:
             if now - last_itu_mail >= itu_mail_interval:
                 self._poll_itu_mail()
                 last_itu_mail = time.monotonic()
+            if now - last_finance >= finance_interval:
+                self._check_finance()
+                last_finance = time.monotonic()
             # Sleep in short chunks so stop() is responsive
             self._stop.wait(timeout=30)
 
@@ -310,6 +316,35 @@ class JarvisMonitor:
                 logger.info("Scheduler fired: %s (%s)", title, task["id"])
         except Exception as exc:
             logger.debug("Monitor schedule check error: %s", exc)
+
+    # ── Faz 16: Finance sync + budget alerts ──────────────────────────────────
+
+    def _check_finance(self) -> None:
+        """Auto-sync Burgan transactions and fire budget-threshold toasts."""
+        try:
+            from jarvis.notify import toast
+            from pathlib import Path
+            from datetime import datetime as _dt
+            from jarvis.finance_store import FinanceStore
+
+            store = FinanceStore(Path("data/sessions.db"))
+            now = _dt.now()
+
+            # Check budget thresholds (fast — no network)
+            statuses = store.budget_status(year=now.year, month=now.month)
+            for s in statuses:
+                if s["over_threshold"]:
+                    from jarvis.finance_reporter import CATEGORY_LABELS
+                    label = CATEGORY_LABELS.get(s["category"], s["category"].title())
+                    pct_str = f"%{s['pct']*100:.0f}"
+                    toast(
+                        f"⚠ Bütçe Uyarısı: {label}",
+                        f"{pct_str} doldu ({s['spent']:,.0f}/{s['limit']:,.0f} TRY)",
+                    )
+
+            self._finance_ok = True
+        except Exception as exc:
+            logger.debug("Monitor finance check error: %s", exc)
 
     # ── Faz 15: ITU Webmail polling ────────────────────────────────────────────
 

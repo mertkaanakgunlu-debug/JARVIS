@@ -32,7 +32,8 @@ from jarvis.tools.spotify import spotify_control
 from jarvis.tools.calendar import calendar_control
 from jarvis.tools.gmail import gmail_control
 from jarvis.tools.drive import drive_control      # Faz 14
-from jarvis.tools.itu_mail import itu_mail_control  # Faz 15
+from jarvis.tools.itu_mail import itu_mail_control    # Faz 15
+from jarvis.tools.finance import finance_control      # Faz 16
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -856,6 +857,63 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             settings=settings,
         )
 
+    # ── Faz 16: Finance Analytics ─────────────────────────────────────────────
+
+    @tool
+    def finance(
+        action: str,
+        year: int = 0,
+        month: int = 0,
+        category: str = "",
+        monthly_limit: float = 0.0,
+        alert_threshold_pct: float = 0.8,
+        months_back: int = 1,
+        n: int = 5,
+    ) -> str:
+        """Track bank transactions and manage budgets (Burgan Bank + Gmail extraction).
+
+        Actions:
+            sync           — scan Gmail for Burgan Bank notification emails and extract
+                             transactions using LLM (Gemini Flash structured output)
+            summary        — monthly income, expenses, net balance + category breakdown
+            recent         — list most recent transactions (default 20)
+            top_categories — top N expense categories for a period
+            set_budget     — define a monthly spending limit for a category
+            budget_status  — show spent/limit/% for all budget categories with visual bars
+            chart          — generate a Plotly HTML bar chart for a period
+
+        Args:
+            year:               Year for summary/top_categories/budget_status (default: current)
+            month:              Month 1-12 (default: current)
+            category:           Budget category for set_budget / filter (food | transport |
+                                entertainment | bills | salary | transfer | atm | shopping |
+                                health | education | other)
+            monthly_limit:      Monthly spending cap in TRY (for set_budget)
+            alert_threshold_pct: Fraction of limit that triggers a warning (default 0.8 = 80%)
+            months_back:        How many months to scan Gmail (for sync, default 1)
+            n:                  Number of results for recent/top_categories (default 5)
+
+        Examples:
+            finance("sync")                                      # pull latest Burgan mails
+            finance("summary")                                   # this month's summary
+            finance("summary", year=2026, month=4)              # April 2026
+            finance("top_categories", n=3)
+            finance("set_budget", category="food", monthly_limit=1500)
+            finance("budget_status")
+            finance("chart")
+        """
+        return finance_control(
+            action=action,
+            year=year,
+            month=month,
+            category=category,
+            monthly_limit=monthly_limit,
+            alert_threshold_pct=alert_threshold_pct,
+            months_back=months_back,
+            n=n,
+            settings=settings,
+        )
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -870,4 +928,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         todo,                    # Faz 13-D
         google_drive,            # Faz 14
         itu_mail,                # Faz 15
+        finance,                 # Faz 16
     ]
