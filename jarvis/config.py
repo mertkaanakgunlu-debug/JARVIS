@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # Faz 13-C: Scheduler — how often monitor checks due tasks
     monitor_schedule_interval_sec: int = 60
 
+    # Faz 13-D: To-do reminders
+    todo_reminder_hour: int = 9           # morning summary hour (24h)
+    todo_reminder_lookahead_min: int = 120  # alert for todos due within N minutes
+    todo_analyzer_model: str = "gemini-2.5-flash"  # model for priority analysis
+
     whisper_device: str = "auto"         # "auto" | "cuda" | "cpu"
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
 

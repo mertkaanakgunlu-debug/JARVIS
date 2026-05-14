@@ -579,6 +579,157 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
         return f"⚠ Bilinmeyen action: '{action}'. Geçerli: add, list, delete, pause, resume, done"
 
+    # ── Faz 13-D: To-do list ────────────────────────────────────────────────
+
+    @tool
+    def todo(
+        action: str,
+        title: str = "",
+        description: str = "",
+        due_date: str = "",
+        category: str = "other",
+        todo_id: str = "",
+    ) -> str:
+        """Manage the personal to-do list with AI-powered prioritization.
+
+        Actions:
+            add      — add a new to-do (AI will auto-assign priority & instructions)
+            list     — list all open to-dos sorted by priority
+            done     — mark a to-do as completed
+            delete   — delete a to-do permanently
+            analyze  — re-prioritize ALL open to-dos (batch AI analysis)
+            today    — show top 5 highest-priority open tasks for today
+            edit     — update title / description / due_date / category
+
+        Parameters:
+            title:       Task title (required for add/edit)
+            description: Optional detail or context
+            due_date:    ISO date or datetime e.g. "2026-05-20" or "2026-05-20T14:00"
+            category:    work | personal | research | health | finance | other
+            todo_id:     ID from list/add output (required for done/delete/edit)
+
+        Examples:
+            todo("add", title="Sismik analiz raporunu bitir", due_date="2026-05-20",
+                 category="research")
+            todo("list")
+            todo("today")
+            todo("done", todo_id="a1b2c3d4")
+            todo("analyze")
+            todo("edit", todo_id="a1b2c3d4", due_date="2026-05-25")
+        """
+        from pathlib import Path as _Path
+        from jarvis.todo_store import TodoStore, PRIORITY_LABELS
+
+        db_path = _Path("data/sessions.db")
+        store = TodoStore(db_path)
+        action = action.strip().lower()
+
+        if action == "add":
+            if not title:
+                return "⚠ title gerekli."
+            tid = store.add(title, description=description, due_date=due_date, category=category)
+            # Fire-and-forget async analysis
+            import asyncio
+            async def _bg_analyze():
+                from jarvis.todo_analyzer import analyze_and_save
+                await analyze_and_save(tid, title, description, settings, store)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_bg_analyze())
+                else:
+                    _run_coro(_bg_analyze())
+            except Exception:
+                pass  # Analysis is optional
+            return (
+                f"✅ To-do eklendi [{tid}]\n"
+                f"  Başlık: {title}\n"
+                f"  Kategori: {category}\n"
+                f"  Bitiş: {due_date or '—'}\n"
+                f"  (Öncelik ve adımlar arka planda hesaplanıyor...)"
+            )
+
+        if action == "list":
+            tasks = store.list_open()
+            if not tasks:
+                return "📋 Açık to-do yok. Eklemek için: todo('add', title='...')"
+            lines = [f"📋 Açık görevler ({len(tasks)}):"]
+            for t in tasks:
+                pri = PRIORITY_LABELS.get(t.get("priority") or "", "⬜ Analiz bekleniyor")
+                due = f"  📅 {t['due_date']}" if t.get("due_date") else ""
+                lines.append(f"\n  [{t['id']}] {pri}\n  {t['title']}{due}")
+                if t.get("instructions"):
+                    first_step = t["instructions"].split("\n")[0][:80]
+                    lines.append(f"  → {first_step}")
+            return "\n".join(lines)
+
+        if action == "today":
+            tasks = store.top_open(n=5)
+            if not tasks:
+                return "🌟 Bugün için açık görev yok!"
+            lines = ["🌟 Bugünün öncelikli görevleri:"]
+            for i, t in enumerate(tasks, 1):
+                pri = PRIORITY_LABELS.get(t.get("priority") or "", "")
+                due = f" (📅 {t['due_date']})" if t.get("due_date") else ""
+                lines.append(f"\n  {i}. [{t['id']}] {t['title']}{due}")
+                if pri:
+                    lines.append(f"     {pri}")
+                if t.get("instructions"):
+                    for step in t["instructions"].split("\n")[:3]:
+                        if step.strip():
+                            lines.append(f"     {step.strip()}")
+            return "\n".join(lines)
+
+        if action == "done":
+            if not todo_id:
+                return "⚠ todo_id gerekli."
+            ok = store.mark_done(todo_id)
+            if ok:
+                task = store.get(todo_id)
+                return f"✅ Tamamlandı: {task['title'] if task else todo_id}"
+            return f"⚠ Bulunamadı veya zaten tamamlanmış: {todo_id}"
+
+        if action == "delete":
+            if not todo_id:
+                return "⚠ todo_id gerekli."
+            task = store.get(todo_id)
+            title_str = task["title"] if task else todo_id
+            ok = store.delete(todo_id)
+            return f"🗑 Silindi: {title_str}" if ok else f"⚠ Bulunamadı: {todo_id}"
+
+        if action == "edit":
+            if not todo_id:
+                return "⚠ todo_id gerekli."
+            updates = {}
+            if title:
+                updates["title"] = title
+            if description:
+                updates["description"] = description
+            if due_date:
+                updates["due_date"] = due_date
+            if category and category != "other":
+                updates["category"] = category
+            if not updates:
+                return "⚠ Güncellenecek alan yok. title/description/due_date/category gönder."
+            ok = store.update(todo_id, **updates)
+            return f"✏ Güncellendi [{todo_id}]" if ok else f"⚠ Bulunamadı: {todo_id}"
+
+        if action == "analyze":
+            count = store.count_open()
+            if count == 0:
+                return "Açık görev yok, analiz gerekmez."
+            # Run batch analysis synchronously so user gets feedback
+            async def _do_analyze():
+                from jarvis.todo_analyzer import reanalyze_all
+                return await reanalyze_all(settings, store)
+            try:
+                updated = _run_coro(_do_analyze())
+                return f"🧠 {updated}/{count} görev yeniden önceliklendirildi. `/todo list` ile görebilirsin."
+            except Exception as exc:
+                return f"⚠ Analiz hatası: {exc}"
+
+        return f"⚠ Bilinmeyen action: '{action}'. Geçerli: add, list, today, done, delete, edit, analyze"
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -590,4 +741,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         spotify,  # Faz 8
         google_calendar, gmail,  # Faz 9
         schedule,                # Faz 13-C
+        todo,                    # Faz 13-D
     ]

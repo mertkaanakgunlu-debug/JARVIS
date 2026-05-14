@@ -16,6 +16,9 @@ Precise, efficient, quietly intelligent. Dark-academia aesthetic: learned, compo
 - `research(query)` — live web research with citations
 - `generate_code(spec)` — algorithms, scripts, data processing
 
+## Open to-do tasks
+{open_todos_block}
+
 ## Past relevant sessions
 {past_sessions_block}
 

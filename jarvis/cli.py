@@ -36,6 +36,7 @@ HELP_TEXT = """\
   [gold3]/status[/gold3]           Model + bellek + oturum istatistiklerini göster
   [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
   [gold3]/monitor[/gold3]          Proaktif monitör durumunu göster
+  [gold3]/todo[/gold3]             To-do listesi (alt: today, analyze, add <başlık>)
   [gold3]/schedule[/gold3]         Planlı görev ve hatırlatıcıları listele
   [gold3]/sessions[/gold3]         Son oturumları listele
   [gold3]/session[/gold3] [dim]<id>[/dim]     Geçmiş oturuma geç
@@ -376,6 +377,85 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
                 ))
             continue
 
+        # ── /todo command (Faz 13-D) ────────────────────────────────────────
+        if lower == "/todo" or lower.startswith("/todo "):
+            sub = user_input[5:].strip() if len(lower) > 5 else ""
+            store = agent.todo_store
+
+            if not sub or sub == "list":
+                tasks = store.list_open()
+                if not tasks:
+                    console.print(
+                        "[dim]Açık to-do yok.[/dim]\n"
+                        'JARVIS\'e söyle: [bold gold3]"Sismik rapor için to-do ekle"[/bold gold3]'
+                    )
+                else:
+                    from jarvis.todo_store import PRIORITY_LABELS
+                    table = Table(
+                        show_header=True,
+                        header_style="bold gold3",
+                        border_style="dim",
+                        title=f"[bold gold3]To-Do Listesi ({len(tasks)} açık)[/bold gold3]",
+                        title_justify="left",
+                    )
+                    table.add_column("ID", style="dim", width=10)
+                    table.add_column("Başlık", min_width=25)
+                    table.add_column("Öncelik", width=20)
+                    table.add_column("Kategori", width=10)
+                    table.add_column("Bitiş", width=12)
+                    for t in tasks:
+                        pri = PRIORITY_LABELS.get(t.get("priority") or "", "⬜ bekliyor")
+                        due = t.get("due_date") or "—"
+                        cat = t.get("category") or "other"
+                        table.add_row(t["id"], t["title"], pri, cat, due[:10])
+                    console.print(table)
+                continue
+
+            if sub == "today":
+                tasks = store.top_open(n=5)
+                if not tasks:
+                    console.print("[gold3]🌟 Tebrikler![/gold3] Bugün için açık görev yok.")
+                else:
+                    console.print(f"[bold gold3]🌟 Bugünün {len(tasks)} öncelikli görevi:[/bold gold3]")
+                    from jarvis.todo_store import PRIORITY_LABELS
+                    for i, t in enumerate(tasks, 1):
+                        pri = PRIORITY_LABELS.get(t.get("priority") or "", "")
+                        due = f"  [dim](📅 {t['due_date']})[/dim]" if t.get("due_date") else ""
+                        console.print(f"  [bold]{i}.[/bold] [{t['id']}] {t['title']}{due}")
+                        if pri:
+                            console.print(f"      {pri}")
+                        if t.get("instructions"):
+                            for line in t["instructions"].split("\n")[:2]:
+                                if line.strip():
+                                    console.print(f"      [dim]{line.strip()}[/dim]")
+                continue
+
+            if sub == "analyze":
+                with console.status("[gold3]Görevler analiz ediliyor...[/gold3]", spinner="dots"):
+                    import asyncio
+                    async def _analyze():
+                        from jarvis.todo_analyzer import reanalyze_all
+                        return await reanalyze_all(agent.settings, store)
+                    try:
+                        count = asyncio.run(_analyze())
+                        console.print(f"[gold3]✓[/gold3] {count} görev yeniden önceliklendirildi.")
+                    except Exception as e:
+                        _print_error(f"Analiz hatası: {e}")
+                continue
+
+            # /todo add <title>
+            if sub.startswith("add "):
+                title = sub[4:].strip()
+                if title:
+                    tid = store.add(title)
+                    console.print(f"[gold3]✓[/gold3] Eklendi [{tid}]: {title} [dim](AI analiz bekleniyor)[/dim]")
+                else:
+                    _print_error("Kullanım: /todo add <başlık>")
+                continue
+
+            _print_error(f"Bilinmeyen alt komut: '{sub}'. Geçerli: list, today, analyze, add <başlık>")
+            continue
+
         # ── /schedule command (Faz 13-C) ────────────────────────────────────
         if lower == "/schedule" or lower.startswith("/schedule"):
             tasks = agent.scheduler.list_tasks(status="active")
@@ -619,7 +699,9 @@ def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> N
 
     if monitor:
         from jarvis.monitor import JarvisMonitor
-        monitor_instance = JarvisMonitor(settings, scheduler=agent.scheduler)
+        monitor_instance = JarvisMonitor(
+            settings, scheduler=agent.scheduler, todo_store=agent.todo_store
+        )
         monitor_instance.start()
         console.print(
             f"[dim green]Monitor başlatıldı[/dim green] — "

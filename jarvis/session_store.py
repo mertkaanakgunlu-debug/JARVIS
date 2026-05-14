@@ -83,6 +83,9 @@ class SessionStore:
         # Faz 13-C: scheduled_tasks table (scheduler.py owns schema, we just ensure it's created)
         from jarvis.scheduler import _SCHEDULE_TABLE
         conn.executescript(_SCHEDULE_TABLE)
+        # Faz 13-D: todos table
+        from jarvis.todo_store import _TODO_TABLE
+        conn.executescript(_TODO_TABLE)
 
     def _open(self, path: Path) -> sqlite3.Connection:
         conn = None

@@ -59,10 +59,13 @@ def main() -> None:
         from jarvis.config import Settings
         from jarvis.monitor import JarvisMonitor
         from jarvis.scheduler import SchedulerStore
+        from jarvis.todo_store import TodoStore
         from pathlib import Path as _Path
         from rich.console import Console
         settings = Settings()
-        scheduler = SchedulerStore(_Path("data") / "sessions.db")
+        db = _Path("data") / "sessions.db"
+        scheduler = SchedulerStore(db)
+        todo_store = TodoStore(db)
         console = Console()
         console.print(
             "[bold gold3]JARVIS Monitor[/bold gold3] — "
@@ -72,7 +75,7 @@ def main() -> None:
             f"zamanlayıcı: her [bold]{settings.monitor_schedule_interval_sec}[/bold] sn\n"
             "[dim]Durdurmak için Ctrl+C[/dim]"
         )
-        monitor = JarvisMonitor(settings, scheduler=scheduler)
+        monitor = JarvisMonitor(settings, scheduler=scheduler, todo_store=todo_store)
         try:
             monitor.run_forever()
         except KeyboardInterrupt:

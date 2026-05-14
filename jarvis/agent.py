@@ -29,6 +29,7 @@ from jarvis.entity_extractor import extract_entities
 from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
 from jarvis.scheduler import SchedulerStore  # Faz 13-C
+from jarvis.todo_store import TodoStore      # Faz 13-D
 from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
@@ -91,6 +92,7 @@ def _load_system_prompt(
     user_query: str = "",
     entities_block: str = "",
     past_sessions_block: str = "",
+    open_todos_block: str = "",
 ) -> str:
     prompt_path = Path(__file__).parent / "prompts" / "system.md"
     raw = prompt_path.read_text(encoding="utf-8")
@@ -98,6 +100,7 @@ def _load_system_prompt(
     raw = raw.replace("{memory_context}", memory_context or "(no prior context retrieved)")
     raw = raw.replace("{entities_block}", entities_block or "(none yet)")
     raw = raw.replace("{past_sessions_block}", past_sessions_block or "(no relevant past sessions)")
+    raw = raw.replace("{open_todos_block}", open_todos_block or "(no open tasks)")
 
     if any(kw in user_query.lower() for kw in _DATA_REPORT_KEYWORDS):
         workflow_path = Path(__file__).parent / "prompts" / "workflows" / "data_report.md"
@@ -170,6 +173,9 @@ class JarvisAgent:
 
         # Faz 13-C: scheduler store (same DB file, separate table)
         self.scheduler = SchedulerStore(Path("data") / "sessions.db")
+
+        # Faz 13-D: to-do store (same DB file, separate table)
+        self.todo_store = TodoStore(Path("data") / "sessions.db")
 
         # Strong refs to background tasks — prevents GC from cancelling them mid-flight
         self._bg_tasks: set[asyncio.Task] = set()
@@ -319,6 +325,22 @@ class JarvisAgent:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    def _build_todos_block(self, n: int = 5) -> str:
+        """Build a compact open-todos block for system prompt injection (Faz 13-D)."""
+        try:
+            todos = self.todo_store.top_open(n=n)
+        except Exception:
+            return "(no open tasks)"
+        if not todos:
+            return "(no open tasks)"
+        from jarvis.todo_store import PRIORITY_LABELS
+        lines = [f"Open tasks ({len(todos)} shown, priority order):"]
+        for t in todos:
+            pri = PRIORITY_LABELS.get(t.get("priority") or "", "⬜ pending analysis")
+            due = f" [due {t['due_date']}]" if t.get("due_date") else ""
+            lines.append(f"- [{t['id']}] {t['title']}{due} — {pri}")
+        return "\n".join(lines)
+
     def _build_past_sessions_block(self, hits: list[dict]) -> str:
         if not hits:
             return "(no relevant past sessions)"
@@ -354,10 +376,11 @@ class JarvisAgent:
         past_sessions = self.memory.recall_summaries(clean_input, n=3)
         past_sessions_block = self._build_past_sessions_block(past_sessions)
         entities_block = self._build_entities_block()
+        open_todos_block = self._build_todos_block()   # Faz 13-D
         system_prompt = _load_system_prompt(
             self.settings, memory_ctx, detected_language,
             self._env_block, clean_input, entities_block,
-            past_sessions_block,
+            past_sessions_block, open_todos_block,
         )
 
         initial_messages = (
@@ -466,10 +489,11 @@ class JarvisAgent:
         past_sessions = self.memory.recall_summaries(clean_input, n=3)
         past_sessions_block = self._build_past_sessions_block(past_sessions)
         entities_block = self._build_entities_block()
+        open_todos_block = self._build_todos_block()   # Faz 13-D
         system_prompt = _load_system_prompt(
             self.settings, memory_ctx, detected_language,
             self._env_block, clean_input, entities_block,
-            past_sessions_block,
+            past_sessions_block, open_todos_block,
         )
 
         initial_messages = (

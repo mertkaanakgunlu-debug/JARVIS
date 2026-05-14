@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class JarvisMonitor:
-    def __init__(self, settings: "Settings", scheduler=None) -> None:
+    def __init__(self, settings: "Settings", scheduler=None, todo_store=None) -> None:
         self.settings = settings
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -47,6 +47,10 @@ class JarvisMonitor:
         # Faz 13-C: SchedulerStore instance (injected by agent.py or __main__.py)
         self._scheduler = scheduler
         self._sched_ok = False
+
+        # Faz 13-D: TodoStore instance (injected alongside scheduler)
+        self._todo_store = todo_store
+        self._todo_morning_fired_date: str = ""   # YYYY-MM-DD of last morning summary
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -89,6 +93,7 @@ class JarvisMonitor:
         last_email = 0.0
         last_cal   = 0.0
         last_sched = 0.0
+        last_todo  = 0.0
 
         while not self._stop.is_set():
             now = time.monotonic()
@@ -101,6 +106,9 @@ class JarvisMonitor:
             if now - last_sched >= sched_interval:
                 self._check_schedule()
                 last_sched = time.monotonic()
+            if now - last_todo >= sched_interval:   # same interval as scheduler
+                self._check_todos()
+                last_todo = time.monotonic()
             # Sleep in short chunks so stop() is responsive
             self._stop.wait(timeout=30)
 
@@ -236,6 +244,44 @@ class JarvisMonitor:
 
         except Exception as exc:
             logger.debug("Monitor calendar check error: %s", exc)
+
+    # ── Faz 13-D: To-do reminders ──────────────────────────────────────────────
+
+    def _check_todos(self) -> None:
+        """Fire toast for due-soon todos + morning daily summary."""
+        if self._todo_store is None:
+            return
+        try:
+            from jarvis.notify import toast
+
+            s = self.settings
+            lookahead_min = getattr(s, "todo_reminder_lookahead_min", 120)
+            morning_hour  = getattr(s, "todo_reminder_hour", 9)
+
+            now = datetime.now()
+            today_str = now.strftime("%Y-%m-%d")
+
+            # 1. Morning summary (once per day at the configured hour)
+            if (now.hour >= morning_hour
+                    and self._todo_morning_fired_date != today_str):
+                todos = self._todo_store.top_open(n=3)
+                if todos:
+                    titles = "\n".join(f"• {t['title']}" for t in todos)
+                    toast("📋 Günün Görevleri", titles)
+                    self._todo_morning_fired_date = today_str
+
+            # 2. Due-soon alerts
+            due = self._todo_store.due_soon(within_min=lookahead_min)
+            for t in due:
+                # Avoid re-alerting within same lookahead window
+                last = t.get("last_reminded_at") or ""
+                if last and last >= now.strftime("%Y-%m-%dT%H"):
+                    continue
+                toast(f"⏰ Görev yaklaşıyor: {t['title']}", f"Bitiş: {t['due_date']}")
+                self._todo_store.update_reminded(t["id"])
+
+        except Exception as exc:
+            logger.debug("Monitor todo check error: %s", exc)
 
     # ── Faz 13-C: Scheduler check ──────────────────────────────────────────────
 
