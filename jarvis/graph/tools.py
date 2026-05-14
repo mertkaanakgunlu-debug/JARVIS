@@ -37,6 +37,7 @@ from jarvis.tools.finance import finance_control      # Faz 16
 from jarvis.gcp_quota import (                        # Faz 17
     quota_status, quota_usage_today, quota_forecast,
 )
+from jarvis.tools.geo_math_tool import geo_math_control  # Faz 18
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -944,6 +945,101 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             return quota_forecast(settings)
         return f"⚠ Bilinmeyen action: '{action}'. Geçerli: status, usage, forecast"
 
+    # ── Faz 18: Geo-Math Sub-Agent ────────────────────────────────────────────
+
+    @tool
+    def geo_math(
+        action: str,
+        expression: str = "",
+        variable: str = "",
+        query: str = "",
+        x_data: str = "[]",
+        y_data: str = "[]",
+        grid_data: str = "[]",
+        volume_data: str = "[]",
+        source_pos: str = "[5, 5]",
+        velocity_grid: str = "[]",
+        duration: float = 0.5,
+        nz: int = 100,
+        nx: int = 100,
+        levels: int = 20,
+        cmap: str = "RdBu_r",
+        title: str = "",
+        plot_type: str = "line",
+    ) -> str:
+        """Geophysics and advanced mathematics computation tool.
+
+        For complex geophysical reasoning → use math_solve (delegates to GeoMathAgent).
+        For actual computation → use this tool with a specific action.
+
+        Actions:
+            solve_symbolic   — SymPy symbolic solve/simplify (requires: pip install sympy)
+            wolfram          — WolframAlpha step-by-step (requires WOLFRAM_APP_ID in .env)
+            wave_simulate_2d — 2D acoustic FDM wave simulation (Devito or NumPy fallback)
+                               → returns path to snapshot PNG
+            plot_2d          — 2D line or scatter plot (seismic trace, spectrum, etc.)
+                               → returns path to PNG
+            plot_contour     — 2D contour map (velocity model, anomaly map, seismic section)
+                               → returns path to PNG (depth-axis inverted by default)
+            plot_3d_surface  — Interactive 3D surface via Plotly (requires: pip install plotly)
+                               → returns path to HTML
+            plot_volume      — 3D isosurface via PyVista (requires: pip install pyvista)
+                               → returns path to PNG; falls back to 2D midplane slice
+
+        Args:
+            action:       One of the actions above.
+            expression:   Math expression or equation for solve_symbolic (e.g. "d2u/dt2 - c**2*d2u/dx2 = 0")
+            variable:     Variable to solve for (e.g. "x", "omega")
+            query:        Query string for wolfram action
+            x_data:       JSON array of x values for plot_2d
+            y_data:       JSON array of y values for plot_2d
+            grid_data:    JSON 2D array (list of lists) for plot_contour/plot_3d_surface
+            volume_data:  JSON 3D array for plot_volume
+            source_pos:   JSON [iz, ix] source position for wave_simulate_2d
+            velocity_grid: JSON 2D array of velocities in m/s (omit for 2000 m/s homogeneous)
+            duration:     Simulation time in seconds (wave_simulate_2d)
+            nz:           Grid depth dimension
+            nx:           Grid horizontal dimension
+            levels:       Number of contour levels
+            cmap:         Colormap (default 'RdBu_r' — standard for seismic)
+            title:        Plot title
+            plot_type:    'line' or 'scatter' for plot_2d
+
+        Examples:
+            geo_math("solve_symbolic", expression="k**2 - (omega/v)**2 = 0", variable="k")
+            geo_math("wave_simulate_2d", source_pos="[10, 50]", nz=100, nx=200)
+            geo_math("plot_contour", grid_data="[[...]]", title="Sismik kesit")
+            geo_math("wolfram", query="dispersion relation acoustic wave equation")
+        """
+        # For complex geophysics reasoning, delegate to GeoMathAgent sub-agent
+        if action.lower() in ("analyze", "reason", "derive", "explain"):
+            from jarvis.subagents.geomath import run_geomath
+            problem = expression or query or title
+            if not problem:
+                return "⚠ expression veya query gerekli (analyze action için)."
+            return _run_coro(run_geomath(problem, settings))
+
+        return geo_math_control(
+            action=action,
+            expression=expression,
+            variable=variable,
+            query=query,
+            x_data=x_data,
+            y_data=y_data,
+            grid_data=grid_data,
+            volume_data=volume_data,
+            source_pos=source_pos,
+            velocity_grid=velocity_grid,
+            duration=duration,
+            nz=nz,
+            nx=nx,
+            levels=levels,
+            cmap=cmap,
+            title=title,
+            plot_type=plot_type,
+            settings=settings,
+        )
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -960,4 +1056,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         itu_mail,                # Faz 15
         finance,                 # Faz 16
         gcp_quota,               # Faz 17
+        geo_math,                # Faz 18
     ]

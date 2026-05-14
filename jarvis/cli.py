@@ -69,6 +69,10 @@ HELP_TEXT = """\
   [dim]/quota  ·  /quota usage  ·  /quota forecast[/dim]
   [dim]gcp_quota("status")  ·  gcp_quota("usage")  ·  gcp_quota("forecast")[/dim]
 
+[bold]Jeofizik Matematik (Faz 18 — SymPy + Devito + Plotly + PyVista):[/bold]
+  [dim]"Akustik dalga denklemini çöz"  "2D sismik simülasyon yap"  "Kontur haritası oluştur"[/dim]
+  [dim]geo_math("solve_symbolic", expression="...")  ·  geo_math("wave_simulate_2d")  ·  geo_math("plot_contour")[/dim]
+
 [bold]Proaktif Monitor (Faz 10 — python -m jarvis --monitor):[/bold]
   [dim]Arka planda Gmail + Takvim + ITU mail + Burgan bütçe izler, Windows toast bildirimi gönderir.[/dim]
 

@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     drive_cache_dir: Path = Path("data/drive_cache")   # downloaded Drive files
     drive_default_folder_id: str = ""                  # optional default folder ID
 
+    # Faz 18: Geo-math sub-agent
+    wolfram_app_id: str = ""                           # WolframAlpha API key (optional)
+    geo_math_output_dir: Path = Path("data/geo_math_outputs")
+    geo_math_use_devito: bool = True                   # use Devito for FDM if installed
+
     # Faz 17: GCP quota tracking
     monitor_gcp_interval_min: int = 30      # how often to check quotas + fire alerts
     gcp_alert_rpm_pct: float = 0.8          # toast when RPM usage >= this fraction
