@@ -89,12 +89,14 @@ def _load_system_prompt(
     env_block: str = "",
     user_query: str = "",
     entities_block: str = "",
+    past_sessions_block: str = "",
 ) -> str:
     prompt_path = Path(__file__).parent / "prompts" / "system.md"
     raw = prompt_path.read_text(encoding="utf-8")
     raw = raw.replace("{user_name}", settings.user_name)
     raw = raw.replace("{memory_context}", memory_context or "(no prior context retrieved)")
     raw = raw.replace("{entities_block}", entities_block or "(none yet)")
+    raw = raw.replace("{past_sessions_block}", past_sessions_block or "(no relevant past sessions)")
 
     if any(kw in user_query.lower() for kw in _DATA_REPORT_KEYWORDS):
         workflow_path = Path(__file__).parent / "prompts" / "workflows" / "data_report.md"
@@ -168,6 +170,9 @@ class JarvisAgent:
         # Strong refs to background tasks — prevents GC from cancelling them mid-flight
         self._bg_tasks: set[asyncio.Task] = set()
 
+        # Faz 13-A: backfill summaries for archived sessions in background
+        self._schedule_summary_backfill()
+
     @property
     def _cloud_model(self) -> str:
         if self._active_model_id:
@@ -182,8 +187,12 @@ class JarvisAgent:
         return self._cloud_model
 
     def reset(self) -> None:
-        """Archive current session and start a fresh one."""
-        self.session_store.archive_session(self.session_id)
+        """Archive current session and start a fresh one. Triggers summarization if content exists."""
+        old_session_id = self.session_id
+        had_content = self._turn > 0 or len(self._history) > 0
+        self.session_store.archive_session(old_session_id)
+        if had_content:
+            self._schedule_summarize_one(old_session_id)
         self.session_id = self.session_store.new_session()
         self._history = []
         self._turn = 0
@@ -241,6 +250,83 @@ class JarvisAgent:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
+    # ── Session summarization (Faz 13-A, fire-and-forget) ─────────────────────
+
+    def _schedule_summary_backfill(self) -> None:
+        """On startup: summarize+embed all archived sessions that have no summary yet."""
+        pending = self.session_store.sessions_needing_summary()
+        if not pending:
+            return
+
+        async def _backfill() -> None:
+            from jarvis.session_summarizer import summarize_session
+            from datetime import datetime as _dt
+            for row in pending:
+                sid = row["id"]
+                try:
+                    msgs = self.session_store.load_full_history(sid)
+                    if not msgs:
+                        continue
+                    summary = await summarize_session(msgs, self.settings)
+                    if not summary:
+                        continue
+                    now = _dt.now().isoformat()
+                    self.session_store.set_summary(sid, summary, embedded_at=now)
+                    self.memory.store_summary(
+                        sid, summary,
+                        row.get("topic_hint"),
+                        row.get("last_active") or now,
+                    )
+                except Exception:
+                    continue
+
+        try:
+            task = asyncio.create_task(_backfill())
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+        except RuntimeError:
+            # No running event loop yet (e.g. unit-test context) — skip silently.
+            pass
+
+    def _schedule_summarize_one(self, session_id: str) -> None:
+        """Fire-and-forget: summarize a single just-archived session."""
+        async def _do() -> None:
+            from jarvis.session_summarizer import summarize_session
+            from datetime import datetime as _dt
+            try:
+                msgs = self.session_store.load_full_history(session_id)
+                if not msgs:
+                    return
+                summary = await summarize_session(msgs, self.settings)
+                if not summary:
+                    return
+                now = _dt.now().isoformat()
+                self.session_store.set_summary(session_id, summary, embedded_at=now)
+                topic = next(
+                    (s["topic_hint"] for s in self.session_store.list_sessions(50)
+                     if s["id"] == session_id),
+                    None,
+                )
+                self.memory.store_summary(session_id, summary, topic, now)
+            except Exception:
+                pass
+
+        task = asyncio.create_task(_do())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    def _build_past_sessions_block(self, hits: list[dict]) -> str:
+        if not hits:
+            return "(no relevant past sessions)"
+        lines = []
+        for h in hits:
+            topic = h.get("topic_hint") or "(no topic)"
+            when = h.get("last_active", "")[:10]   # YYYY-MM-DD
+            lines.append(
+                f"- **{when} · {topic}** (id={h['session_id']}):\n  {h['summary']}"
+            )
+        return "\n".join(lines)
+
     def _build_entities_block(self, n: int = 5) -> str:
         entities = self.session_store.top_entities(n=n)
         if not entities:
@@ -261,10 +347,13 @@ class JarvisAgent:
         use_pro_agent = _is_complex_query(clean_input, needs_planning)
 
         memory_ctx = self.memory.recall(clean_input, n=3)
+        past_sessions = self.memory.recall_summaries(clean_input, n=3)
+        past_sessions_block = self._build_past_sessions_block(past_sessions)
         entities_block = self._build_entities_block()
         system_prompt = _load_system_prompt(
             self.settings, memory_ctx, detected_language,
             self._env_block, clean_input, entities_block,
+            past_sessions_block,
         )
 
         initial_messages = (
@@ -370,10 +459,13 @@ class JarvisAgent:
         use_pro_agent = _is_complex_query(clean_input, needs_planning)
 
         memory_ctx = self.memory.recall(clean_input, n=3)
+        past_sessions = self.memory.recall_summaries(clean_input, n=3)
+        past_sessions_block = self._build_past_sessions_block(past_sessions)
         entities_block = self._build_entities_block()
         system_prompt = _load_system_prompt(
             self.settings, memory_ctx, detected_language,
             self._env_block, clean_input, entities_block,
+            past_sessions_block,
         )
 
         initial_messages = (

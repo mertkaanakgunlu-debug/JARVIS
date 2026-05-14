@@ -75,6 +75,14 @@ class Memory:
             self._docs_collection = self._client.get_or_create_collection("jarvis_docs")
             self._gemini_ef_active = False
 
+        # jarvis_summaries: session summary RAG — Gemini embeddings (high quality, low volume)
+        try:
+            self._summaries_collection = self._client.get_or_create_collection(
+                "jarvis_summaries", **doc_kwargs
+            )
+        except ValueError:
+            self._summaries_collection = self._client.get_or_create_collection("jarvis_summaries")
+
     # ------------------------------------------------------------------
     # Semantic memory (conversations)
     # ------------------------------------------------------------------
@@ -184,6 +192,62 @@ class Memory:
 
     def count_docs(self) -> int:
         return self._docs_collection.count()
+
+    # ------------------------------------------------------------------
+    # Session summary RAG (Faz 13-A)
+    # ------------------------------------------------------------------
+
+    def store_summary(self, session_id: str, summary: str, topic_hint: str | None,
+                      last_active: str) -> None:
+        """Embed and store a session summary. Idempotent — overwrites same session_id."""
+        if not summary.strip():
+            return
+        # Remove existing entry for this session (idempotent)
+        try:
+            existing = self._summaries_collection.get(ids=[session_id])
+            if existing["ids"]:
+                self._summaries_collection.delete(ids=[session_id])
+        except Exception:
+            pass
+        self._summaries_collection.add(
+            documents=[summary],
+            ids=[session_id],
+            metadatas=[{
+                "session_id": session_id,
+                "topic_hint": topic_hint or "",
+                "last_active": last_active,
+            }],
+        )
+
+    def recall_summaries(self, query: str, n: int = 3,
+                         distance_max: float = 0.55) -> list[dict]:
+        """Return semantically relevant past session summaries for a query."""
+        count = self._summaries_collection.count()
+        if count == 0:
+            return []
+        results = self._summaries_collection.query(
+            query_texts=[query],
+            n_results=min(n, count),
+            include=["documents", "metadatas", "distances"],
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        dists = results.get("distances", [[]])[0]
+        out = []
+        for doc, meta, dist in zip(docs, metas, dists):
+            if dist > distance_max:
+                continue
+            out.append({
+                "session_id": meta.get("session_id", ""),
+                "topic_hint": meta.get("topic_hint", ""),
+                "last_active": meta.get("last_active", ""),
+                "summary": doc,
+                "score": round(1.0 - dist, 3),
+            })
+        return out
+
+    def count_summaries(self) -> int:
+        return self._summaries_collection.count()
 
     # ------------------------------------------------------------------
     # Vault (markdown log)

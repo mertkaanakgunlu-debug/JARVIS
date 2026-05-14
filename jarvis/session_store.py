@@ -71,6 +71,16 @@ class SessionStore:
 
     # ── Connection management ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _apply_migrations(conn: sqlite3.Connection) -> None:
+        """Idempotent schema migrations — run after executescript(_SCHEMA)."""
+        # Faz 13-A: summary columns
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "summary" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT")
+        if "summary_embedded_at" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN summary_embedded_at TEXT")
+
     def _open(self, path: Path) -> sqlite3.Connection:
         conn = None
         try:
@@ -83,6 +93,7 @@ class SessionStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(_SCHEMA)
+            self._apply_migrations(conn)
             return conn
         except sqlite3.DatabaseError:
             # Close before rename — required on Windows (file lock)
@@ -112,6 +123,7 @@ class SessionStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(_SCHEMA)
+            self._apply_migrations(conn)
             return conn
 
     # ── Session management ────────────────────────────────────────────────────
@@ -263,3 +275,38 @@ class SessionStore:
     def total_entities(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS c FROM entities").fetchone()
         return row["c"] if row else 0
+
+    # ── Summary persistence (Faz 13-A) ───────────────────────────────────────
+
+    def set_summary(self, session_id: str, summary: str, embedded_at: str | None = None) -> None:
+        """Write the generated summary (and optional embed timestamp) to sessions."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sessions SET summary=?, summary_embedded_at=? WHERE id=?",
+                (summary, embedded_at, session_id),
+            )
+
+    def sessions_needing_summary(self) -> list[dict]:
+        """Return archived sessions that have no summary yet — backfill queue."""
+        rows = self._conn.execute(
+            "SELECT id, topic_hint, last_active, message_count FROM sessions "
+            "WHERE status='archived' AND (summary IS NULL OR summary='') "
+            "AND message_count > 0 "
+            "ORDER BY last_active DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def load_full_history(self, session_id: str) -> list[BaseMessage]:
+        """Return all messages for a session in order — used for summarization."""
+        rows = self._conn.execute(
+            "SELECT payload_json FROM messages WHERE session_id=? "
+            "ORDER BY turn_idx, msg_idx",
+            (session_id,),
+        ).fetchall()
+        msgs: list[BaseMessage] = []
+        for row in rows:
+            try:
+                msgs.append(lc_loads(row["payload_json"]))
+            except Exception:
+                pass
+        return msgs

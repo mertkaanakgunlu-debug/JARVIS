@@ -223,6 +223,7 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
         if lower == "/status":
             count = agent.memory.count()
             docs_count = agent.memory.count_docs()
+            summaries_count = agent.memory.count_summaries()
             active = agent._active_model_id or settings.effective_cloud_model
             cost = agent.usage.session_cost
             ef_label = "Gemini text-embedding-004" if agent.memory._gemini_ef_active else "default ONNX"
@@ -233,6 +234,7 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
                 f"[dim]Session ID:[/dim]      [bold]{agent.session_id}[/bold] [dim]({history_len} messages loaded)[/dim]\n"
                 f"[dim]Total sessions:[/dim]  [bold]{total_sessions}[/bold]\n"
                 f"[dim]Known entities:[/dim]  [bold]{total_entities}[/bold]\n"
+                f"[dim]Summaries indexed:[/dim][bold]{summaries_count}[/bold]\n"
                 f"[dim]Memory turns:[/dim]    [bold]{count}[/bold]\n"
                 f"[dim]Vault chunks:[/dim]    [bold]{docs_count}[/bold] [dim](embed: {ef_label})[/dim]\n"
                 f"[dim]Active model:[/dim]    [bold]{agent.current_model_label}[/bold] [dim]({active})[/dim]\n"
