@@ -54,6 +54,9 @@ HELP_TEXT = """\
 [bold]Google Calendar (Faz 9 — OAuth credentials in data/calendar_credentials.json):[/bold]
   [dim]"Bu haftaki etkinliklerimi listele"    "Yarın 15:00'e toplantı ekle"    "Standupı iptal et"[/dim]
 
+[bold]Google Drive (Faz 14 — same OAuth credentials):[/bold]
+  [dim]"Drive'da sismik raporu bul"    "Bu PDF'yi Drive'a yükle"    "Drive klasörümü listele"[/dim]
+
 [bold]Proaktif Monitor (Faz 10 — python -m jarvis --monitor):[/bold]
   [dim]Arka planda Gmail + Takvim izler, Windows toast bildirimi gönderir.[/dim]
 

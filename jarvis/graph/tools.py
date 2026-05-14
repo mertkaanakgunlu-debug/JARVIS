@@ -31,6 +31,7 @@ from jarvis.tools.deep_research import run_deep_research
 from jarvis.tools.spotify import spotify_control
 from jarvis.tools.calendar import calendar_control
 from jarvis.tools.gmail import gmail_control
+from jarvis.tools.drive import drive_control  # Faz 14
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -730,6 +731,71 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
         return f"⚠ Bilinmeyen action: '{action}'. Geçerli: add, list, today, done, delete, edit, analyze"
 
+    # ── Faz 14: Google Drive ──────────────────────────────────────────────────
+
+    @tool
+    def google_drive(
+        action: str,
+        query: str = "",
+        folder_id: str = "",
+        file_id: str = "",
+        dest_path: str = "",
+        local_path: str = "",
+        name: str = "",
+        email: str = "",
+        role: str = "reader",
+        max_results: int = 20,
+    ) -> str:
+        """Manage Google Drive files — search, read, upload, download, share.
+
+        Actions:
+            search   — find files by keyword or Drive query syntax
+            list     — list folder contents (default: root)
+            read     — read file content (Google Docs/Sheets/Slides as text;
+                       PDFs downloaded to data/drive_cache/ → path returned
+                       for pdf_read() or pdf_vision())
+            download — download any file to a local path
+            upload   — upload a local file to Drive
+            share    — share a file with another user
+            delete   — move file to trash
+
+        Parameters:
+            query:       Search keyword or Drive API q-syntax (for search)
+            folder_id:   Drive folder ID (for list/upload)
+            file_id:     Drive file ID (for read/download/share/delete)
+            dest_path:   Local destination path (for download)
+            local_path:  Local source file path (for upload)
+            name:        Filename override (for upload)
+            email:       Recipient email (for share)
+            role:        Permission role: reader | writer | commenter (for share)
+            max_results: Max files to return (for search/list)
+
+        PDF pipeline example:
+            result = google_drive("search", query="sismik analiz")
+            # → shows file_id
+            path_info = google_drive("read", file_id="<id>")
+            # → returns local path e.g. data/drive_cache/analiz.pdf
+            content = pdf_vision(path="data/drive_cache/analiz.pdf", question="Özetle")
+
+        Drive query syntax examples:
+            "name contains 'rapor'"
+            "mimeType='application/pdf' and name contains 'sismik'"
+            "'folder_id' in parents"
+        """
+        return drive_control(
+            action=action,
+            query=query,
+            folder_id=folder_id,
+            file_id=file_id,
+            dest_path=dest_path,
+            local_path=local_path,
+            name=name,
+            email=email,
+            role=role,
+            max_results=max_results,
+            settings=settings,
+        )
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -742,4 +808,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         google_calendar, gmail,  # Faz 9
         schedule,                # Faz 13-C
         todo,                    # Faz 13-D
+        google_drive,            # Faz 14
     ]

@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     todo_reminder_lookahead_min: int = 120  # alert for todos due within N minutes
     todo_analyzer_model: str = "gemini-2.5-flash"  # model for priority analysis
 
+    # Faz 14: Google Drive
+    drive_cache_dir: Path = Path("data/drive_cache")   # downloaded Drive files
+    drive_default_folder_id: str = ""                  # optional default folder ID
+
     whisper_device: str = "auto"         # "auto" | "cuda" | "cpu"
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
 
