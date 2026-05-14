@@ -46,6 +46,7 @@ class JarvisMonitor:
         self._cal_ok = False     # True after first successful Calendar call
         self._itu_mail_ok = False  # Faz 15
         self._finance_ok = False   # Faz 16
+        self._gcp_ok = False       # Faz 17
 
         # Faz 13-C: SchedulerStore instance (injected by agent.py or __main__.py)
         self._scheduler = scheduler
@@ -90,6 +91,7 @@ class JarvisMonitor:
         sched_interval    = getattr(s, "monitor_schedule_interval_sec", 60)
         itu_mail_interval = getattr(s, "monitor_itu_mail_interval_min", 5) * 60
         finance_interval  = getattr(s, "monitor_finance_interval_min", 30) * 60
+        gcp_interval      = getattr(s, "monitor_gcp_interval_min", 30) * 60
 
         # Initialise state silently (avoid startup spam)
         self._init_email_state()
@@ -102,6 +104,7 @@ class JarvisMonitor:
         last_todo     = 0.0
         last_itu_mail = 0.0
         last_finance  = 0.0
+        last_gcp      = 0.0
 
         while not self._stop.is_set():
             now = time.monotonic()
@@ -123,6 +126,9 @@ class JarvisMonitor:
             if now - last_finance >= finance_interval:
                 self._check_finance()
                 last_finance = time.monotonic()
+            if now - last_gcp >= gcp_interval:
+                self._check_gcp_quota()
+                last_gcp = time.monotonic()
             # Sleep in short chunks so stop() is responsive
             self._stop.wait(timeout=30)
 
@@ -316,6 +322,20 @@ class JarvisMonitor:
                 logger.info("Scheduler fired: %s (%s)", title, task["id"])
         except Exception as exc:
             logger.debug("Monitor schedule check error: %s", exc)
+
+    # ── Faz 17: GCP quota alerts ──────────────────────────────────────────────
+
+    def _check_gcp_quota(self) -> None:
+        """Fire toast notifications for over-threshold GCP quota conditions."""
+        try:
+            from jarvis.notify import toast
+            from jarvis.gcp_quota import quota_alert_check
+            alerts = quota_alert_check(self.settings)
+            for msg in alerts:
+                toast("⚡ GCP Kota Uyarısı", msg)
+            self._gcp_ok = True
+        except Exception as exc:
+            logger.debug("Monitor GCP quota check error: %s", exc)
 
     # ── Faz 16: Finance sync + budget alerts ──────────────────────────────────
 

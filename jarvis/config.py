@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     drive_cache_dir: Path = Path("data/drive_cache")   # downloaded Drive files
     drive_default_folder_id: str = ""                  # optional default folder ID
 
+    # Faz 17: GCP quota tracking
+    monitor_gcp_interval_min: int = 30      # how often to check quotas + fire alerts
+    gcp_alert_rpm_pct: float = 0.8          # toast when RPM usage >= this fraction
+    gcp_alert_daily_spend_pct: float = 0.9  # toast when daily spend >= this fraction of budget
+    gcp_alert_credit_low_tl: float = 1000.0 # toast when remaining credit falls below this TL
+
     # Faz 16: Finance analytics
     finance_data_dir: Path = Path("data/finance")   # charts + reports output dir
     finance_bank: str = "burgan"                     # primary bank identifier

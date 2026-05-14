@@ -35,6 +35,7 @@ HELP_TEXT = """\
   [gold3]/indexed[/gold3]          RAG vault'una indexlenmiş dosyaları listele
   [gold3]/status[/gold3]           Model + bellek + oturum istatistiklerini göster
   [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
+  [gold3]/quota[/gold3]            GCP kota + Vertex kullanım durumu (RPM, kredi, tahmin)
   [gold3]/monitor[/gold3]          Proaktif monitör durumunu göster
   [gold3]/todo[/gold3]             To-do listesi (alt: today, analyze, add <başlık>)
   [gold3]/schedule[/gold3]         Planlı görev ve hatırlatıcıları listele
@@ -63,6 +64,10 @@ HELP_TEXT = """\
 [bold]Finans Analizi (Faz 16 — Burgan Bank + Gmail):[/bold]
   [dim]"Bu ayki harcamalarımı özetle"    "Yemek bütçesi koy 1500 TL"    "Grafik oluştur"[/dim]
   [dim]finance("sync")  ·  finance("summary")  ·  finance("budget_status")  ·  finance("chart")[/dim]
+
+[bold]GCP Kota Takibi (Faz 17 — VERTEX_CREDIT_USD in .env):[/bold]
+  [dim]/quota  ·  /quota usage  ·  /quota forecast[/dim]
+  [dim]gcp_quota("status")  ·  gcp_quota("usage")  ·  gcp_quota("forecast")[/dim]
 
 [bold]Proaktif Monitor (Faz 10 — python -m jarvis --monitor):[/bold]
   [dim]Arka planda Gmail + Takvim + ITU mail + Burgan bütçe izler, Windows toast bildirimi gönderir.[/dim]
@@ -385,6 +390,23 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
                     border_style="gold3 dim",
                     padding=(0, 1),
                 ))
+            continue
+
+        # ── /quota command (Faz 17) ─────────────────────────────────────────
+        if lower in ("/quota", "/quota status", "/quota usage", "/quota forecast"):
+            from jarvis.gcp_quota import quota_status, quota_usage_today, quota_forecast
+            if "usage" in lower:
+                content = quota_usage_today(settings)
+            elif "forecast" in lower:
+                content = quota_forecast(settings)
+            else:
+                content = quota_status(settings)
+            console.print(Panel(
+                content,
+                title="[bold gold3]GCP / Vertex AI Kota[/bold gold3]",
+                border_style="gold3 dim",
+                padding=(0, 1),
+            ))
             continue
 
         # ── /todo command (Faz 13-D) ────────────────────────────────────────

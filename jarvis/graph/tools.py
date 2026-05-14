@@ -34,6 +34,9 @@ from jarvis.tools.gmail import gmail_control
 from jarvis.tools.drive import drive_control      # Faz 14
 from jarvis.tools.itu_mail import itu_mail_control    # Faz 15
 from jarvis.tools.finance import finance_control      # Faz 16
+from jarvis.gcp_quota import (                        # Faz 17
+    quota_status, quota_usage_today, quota_forecast,
+)
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -914,6 +917,33 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             settings=settings,
         )
 
+    # ── Faz 17: GCP Quota ────────────────────────────────────────────────────
+
+    @tool
+    def gcp_quota(action: str = "status") -> str:
+        """Check Vertex AI / GCP quota usage and estimated credit remaining.
+
+        Actions:
+            status   — all metrics with Rich progress bars (RPM, credit, tokens)
+            usage    — cumulative token counts + cost breakdown
+            forecast — linear spend extrapolation to end of month
+
+        Requires VERTEX_CREDIT_USD in .env for credit tracking.
+        Cloud Monitoring API (google-cloud-monitoring) is optional —
+        falls back to local token_tracker data if not installed/accessible.
+
+        Args:
+            action: status | usage | forecast  (default: status)
+        """
+        a = action.strip().lower()
+        if a in ("status", ""):
+            return quota_status(settings)
+        if a in ("usage", "usage_today"):
+            return quota_usage_today(settings)
+        if a in ("forecast",):
+            return quota_forecast(settings)
+        return f"⚠ Bilinmeyen action: '{action}'. Geçerli: status, usage, forecast"
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -929,4 +959,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         google_drive,            # Faz 14
         itu_mail,                # Faz 15
         finance,                 # Faz 16
+        gcp_quota,               # Faz 17
     ]
