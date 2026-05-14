@@ -80,6 +80,9 @@ class SessionStore:
             conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT")
         if "summary_embedded_at" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN summary_embedded_at TEXT")
+        # Faz 13-C: scheduled_tasks table (scheduler.py owns schema, we just ensure it's created)
+        from jarvis.scheduler import _SCHEDULE_TABLE
+        conn.executescript(_SCHEDULE_TABLE)
 
     def _open(self, path: Path) -> sqlite3.Connection:
         conn = None

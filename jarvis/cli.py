@@ -36,6 +36,7 @@ HELP_TEXT = """\
   [gold3]/status[/gold3]           Model + bellek + oturum istatistiklerini göster
   [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
   [gold3]/monitor[/gold3]          Proaktif monitör durumunu göster
+  [gold3]/schedule[/gold3]         Planlı görev ve hatırlatıcıları listele
   [gold3]/sessions[/gold3]         Son oturumları listele
   [gold3]/session[/gold3] [dim]<id>[/dim]     Geçmiş oturuma geç
   [gold3]/entities[/gold3]         Tanınan varlıkları (kişi/proje/dosya) listele
@@ -375,6 +376,51 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
                 ))
             continue
 
+        # ── /schedule command (Faz 13-C) ────────────────────────────────────
+        if lower == "/schedule" or lower.startswith("/schedule"):
+            tasks = agent.scheduler.list_tasks(status="active")
+            paused = agent.scheduler.list_tasks(status="paused")
+            done   = agent.scheduler.list_tasks(status="done")
+
+            if not tasks and not paused:
+                console.print(
+                    "[dim]Planlı görev yok.[/dim]\n"
+                    'JARVIS\'e söyle veya doğrudan ekle: [bold gold3]schedule("add", title="...", '
+                    'schedule_type="daily", run_at="09:00")[/bold gold3]'
+                )
+            else:
+                if tasks:
+                    table = Table(
+                        show_header=True,
+                        header_style="bold gold3",
+                        border_style="dim",
+                        title=f"[bold gold3]Aktif Görevler ({len(tasks)})[/bold gold3]",
+                        title_justify="left",
+                    )
+                    table.add_column("ID", style="dim", width=10)
+                    table.add_column("Başlık", min_width=20)
+                    table.add_column("Tür", width=10)
+                    table.add_column("Saat", width=6)
+                    table.add_column("Sonraki", width=18)
+                    _TYPE_LABELS = {
+                        "once": "tek sef.", "daily": "günlük",
+                        "weekly": "haftalık", "monthly": "aylık",
+                    }
+                    for t in tasks:
+                        table.add_row(
+                            t["id"],
+                            t["title"],
+                            _TYPE_LABELS.get(t["schedule_type"], t["schedule_type"]),
+                            t["run_at"],
+                            t["next_run"][:16],
+                        )
+                    console.print(table)
+                if paused:
+                    console.print(f"[dim]⏸ {len(paused)} görev duraklatıldı[/dim]")
+                if done:
+                    console.print(f"[dim]✅ {len(done)} görev tamamlandı[/dim]")
+            continue
+
         # ── /model command ──────────────────────────────────────────────────
         if lower == "/model" or lower.startswith("/model "):
             # If a model ID/number was given inline: /model 2 or /model flash
@@ -569,18 +615,19 @@ def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> N
 
     # Start background monitor daemon if requested
     monitor_instance = None
+    agent = JarvisAgent(settings)  # init first so scheduler is available
+
     if monitor:
         from jarvis.monitor import JarvisMonitor
-        monitor_instance = JarvisMonitor(settings)
+        monitor_instance = JarvisMonitor(settings, scheduler=agent.scheduler)
         monitor_instance.start()
         console.print(
             f"[dim green]Monitor başlatıldı[/dim green] — "
             f"e-posta: her {settings.monitor_email_interval_min} dk  ·  "
             f"takvim: her {settings.monitor_calendar_interval_min} dk  ·  "
-            f"önce {settings.monitor_calendar_lookahead_min} dk uyarı[/dim green]"
+            f"önce {settings.monitor_calendar_lookahead_min} dk uyarı  ·  "
+            f"zamanlayıcı: her {settings.monitor_schedule_interval_sec} sn[/dim green]"
         )
-
-    agent = JarvisAgent(settings)
     try:
         if voice or wakeword:
             asyncio.run(_run_voice_loop(agent, wakeword=wakeword, monitor=monitor_instance))

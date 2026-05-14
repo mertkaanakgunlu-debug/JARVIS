@@ -58,17 +58,21 @@ def main() -> None:
         # Standalone monitor: no chat interface, just watch + notify
         from jarvis.config import Settings
         from jarvis.monitor import JarvisMonitor
+        from jarvis.scheduler import SchedulerStore
+        from pathlib import Path as _Path
         from rich.console import Console
         settings = Settings()
+        scheduler = SchedulerStore(_Path("data") / "sessions.db")
         console = Console()
         console.print(
             "[bold gold3]JARVIS Monitor[/bold gold3] — "
             f"e-posta: her [bold]{settings.monitor_email_interval_min}[/bold] dk  ·  "
             f"takvim: her [bold]{settings.monitor_calendar_interval_min}[/bold] dk  ·  "
-            f"önce [bold]{settings.monitor_calendar_lookahead_min}[/bold] dk uyarı\n"
+            f"önce [bold]{settings.monitor_calendar_lookahead_min}[/bold] dk uyarı  ·  "
+            f"zamanlayıcı: her [bold]{settings.monitor_schedule_interval_sec}[/bold] sn\n"
             "[dim]Durdurmak için Ctrl+C[/dim]"
         )
-        monitor = JarvisMonitor(settings)
+        monitor = JarvisMonitor(settings, scheduler=scheduler)
         try:
             monitor.run_forever()
         except KeyboardInterrupt:

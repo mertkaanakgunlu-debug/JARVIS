@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     monitor_calendar_interval_min: int = 2    # how often to poll Calendar (minutes)
     monitor_calendar_lookahead_min: int = 15  # notify for events starting within N minutes
 
+    # Faz 13-C: Scheduler — how often monitor checks due tasks
+    monitor_schedule_interval_sec: int = 60
+
     whisper_device: str = "auto"         # "auto" | "cuda" | "cpu"
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
 

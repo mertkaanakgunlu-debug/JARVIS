@@ -28,6 +28,7 @@ from jarvis.config import Settings, LANG_NAMES
 from jarvis.entity_extractor import extract_entities
 from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
+from jarvis.scheduler import SchedulerStore  # Faz 13-C
 from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
@@ -166,6 +167,9 @@ class JarvisAgent:
         else:
             self.session_id = self.session_store.new_session()
             self._history: list[Any] = []
+
+        # Faz 13-C: scheduler store (same DB file, separate table)
+        self.scheduler = SchedulerStore(Path("data") / "sessions.db")
 
         # Strong refs to background tasks — prevents GC from cancelling them mid-flight
         self._bg_tasks: set[asyncio.Task] = set()

@@ -1,12 +1,14 @@
-"""Background monitoring daemon for proactive notifications (Faz 10).
+"""Background monitoring daemon for proactive notifications (Faz 10 + 13-C).
 
-Runs as a daemon thread alongside any JARVIS mode.  Polls Gmail and Google
-Calendar on configurable intervals and fires Windows toast notifications for:
+Runs as a daemon thread alongside any JARVIS mode.  Polls Gmail, Google
+Calendar, and scheduled tasks on configurable intervals and fires Windows
+toast notifications for:
   - New unread e-mails (appears after monitor start)
   - Calendar events starting within monitor_calendar_lookahead_min minutes
+  - Scheduled tasks / reminders that are due (Faz 13-C)
 
 Usage:
-    monitor = JarvisMonitor(settings)
+    monitor = JarvisMonitor(settings, scheduler=scheduler_store)
     monitor.start()   # non-blocking daemon thread
     ...
     monitor.stop()    # graceful shutdown (waits up to 5 s)
@@ -30,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class JarvisMonitor:
-    def __init__(self, settings: "Settings") -> None:
+    def __init__(self, settings: "Settings", scheduler=None) -> None:
         self.settings = settings
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -41,6 +43,10 @@ class JarvisMonitor:
 
         self._email_ok = False   # True after first successful Gmail call
         self._cal_ok = False     # True after first successful Calendar call
+
+        # Faz 13-C: SchedulerStore instance (injected by agent.py or __main__.py)
+        self._scheduler = scheduler
+        self._sched_ok = False
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -74,6 +80,7 @@ class JarvisMonitor:
         s = self.settings
         email_interval = getattr(s, "monitor_email_interval_min", 5) * 60
         cal_interval   = getattr(s, "monitor_calendar_interval_min", 2) * 60
+        sched_interval = getattr(s, "monitor_schedule_interval_sec", 60)
 
         # Initialise state silently (avoid startup spam)
         self._init_email_state()
@@ -81,6 +88,7 @@ class JarvisMonitor:
 
         last_email = 0.0
         last_cal   = 0.0
+        last_sched = 0.0
 
         while not self._stop.is_set():
             now = time.monotonic()
@@ -90,6 +98,9 @@ class JarvisMonitor:
             if now - last_cal >= cal_interval:
                 self._check_calendar()
                 last_cal = time.monotonic()
+            if now - last_sched >= sched_interval:
+                self._check_schedule()
+                last_sched = time.monotonic()
             # Sleep in short chunks so stop() is responsive
             self._stop.wait(timeout=30)
 
@@ -226,6 +237,26 @@ class JarvisMonitor:
         except Exception as exc:
             logger.debug("Monitor calendar check error: %s", exc)
 
+    # ── Faz 13-C: Scheduler check ──────────────────────────────────────────────
+
+    def _check_schedule(self) -> None:
+        """Fire toast notifications for any due scheduled tasks."""
+        if self._scheduler is None:
+            return
+        try:
+            from jarvis.notify import toast
+            due_tasks = self._scheduler.check_due(window_sec=90)
+            for task in due_tasks:
+                title = task.get("title", "Hatırlatıcı")
+                desc  = task.get("description") or ""
+                body  = desc[:80] if desc else "Zamanı geldi!"
+                toast(f"⏰ {title}", body)
+                self._scheduler.mark_ran(task["id"])
+                self._sched_ok = True
+                logger.info("Scheduler fired: %s (%s)", title, task["id"])
+        except Exception as exc:
+            logger.debug("Monitor schedule check error: %s", exc)
+
     # ── Google service helpers ─────────────────────────────────────────────────
 
     def _gmail_service(self):
@@ -240,16 +271,27 @@ class JarvisMonitor:
 
     def status_line(self) -> str:
         s = self.settings
-        email_min = getattr(s, "monitor_email_interval_min", 5)
-        cal_min   = getattr(s, "monitor_calendar_interval_min", 2)
-        lookahead = getattr(s, "monitor_calendar_lookahead_min", 15)
+        email_min  = getattr(s, "monitor_email_interval_min", 5)
+        cal_min    = getattr(s, "monitor_calendar_interval_min", 2)
+        lookahead  = getattr(s, "monitor_calendar_lookahead_min", 15)
+        sched_sec  = getattr(s, "monitor_schedule_interval_sec", 60)
         state = "çalışıyor" if self.is_running() else "durdu"
         email_state = "✓" if self._email_ok else "⚠ bağlanamadı"
         cal_state   = "✓" if self._cal_ok   else "⚠ bağlanamadı"
+        sched_count = 0
+        sched_state = "—"
+        if self._scheduler is not None:
+            try:
+                sched_count = self._scheduler.count_active()
+                sched_state = "✓" if self._sched_ok else "bekleniyor"
+            except Exception:
+                sched_state = "⚠"
         return (
             f"Monitor: [bold]{state}[/bold]\n"
-            f"  E-posta kontrolü: her {email_min} dk  [{email_state}]  "
+            f"  E-posta kontrolü:   her {email_min} dk  [{email_state}]  "
             f"({len(self._notified_email_ids)} bildirim gönderildi)\n"
-            f"  Takvim kontrolü:  her {cal_min} dk  [{cal_state}]  "
-            f"(önce {lookahead} dk, {len(self._notified_event_ids)} etkinlik görüldü)"
+            f"  Takvim kontrolü:    her {cal_min} dk  [{cal_state}]  "
+            f"(önce {lookahead} dk, {len(self._notified_event_ids)} etkinlik görüldü)\n"
+            f"  Planlı görevler:    her {sched_sec} sn  [{sched_state}]  "
+            f"({sched_count} aktif görev)"
         )

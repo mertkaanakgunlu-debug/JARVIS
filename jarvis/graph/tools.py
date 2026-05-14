@@ -448,6 +448,137 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             settings=settings,
         )
 
+    # ── Faz 13-C: Scheduled tasks ─────────────────────────────────────────────
+
+    @tool
+    def schedule(
+        action: str,
+        title: str = "",
+        description: str = "",
+        schedule_type: str = "daily",
+        run_at: str = "",
+        days_of_week: str = "",
+        day_of_month: int = 0,
+        task_id: str = "",
+    ) -> str:
+        """Manage scheduled reminders and recurring tasks.
+
+        Actions:
+            add     — create a new scheduled task/reminder
+            list    — list all active (and optionally done) tasks
+            delete  — delete a task by id
+            pause   — pause a task (skip without deleting)
+            resume  — resume a paused task
+            done    — list completed tasks
+
+        Parameters for 'add':
+            title:         Short title for the reminder (required)
+            description:   Optional detail shown in the toast notification
+            schedule_type: 'once' | 'daily' | 'weekly' | 'monthly'  (default: daily)
+            run_at:        Time to fire.
+                           For 'once':    ISO datetime like "2026-05-20T09:00:00"
+                           For others:    HH:MM like "09:00" or "14:30"
+            days_of_week:  Comma-separated weekday numbers 0–6 (Mon=0) — used for 'weekly'
+                           e.g. "0,2,4" = Mon/Wed/Fri
+            day_of_month:  Day number 1–31 for 'monthly'
+
+        Parameters for delete/pause/resume:
+            task_id: ID returned by 'add' or shown in 'list'
+
+        Examples:
+            schedule("add", title="Kahve molası", schedule_type="daily", run_at="14:30")
+            schedule("add", title="Haftalık özet", schedule_type="weekly",
+                     run_at="09:00", days_of_week="0")
+            schedule("add", title="Aylık rapor", schedule_type="monthly",
+                     run_at="08:00", day_of_month=1)
+            schedule("add", title="Toplantı hatırlatıcı", schedule_type="once",
+                     run_at="2026-05-20T14:45:00")
+            schedule("list")
+            schedule("delete", task_id="abc12345")
+        """
+        from pathlib import Path as _Path
+        from jarvis.scheduler import SchedulerStore, ONCE, DAILY, WEEKLY, MONTHLY
+        import json as _json
+
+        db_path = _Path("data/sessions.db")
+        store = SchedulerStore(db_path)
+
+        action = action.strip().lower()
+
+        if action == "add":
+            if not title:
+                return "⚠ title gerekli."
+            if not run_at:
+                return "⚠ run_at gerekli (örn. '09:00' veya '2026-05-20T09:00:00')."
+            dow_list = None
+            if days_of_week:
+                try:
+                    dow_list = [int(x.strip()) for x in days_of_week.split(",") if x.strip()]
+                except ValueError:
+                    return "⚠ days_of_week must be comma-separated numbers 0–6."
+            dom = day_of_month or None
+            try:
+                task_id = store.add_task(
+                    title,
+                    schedule_type=schedule_type,
+                    run_at=run_at,
+                    description=description,
+                    days_of_week=dow_list,
+                    day_of_month=dom,
+                )
+            except ValueError as exc:
+                return f"⚠ {exc}"
+            # Fetch next_run for confirmation
+            task = store.get_task(task_id)
+            next_run = task["next_run"] if task else "?"
+            type_labels = {ONCE: "tek seferlik", DAILY: "günlük",
+                           WEEKLY: "haftalık", MONTHLY: "aylık"}
+            label = type_labels.get(schedule_type, schedule_type)
+            return (
+                f"✅ Görev eklendi [{task_id}]\n"
+                f"  Başlık:   {title}\n"
+                f"  Tür:      {label}\n"
+                f"  Saat:     {run_at}\n"
+                f"  Sonraki:  {next_run}"
+            )
+
+        if action == "list":
+            tasks = store.list_tasks(status="active")
+            if not tasks:
+                return "📋 Aktif planlı görev yok. Eklemek için: schedule('add', ...)"
+            lines = [f"📋 Aktif görevler ({len(tasks)}):"]
+            for t in tasks:
+                lines.append(
+                    f"  [{t['id']}]  {t['title']}  "
+                    f"({t['schedule_type']}, {t['run_at']})  "
+                    f"→ sonraki: {t['next_run'][:16]}"
+                )
+            return "\n".join(lines)
+
+        if action == "done":
+            tasks = store.list_tasks(status="done")
+            if not tasks:
+                return "Tamamlanan görev yok."
+            lines = [f"✅ Tamamlananlar ({len(tasks)}):"]
+            for t in tasks:
+                lines.append(f"  [{t['id']}]  {t['title']}  (son çalışma: {t.get('last_run','?')[:16]})")
+            return "\n".join(lines)
+
+        if action in ("delete", "pause", "resume"):
+            if not task_id:
+                return f"⚠ task_id gerekli ({action} için)."
+            if action == "delete":
+                ok = store.delete_task(task_id)
+                return f"🗑 Görev silindi: {task_id}" if ok else f"⚠ Görev bulunamadı: {task_id}"
+            if action == "pause":
+                ok = store.pause_task(task_id)
+                return f"⏸ Görev duraklatıldı: {task_id}" if ok else f"⚠ Görev bulunamadı: {task_id}"
+            if action == "resume":
+                ok = store.resume_task(task_id)
+                return f"▶ Görev devam ettirildi: {task_id}" if ok else f"⚠ Görev bulunamadı: {task_id}"
+
+        return f"⚠ Bilinmeyen action: '{action}'. Geçerli: add, list, delete, pause, resume, done"
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -457,6 +588,6 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         vault_search, index_doc,  # Faz 6
         url_read, deep_web_research,  # Faz 7
         spotify,  # Faz 8
-        google_calendar,  # Faz 9
-        gmail,            # Faz 9
+        google_calendar, gmail,  # Faz 9
+        schedule,                # Faz 13-C
     ]
