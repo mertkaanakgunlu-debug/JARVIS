@@ -40,9 +40,11 @@ class JarvisMonitor:
         # IDs we have already notified about — never re-alert for the same item
         self._notified_email_ids: set[str] = set()
         self._notified_event_ids: set[str] = set()
+        self._notified_itu_ids: set[str] = set()   # Faz 15: ITU mail UIDs
 
         self._email_ok = False   # True after first successful Gmail call
         self._cal_ok = False     # True after first successful Calendar call
+        self._itu_mail_ok = False  # Faz 15
 
         # Faz 13-C: SchedulerStore instance (injected by agent.py or __main__.py)
         self._scheduler = scheduler
@@ -82,18 +84,21 @@ class JarvisMonitor:
 
     def _run(self) -> None:
         s = self.settings
-        email_interval = getattr(s, "monitor_email_interval_min", 5) * 60
-        cal_interval   = getattr(s, "monitor_calendar_interval_min", 2) * 60
-        sched_interval = getattr(s, "monitor_schedule_interval_sec", 60)
+        email_interval    = getattr(s, "monitor_email_interval_min", 5) * 60
+        cal_interval      = getattr(s, "monitor_calendar_interval_min", 2) * 60
+        sched_interval    = getattr(s, "monitor_schedule_interval_sec", 60)
+        itu_mail_interval = getattr(s, "monitor_itu_mail_interval_min", 5) * 60
 
         # Initialise state silently (avoid startup spam)
         self._init_email_state()
         self._init_calendar_state()
+        self._init_itu_mail_state()
 
-        last_email = 0.0
-        last_cal   = 0.0
-        last_sched = 0.0
-        last_todo  = 0.0
+        last_email    = 0.0
+        last_cal      = 0.0
+        last_sched    = 0.0
+        last_todo     = 0.0
+        last_itu_mail = 0.0
 
         while not self._stop.is_set():
             now = time.monotonic()
@@ -109,6 +114,9 @@ class JarvisMonitor:
             if now - last_todo >= sched_interval:   # same interval as scheduler
                 self._check_todos()
                 last_todo = time.monotonic()
+            if now - last_itu_mail >= itu_mail_interval:
+                self._poll_itu_mail()
+                last_itu_mail = time.monotonic()
             # Sleep in short chunks so stop() is responsive
             self._stop.wait(timeout=30)
 
@@ -303,6 +311,51 @@ class JarvisMonitor:
         except Exception as exc:
             logger.debug("Monitor schedule check error: %s", exc)
 
+    # ── Faz 15: ITU Webmail polling ────────────────────────────────────────────
+
+    def _init_itu_mail_state(self) -> None:
+        """Silently load current ITU unread UIDs to avoid startup spam."""
+        user = getattr(self.settings, "itu_username", "")
+        pwd  = getattr(self.settings, "itu_password", "")
+        if not user or not pwd:
+            return
+        try:
+            from imap_tools import MailBox, AND
+            host = getattr(self.settings, "itu_imap_host", "imap.itu.edu.tr")
+            port = int(getattr(self.settings, "itu_imap_port", 993))
+            with MailBox(host, port).login(user, pwd, initial_folder="INBOX") as mb:
+                msgs = list(mb.fetch(AND(seen=False), limit=50, bulk=True))
+                for m in msgs:
+                    self._notified_itu_ids.add(getattr(m, "uid", ""))
+            logger.debug("Monitor: ITU mail state initialised (%d seen)", len(self._notified_itu_ids))
+        except Exception as exc:
+            logger.debug("Monitor ITU mail init failed: %s", exc)
+
+    def _poll_itu_mail(self) -> None:
+        """Check ITU inbox for new unread messages and fire toast."""
+        user = getattr(self.settings, "itu_username", "")
+        pwd  = getattr(self.settings, "itu_password", "")
+        if not user or not pwd:
+            return
+        try:
+            from jarvis.notify import toast
+            from imap_tools import MailBox, AND
+            host = getattr(self.settings, "itu_imap_host", "imap.itu.edu.tr")
+            port = int(getattr(self.settings, "itu_imap_port", 993))
+            with MailBox(host, port).login(user, pwd, initial_folder="INBOX") as mb:
+                msgs = list(mb.fetch(AND(seen=False), limit=20, bulk=True, reverse=True))
+            self._itu_mail_ok = True
+            for m in msgs:
+                uid = getattr(m, "uid", "")
+                if not uid or uid in self._notified_itu_ids:
+                    continue
+                subject = (getattr(m, "subject", "") or "(konu yok)")[:60]
+                sender  = (getattr(m, "from_", "") or "?")[:40]
+                toast("📬 [ITU] Yeni E-posta", f"Kimden: {sender}\n{subject}")
+                self._notified_itu_ids.add(uid)
+        except Exception as exc:
+            logger.debug("Monitor ITU mail poll error: %s", exc)
+
     # ── Google service helpers ─────────────────────────────────────────────────
 
     def _gmail_service(self):
@@ -317,10 +370,11 @@ class JarvisMonitor:
 
     def status_line(self) -> str:
         s = self.settings
-        email_min  = getattr(s, "monitor_email_interval_min", 5)
-        cal_min    = getattr(s, "monitor_calendar_interval_min", 2)
-        lookahead  = getattr(s, "monitor_calendar_lookahead_min", 15)
-        sched_sec  = getattr(s, "monitor_schedule_interval_sec", 60)
+        email_min    = getattr(s, "monitor_email_interval_min", 5)
+        cal_min      = getattr(s, "monitor_calendar_interval_min", 2)
+        lookahead    = getattr(s, "monitor_calendar_lookahead_min", 15)
+        sched_sec    = getattr(s, "monitor_schedule_interval_sec", 60)
+        itu_min      = getattr(s, "monitor_itu_mail_interval_min", 5)
         state = "çalışıyor" if self.is_running() else "durdu"
         email_state = "✓" if self._email_ok else "⚠ bağlanamadı"
         cal_state   = "✓" if self._cal_ok   else "⚠ bağlanamadı"
@@ -332,6 +386,16 @@ class JarvisMonitor:
                 sched_state = "✓" if self._sched_ok else "bekleniyor"
             except Exception:
                 sched_state = "⚠"
+        # ITU mail status
+        itu_user = getattr(s, "itu_username", "")
+        if itu_user:
+            itu_state = "✓" if self._itu_mail_ok else "bekleniyor"
+            itu_line = (
+                f"\n  ITU mail kontrolü:  her {itu_min} dk  [{itu_state}]  "
+                f"({len(self._notified_itu_ids)} bildirim gönderildi)"
+            )
+        else:
+            itu_line = "\n  ITU mail:           devre dışı (ITU_USERNAME/.env ayarlı değil)"
         return (
             f"Monitor: [bold]{state}[/bold]\n"
             f"  E-posta kontrolü:   her {email_min} dk  [{email_state}]  "
@@ -340,4 +404,5 @@ class JarvisMonitor:
             f"(önce {lookahead} dk, {len(self._notified_event_ids)} etkinlik görüldü)\n"
             f"  Planlı görevler:    her {sched_sec} sn  [{sched_state}]  "
             f"({sched_count} aktif görev)"
+            f"{itu_line}"
         )

@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     drive_cache_dir: Path = Path("data/drive_cache")   # downloaded Drive files
     drive_default_folder_id: str = ""                  # optional default folder ID
 
+    # Faz 15: ITU Webmail (IMAP + SMTP)
+    itu_username: str = ""                   # e.g. akgunlu22@itu.edu.tr
+    itu_password: str = ""                   # ITU LDAP password (or app password)
+    itu_imap_host: str = "imap.itu.edu.tr"
+    itu_imap_port: int = 993
+    itu_smtp_host: str = "smtp.itu.edu.tr"
+    itu_smtp_port: int = 587
+    monitor_itu_mail_interval_min: int = 5   # poll interval for ITU inbox
+
     whisper_device: str = "auto"         # "auto" | "cuda" | "cpu"
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
 

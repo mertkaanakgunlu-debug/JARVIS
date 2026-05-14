@@ -57,8 +57,12 @@ HELP_TEXT = """\
 [bold]Google Drive (Faz 14 — same OAuth credentials):[/bold]
   [dim]"Drive'da sismik raporu bul"    "Bu PDF'yi Drive'a yükle"    "Drive klasörümü listele"[/dim]
 
+[bold]ITU Webmail (Faz 15 — ITU_USERNAME/ITU_PASSWORD in .env):[/bold]
+  [dim]"ITU inboxumu göster"    "Hocama mail at"    "Ödev konulu maili bul"[/dim]
+  [dim]itu_mail("list_unread")  ·  itu_mail("search", query="SUBJECT:ödev")  ·  itu_mail("reply", uid="..."[/dim]
+
 [bold]Proaktif Monitor (Faz 10 — python -m jarvis --monitor):[/bold]
-  [dim]Arka planda Gmail + Takvim izler, Windows toast bildirimi gönderir.[/dim]
+  [dim]Arka planda Gmail + Takvim + ITU mail izler, Windows toast bildirimi gönderir.[/dim]
 
 [bold]Model değiştirme (doğal dil):[/bold]
   [dim]"Modeli flash yap"   "Gemini Pro'ya geç"   "Switch to llama"[/dim]

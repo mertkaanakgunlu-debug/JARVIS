@@ -31,7 +31,8 @@ from jarvis.tools.deep_research import run_deep_research
 from jarvis.tools.spotify import spotify_control
 from jarvis.tools.calendar import calendar_control
 from jarvis.tools.gmail import gmail_control
-from jarvis.tools.drive import drive_control  # Faz 14
+from jarvis.tools.drive import drive_control      # Faz 14
+from jarvis.tools.itu_mail import itu_mail_control  # Faz 15
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -796,6 +797,65 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             settings=settings,
         )
 
+    # ── Faz 15: ITU Webmail ───────────────────────────────────────────────────
+
+    @tool
+    def itu_mail(
+        action: str,
+        query: str = "",
+        uid: str = "",
+        to: str = "",
+        subject: str = "",
+        body: str = "",
+        cc: str = "",
+        reply_all: bool = False,
+        max_results: int = 20,
+    ) -> str:
+        """Manage ITU University webmail via IMAP/SMTP.
+
+        Actions:
+            list_unread  — list unread messages in ITU inbox
+            search       — search messages (FROM:x SUBJECT:x BODY:x SINCE:YYYY-MM-DD)
+            read         — read full message body (uid required)
+            send         — send a new email via ITU SMTP (to, subject, body required)
+            reply        — reply to a message (uid + body required)
+            trash        — move message to Trash (uid required)
+            mark_read    — mark message as read (uid required)
+
+        Requires ITU_USERNAME and ITU_PASSWORD in .env.
+        Uses imap.itu.edu.tr:993 (SSL) and smtp.itu.edu.tr:587 (STARTTLS).
+
+        Args:
+            action:      list_unread | search | read | send | reply | trash | mark_read
+            query:       IMAP search string — e.g. "SUBJECT:ödev FROM:hoca@itu.edu.tr"
+            uid:         Message UID from list_unread/search (read/reply/trash/mark_read)
+            to:          Recipient email address (send)
+            subject:     Email subject (send)
+            body:        Email body text (send/reply)
+            cc:          CC recipients comma-separated (send)
+            reply_all:   Reply to all recipients when True (reply)
+            max_results: Max messages to return (list_unread/search, default 20)
+
+        Examples:
+            itu_mail("list_unread")
+            itu_mail("search", query="SUBJECT:ödev SINCE:2026-05-01")
+            itu_mail("read", uid="1234")
+            itu_mail("send", to="hoca@itu.edu.tr", subject="Soru", body="Merhaba...")
+            itu_mail("reply", uid="1234", body="Yanıtım...")
+        """
+        return itu_mail_control(
+            action=action,
+            query=query,
+            uid=uid,
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            reply_all=reply_all,
+            max_results=max_results,
+            settings=settings,
+        )
+
     return [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
@@ -809,4 +869,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         schedule,                # Faz 13-C
         todo,                    # Faz 13-D
         google_drive,            # Faz 14
+        itu_mail,                # Faz 15
     ]
