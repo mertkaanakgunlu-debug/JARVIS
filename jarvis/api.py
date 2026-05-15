@@ -1,4 +1,4 @@
-"""JARVIS FastAPI REST server (Faz 9) + HUD WebSocket (Faz 11).
+"""JARVIS FastAPI REST server (Faz 9) + HUD WebSocket (Faz 11) + Mobile API (Faz 19A-0).
 
 Start with:
     python -m jarvis --api            # default port 8000
@@ -6,14 +6,17 @@ Start with:
 
 Endpoints:
     GET  /health           — liveness check (no auth required)
-    WS   /ws               — WebSocket event stream for the HUD (no auth, local-only)
+    GET  /system/ping      — auth-free PC awake check for mobile WoL
+    WS   /ws               — WebSocket event stream for the HUD (?token= optional auth)
     POST /chat             — single-turn chat, returns full response
     POST /chat/stream      — streaming chat via Server-Sent Events
     GET  /status           — session + model + cost info
     POST /reset            — clear conversation history
+    --- Mobile routers (auth required) ---
+    /todos, /finance, /calendar, /vault, /push, /tasks, /system/wake
 
 Auth:
-    All endpoints except /health and /ws require header:
+    All endpoints except /health and /system/ping require header:
         X-API-Key: <JARVIS_API_KEY from .env>
     If JARVIS_API_KEY is empty, auth is disabled (local-only use).
 """
@@ -34,7 +37,16 @@ from jarvis.config import Settings
 from jarvis.agent import JarvisAgent
 from jarvis.ws import event_bus, start_metrics_task
 
-# ── App lifespan (starts background metrics push) ─────────────────────────────
+# Mobile routers
+from jarvis.api_routers import todos as todos_router
+from jarvis.api_routers import finance as finance_router
+from jarvis.api_routers import calendar as calendar_router
+from jarvis.api_routers import vault as vault_router
+from jarvis.api_routers import push as push_router
+from jarvis.api_routers import tasks as tasks_router
+from jarvis.api_routers import system as system_router
+
+# ── App lifespan ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,7 +55,7 @@ async def lifespan(app: FastAPI):
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="JARVIS API", version="0.1.0", docs_url="/docs", lifespan=lifespan)
+app = FastAPI(title="JARVIS API", version="0.2.0", docs_url="/docs", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +73,32 @@ def init_agent(settings: Settings) -> None:
     global _agent, _settings
     _settings = settings
     _agent = JarvisAgent(settings)
+    _wire_routers(settings, _agent)
+
+
+def _wire_routers(settings: Settings, agent: JarvisAgent) -> None:
+    """Inject store/service references into all mobile routers."""
+    from jarvis.push_store import PushStore
+    from jarvis.fcm_sender import FcmSender
+    from jarvis.task_executor import TaskExecutor
+    from jarvis.finance_store import FinanceStore
+    from pathlib import Path
+
+    db_path = Path("data/sessions.db")
+    push_store = PushStore(db_path)
+    fcm = FcmSender(push_store, settings.firebase_credentials_path) if settings.push_enabled else None
+    executor = TaskExecutor(agent, fcm_sender=fcm)
+    finance_store = FinanceStore(db_path)
+
+    todos_router.init_todos(agent.todo_store)
+    finance_router.init_finance(finance_store)
+    calendar_router.init_calendar(settings)
+    vault_router.init_vault(agent.memory)
+    push_router.init_push(push_store, fcm)
+    tasks_router.init_tasks(executor)
+
+    # Attach executor to agent for /chat async-heuristic
+    agent._task_executor = executor
 
 
 def get_agent() -> JarvisAgent:
@@ -82,16 +120,34 @@ def _check_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
 
 
+# ── Mount mobile routers (all behind auth dependency) ─────────────────────────
+
+app.include_router(system_router.router)   # /system/ping is auth-free by design
+app.include_router(todos_router.router,    dependencies=[Depends(_check_auth)])
+app.include_router(finance_router.router,  dependencies=[Depends(_check_auth)])
+app.include_router(calendar_router.router, dependencies=[Depends(_check_auth)])
+app.include_router(vault_router.router,    dependencies=[Depends(_check_auth)])
+app.include_router(push_router.router,     dependencies=[Depends(_check_auth)])
+app.include_router(tasks_router.router,    dependencies=[Depends(_check_auth)])
+
+
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     message: str
-    language: str = ""  # optional language hint ("tr", "en", …)
+    language: str = ""
+    force_async: bool = False
 
 
 class ChatResponse(BaseModel):
     response: str
     model: str
+
+
+class AsyncChatResponse(BaseModel):
+    async_: bool = True
+    task_id: str
+    status: str
 
 
 class StatusResponse(BaseModel):
@@ -107,18 +163,24 @@ class StatusResponse(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 # ── WebSocket — HUD event stream ──────────────────────────────────────────────
 
 @app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket):
-    """Real-time event stream for the JARVIS HUD (Electron app).
-    No auth — intended for localhost only.
+async def ws_endpoint(websocket: WebSocket, token: str | None = None):
+    """Real-time event stream for JARVIS HUD (Electron) and mobile app.
+
+    Authentication: ?token=<JARVIS_API_KEY> query param.
+    If API key is set and token is wrong, connection is closed with code 4401.
     """
+    if _settings and _settings.jarvis_api_key:
+        if token != _settings.jarvis_api_key:
+            await websocket.close(code=4401)
+            return
+
     await event_bus.connect(websocket)
-    # Send initial state snapshot
     agent = _agent
     if agent:
         await event_bus.broadcast({"type": "state", "value": "idle"})
@@ -129,7 +191,6 @@ async def ws_endpoint(websocket: WebSocket):
         })
     try:
         while True:
-            # Keep connection alive; we don't process incoming messages yet
             await websocket.receive_text()
     except WebSocketDisconnect:
         event_bus.disconnect(websocket)
@@ -137,10 +198,17 @@ async def ws_endpoint(websocket: WebSocket):
         event_bus.disconnect(websocket)
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 async def chat(body: ChatRequest, request: Request):
     _check_auth(request)
     agent = get_agent()
+
+    # Async heuristic: offload long tasks to TaskExecutor
+    executor = getattr(agent, "_task_executor", None)
+    if executor and executor.should_async(body.message, force=body.force_async):
+        task = executor.submit(body.message)
+        return {"async": True, "task_id": task.task_id, "status": task.status}
+
     try:
         response, model_label = await agent.chat(
             body.message,
@@ -155,6 +223,9 @@ async def chat(body: ChatRequest, request: Request):
 async def chat_stream(body: ChatRequest, request: Request):
     """Stream response tokens via Server-Sent Events.
 
+    If the query triggers the async heuristic, returns a single JSON SSE frame
+    with {"async": true, "task_id": "..."} instead of streaming.
+
     Client reads:
         data: <token>\\n\\n
         data: [DONE]\\n\\n
@@ -162,13 +233,29 @@ async def chat_stream(body: ChatRequest, request: Request):
     _check_auth(request)
     agent = get_agent()
 
+    # Async heuristic check
+    executor = getattr(agent, "_task_executor", None)
+    if executor and executor.should_async(body.message, force=body.force_async):
+        task = executor.submit(body.message)
+        import json
+
+        async def _async_sse():
+            payload = json.dumps({"async": True, "task_id": task.task_id, "status": task.status})
+            yield f"data: {payload}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _async_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     async def _sse_generator() -> AsyncGenerator[str, None]:
         try:
             async for token in agent.chat_stream(
                 body.message,
                 detected_language=body.language or "en",
             ):
-                # Escape newlines inside a single SSE data field
                 safe = token.replace("\n", "\\n")
                 yield f"data: {safe}\n\n"
         except Exception as e:
@@ -178,10 +265,7 @@ async def chat_stream(body: ChatRequest, request: Request):
     return StreamingResponse(
         _sse_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

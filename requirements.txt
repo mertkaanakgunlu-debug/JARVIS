@@ -74,3 +74,7 @@ uvicorn[standard]>=0.30  # ASGI server
 
 # Proactive notifications (Faz 10: python -m jarvis --monitor)
 winotify>=1.1            # Windows 10/11 toast notifications
+
+# Faz 19A-0: Mobile push + Windows power management
+firebase-admin>=6.5.0    # Firebase Cloud Messaging (server-side push)
+pywin32>=306             # SetThreadExecutionState (prevent PC sleep during tasks)

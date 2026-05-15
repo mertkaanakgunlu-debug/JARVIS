@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     geo_math_output_dir: Path = Path("data/geo_math_outputs")
     geo_math_use_devito: bool = True                   # use Devito for FDM if installed
 
+    # Faz 19A-0: Mobile push + Wake-on-LAN
+    firebase_credentials_path: Path = Path("data/firebase_admin_credentials.json")
+    push_enabled: bool = True
+    system_pc_mac: str = ""              # Ethernet MAC for WoL relay (optional)
+    system_wake_timeout_sec: int = 30
+
     # Faz 17: GCP quota tracking
     monitor_gcp_interval_min: int = 30      # how often to check quotas + fire alerts
     gcp_alert_rpm_pct: float = 0.8          # toast when RPM usage >= this fraction

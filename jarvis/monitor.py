@@ -56,6 +56,10 @@ class JarvisMonitor:
         self._todo_store = todo_store
         self._todo_morning_fired_date: str = ""   # YYYY-MM-DD of last morning summary
 
+        # Faz 19A-0: FCM push (lazily initialised on first notification)
+        self._fcm = None
+        self._push_store = None
+
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -213,8 +217,18 @@ class JarvisMonitor:
                     subject = hdrs.get("subject", "(no subject)")[:60]
                     sender  = hdrs.get("from", "?")[:40]
                     toast("📧 Yeni E-posta", f"Kimden: {sender}\n{subject}")
+                    self._dispatch_push(
+                        "📧 Yeni E-posta",
+                        f"Kimden: {sender} — {subject}",
+                        {"category": "email", "message_id": mid},
+                    )
                 except Exception:
                     toast("📧 Yeni E-posta", "Okunmamış bir mesajınız var.")
+                    self._dispatch_push(
+                        "📧 Yeni E-posta",
+                        "Okunmamış bir mesajınız var.",
+                        {"category": "email"},
+                    )
 
                 self._notified_email_ids.add(mid)
 
@@ -255,10 +269,23 @@ class JarvisMonitor:
                         mins = int((dt - now).total_seconds() / 60)
                         time_str = f"{mins} dakika sonra" if mins > 0 else "şimdi"
                         toast("📅 Takvim Hatırlatıcısı", f"{title}\nBaşlıyor: {time_str}")
+                        self._dispatch_push(
+                            "📅 Takvim Hatırlatıcısı",
+                            f"{title} — {time_str}",
+                            {"category": "calendar", "event_id": eid},
+                        )
                     except Exception:
                         toast("📅 Takvim Hatırlatıcısı", title)
+                        self._dispatch_push(
+                            "📅 Takvim Hatırlatıcısı", title,
+                            {"category": "calendar", "event_id": eid},
+                        )
                 else:
                     toast("📅 Takvim Hatırlatıcısı", title)
+                    self._dispatch_push(
+                        "📅 Takvim Hatırlatıcısı", title,
+                        {"category": "calendar", "event_id": eid},
+                    )
 
                 self._notified_event_ids.add(eid)
 
@@ -298,6 +325,11 @@ class JarvisMonitor:
                 if last and last >= now.strftime("%Y-%m-%dT%H"):
                     continue
                 toast(f"⏰ Görev yaklaşıyor: {t['title']}", f"Bitiş: {t['due_date']}")
+                self._dispatch_push(
+                    f"⏰ Görev yaklaşıyor: {t['title']}",
+                    f"Bitiş: {t['due_date']}",
+                    {"category": "todo", "todo_id": t["id"]},
+                )
                 self._todo_store.update_reminded(t["id"])
 
         except Exception as exc:
@@ -333,6 +365,9 @@ class JarvisMonitor:
             alerts = quota_alert_check(self.settings)
             for msg in alerts:
                 toast("⚡ GCP Kota Uyarısı", msg)
+                self._dispatch_push(
+                    "⚡ GCP Kota Uyarısı", msg, {"category": "gcp_quota"}
+                )
             self._gcp_ok = True
         except Exception as exc:
             logger.debug("Monitor GCP quota check error: %s", exc)
@@ -357,9 +392,12 @@ class JarvisMonitor:
                     from jarvis.finance_reporter import CATEGORY_LABELS
                     label = CATEGORY_LABELS.get(s["category"], s["category"].title())
                     pct_str = f"%{s['pct']*100:.0f}"
-                    toast(
+                    body_txt = f"{pct_str} doldu ({s['spent']:,.0f}/{s['limit']:,.0f} TRY)"
+                    toast(f"⚠ Bütçe Uyarısı: {label}", body_txt)
+                    self._dispatch_push(
                         f"⚠ Bütçe Uyarısı: {label}",
-                        f"{pct_str} doldu ({s['spent']:,.0f}/{s['limit']:,.0f} TRY)",
+                        body_txt,
+                        {"category": "budget_alert", "budget_category": s["category"]},
                     )
 
             self._finance_ok = True
@@ -407,11 +445,36 @@ class JarvisMonitor:
                 subject = (getattr(m, "subject", "") or "(konu yok)")[:60]
                 sender  = (getattr(m, "from_", "") or "?")[:40]
                 toast("📬 [ITU] Yeni E-posta", f"Kimden: {sender}\n{subject}")
+                self._dispatch_push(
+                    "📬 [ITU] Yeni E-posta",
+                    f"Kimden: {sender} — {subject}",
+                    {"category": "itu_email", "uid": uid},
+                )
                 self._notified_itu_ids.add(uid)
         except Exception as exc:
             logger.debug("Monitor ITU mail poll error: %s", exc)
 
     # ── Google service helpers ─────────────────────────────────────────────────
+
+    # ── Faz 19A-0: FCM push dispatch ──────────────────────────────────────────
+
+    def _dispatch_push(self, title: str, body: str, data: dict | None = None) -> None:
+        """Fire-and-forget FCM push alongside a Windows toast."""
+        try:
+            if not getattr(self.settings, "push_enabled", True):
+                return
+            if self._fcm is None:
+                from pathlib import Path
+                from jarvis.push_store import PushStore
+                from jarvis.fcm_sender import FcmSender
+                db = Path("data/sessions.db")
+                creds = getattr(self.settings, "firebase_credentials_path",
+                                Path("data/firebase_admin_credentials.json"))
+                self._push_store = PushStore(db)
+                self._fcm = FcmSender(self._push_store, creds)
+            self._fcm.send_to_all(title=title, body=body, data=data or {})
+        except Exception as exc:
+            logger.debug("Push dispatch error: %s", exc)
 
     def _gmail_service(self):
         from jarvis.tools.gmail import _get_service

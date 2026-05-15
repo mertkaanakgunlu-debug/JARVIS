@@ -111,6 +111,22 @@ class JarvisEventBus:
         """Session change event — lets Electron HUD display current session name."""
         self.emit({"type": "session", "id": session_id, "topic": topic})
 
+    def task_status(
+        self,
+        task_id: str,
+        status: str,
+        progress_note: str = "",
+        elapsed_sec: int = 0,
+    ) -> None:
+        """Async task progress event — consumed by mobile app task cards."""
+        self.emit({
+            "type": "task_status",
+            "task_id": task_id,
+            "status": status,
+            "progress_note": progress_note,
+            "elapsed_sec": elapsed_sec,
+        })
+
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
 event_bus = JarvisEventBus()
