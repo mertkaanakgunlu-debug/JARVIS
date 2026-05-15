@@ -175,9 +175,9 @@ export function CalendarPanel({ today = '', events = [] }) {
 }
 
 // ── Project Tracker ───────────────────────────────────────────────────────────
-export function ProjectTracker({ projects = [] }) {
+export function ProjectTracker({ projects = [], live = false }) {
   return (
-    <Panel title="Project Tracker" id="ID/0x0C3" scroll>
+    <Panel title={live ? 'Open Tasks' : 'Project Tracker'} id="ID/0x0C3" scroll>
       {projects.map((p, i) => (
         <div key={i} className="proj">
           <div className="top">

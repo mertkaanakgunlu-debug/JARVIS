@@ -170,7 +170,7 @@ export default function App() {
   }, [])
 
   // Live data from WebSocket
-  const { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress } =
+  const { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos } =
     useJarvisSocket(apiUrl)
 
   // State → accent: changes color palette when JARVIS switches modes
@@ -205,7 +205,15 @@ export default function App() {
 
   // Use live data when connected, rich placeholders when offline
   const calendarEvents  = connected && calEvents.length    ? calEvents    : PLACEHOLDER_EVENTS
-  const projects        = PLACEHOLDER_PROJECTS  // TODO: real project data from backend
+  const projects        = connected && todos.length
+    ? todos.map(t => ({
+        title: t.title,
+        progress: Math.round((t.priority_score || 0) * 100),
+        due: t.due || '—',
+        stage: t.priority || 'low',
+        tag: t.category || 'other',
+      }))
+    : PLACEHOLDER_PROJECTS
   const vaultEntries    = connected && vaultData.entries.length ? vaultData.entries : PLACEHOLDER_VAULT_ENTRIES
   const vaultCount      = connected ? vaultData.count : 2847
   const displayTask     = (connected && task.name) ? task : TASK_BY_STATE[state] || TASK_BY_STATE.idle
@@ -276,7 +284,7 @@ export default function App() {
           />
         </div>
         <div className="slot-r3" style={{ display: 'flex', minHeight: 0 }}>
-          <ProjectTracker projects={projects} />
+          <ProjectTracker projects={projects} live={connected && todos.length > 0} />
         </div>
 
         {/* Center-bottom strip */}

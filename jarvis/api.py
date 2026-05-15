@@ -35,7 +35,7 @@ from pydantic import BaseModel
 
 from jarvis.config import Settings
 from jarvis.agent import JarvisAgent
-from jarvis.ws import event_bus, start_metrics_task
+from jarvis.ws import event_bus, start_metrics_task, start_live_data_task, live_data_snapshot
 
 # Mobile routers
 from jarvis.api_routers import todos as todos_router
@@ -51,6 +51,8 @@ from jarvis.api_routers import system as system_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_metrics_task()
+    if _agent is not None:
+        start_live_data_task(_agent, _settings)
     yield
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -184,11 +186,7 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
     agent = _agent
     if agent:
         await event_bus.broadcast({"type": "state", "value": "idle"})
-        await event_bus.broadcast({
-            "type": "vault",
-            "entries": [],
-            "count": agent.memory.count_docs(),
-        })
+        await live_data_snapshot(agent, _settings)
     try:
         while True:
             await websocket.receive_text()

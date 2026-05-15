@@ -29,6 +29,7 @@ function useJarvisSocket(apiUrl) {
   const [calEvents, setCalEvents]   = useState([])
   const [vaultData, setVaultData]   = useState({ entries: [], count: 0 })
   const [progress, setProgress]     = useState({ jobsDone: 0, jobsTotal: 0, runtime: '00:00:00', tokensIn: 0, tokensOut: 0 })
+  const [todos, setTodos]           = useState([])
 
   const wsRef    = useRef(null)
   const feedId   = useRef(0)
@@ -95,6 +96,10 @@ function useJarvisSocket(apiUrl) {
           setVaultData({ entries: msg.entries || [], count: msg.count || 0 })
           break
 
+        case 'todos':
+          setTodos(msg.items || [])
+          break
+
         case 'progress':
           setProgress(p => ({ ...p, ...msg }))
           break
@@ -113,7 +118,7 @@ function useJarvisSocket(apiUrl) {
     }
   }, [connect])
 
-  return { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress }
+  return { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos }
 }
 
 export default useJarvisSocket

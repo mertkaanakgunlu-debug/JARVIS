@@ -107,6 +107,10 @@ class JarvisEventBus:
         self.emit({"type": "progress", "jobsDone": jobs_done, "jobsTotal": jobs_total,
                    "runtime": runtime, "tokensIn": tokens_in, "tokensOut": tokens_out})
 
+    def todos(self, items: list) -> None:
+        """Open todo items for HUD ProjectTracker panel."""
+        self.emit({"type": "todos", "items": items})
+
     def session(self, session_id: str, topic: str | None) -> None:
         """Session change event — lets Electron HUD display current session name."""
         self.emit({"type": "session", "id": session_id, "topic": topic})
@@ -187,3 +191,150 @@ def start_metrics_task() -> None:
     global _metrics_task
     if _metrics_task is None or _metrics_task.done():
         _metrics_task = asyncio.create_task(_push_metrics_loop())
+
+
+# ── Live data background task (calendar / todos / vault) ──────────────────────
+_live_data_task: Optional[asyncio.Task] = None
+_live_agent = None
+_live_settings = None
+
+
+def _fetch_calendar_events(settings) -> list:
+    """Sync helper — fetches today's Google Calendar events (run in executor)."""
+    if settings is None:
+        return []
+    try:
+        from jarvis.tools.calendar import _get_service  # type: ignore
+        from datetime import datetime, timedelta, timezone
+        svc = _get_service(settings)
+        now = datetime.now(timezone.utc)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        res = (
+            svc.events()
+            .list(
+                calendarId="primary",
+                timeMin=start.isoformat(),
+                timeMax=end.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=20,
+            )
+            .execute()
+        )
+        events = []
+        for ev in res.get("items", []):
+            start_raw = ev.get("start", {})
+            dt_str = start_raw.get("dateTime") or start_raw.get("date") or ""
+            time_str = ""
+            if "T" in dt_str:
+                try:
+                    from datetime import datetime as _dt
+                    parsed = _dt.fromisoformat(dt_str.replace("Z", "+00:00"))
+                    time_str = parsed.astimezone().strftime("%H:%M")
+                except Exception:
+                    pass
+            events.append({
+                "time": time_str,
+                "title": ev.get("summary", ""),
+                "where": ev.get("location", ""),
+                "kind": "live",
+            })
+        return events
+    except Exception as exc:
+        logger.debug("Calendar fetch error: %s", exc)
+        return []
+
+
+def _fetch_vault_entries(agent) -> list:
+    """Return the 5 most recently indexed vault sources as HUD vault entries."""
+    try:
+        sources = agent.memory.list_indexed()[-5:]
+        entries = []
+        for src in reversed(sources):
+            name = src.replace("\\", "/").split("/")[-1]
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else "doc"
+            tag = {"pdf": "pdf", "md": "note", "txt": "note"}.get(ext, "doc")
+            entries.append({"title": name, "tag": tag, "ts": "indexed"})
+        return entries
+    except Exception as exc:
+        logger.debug("Vault entries fetch error: %s", exc)
+        return []
+
+
+def _build_todo_items(agent) -> list:
+    """Fetch top 8 open todos formatted for HUD ProjectTracker."""
+    try:
+        rows = agent.todo_store.top_open(n=8)
+        return [
+            {
+                "id": t.get("id", ""),
+                "title": t.get("title", ""),
+                "priority": t.get("priority", "low"),
+                "priority_score": t.get("priority_score", 0.0),
+                "category": t.get("category", "other"),
+                "due": t.get("due_date") or "",
+            }
+            for t in rows
+        ]
+    except Exception as exc:
+        logger.debug("Todo fetch error: %s", exc)
+        return []
+
+
+async def _push_live_data_loop() -> None:
+    """Push todos (30 s), calendar (60 s), vault (120 s) to all HUD clients."""
+    await asyncio.sleep(8)   # let agent finish init before first tick
+    tick = 0
+    while True:
+        await asyncio.sleep(30)
+        if not event_bus._clients:
+            continue
+        agent   = _live_agent
+        settings = _live_settings
+        if agent is None:
+            continue
+        tick += 1
+
+        # Todos — every 30 s
+        items = _build_todo_items(agent)
+        if items is not None:
+            event_bus.todos(items)
+
+        # Calendar — every ~60 s
+        if tick % 2 == 0:
+            loop = asyncio.get_event_loop()
+            cal_events = await loop.run_in_executor(None, _fetch_calendar_events, settings)
+            event_bus.calendar(cal_events)
+
+        # Vault — every ~120 s
+        if tick % 4 == 0:
+            entries = _fetch_vault_entries(agent)
+            event_bus.vault(entries, agent.memory.count_docs())
+
+
+async def live_data_snapshot(agent, settings) -> None:
+    """Send a one-shot snapshot to all connected clients (call on new connection)."""
+    try:
+        items = _build_todo_items(agent)
+        await event_bus.broadcast({"type": "todos", "items": items})
+    except Exception:
+        pass
+    try:
+        entries = _fetch_vault_entries(agent)
+        await event_bus.broadcast({
+            "type": "vault",
+            "entries": entries,
+            "count": agent.memory.count_docs(),
+        })
+    except Exception:
+        pass
+
+
+def start_live_data_task(agent, settings) -> None:
+    """Start the live data push loop (call once from api.py lifespan)."""
+    global _live_data_task, _live_agent, _live_settings
+    _live_agent = agent
+    _live_settings = settings
+    if _live_data_task is None or _live_data_task.done():
+        _live_data_task = asyncio.create_task(_push_live_data_loop())
