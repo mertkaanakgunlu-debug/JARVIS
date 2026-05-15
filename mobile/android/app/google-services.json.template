@@ -1,0 +1,37 @@
+{
+  "_PLACEHOLDER_": true,
+  "_INSTRUCTIONS_": [
+    "1. Firebase Console → https://console.firebase.google.com",
+    "2. 'Add Project' → 'jarvis-mobile'",
+    "3. Add Android app → package name: com.mertkaan.jarvis",
+    "4. Download google-services.json and place it here:",
+    "   mobile/android/app/google-services.json",
+    "5. Firebase Console → Cloud Messaging → Upload APNs key (for iOS later)",
+    "6. Project Settings → Service Accounts → Generate new private key",
+    "   Save as: jarvis/data/firebase_admin_credentials.json (backend)",
+    "",
+    "After placing google-services.json, delete this template file."
+  ],
+  "project_info": {
+    "project_number": "YOUR_PROJECT_NUMBER",
+    "project_id": "jarvis-mobile",
+    "storage_bucket": "jarvis-mobile.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:YOUR_PROJECT_NUMBER:android:XXXXXXXX",
+        "android_client_info": {
+          "package_name": "com.mertkaan.jarvis"
+        }
+      },
+      "api_key": [{"current_key": "YOUR_API_KEY"}],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

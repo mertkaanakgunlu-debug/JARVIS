@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS</string>
+    <string name="wake_notification_channel_id">jarvis_wake</string>
+    <string name="wake_notification_title">JARVIS dinleniyor</string>
+    <string name="wake_notification_text">Hey JARVIS diyerek uyandırın • Durdurmak için dokunun</string>
+    <string name="tasks_notification_channel_id">jarvis_tasks</string>
+    <string name="alerts_notification_channel_id">jarvis_alerts</string>
+    <string name="info_notification_channel_id">jarvis_info</string>
+</resources>
