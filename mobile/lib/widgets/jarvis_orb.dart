@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../models/conversation_state.dart';
-import '../theme/jarvis_theme.dart';
 import '../theme/state_accent.dart';
 
 class JarvisOrb extends StatefulWidget {

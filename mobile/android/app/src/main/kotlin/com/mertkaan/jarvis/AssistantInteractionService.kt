@@ -39,7 +39,7 @@ class AssistantInteractionService : VoiceInteractionService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Launch the main activity in chat mode
         val launchIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("from_assistant", true)
         }
         startActivity(launchIntent)

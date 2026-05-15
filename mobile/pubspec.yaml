@@ -19,8 +19,8 @@ dependencies:
   web_socket_channel: ^3.0.1
 
   # Voice I/O
-  speech_to_text: ^6.6.2
-  flutter_tts: ^4.0.2
+  speech_to_text: ^7.3.0
+  flutter_tts: ^4.2.0
 
   # Push notifications
   firebase_core: ^3.3.0
@@ -29,7 +29,7 @@ dependencies:
   # Local storage
   hive: ^2.2.3
   hive_flutter: ^1.1.0
-  flutter_secure_storage: ^9.2.2
+  flutter_secure_storage: ^10.2.0
   shared_preferences: ^2.2.3
 
   # Charts
@@ -39,7 +39,7 @@ dependencies:
   udp: ^4.0.0
 
   # Background processing
-  workmanager: ^0.5.2
+  workmanager: ^0.9.0
 
   # Device info (for FCM device_id)
   device_info_plus: ^10.1.0

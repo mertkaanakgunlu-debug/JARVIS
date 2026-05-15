@@ -1,6 +1,7 @@
 import 'conversation_state.dart';
 
 sealed class WsEvent {
+  WsEvent();
   factory WsEvent.fromJson(Map<String, dynamic> j) {
     switch (j['type'] as String?) {
       case 'state':

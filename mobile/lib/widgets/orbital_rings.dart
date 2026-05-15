@@ -91,7 +91,6 @@ class _RingsPainter extends CustomPainter {
   void _drawDashedRing(Canvas c, double cx, double cy, double r,
       double angle, Paint p) {
     const dashPattern = [40.0, 14.0, 6.0, 14.0, 90.0, 14.0, 30.0, 14.0];
-    final total = dashPattern.fold(0.0, (a, b) => a + b);
     double progress = 0;
     bool drawing = true;
     while (progress < 360) {
@@ -129,7 +128,6 @@ class _RingsPainter extends CustomPainter {
     }
     // Cardinal labels N/E/S/W
     const labels = ['N', 'E', 'S', 'W'];
-    const tp = TextPainter(textDirection: TextDirection.ltr);
     for (int i = 0; i < 4; i++) {
       final a = angle + (i / 4) * math.pi * 2 - math.pi / 2;
       final lx = cx + math.cos(a) * (r + 14);

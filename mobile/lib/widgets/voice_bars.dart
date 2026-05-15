@@ -78,7 +78,7 @@ class _BarsPainter extends CustomPainter {
       case ConversationState.idle:
         return maxH * (0.08 + 0.05 * math.sin(phase * 0.3 + i * 0.4));
       case ConversationState.listening:
-        return maxH * (0.1 + 0.6 * math.abs(math.sin(phase * 1.5 + i * 0.5)));
+        return maxH * (0.1 + 0.6 * math.sin(phase * 1.5 + i * 0.5).abs());
       case ConversationState.thinking:
         return maxH * (0.15 + 0.4 * math.sin(phase * 1.2 + i * 0.35).abs());
       case ConversationState.working:

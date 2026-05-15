@@ -9,7 +9,7 @@ class SettingsNotifier extends AsyncNotifier<JarvisSettings> {
   @override
   Future<JarvisSettings> build() => JarvisSettings.load();
 
-  Future<void> update({
+  Future<void> saveSettings({
     String? host,
     String? apiKey,
     String? pcMac,

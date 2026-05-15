@@ -5,7 +5,6 @@ import '../theme/typography.dart';
 import '../widgets/grid_background.dart';
 import '../providers/settings_provider.dart';
 import '../providers/api_provider.dart';
-import '../core/push_service.dart';
 import '../core/wake_service.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -79,7 +78,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _save() async {
-    await ref.read(settingsProvider.notifier).update(
+    await ref.read(settingsProvider.notifier).saveSettings(
       host: _hostCtrl.text.trim(),
       apiKey: _keyCtrl.text.trim(),
       pcMac: _macCtrl.text.trim(),
@@ -159,28 +158,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     _Section('OTOMATİK UYANDIRMA'),
                     _Switch('Auto-wake (PC uykudaysa uyandır)',
                         settings.autoWake,
-                        (v) => ref.read(settingsProvider.notifier).update(autoWake: v)),
+                        (v) => ref.read(settingsProvider.notifier).saveSettings(autoWake: v)),
 
                     _Section('SES'),
                     _Switch('TTS (JARVIS sesli yanıt)',
                         settings.ttsEnabled,
-                        (v) => ref.read(settingsProvider.notifier).update(ttsEnabled: v)),
+                        (v) => ref.read(settingsProvider.notifier).saveSettings(ttsEnabled: v)),
                     _Switch('STT (mikrofon girişi)',
                         settings.sttEnabled,
-                        (v) => ref.read(settingsProvider.notifier).update(sttEnabled: v)),
+                        (v) => ref.read(settingsProvider.notifier).saveSettings(sttEnabled: v)),
                     _Switch('Wake-word always-on ("Hey JARVIS")',
                         settings.wakeWordEnabled,
-                        (v) => ref.read(settingsProvider.notifier).update(wakeWordEnabled: v)),
+                        (v) => ref.read(settingsProvider.notifier).saveSettings(wakeWordEnabled: v)),
 
                     _Section('GÖREVLER'),
                     _Switch('Async heuristik (uzun task\'lar arka plana)',
                         settings.asyncHeuristic,
-                        (v) => ref.read(settingsProvider.notifier).update(asyncHeuristic: v)),
+                        (v) => ref.read(settingsProvider.notifier).saveSettings(asyncHeuristic: v)),
 
                     _Section('BİLDİRİMLER'),
                     _Switch('Push aktif',
                         settings.pushEnabled,
-                        (v) => ref.read(settingsProvider.notifier).update(pushEnabled: v)),
+                        (v) => ref.read(settingsProvider.notifier).saveSettings(pushEnabled: v)),
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: _ActionButton('Push Test', () async {
@@ -204,7 +203,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       activeColor: JarvisColors.cyan,
                       inactiveColor: JarvisColors.lineDim,
                       onChanged: (v) =>
-                          ref.read(settingsProvider.notifier).update(gridAlpha: v),
+                          ref.read(settingsProvider.notifier).saveSettings(gridAlpha: v),
                     ),
 
                     const SizedBox(height: 24),
