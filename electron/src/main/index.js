@@ -169,22 +169,32 @@ function createTray() {
   tray = new Tray(makeTrayIcon())
   tray.setToolTip('J.A.R.V.I.S.')
 
-  const buildMenu = () => Menu.buildFromTemplate([
-    { label: 'J.A.R.V.I.S. HUD', enabled: false },
-    { type: 'separator' },
-    {
-      label: mainWindow?.isVisible() ? 'Hide HUD' : 'Show HUD',
-      click: toggleMain,
-    },
-    {
-      label: widgetWindow?.isVisible() ? 'Hide Widget' : 'Show Widget',
-      click: toggleWidget,
-    },
-    { type: 'separator' },
-    { label: 'Open DevTools (HUD)', click: () => mainWindow?.webContents.openDevTools({ mode: 'detach' }) },
-    { type: 'separator' },
-    { label: 'Quit JARVIS', click: () => { app.quit() } },
-  ])
+  const buildMenu = () => {
+    const autoStart = app.getLoginItemSettings().openAtLogin
+    return Menu.buildFromTemplate([
+      { label: 'J.A.R.V.I.S. HUD', enabled: false },
+      { type: 'separator' },
+      {
+        label: mainWindow?.isVisible() ? 'Hide HUD' : 'Show HUD',
+        click: toggleMain,
+      },
+      {
+        label: widgetWindow?.isVisible() ? 'Hide Widget' : 'Show Widget',
+        click: toggleWidget,
+      },
+      { type: 'separator' },
+      {
+        label: autoStart ? 'Disable Auto-start' : 'Enable Auto-start',
+        click: () => {
+          app.setLoginItemSettings({ openAtLogin: !autoStart, openAsHidden: true })
+        },
+      },
+      { type: 'separator' },
+      { label: 'Open DevTools (HUD)', click: () => mainWindow?.webContents.openDevTools({ mode: 'detach' }) },
+      { type: 'separator' },
+      { label: 'Quit JARVIS', click: () => { app.quit() } },
+    ])
+  }
 
   tray.on('click', () => toggleMain())
   tray.on('right-click', () => {
@@ -214,8 +224,10 @@ ipcMain.on('open-hud-from-widget', () => { mainWindow?.show(); mainWindow?.focus
 
 // Relay JARVIS state from any renderer to the other
 ipcMain.on('jarvis-state', (_, state) => {
-  // When JARVIS starts listening → show widget
-  if (state === 'listening' || state === 'speaking') {
+  // Any active state (mobile command, voice, etc.) → bring up HUD + widget
+  if (state !== 'idle') {
+    mainWindow?.show()
+    mainWindow?.focus()
     widgetWindow?.show()
   }
   // Forward to both windows
@@ -225,25 +237,20 @@ ipcMain.on('jarvis-state', (_, state) => {
 
 // ── App lifecycle ──────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
-  createTray()          // tray icon appears immediately
-  createMainWindow()    // hidden until backend ready
+  // Auto-start with Windows (silent — no window on login)
+  app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true })
+
+  createTray()          // tray icon visible immediately
+  createMainWindow()    // hidden — user opens manually or via JARVIS activity
   createWidgetWindow()  // hidden
 
   startPythonBackend()
 
-  tray.setToolTip('J.A.R.V.I.S. — starting backend…')
+  tray.setToolTip('J.A.R.V.I.S. — starting…')
   const ready = await waitForBackend()
-
-  if (ready) {
-    console.log('[jarvis:main] Backend ready — showing HUD')
-    tray.setToolTip('J.A.R.V.I.S.')
-    mainWindow?.show()
-    setTimeout(() => widgetWindow?.show(), 600)
-  } else {
-    console.warn('[jarvis:main] Backend did not respond in time — showing anyway')
-    tray.setToolTip('J.A.R.V.I.S. (backend unreachable)')
-    mainWindow?.show()
-  }
+  tray.setToolTip(ready ? 'J.A.R.V.I.S.' : 'J.A.R.V.I.S. (backend unreachable)')
+  console.log(ready ? '[jarvis:main] Backend ready — tray only' : '[jarvis:main] Backend timeout')
+  // HUD stays hidden; user opens via tray click or JARVIS state change
 })
 
 app.on('before-quit', () => {
