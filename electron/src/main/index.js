@@ -1,11 +1,65 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen } from 'electron'
 import { join } from 'path'
+import { spawn } from 'child_process'
+import { existsSync } from 'fs'
+import http from 'http'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const JARVIS_API = process.env.JARVIS_API_URL || 'http://127.0.0.1:8000'
 // electron-vite sets ELECTRON_RENDERER_URL only in dev server mode (npm run dev).
 // In preview/production, this is undefined → load from built files.
 const RENDERER_URL = process.env['ELECTRON_RENDERER_URL']
+
+// ── Python backend management ──────────────────────────────────────────────────
+let pythonProcess = null
+
+function jarvisRoot() {
+  // JARVIS_ROOT env override (useful for packaged builds)
+  if (process.env.JARVIS_ROOT) return process.env.JARVIS_ROOT
+  // app.getAppPath() → .../Jarvis/electron  →  parent = repo root
+  return join(app.getAppPath(), '..')
+}
+
+function startPythonBackend() {
+  const root = jarvisRoot()
+  const pyExe = join(root, '.venv', 'Scripts', 'python.exe')
+  if (!existsSync(pyExe)) {
+    console.warn('[jarvis:main] Python venv not found at', pyExe, '— skipping spawn')
+    return
+  }
+  console.log('[jarvis:main] Starting Python backend…')
+  pythonProcess = spawn(pyExe, ['-m', 'jarvis', '--api', '--monitor', '--wakeword'], {
+    cwd: root,
+    windowsHide: true,   // no console popup on Windows
+    env: { ...process.env },
+  })
+  pythonProcess.stdout.on('data', d => process.stdout.write('[py] ' + d))
+  pythonProcess.stderr.on('data', d => process.stderr.write('[py] ' + d))
+  pythonProcess.on('exit', code => console.log('[jarvis:main] Python exited with code', code))
+}
+
+function stopPythonBackend() {
+  if (!pythonProcess || pythonProcess.killed) return
+  console.log('[jarvis:main] Shutting down Python backend…')
+  pythonProcess.kill('SIGTERM')
+  pythonProcess = null
+}
+
+function waitForBackend(maxRetries = 40, intervalMs = 750) {
+  return new Promise(resolve => {
+    let tries = 0
+    const check = () => {
+      const req = http.get('http://127.0.0.1:8000/health', res => {
+        if (res.statusCode === 200) { resolve(true) }
+        else retry()
+      })
+      req.on('error', retry)
+      req.end()
+    }
+    const retry = () => { if (++tries >= maxRetries) resolve(false); else setTimeout(check, intervalMs) }
+    check()
+  })
+}
 
 // ── Window handles ─────────────────────────────────────────────────────────────
 let mainWindow = null
@@ -66,7 +120,7 @@ function createMainWindow() {
 
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.send('config', { apiUrl: JARVIS_API })
-    mainWindow.show()
+    // Window is shown by app.whenReady after backend is confirmed up
   })
 }
 
@@ -170,17 +224,30 @@ ipcMain.on('jarvis-state', (_, state) => {
 })
 
 // ── App lifecycle ──────────────────────────────────────────────────────────────
-app.whenReady().then(() => {
-  createMainWindow()
-  createWidgetWindow()
-  createTray()
+app.whenReady().then(async () => {
+  createTray()          // tray icon appears immediately
+  createMainWindow()    // hidden until backend ready
+  createWidgetWindow()  // hidden
 
-  // Show widget on first launch as a teaser
-  setTimeout(() => widgetWindow?.show(), 1000)
+  startPythonBackend()
+
+  tray.setToolTip('J.A.R.V.I.S. — starting backend…')
+  const ready = await waitForBackend()
+
+  if (ready) {
+    console.log('[jarvis:main] Backend ready — showing HUD')
+    tray.setToolTip('J.A.R.V.I.S.')
+    mainWindow?.show()
+    setTimeout(() => widgetWindow?.show(), 600)
+  } else {
+    console.warn('[jarvis:main] Backend did not respond in time — showing anyway')
+    tray.setToolTip('J.A.R.V.I.S. (backend unreachable)')
+    mainWindow?.show()
+  }
 })
 
 app.on('before-quit', () => {
-  // Allow windows to actually close on quit
+  stopPythonBackend()
   if (mainWindow) mainWindow.removeAllListeners('close')
   if (widgetWindow) widgetWindow.removeAllListeners('close')
 })
