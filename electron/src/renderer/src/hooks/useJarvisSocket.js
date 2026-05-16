@@ -100,6 +100,10 @@ function useJarvisSocket(apiUrl) {
           setTodos(msg.items || [])
           break
 
+        case 'show_hud':
+          window.jarvis?.showHud()
+          break
+
         case 'progress':
           setProgress(p => ({ ...p, ...msg }))
           break

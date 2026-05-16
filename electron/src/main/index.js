@@ -224,13 +224,9 @@ ipcMain.on('open-hud-from-widget', () => { mainWindow?.show(); mainWindow?.focus
 
 // Relay JARVIS state from any renderer to the other
 ipcMain.on('jarvis-state', (_, state) => {
-  // Any active state (mobile command, voice, etc.) → bring up HUD + widget
-  if (state !== 'idle') {
-    mainWindow?.show()
-    mainWindow?.focus()
-    widgetWindow?.show()
-  }
-  // Forward to both windows
+  // Any active state → show only the floating widget orb (never HUD)
+  // HUD opens only via tray click or explicit show-hud event from JARVIS
+  if (state !== 'idle') widgetWindow?.show()
   mainWindow?.webContents.send('jarvis-state', state)
   widgetWindow?.webContents.send('jarvis-state', state)
 })

@@ -38,6 +38,7 @@ from jarvis.gcp_quota import (                        # Faz 17
     quota_status, quota_usage_today, quota_forecast,
 )
 from jarvis.tools.geo_math_tool import geo_math_control  # Faz 18
+from jarvis.ws import event_bus                           # HUD show_hud signal
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -150,7 +151,9 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     @tool
     def report_compile(tex_path: str) -> str:
         """Compile a .tex file to PDF via pdflatex. On failure, fix the LaTeX and retry."""
-        return latex_compile(tex_path)
+        result = latex_compile(tex_path)
+        event_bus.show_hud()
+        return result
 
     @tool
     def math_solve(problem: str) -> str:
@@ -232,7 +235,9 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         """
         full = workspace / path if not Path(path).is_absolute() else Path(path)
         plots_dir = workspace / "data" / "plots"
-        return generate_plot(full, kind, x, y, title, hue, output, plots_dir)
+        result = generate_plot(full, kind, x, y, title, hue, output, plots_dir)
+        event_bus.show_hud()
+        return result
 
     @tool
     def report_compose(title: str, sections_md: str, figures_json: str = "") -> str:
@@ -252,7 +257,9 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             Path to the written .tex file.
         """
         reports_dir = workspace / "vault" / "reports"
-        return compose_report(title, sections_md, figures_json or "[]", reports_dir)
+        result = compose_report(title, sections_md, figures_json or "[]", reports_dir)
+        event_bus.show_hud()
+        return result
 
     # ── Faz 6: Document RAG ───────────────────────────────────────────────────
 
@@ -1019,7 +1026,8 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
                 return "⚠ expression veya query gerekli (analyze action için)."
             return _run_coro(run_geomath(problem, settings))
 
-        return geo_math_control(
+        _VISUAL_GEO_ACTIONS = {"wave_simulate_2d", "plot_2d", "plot_contour", "plot_3d_surface", "plot_volume"}
+        result = geo_math_control(
             action=action,
             expression=expression,
             variable=variable,
@@ -1039,6 +1047,9 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             plot_type=plot_type,
             settings=settings,
         )
+        if action.lower() in _VISUAL_GEO_ACTIONS:
+            event_bus.show_hud()
+        return result
 
     return [
         shell_run, file_read, file_write, file_list,

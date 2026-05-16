@@ -111,6 +111,10 @@ class JarvisEventBus:
         """Open todo items for HUD ProjectTracker panel."""
         self.emit({"type": "todos", "items": items})
 
+    def show_hud(self) -> None:
+        """Tell Electron to bring the HUD to front (visual output ready)."""
+        self.emit({"type": "show_hud"})
+
     def session(self, session_id: str, topic: str | None) -> None:
         """Session change event — lets Electron HUD display current session name."""
         self.emit({"type": "session", "id": session_id, "topic": topic})
