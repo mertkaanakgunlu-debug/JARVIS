@@ -105,17 +105,18 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
     @tool
     def pdf_vision(path: str, question: str, pages: str = "") -> str:
-        """Use Gemini Vision to analyze visual content in a PDF.
+        """Use Gemini Vision to analyze visual content in a PDF or image file.
 
-        Unlike pdf_read (text extraction), this sends the PDF directly to Gemini's
-        visual AI which can interpret charts, maps, seismic cross-sections, contour
-        maps, and any image-heavy content.
+        Use this for ANY visual file the user uploads: exam schedule screenshots,
+        photos, charts, maps, seismic cross-sections, scanned documents, etc.
+
+        Supported file types: PDF, PNG, JPG, JPEG, WEBP, GIF, BMP.
 
         Args:
-            path:     Path to the PDF (workspace-relative or absolute).
-            question: What to analyze or describe in the PDF.
-            pages:    Optional page subset to send — "1", "2-4", "1,3,5" (1-indexed).
-                      Leave empty to send the entire PDF. Use for large files.
+            path:     Path to the file — use the exact path from the upload hint
+                      (e.g. data/uploads/<filename>). Workspace-relative or absolute.
+            question: What to extract or describe (e.g. "List all exam dates and times").
+            pages:    PDF only — optional page subset "1", "2-4", "1,3,5". Ignored for images.
         """
         full_path = workspace / path if not Path(path).is_absolute() else Path(path)
         return read_pdf_vision(full_path, question, settings, pages or None)
@@ -378,17 +379,14 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         query: str = "",
         event_id: str = "",
     ) -> str:
-        """Manage Google Calendar events.
+        """Manage Google Calendar events. OAuth is authenticated and ready — call this tool directly.
 
         Actions:
           list   — show upcoming events (days_ahead window, default 7)
-          create — create a new event (title + date required; time optional for all-day)
-          delete — delete by event_id, or by query (finds first match)
+          create — add a new event to the calendar (title + date required; time optional for all-day)
+          delete — delete by event_id, or by query keyword (finds first match)
           search — search future events by keyword
           update — update event fields (event_id required)
-
-        Requires GOOGLE_CALENDAR_CREDS_FILE in .env pointing to OAuth credentials JSON.
-        First call opens a browser for one-time consent; token cached at data/.calendar_token.json.
 
         Args:
             action:           list | create | delete | search | update
@@ -428,7 +426,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         body: str = "",
         max_results: int = 10,
     ) -> str:
-        """Manage Gmail — read, send, reply, search, and organise emails.
+        """Manage Gmail — read, send, reply, search, and organise emails. OAuth is authenticated and ready.
 
         Actions:
           list_unread  — list unread emails in inbox (max_results, default 10)
@@ -438,9 +436,6 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
           reply        — reply to an email (message_id + body required)
           trash        — move email to trash (message_id required)
           mark_read    — mark email as read (message_id required)
-
-        Uses the same OAuth credentials as Google Calendar.
-        First call opens a browser for Gmail consent; token cached at data/.gmail_token.json.
 
         Args:
             action:      list_unread | search | read | send | reply | trash | mark_read
