@@ -222,8 +222,8 @@ function DropResponseOverlay({ text, done, onDismiss }) {
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [text])
   return (
     <div style={{
-      position: 'fixed', bottom: 32, right: 32, zIndex: 9997,
-      width: 420, maxHeight: 340,
+      position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', zIndex: 9997,
+      width: 480, maxHeight: 340,
       background: 'rgba(0,8,16,.97)',
       border: '1px solid var(--hud-cyan)',
       borderRadius: 12,
@@ -410,7 +410,7 @@ export default function App() {
     : []
 
   // Use live data when connected, rich placeholders when offline
-  const calendarEvents  = connected && calEvents.length    ? calEvents    : PLACEHOLDER_EVENTS
+  const calendarEvents  = connected ? calEvents : PLACEHOLDER_EVENTS
   const projects        = connected && todos.length
     ? todos.map(t => ({
         title: t.title,

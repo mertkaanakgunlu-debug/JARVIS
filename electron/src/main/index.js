@@ -239,9 +239,13 @@ ipcMain.on('open-hud-from-widget', () => { mainWindow?.show(); mainWindow?.focus
 
 // Relay JARVIS state from any renderer to the other
 ipcMain.on('jarvis-state', (_, state) => {
-  // Any active state → show only the floating widget orb (never HUD)
-  // HUD opens only via tray click or explicit show-hud event from JARVIS
-  if (state !== 'idle') widgetWindow?.show()
+  if (state === 'idle') {
+    // Hide widget when idle — it should only appear while processing
+    widgetWindow?.hide()
+  } else if (!mainWindow?.isVisible()) {
+    // Show widget only when HUD is closed; if HUD is open, no need for widget
+    widgetWindow?.show()
+  }
   mainWindow?.webContents.send('jarvis-state', state)
   widgetWindow?.webContents.send('jarvis-state', state)
 })

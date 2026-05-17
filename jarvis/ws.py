@@ -363,8 +363,7 @@ async def live_data_snapshot(agent, settings) -> None:
     try:
         loop = asyncio.get_event_loop()
         cal_events = await loop.run_in_executor(None, _fetch_calendar_events, settings)
-        if cal_events:
-            await event_bus.broadcast({"type": "calendar", "events": cal_events})
+        await event_bus.broadcast({"type": "calendar", "events": cal_events})
     except Exception:
         pass
     # Usage / progress stats — send on connect
