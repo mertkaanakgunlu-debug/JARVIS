@@ -4,12 +4,55 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import re
+import unicodedata
 from collections.abc import AsyncIterator
 
 import numpy as np
 import sounddevice as sd
 
 from jarvis.config import Settings
+
+
+# ── TTS text sanitizer ────────────────────────────────────────────────────────
+
+def sanitize_for_tts(text: str) -> str:
+    """Strip markdown and non-speakable characters before sending to TTS.
+
+    edge-tts reads asterisks, hash signs, and emoji descriptions verbatim,
+    producing robot-like output.  This function converts to clean spoken prose.
+    """
+    # Bold / italic
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\*(.+?)\*',     r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__',     r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'_(.+?)_',       r'\1', text, flags=re.DOTALL)
+    # Headers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Inline code
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Markdown links → anchor text only
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    # Bullet / numbered list markers
+    text = re.sub(r'^\s*[-•*]\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    # Horizontal rules
+    text = re.sub(r'^[-=_]{3,}$', '', text, flags=re.MULTILINE)
+    # Emojis (Unicode So + Sm + supplemental pictographs)
+    text = ''.join(
+        c for c in text
+        if not (unicodedata.category(c) in ('So', 'Sm') or ord(c) > 0x1F000)
+    )
+    # Ellipsis → natural pause comma
+    text = text.replace('…', ',').replace('...', ',')
+    # Strip any remaining bare markdown symbols (* # _ ~)
+    text = re.sub(r'[*#_~]+', '', text)
+    # Paragraph breaks → sentence boundary
+    text = re.sub(r'\n{2,}', '. ', text)
+    text = text.replace('\n', ' ')
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 
 # ── Exit phrase detection ─────────────────────────────────────────────────────
@@ -92,11 +135,14 @@ class VoiceEngine:
         """Pre-load the hey_jarvis openwakeword model. Returns True on success."""
         return self._ensure_oww_model()
 
-    def listen_for_wakeword(self, threshold: float = 0.5) -> bool:
+    def listen_for_wakeword(self, threshold: float = 0.5, stop_event=None) -> bool:
         """Block until 'Hey JARVIS' is detected. Returns True on activation.
 
         Falls back silently (returns True immediately) if openwakeword is
         unavailable — the voice loop continues without wake-word gating.
+
+        stop_event: optional threading.Event; if set(), returns False immediately
+        (used by voice_api.py to interrupt wakeword listening on PTT press).
         """
         if not self._ensure_oww_model():
             return True  # graceful degradation
@@ -110,6 +156,8 @@ class VoiceEngine:
             blocksize=_OWW_CHUNK,
         ) as stream:
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    return False  # interrupted by PTT
                 data, _ = stream.read(_OWW_CHUNK)
                 chunk = data.flatten().astype(np.float32) / 32768.0
                 prediction = self._oww_model.predict(chunk)
@@ -186,11 +234,15 @@ class VoiceEngine:
             buffer += chunk
             stripped = buffer.rstrip()
             if stripped and stripped[-1] in ".?!\n":
-                await queue.put(buffer.strip())
+                clean = sanitize_for_tts(buffer.strip())
+                if clean:
+                    await queue.put(clean)
                 buffer = ""
 
         if buffer.strip():
-            await queue.put(buffer.strip())
+            clean = sanitize_for_tts(buffer.strip())
+            if clean:
+                await queue.put(clean)
 
         await queue.put(None)
         await player_task

@@ -266,6 +266,27 @@ def _fetch_vault_entries(agent) -> list:
         return []
 
 
+def _build_usage_stats(agent) -> dict | None:
+    """Build a progress event dict from the agent's session usage tracker."""
+    try:
+        s = agent.usage._session
+        total_turns = s.get("flash_turns", 0) + s.get("pro_turns", 0)
+        cost        = s.get("cost_usd", 0.0)
+        cost_saved  = cost * 7.0   # rough: local routing saves ~7× vs direct API
+        return {
+            "type":        "progress",
+            "jobsDone":    total_turns,
+            "jobsTotal":   max(total_turns + 1, 1),
+            "tokensIn":    s.get("tokens_in", 0),
+            "tokensOut":   s.get("tokens_out", 0),
+            "cloudSpend":  f"{cost:.4f}",
+            "costSaved":   f"{cost_saved:.4f}",
+        }
+    except Exception as exc:
+        logger.debug("Usage stats error: %s", exc)
+        return None
+
+
 def _build_todo_items(agent) -> list:
     """Fetch top 8 open todos formatted for HUD ProjectTracker."""
     try:
@@ -305,6 +326,11 @@ async def _push_live_data_loop() -> None:
         if items is not None:
             event_bus.todos(items)
 
+        # Usage / progress stats — every 30 s
+        stats = _build_usage_stats(agent)
+        if stats:
+            event_bus.emit(stats)
+
         # Calendar — every ~60 s
         if tick % 2 == 0:
             loop = asyncio.get_event_loop()
@@ -331,6 +357,21 @@ async def live_data_snapshot(agent, settings) -> None:
             "entries": entries,
             "count": agent.memory.count_docs(),
         })
+    except Exception:
+        pass
+    # Calendar — fetch immediately on connect (don't wait 60 s for the loop)
+    try:
+        loop = asyncio.get_event_loop()
+        cal_events = await loop.run_in_executor(None, _fetch_calendar_events, settings)
+        if cal_events:
+            await event_bus.broadcast({"type": "calendar", "events": cal_events})
+    except Exception:
+        pass
+    # Usage / progress stats — send on connect
+    try:
+        stats = _build_usage_stats(agent)
+        if stats:
+            await event_bus.broadcast(stats)
     except Exception:
         pass
 

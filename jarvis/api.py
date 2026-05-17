@@ -28,7 +28,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
+import uuid as _uuid
+
+from fastapi import FastAPI, File, Form, HTTPException, Depends, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -36,6 +38,7 @@ from pydantic import BaseModel
 from jarvis.config import Settings
 from jarvis.agent import JarvisAgent
 from jarvis.ws import event_bus, start_metrics_task, start_live_data_task, live_data_snapshot
+from jarvis.voice_api import start_voice_task, trigger_ptt
 
 # Mobile routers
 from jarvis.api_routers import todos as todos_router
@@ -48,11 +51,16 @@ from jarvis.api_routers import system as system_router
 
 # ── App lifespan ──────────────────────────────────────────────────────────────
 
+_voice_wakeword: bool = False   # set by run_server() before uvicorn starts
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_metrics_task()
     if _agent is not None:
         start_live_data_task(_agent, _settings)
+        if _voice_wakeword:
+            start_voice_task(_agent, _settings, wakeword=True)
     yield
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -196,6 +204,20 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
         event_bus.disconnect(websocket)
 
 
+@app.post("/voice/ptt/start")
+async def voice_ptt_start(request: Request):
+    """Trigger push-to-talk: skip wakeword and listen immediately.
+
+    Called by the HUD when the user presses Alt+Space.
+    Returns 200 if voice loop is active, 503 if voice is not running.
+    """
+    _check_auth(request)
+    ok = trigger_ptt()
+    if not ok:
+        raise HTTPException(status_code=503, detail="Voice loop not running")
+    return {"ok": True}
+
+
 @app.post("/chat")
 async def chat(body: ChatRequest, request: Request):
     _check_auth(request)
@@ -207,13 +229,16 @@ async def chat(body: ChatRequest, request: Request):
         task = executor.submit(body.message)
         return {"async": True, "task_id": task.task_id, "status": task.status}
 
+    event_bus.state("thinking")
     try:
         response, model_label = await agent.chat(
             body.message,
             detected_language=body.language or "en",
         )
     except Exception as e:
+        event_bus.state("idle")
         raise HTTPException(status_code=500, detail=str(e))
+    event_bus.state("idle")
     return ChatResponse(response=response, model=model_label)
 
 
@@ -249,10 +274,92 @@ async def chat_stream(body: ChatRequest, request: Request):
         )
 
     async def _sse_generator() -> AsyncGenerator[str, None]:
+        event_bus.state("thinking")
+        full: list[str] = []
         try:
             async for token in agent.chat_stream(
                 body.message,
                 detected_language=body.language or "en",
+            ):
+                full.append(token)
+                safe = token.replace("\n", "\\n")
+                yield f"data: {safe}\n\n"
+        except Exception as e:
+            event_bus.state("idle")
+            yield f"data: [ERROR] {e}\n\n"
+        else:
+            event_bus.state("idle")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _sse_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+_UPLOAD_DIR = Path("data/uploads")
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
+_PDF_EXTS   = {".pdf"}
+_EXCEL_EXTS = {".xlsx", ".xls"}
+_CSV_EXTS   = {".csv"}
+_WORD_EXTS  = {".docx", ".doc"}
+
+
+def _upload_system_hint(filename: str, saved_path: Path) -> str:
+    """Build an agent-facing file context string."""
+    ext = Path(filename).suffix.lower()
+    if ext in _PDF_EXTS:
+        kind = "PDF document"
+        hint = f'Use the pdf_read or pdf_vision tool on "{saved_path}" to read it.'
+    elif ext in _IMAGE_EXTS:
+        kind = "image"
+        hint = f'Use the pdf_vision tool on "{saved_path}" to analyze it visually.'
+    elif ext in _EXCEL_EXTS:
+        kind = "Excel spreadsheet"
+        hint = f'Use the excel_read tool on "{saved_path}" to read it.'
+    elif ext in _CSV_EXTS:
+        kind = "CSV file"
+        hint = f'Use the csv_read tool on "{saved_path}" to read it.'
+    elif ext in _WORD_EXTS:
+        kind = "Word document"
+        hint = f'Use the file_read tool on "{saved_path}" to read it.'
+    else:
+        kind = "file"
+        hint = f'Use the file_read tool on "{saved_path}" to read it.'
+    return f'[User uploaded a {kind}: "{filename}" — saved at "{saved_path}". {hint}]'
+
+
+@app.post("/chat/upload")
+async def chat_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    query: str = Form(""),
+    language: str = Form(""),
+):
+    """Accept a file + optional text query, stream JARVIS response.
+
+    Saves the file to data/uploads/, injects the path into the agent prompt,
+    and returns a streaming SSE response identical to /chat/stream.
+    """
+    _check_auth(request)
+    agent = get_agent()
+
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "upload").suffix.lower()
+    saved_path = _UPLOAD_DIR / f"{_uuid.uuid4().hex}{suffix}"
+    content = await file.read()
+    saved_path.write_bytes(content)
+
+    file_hint = _upload_system_hint(file.filename or "file", saved_path)
+    user_query = f'{file_hint}\n\n{query.strip()}' if query.strip() else f'{file_hint}\n\nPlease analyze this file.'
+
+    async def _sse() -> AsyncGenerator[str, None]:
+        try:
+            async for token in agent.chat_stream(
+                user_query,
+                detected_language=language or "en",
             ):
                 safe = token.replace("\n", "\\n")
                 yield f"data: {safe}\n\n"
@@ -261,7 +368,7 @@ async def chat_stream(body: ChatRequest, request: Request):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
-        _sse_generator(),
+        _sse(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -291,8 +398,11 @@ async def reset(request: Request):
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-def run_server(settings: Settings, port: int = 8000) -> None:
+def run_server(settings: Settings, port: int = 8000, wakeword: bool = False) -> None:
     """Start the Uvicorn server (blocking)."""
+    global _voice_wakeword
+    _voice_wakeword = wakeword
+
     try:
         import uvicorn
     except ImportError:

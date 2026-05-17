@@ -46,7 +46,7 @@ async def summarize_session(messages: list, settings) -> str:
     body = "\n".join(convo_lines[-40:])  # cap context at last 40 lines
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
+        model=getattr(settings, "triage_model", "gemini-2.5-flash"),
         google_api_key=settings.gemini_api_key,
         max_output_tokens=300,
         temperature=0.2,

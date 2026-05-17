@@ -54,7 +54,7 @@ async def extract_entities(
 
         api_key = settings.gemini_api_key or None
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite",
+            model=getattr(settings, "triage_model", "gemini-2.5-flash"),
             google_api_key=api_key,
             max_output_tokens=512,
         ).with_structured_output(EntityList)

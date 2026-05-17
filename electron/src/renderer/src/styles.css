@@ -348,10 +348,10 @@ svg.wire .arc-bright{ stroke: var(--hud-cyan); fill:none; stroke-width: 1.5;
 @keyframes feedIn{ from{ opacity:0; transform: translateY(2px) } to{ opacity:1 } }
 
 /* transcript bubbles — minimal terminal style */
-.xcript .turn{ display:flex; gap: 8px; margin-bottom: 8px; }
-.xcript .who{ width: 60px; font-size: 9px; letter-spacing:.18em; text-transform:uppercase; color: var(--hud-ink-dim); flex-shrink:0; padding-top:2px }
+.xcript .turn{ display:flex; gap: 10px; margin-bottom: 10px; align-items:flex-start; }
+.xcript .who{ width: 56px; min-width:56px; font-size: 9px; letter-spacing:.12em; text-transform:uppercase; color: var(--hud-ink-dim); flex-shrink:0; padding-top:2px; overflow:hidden; white-space:nowrap; }
 .xcript .who.j{ color: var(--hud-cyan-soft) }
-.xcript .msg{ flex:1; line-height: 1.45; font-size: 11px }
+.xcript .msg{ flex:1; min-width:0; line-height: 1.5; font-size: 11px; word-break:break-word; }
 .xcript .msg.j{ color: var(--hud-cyan-soft) }
 .xcript .caret{ display:inline-block; width:7px; height:12px;
   background: var(--hud-cyan); margin-left:2px; vertical-align:-2px;

@@ -62,7 +62,7 @@ async def analyze_todo(
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite-preview-06-17" if not settings.gemini_api_key else "gemini-2.5-flash",
+            model=getattr(settings, "triage_model", "gemini-2.5-flash"),
             google_api_key=settings.gemini_api_key or None,
         ).with_structured_output(TodoAnalysis)
 

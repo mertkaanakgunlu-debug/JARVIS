@@ -22,6 +22,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from jarvis.config import Settings, LANG_NAMES
@@ -36,6 +37,50 @@ from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
 
 
+# ── HUD activity feed callback ────────────────────────────────────────────────
+
+class _HudEventCallback(BaseCallbackHandler):
+    """Non-blocking LangChain callback → pushes tool/LLM events to the HUD feed."""
+
+    def on_tool_start(self, serialized: dict, input_str: Any, **kwargs: Any) -> None:
+        name = serialized.get("name", "tool")
+        if isinstance(input_str, dict):
+            args = ", ".join(f"{k}={str(v)[:60]}" for k, v in list(input_str.items())[:2])
+        else:
+            args = str(input_str)[:120]
+        event_bus.tool_call(f"{name} → {args}", kind="tool")
+
+    def on_tool_end(self, output: Any, **kwargs: Any) -> None:
+        s = str(output)[:160]
+        if any(kw in s.lower() for kw in ("chroma", "vector", "recall", "memory", "retrieved")):
+            event_bus.tool_call(s, kind="note")
+
+    def on_llm_start(self, serialized: dict, prompts: list, **kwargs: Any) -> None:
+        model = (
+            serialized.get("kwargs", {}).get("model_name")
+            or serialized.get("kwargs", {}).get("model")
+            or serialized.get("name", "llm")
+        )
+        event_bus.tool_call(str(model), kind="cloud")
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        try:
+            gen = response.generations[0][0]
+            msg = getattr(gen, "message", None)
+            usage = getattr(msg, "usage_metadata", None) if msg else None
+            if usage:
+                ti   = usage.get("input_tokens", 0)
+                to_  = usage.get("output_tokens", 0)
+                mname = getattr(msg, "response_metadata", {}).get("model_name", "Gemini")
+                if to_ > 0:
+                    spd = f" · {to_:,} tok/s"
+                    event_bus.tool_call(
+                        f"{mname} · {ti:,} in / {to_:,} out{spd}", kind="local"
+                    )
+        except Exception:
+            pass
+
+
 # ── System prompt helpers ──────────────────────────────────────────────────────
 
 _DATA_REPORT_KEYWORDS = frozenset([
@@ -43,29 +88,42 @@ _DATA_REPORT_KEYWORDS = frozenset([
     "chart", "data", "veri", "analiz", "analysis", "hw", "odev", "ödev",
 ])
 
-_PRO_KEYWORDS = frozenset([
-    "analyze", "analiz", "research", "araştır", "compare", "karşılaştır",
-    "explain", "açıkla", "report", "rapor", "summarize", "özetle",
-    "investigate", "incele", "calculate", "hesapla", "derive", "prove",
-    "deep", "derin", "comprehensive", "kapsamlı", "detailed", "ayrıntılı",
+_FLASH_TRIVIAL_SIGNALS = frozenset([
+    # Pure status lookups — no reasoning required
+    "hava", "weather", "saat kaç", "what time", "tarih ne", "what date",
+    "merhaba", "hello", "hi", "hey", "selam", "naber", "nasılsın",
+    "tamam", "ok", "teşekkür", "thanks", "thank you", "sağ ol",
 ])
-_HEAVY_EXTS = frozenset(["pdf", "xlsx", "xls", "csv", "docx", "tex"])
+
+_ANALYSIS_SIGNALS = frozenset([
+    # Any of these → definitely Pro
+    "analiz", "analyze", "araştır", "research", "karşılaştır", "compare",
+    "açıkla", "explain", "özetle", "summarize", "incele", "investigate",
+    "hesapla", "calculate", "derive", "prove", "derin", "deep",
+    "kapsamlı", "comprehensive", "ayrıntılı", "detailed", "rapor", "report",
+    "pdf", "xlsx", "xls", "csv", "docx",
+    "neden", "why", "nasıl", "how", "ne zaman", "when",
+    "bugün ne var", "bugün", "today", "takvim", "calendar",
+    "görevlerim", "todo", "yapılacak", "mail", "e-posta", "email",
+    "spotify", "çal", "play", "drive", "dosya", "file",
+])
 
 
-def _is_complex_query(query: str, needs_planning: bool) -> bool:
+def _is_trivially_simple(query: str, needs_planning: bool) -> bool:
+    """Return True only for queries so simple that Flash is fully adequate.
+
+    Pro is the default; this is the narrow exception path.
+    Criteria: very short query, no analysis/tool signals, pure social/status.
+    """
     if needs_planning:
-        return True
-    q = query.lower()
+        return False
+    q = query.lower().strip()
     words = q.split()
-    if len(words) > 50:
-        return True
-    has_file = any(ext in q for ext in _HEAVY_EXTS)
-    has_kw = any(kw in q for kw in _PRO_KEYWORDS)
-    if has_file and has_kw:
-        return True
-    if len(words) > 30 and has_kw:
-        return True
-    return False
+    if len(words) > 8:
+        return False
+    if any(sig in q for sig in _ANALYSIS_SIGNALS):
+        return False
+    return any(sig in q for sig in _FLASH_TRIVIAL_SIGNALS)
 
 
 def _build_env_block(workspace: Path) -> str:
@@ -370,7 +428,7 @@ class JarvisAgent:
         """Run one turn. Returns (response_text, model_label)."""
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
-        use_pro_agent = _is_complex_query(clean_input, needs_planning)
+        use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
 
         memory_ctx = self.memory.recall(clean_input, n=3)
         past_sessions = self.memory.recall_summaries(clean_input, n=3)
@@ -403,9 +461,11 @@ class JarvisAgent:
             "critic_verdict": "",
             "critique": "",
         }
-        config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
+        config = {
+            "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
+            "callbacks": [_HudEventCallback()],
+        }
 
-        event_bus.message("u", clean_input)
         event_bus.state("thinking")
 
         try:
@@ -413,12 +473,12 @@ class JarvisAgent:
         except Exception as exc:
             msg = str(exc)
             if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
-                print(f"\n[JARVIS] Quota hit — falling back to AI Studio Flash-Lite.")
+                print(f"\n[JARVIS] Quota hit — falling back to AI Studio Flash.")
                 self._using_fallback = True
                 import copy
                 fb_settings = copy.copy(self.settings)
                 fb_settings.cloud_tier = "aistudio"
-                fb_settings.cloud_model = "gemini-2.5-flash-lite"
+                fb_settings.cloud_model = self.settings.cloud_model_fallback
                 self._graph = build_graph(fb_settings, self.workspace, self.memory, self._checkpointer)
                 result = await self._graph.ainvoke(state, config=config)
             else:
@@ -451,7 +511,6 @@ class JarvisAgent:
         self._schedule_entity_extraction(clean_input, response)
 
         event_bus.state("speaking")
-        event_bus.message("j", response)
         event_bus.state("idle")
 
         return response, self.current_model_label
@@ -483,7 +542,7 @@ class JarvisAgent:
         """Stream one turn token-by-token. Yields text deltas for voice.speak_stream()."""
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
-        use_pro_agent = _is_complex_query(clean_input, needs_planning)
+        use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
 
         memory_ctx = self.memory.recall(clean_input, n=3)
         past_sessions = self.memory.recall_summaries(clean_input, n=3)
@@ -516,9 +575,11 @@ class JarvisAgent:
             "critic_verdict": "",
             "critique": "",
         }
-        config = {"configurable": {"thread_id": f"{self.session_id}-t{self._turn}"}}
+        config = {
+            "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
+            "callbacks": [_HudEventCallback()],
+        }
 
-        event_bus.message("u", clean_input)
         event_bus.state("thinking")
 
         chunks: list[str] = []
@@ -574,5 +635,4 @@ class JarvisAgent:
 
         self._schedule_entity_extraction(clean_input, full_response)
 
-        event_bus.message("j", full_response)
         event_bus.state("idle")
