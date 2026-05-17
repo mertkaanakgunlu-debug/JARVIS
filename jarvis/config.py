@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     # Faz 9: Google Calendar (OAuth 2.0 desktop credentials JSON from console.cloud.google.com)
     google_calendar_creds_file: str = "data/calendar_credentials.json"
+    calendar_timezone: str = "Europe/Istanbul"  # IANA timezone for event create/update
 
     # Faz 9: REST API server (python -m jarvis --api)
     jarvis_api_key: str = ""    # set in .env; empty = auth disabled (local-only)

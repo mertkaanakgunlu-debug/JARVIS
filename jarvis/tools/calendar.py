@@ -213,28 +213,32 @@ def calendar_control(
             if not title or not date:
                 return "[Calendar] 'title' and 'date' are required to create an event."
 
+            tz_name = getattr(settings, "calendar_timezone", "Europe/Istanbul")
             start_dt = _parse_date(date)
             if time:
                 h, m = _parse_time(time)
                 start_dt = start_dt.replace(hour=h, minute=m)
             end_dt = start_dt + timedelta(minutes=duration_minutes)
 
-            # All-day event if no time given
+            # Naive datetime string (no UTC offset) + explicit timeZone → Google Calendar
+            # stores the event in the user's local timezone, not UTC.
             if not time:
                 event_body = {
                     "summary": title,
                     "description": description,
                     "location": location,
-                    "start": {"date": start_dt.strftime("%Y-%m-%d"), "timeZone": "UTC"},
-                    "end": {"date": end_dt.strftime("%Y-%m-%d"), "timeZone": "UTC"},
+                    "start": {"date": start_dt.strftime("%Y-%m-%d")},
+                    "end": {"date": end_dt.strftime("%Y-%m-%d")},
                 }
             else:
+                dt_str  = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
+                end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
                 event_body = {
                     "summary": title,
                     "description": description,
                     "location": location,
-                    "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
-                    "end": {"dateTime": end_dt.isoformat(), "timeZone": "UTC"},
+                    "start": {"dateTime": dt_str,  "timeZone": tz_name},
+                    "end":   {"dateTime": end_str, "timeZone": tz_name},
                 }
 
             created = service.events().insert(calendarId="primary", body=event_body).execute()
@@ -292,17 +296,18 @@ def calendar_control(
             if location:
                 ev["location"] = location
             if date:
+                tz_name = getattr(settings, "calendar_timezone", "Europe/Istanbul")
                 start_dt = _parse_date(date)
                 if time:
                     h, m = _parse_time(time)
                     start_dt = start_dt.replace(hour=h, minute=m)
                 end_dt = start_dt + timedelta(minutes=duration_minutes)
                 if time:
-                    ev["start"] = {"dateTime": start_dt.isoformat(), "timeZone": "UTC"}
-                    ev["end"] = {"dateTime": end_dt.isoformat(), "timeZone": "UTC"}
+                    ev["start"] = {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": tz_name}
+                    ev["end"]   = {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),   "timeZone": tz_name}
                 else:
-                    ev["start"] = {"date": start_dt.strftime("%Y-%m-%d"), "timeZone": "UTC"}
-                    ev["end"] = {"date": end_dt.strftime("%Y-%m-%d"), "timeZone": "UTC"}
+                    ev["start"] = {"date": start_dt.strftime("%Y-%m-%d")}
+                    ev["end"]   = {"date": end_dt.strftime("%Y-%m-%d")}
 
             updated = service.events().update(calendarId="primary", eventId=event_id, body=ev).execute()
             new_title = updated.get("summary", "")
