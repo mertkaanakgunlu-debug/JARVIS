@@ -315,7 +315,11 @@ def _upload_system_hint(filename: str, saved_path: Path) -> str:
         hint = f'Use the pdf_read or pdf_vision tool on "{saved_path}" to read it.'
     elif ext in _IMAGE_EXTS:
         kind = "image"
-        hint = f'Use the pdf_vision tool on "{saved_path}" to analyze it visually.'
+        hint = (
+            f'MANDATORY: call pdf_vision("{saved_path}", question="...") IMMEDIATELY — '
+            f'this tool fully supports PNG, JPG, WEBP, GIF, BMP images. '
+            f'Do NOT say you cannot process images. Do NOT skip this tool call.'
+        )
     elif ext in _EXCEL_EXTS:
         kind = "Excel spreadsheet"
         hint = f'Use the excel_read tool on "{saved_path}" to read it.'
