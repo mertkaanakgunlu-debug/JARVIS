@@ -20,7 +20,22 @@ function jarvisRoot() {
   return join(app.getAppPath(), '..')
 }
 
-function startPythonBackend() {
+function isPortInUse(port) {
+  return new Promise(resolve => {
+    const req = http.get(`http://127.0.0.1:${port}/health`, res => {
+      resolve(res.statusCode === 200)
+    })
+    req.on('error', () => resolve(false))
+    req.end()
+  })
+}
+
+async function startPythonBackend() {
+  const port = 8000
+  if (await isPortInUse(port)) {
+    console.log('[jarvis:main] Backend already running on port', port, '— skipping spawn')
+    return
+  }
   const root = jarvisRoot()
   const pyExe = join(root, '.venv', 'Scripts', 'python.exe')
   if (!existsSync(pyExe)) {
@@ -30,7 +45,7 @@ function startPythonBackend() {
   console.log('[jarvis:main] Starting Python backend…')
   pythonProcess = spawn(pyExe, ['-m', 'jarvis', '--api', '--monitor', '--wakeword'], {
     cwd: root,
-    windowsHide: true,   // no console popup on Windows
+    windowsHide: true,
     env: { ...process.env },
   })
   pythonProcess.stdout.on('data', d => process.stdout.write('[py] ' + d))
