@@ -6,7 +6,7 @@
  *   thinking/working → yellow (#FFC857)
  *   speaking → red (#FF5577)
  */
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import './styles.css'
 import JarvisOrb, { OrbitalRings, VoiceBars } from './components/JarvisOrb'
 import {
@@ -157,9 +157,137 @@ const TRANSCRIPT_BY_STATE = {
   ],
 }
 
+// ── Drop overlay ──────────────────────────────────────────────────────────────
+function DropOverlay({ file, query, onQueryChange, onSend, onDismiss }) {
+  const ext = file ? file.split('.').pop().toUpperCase() : ''
+  const name = file ? file.split(/[\\/]/).pop() : ''
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: 'rgba(0,0,0,.82)',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center', gap: 16,
+    }}>
+      <div style={{
+        border: '1px solid var(--hud-cyan)', borderRadius: 12,
+        padding: '28px 32px', maxWidth: 520, width: '90%',
+        background: 'rgba(0,8,16,.96)',
+        boxShadow: 'var(--hud-glow)',
+      }}>
+        <div style={{ fontSize: 9, letterSpacing: '.22em', color: 'var(--hud-cyan)', marginBottom: 12 }}>
+          // FILE ATTACHED
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
+          <span style={{
+            fontSize: 9, padding: '2px 7px', borderRadius: 4,
+            border: '1px solid var(--hud-cyan)', color: 'var(--hud-cyan)',
+            letterSpacing: '.14em',
+          }}>{ext}</span>
+          <span style={{ color: 'var(--hud-cyan-soft)', fontSize: 12, wordBreak: 'break-all' }}>{name}</span>
+        </div>
+        <input
+          autoFocus
+          value={query}
+          onChange={e => onQueryChange(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') onSend(); if (e.key === 'Escape') onDismiss(); }}
+          placeholder="Dosya hakkında bir soru sor, ya da Enter ile analiz başlat…"
+          style={{
+            width: '100%', background: 'rgba(255,255,255,.04)',
+            border: '1px solid var(--hud-line)', borderRadius: 8,
+            color: 'var(--hud-cyan-soft)', fontSize: 12,
+            padding: '8px 12px', outline: 'none', boxSizing: 'border-box',
+            marginBottom: 14, letterSpacing: '.03em',
+          }}
+        />
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button onClick={onDismiss} style={{
+            background: 'transparent', border: '1px solid var(--hud-line-dim)',
+            color: 'var(--hud-line)', borderRadius: 6, padding: '5px 14px',
+            cursor: 'pointer', fontSize: 10, letterSpacing: '.1em',
+          }}>DISMISS</button>
+          <button onClick={onSend} style={{
+            background: 'var(--hud-cyan)', border: 'none',
+            color: '#000', borderRadius: 6, padding: '5px 18px',
+            cursor: 'pointer', fontSize: 10, letterSpacing: '.1em', fontWeight: 700,
+          }}>ANALYZE</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Drop response panel (streaming SSE result) ────────────────────────────────
+function DropResponseOverlay({ text, done, onDismiss }) {
+  const endRef = useRef(null)
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [text])
+  return (
+    <div style={{
+      position: 'fixed', bottom: 32, right: 32, zIndex: 9997,
+      width: 420, maxHeight: 340,
+      background: 'rgba(0,8,16,.97)',
+      border: '1px solid var(--hud-cyan)',
+      borderRadius: 12,
+      boxShadow: 'var(--hud-glow)',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '8px 14px', borderBottom: '1px solid var(--hud-line-dim)',
+      }}>
+        <span style={{ fontSize: 9, letterSpacing: '.22em', color: 'var(--hud-cyan)' }}>
+          {done ? '// JARVIS' : '// JARVIS · ANALYZING…'}
+        </span>
+        {done && (
+          <button onClick={onDismiss} style={{
+            background: 'transparent', border: 'none',
+            color: 'var(--hud-line)', cursor: 'pointer', fontSize: 14, lineHeight: 1,
+          }}>×</button>
+        )}
+      </div>
+      <div style={{
+        padding: '10px 14px', overflowY: 'auto', flex: 1,
+        fontSize: 11, color: 'var(--hud-cyan-soft)',
+        lineHeight: 1.6, letterSpacing: '.02em', whiteSpace: 'pre-wrap',
+      }}>
+        {text || <span style={{ color: 'var(--hud-line)', fontStyle: 'italic' }}>…</span>}
+        <div ref={endRef} />
+      </div>
+    </div>
+  )
+}
+
+// ── Drag-hint overlay (while file is hovering) ────────────────────────────────
+function DragHint() {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9998,
+      border: '2px dashed var(--hud-cyan)',
+      background: 'rgba(0,20,32,.65)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      pointerEvents: 'none',
+    }}>
+      <span style={{ fontSize: 11, letterSpacing: '.3em', color: 'var(--hud-cyan)' }}>
+        DROP FILE TO ANALYZE
+      </span>
+    </div>
+  )
+}
+
 export default function App() {
   const [apiUrl, setApiUrl] = useState(null)
   const [accent, setAccent]   = useState(STATE_ACCENT.idle)
+  const [dragging, setDragging] = useState(false)
+  const [dropFile, setDropFile] = useState(null)     // native path string
+  const [dropQuery, setDropQuery] = useState('')
+  const [dropResponse, setDropResponse] = useState(null) // {text, done}
+  const dragCounter = useRef(0)
+
+  // Local chat messages (typed via ChatBar); merged with WS transcript for display
+  const [localChat, setLocalChat] = useState([])
+  const [chatBusy, setChatBusy]   = useState(false)
+  const addLocalMessage = useCallback((msg) => {
+    setLocalChat(prev => [...prev.slice(-40), msg])
+  }, [])
 
   // Get API URL from Electron main process
   useEffect(() => {
@@ -168,6 +296,22 @@ export default function App() {
     if (!window.jarvis) setApiUrl('http://127.0.0.1:8000')
     return () => window.jarvis?.removeAllListeners('config')
   }, [])
+
+  // Space → Push-to-Talk: tell the voice loop to listen immediately
+  // (ignored when a text input / textarea is focused so ChatBar still works)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.code !== 'Space' || e.altKey || e.ctrlKey || e.metaKey) return
+      const tag = document.activeElement?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      e.preventDefault()
+      if (apiUrl) {
+        fetch(`${apiUrl}/voice/ptt/start`, { method: 'POST' }).catch(() => {})
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [apiUrl])
 
   // Live data from WebSocket
   const { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos } =
@@ -185,6 +329,68 @@ export default function App() {
     applyAccent(accent, GRID_INTENSITY)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // ── Drag-and-drop handlers ───────────────────────────────────────────────────
+  const handleDragEnter = useCallback(e => {
+    e.preventDefault()
+    dragCounter.current++
+    if (e.dataTransfer.types.includes('Files')) setDragging(true)
+  }, [])
+  const handleDragLeave = useCallback(e => {
+    e.preventDefault()
+    dragCounter.current--
+    if (dragCounter.current === 0) setDragging(false)
+  }, [])
+  const handleDragOver = useCallback(e => { e.preventDefault() }, [])
+  const handleDrop = useCallback(e => {
+    e.preventDefault()
+    dragCounter.current = 0
+    setDragging(false)
+    const f = e.dataTransfer.files[0]
+    if (!f) return
+    setDropFile(f)
+    setDropQuery('')
+  }, [])
+
+  const sendDroppedFile = useCallback(async () => {
+    if (!dropFile || !apiUrl) return
+
+    const formData = new FormData()
+    formData.append('file', dropFile)
+    formData.append('query', dropQuery.trim())
+    formData.append('language', 'tr')
+
+    setDropFile(null)
+    setDropQuery('')
+    setDropResponse({ text: '', done: false })
+
+    try {
+      const resp = await fetch(`${apiUrl}/chat/upload`, {
+        method: 'POST',
+        body: formData,
+      })
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop()
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6)
+          if (data === '[DONE]') { setDropResponse(r => ({ ...r, done: true })); return }
+          if (data.startsWith('[ERROR]')) { setDropResponse(r => ({ text: r.text + data.slice(7), done: true })); return }
+          const token = data.replace(/\\n/g, '\n')
+          setDropResponse(r => ({ ...r, text: r.text + token }))
+        }
+      }
+    } catch (e) {
+      setDropResponse({ text: `Hata: ${e.message}`, done: true })
+    }
+  }, [dropFile, dropQuery, apiUrl])
 
   // Fake data fallback (active when disconnected)
   const fakeMic      = useFakeMic(state)
@@ -217,14 +423,41 @@ export default function App() {
   const vaultEntries    = connected && vaultData.entries.length ? vaultData.entries : PLACEHOLDER_VAULT_ENTRIES
   const vaultCount      = connected ? vaultData.count : 2847
   const displayTask     = (connected && task.name) ? task : TASK_BY_STATE[state] || TASK_BY_STATE.idle
-  const displayTranscript = (connected && transcript.length) ? transcript : (TRANSCRIPT_BY_STATE[state] || [])
+  // Merge WS voice messages + locally typed chat messages; fall back to placeholder
+  const mergedMessages    = [...transcript, ...localChat]
+  const displayTranscript = mergedMessages.length > 0
+    ? mergedMessages
+    : (TRANSCRIPT_BY_STATE[state] || [])
 
-  // Progress: use WS data or placeholders
-  const cloudSpend = progress.cloudSpend ?? '0.47'
-  const costSaved  = progress.costSaved  ?? '4.18'
+  // Progress: use WS data or zeroes (no fake placeholders)
+  const cloudSpend = progress.cloudSpend ?? '0.0000'
+  const costSaved  = progress.costSaved  ?? '0.0000'
 
   return (
-    <>
+    <div
+      style={{ position: 'relative', width: '100%', height: '100%' }}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {dragging && <DragHint />}
+      {dropFile && (
+        <DropOverlay
+          file={dropFile.name ?? dropFile}
+          query={dropQuery}
+          onQueryChange={setDropQuery}
+          onSend={sendDroppedFile}
+          onDismiss={() => { setDropFile(null); setDropQuery('') }}
+        />
+      )}
+      {dropResponse && (
+        <DropResponseOverlay
+          text={dropResponse.text}
+          done={dropResponse.done}
+          onDismiss={() => setDropResponse(null)}
+        />
+      )}
       <div className="hud-grid" />
       <div className="hud-scan" />
 
@@ -277,9 +510,9 @@ export default function App() {
         </div>
         <div className="slot-r2" style={{ display: 'flex', minHeight: 0 }}>
           <ProgressToday
-            jobsDone={progress.jobsDone || 11} jobsTotal={progress.jobsTotal || 14}
+            jobsDone={progress.jobsDone ?? 0} jobsTotal={progress.jobsTotal || 1}
             runtime={progress.runtime || uptime}
-            tokensIn={progress.tokensIn || 184320} tokensOut={progress.tokensOut || 62870}
+            tokensIn={progress.tokensIn ?? 0} tokensOut={progress.tokensOut ?? 0}
             cloudSpend={cloudSpend} costSaved={costSaved}
           />
         </div>
@@ -303,10 +536,13 @@ export default function App() {
         <BottomBar
           state={state} micLevel={micLevel} latency={met.latency}
           vaultCount={vaultCount} uptime={uptime}
+          apiUrl={apiUrl}
+          onMessage={addLocalMessage}
+          busy={chatBusy}
+          onBusy={setChatBusy}
+          onPickFile={f => { setDropFile(f); setDropQuery('') }}
         />
       </div>
-
-      {/* Float orb removed — the separate widget window serves this purpose */}
-    </>
+    </div>
   )
 }

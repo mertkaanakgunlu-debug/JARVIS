@@ -2,7 +2,7 @@
  * HudPanels — all wireframe panel components for the JARVIS HUD.
  * Ported from the Claude Design prototype (hud-panels.jsx).
  */
-import React, { useRef, useEffect } from 'react'
+import React, { useRef, useEffect, useState, useCallback } from 'react'
 
 // ── Panel chrome ──────────────────────────────────────────────────────────────
 export function Panel({ title, id, status = 'live', live = true, children, scroll = false }) {
@@ -302,7 +302,7 @@ export function Transcript({ turns = [], typing = false }) {
       <div className="xcript">
         {turns.map((t, i) => (
           <div key={i} className="turn">
-            <span className={`who${t.who === 'j' ? ' j' : ''}`}>{t.who === 'j' ? 'J.A.R.V.I.S' : 'USER'}</span>
+            <span className={`who${t.who === 'j' ? ' j' : ''}`}>{t.who === 'j' ? 'JARVIS' : 'USER'}</span>
             <span className={`msg${t.who === 'j' ? ' j' : ''}`}>
               {t.text}
               {i === turns.length - 1 && typing && <span className="caret" />}
@@ -353,28 +353,144 @@ export function TopBar({ state, clock, onClose }) {
 }
 
 // ── Bottom Bar ────────────────────────────────────────────────────────────────
-export function BottomBar({ state, micLevel, latency, vaultCount = 0, uptime = '00:00:00' }) {
+export function BottomBar({
+  state, micLevel, latency, vaultCount = 0, uptime = '00:00:00',
+  apiUrl, onMessage, busy = false, onBusy, onPickFile,
+}) {
+  const [value, setValue] = useState('')
+  const fileInputRef = useRef(null)
+
+  const send = useCallback(async () => {
+    const msg = value.trim()
+    if (!msg || busy || !apiUrl) return
+    setValue('')
+    onBusy?.(true)
+    onMessage?.({ who: 'u', text: msg })
+
+    let full = ''
+    try {
+      const resp = await fetch(`${apiUrl}/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg, language: '' }),
+      })
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value: chunk } = await reader.read()
+        if (done) break
+        buf += decoder.decode(chunk, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop()
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6)
+          if (data === '[DONE]') { onMessage?.({ who: 'j', text: full }); onBusy?.(false); return }
+          if (data.startsWith('[ERROR]')) { onMessage?.({ who: 'j', text: '⚠ ' + data.slice(7) }); onBusy?.(false); return }
+          full += data.replace(/\\n/g, '\n')
+        }
+      }
+    } catch {
+      onMessage?.({ who: 'j', text: '⚠ Connection error' })
+    }
+    if (full) onMessage?.({ who: 'j', text: full })
+    onBusy?.(false)
+  }, [value, busy, apiUrl, onMessage, onBusy])
+
   return (
     <div className="bar bot slot-bot">
-      <span className="dim">VOICE I/O</span>
-      <span className={state === 'listening' ? 'cyan glow' : 'dim'}>● MIC</span>
-      <span className={state === 'speaking'  ? 'cyan glow' : 'dim'}>● TTS</span>
-      <div style={{ width: 120, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span className="dim" style={{ fontSize: 9 }}>LEVEL</span>
+      {/* Voice I/O status */}
+      <span className={state === 'listening' ? 'cyan glow' : 'dim'} style={{ fontSize: 9 }}>● MIC</span>
+      <span className={state === 'speaking'  ? 'cyan glow' : 'dim'} style={{ fontSize: 9 }}>● TTS</span>
+      <div style={{ width: 80, display: 'flex', alignItems: 'center', gap: 6 }}>
         <div className="meter" style={{ flex: 1 }}>
-          {Array.from({ length: 18 }).map((_, i) => (
-            <div key={i} className={`seg${i < Math.round(micLevel * 18) ? ' on' : ''}`} />
+          {Array.from({ length: 12 }).map((_, i) => (
+            <div key={i} className={`seg${i < Math.round(micLevel * 12) ? ' on' : ''}`} />
           ))}
         </div>
       </div>
       <span className="sep" />
-      <span className="dim">RTT</span><span className="cyan numeric">{latency}ms</span>
+      <span className="dim" style={{ fontSize: 9 }}>RTT</span>
+      <span className="cyan numeric" style={{ fontSize: 10 }}>{latency}ms</span>
       <span className="sep" />
-      <span className="dim">VAULT</span><span className="cyan">{vaultCount.toLocaleString()} vectors</span>
+      <span className="dim" style={{ fontSize: 9 }}>VAULT</span>
+      <span className="cyan" style={{ fontSize: 10 }}>{vaultCount.toLocaleString()}v</span>
       <span className="sep" />
-      <span className="dim">UPTIME</span><span className="cyan numeric">{uptime}</span>
-      <span className="grow" />
-      <span className="dim">↑/↓ MODULES   ⌥ SPACE PUSH-TO-TALK   ESC DISMISS</span>
+      <span className="dim" style={{ fontSize: 9 }}>UPTIME</span>
+      <span className="cyan numeric" style={{ fontSize: 10 }}>{uptime}</span>
+      <span className="sep" />
+
+      {/* Inline chat input — grows to fill remaining width */}
+      <input
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+        placeholder={busy ? '// PROCESSING…' : '// ENTER COMMAND  ·  SPACE = VOICE PTT'}
+        disabled={busy}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: 'rgba(0,10,20,.85)',
+          border: '1px solid var(--hud-line-dim)',
+          borderRadius: 4,
+          color: 'var(--hud-cyan-soft)',
+          fontSize: 10,
+          padding: '4px 10px',
+          outline: 'none',
+          letterSpacing: '.04em',
+          fontFamily: '"Share Tech Mono", monospace',
+          opacity: busy ? 0.6 : 1,
+        }}
+      />
+      <button
+        onClick={send}
+        disabled={busy || !value.trim()}
+        style={{
+          flexShrink: 0,
+          background: 'transparent',
+          border: `1px solid ${(busy || !value.trim()) ? 'var(--hud-line-dim)' : 'var(--hud-cyan)'}`,
+          color: (busy || !value.trim()) ? 'var(--hud-ink-faint)' : 'var(--hud-cyan)',
+          borderRadius: 4,
+          padding: '3px 12px',
+          cursor: (busy || !value.trim()) ? 'default' : 'pointer',
+          fontSize: 9,
+          letterSpacing: '.14em',
+          fontWeight: 700,
+          fontFamily: '"Share Tech Mono", monospace',
+          transition: 'color .15s, border-color .15s',
+        }}
+      >{busy ? '…' : 'EXEC'}</button>
+
+      {/* File upload button */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        style={{ display: 'none' }}
+        onChange={e => {
+          const f = e.target.files?.[0]
+          if (f) onPickFile?.(f)
+          e.target.value = ''
+        }}
+      />
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        disabled={busy}
+        title="Dosya yükle"
+        style={{
+          flexShrink: 0,
+          background: 'transparent',
+          border: `1px solid ${busy ? 'var(--hud-line-dim)' : 'var(--hud-line)'}`,
+          color: busy ? 'var(--hud-ink-faint)' : 'var(--hud-cyan-soft)',
+          borderRadius: 4,
+          padding: '3px 10px',
+          cursor: busy ? 'default' : 'pointer',
+          fontSize: 9,
+          letterSpacing: '.14em',
+          fontFamily: '"Share Tech Mono", monospace',
+          transition: 'color .15s, border-color .15s',
+        }}
+      >↑ FILE</button>
     </div>
   )
 }
