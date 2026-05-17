@@ -27,9 +27,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     local_model: str = "qwen2.5:7b-instruct"
     embed_model: str = "nomic-embed-text"
-    cloud_model: str = "gemini-2.5-flash-lite"   # 1000 RPD free tier; stronger models exhausted in testing
-    cloud_model_pro: str = "gemini-2.5-pro"     # pro tier default; override via CLOUD_MODEL_PRO
-    cloud_model_fallback: str = "gemini-2.5-flash-lite"  # 1000 RPD on free tier (vs 20 for flash)
+    cloud_model: str = "gemini-2.5-pro"          # primary model for all user-facing responses
+    cloud_model_pro: str = "gemini-2.5-pro"     # critic/planner (same tier, kept for Vertex compat)
+    cloud_model_fallback: str = "gemini-2.5-flash"  # quota exhaustion fallback
+    triage_model: str = "gemini-2.5-flash"      # cheap model for bulk reading/classification pipelines
     cloud_tier: str = "flash"  # "vertex" | "aistudio" | "flash" (legacy alias)
 
     # Vertex AI (Google Cloud credits — ADC via `gcloud auth application-default login`)

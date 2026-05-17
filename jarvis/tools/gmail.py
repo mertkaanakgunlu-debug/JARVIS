@@ -26,11 +26,13 @@ _SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
 ]
-_TOKEN_FILE = Path("data") / ".gmail_token.json"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_TOKEN_FILE = _PROJECT_ROOT / "data" / ".gmail_token.json"
 
 
 def _get_service(settings: "Settings"):
-    creds_path = Path(settings.google_calendar_creds_file)
+    raw = Path(settings.google_calendar_creds_file)
+    creds_path = raw if raw.is_absolute() else _PROJECT_ROOT / raw
     if not creds_path.exists():
         raise RuntimeError(
             f"Google OAuth credentials not found at '{creds_path}'. "
@@ -41,10 +43,10 @@ def _get_service(settings: "Settings"):
         from google.auth.transport.requests import Request
         from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
-    except ImportError:
+    except ImportError as _ie:
         raise RuntimeError(
-            "Google API packages not installed. Run:\n"
-            "  pip install google-api-python-client google-auth-oauthlib google-auth-httplib2"
+            f"Google API library import error: {_ie}. "
+            "Run: pip install google-api-python-client google-auth-oauthlib google-auth-httplib2"
         )
 
     creds = None

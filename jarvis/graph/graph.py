@@ -61,12 +61,7 @@ def make_llm_fast(settings: "Settings") -> BaseChatModel:
             google_api_key=settings.gemini_api_key or None,
             max_output_tokens=4096,
         )
-        fallback_lite = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite",
-            google_api_key=settings.gemini_api_key or None,
-            max_output_tokens=4096,
-        )
-        return primary.with_fallbacks([fallback_flash, fallback_lite])
+        return primary.with_fallbacks([fallback_flash])
 
     model_id = settings.effective_cloud_model
     return ChatGoogleGenerativeAI(

@@ -31,6 +31,7 @@ from jarvis.tools.deep_research import run_deep_research
 from jarvis.tools.spotify import spotify_control
 from jarvis.tools.calendar import calendar_control
 from jarvis.tools.gmail import gmail_control
+from jarvis.tools.email_triage import triage_emails
 from jarvis.tools.drive import drive_control      # Faz 14
 from jarvis.tools.itu_mail import itu_mail_control    # Faz 15
 from jarvis.tools.finance import finance_control      # Faz 16
@@ -456,6 +457,31 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             max_results=max_results,
             settings=settings,
         )
+
+    # ── Email triage pipeline ─────────────────────────────────────────────────
+
+    @tool
+    def email_triage(query: str, max_emails: int = 20) -> str:
+        """Scan emails with Flash and return only homework/deadline-related ones as structured JSON.
+
+        Use this when the user asks to scan their inbox for assignments, deadlines,
+        or exam dates — e.g. "maillerimi tara, ödev olanları takvime ekle".
+
+        Stage 1 (this tool, Flash): fetches and classifies emails cheaply.
+        Stage 2 (you, Pro): create calendar entries from the returned JSON.
+
+        Args:
+            query:      Gmail search query to pre-filter emails before classification.
+                        Good defaults: "is:unread" or "ödev OR teslim OR deadline OR sınav".
+            max_emails: How many emails to scan (max 30, default 20).
+
+        Returns:
+            JSON string with keys:
+              "scanned"  — total emails checked
+              "homework" — list of objects: {course, assignment, deadline, time,
+                           summary, subject, sender, message_id}
+        """
+        return triage_emails(query=query, max_emails=max_emails, settings=settings)
 
     # ── Faz 13-C: Scheduled tasks ─────────────────────────────────────────────
 
