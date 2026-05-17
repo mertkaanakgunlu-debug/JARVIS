@@ -17,7 +17,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 const RECONNECT_MS = 3000
 
-function useJarvisSocket(apiUrl) {
+function useJarvisSocket(apiUrl, options = {}) {
   const wsUrl = apiUrl ? apiUrl.replace(/^http/, 'ws') + '/ws' : null
 
   const [connected, setConnected]   = useState(false)
@@ -31,9 +31,11 @@ function useJarvisSocket(apiUrl) {
   const [progress, setProgress]     = useState({ jobsDone: 0, jobsTotal: 0, runtime: '00:00:00', tokensIn: 0, tokensOut: 0 })
   const [todos, setTodos]           = useState([])
 
-  const wsRef    = useRef(null)
-  const feedId   = useRef(0)
-  const timerRef = useRef(null)
+  const wsRef           = useRef(null)
+  const feedId          = useRef(0)
+  const timerRef        = useRef(null)
+  const onPanelCtrlRef  = useRef(options.onPanelControl)
+  useEffect(() => { onPanelCtrlRef.current = options.onPanelControl })
 
   const connect = useCallback(() => {
     if (!wsUrl) return
@@ -102,6 +104,10 @@ function useJarvisSocket(apiUrl) {
 
         case 'show_hud':
           window.jarvis?.showHud()
+          break
+
+        case 'panel_control':
+          onPanelCtrlRef.current?.(msg.action, msg.panels)
           break
 
         case 'progress':

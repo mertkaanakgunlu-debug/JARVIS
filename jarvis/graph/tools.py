@@ -458,6 +458,29 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             settings=settings,
         )
 
+    # ── HUD panel control ─────────────────────────────────────────────────────
+
+    @tool
+    def hud_panels(action: str, panels: str = "all") -> str:
+        """Show, hide, or toggle panels in the Electron HUD desktop interface.
+
+        Use when the user says things like:
+        - "tüm panelleri gizle / kapat" → action="hide", panels="all"
+        - "tüm panelleri aç / göster" → action="show", panels="all"
+        - "takvim panelini gizle" → action="hide", panels="schedule"
+        - "telemetry ve conversation'ı kapat" → action="hide", panels="telemetry,conversation"
+        - "sadece conversation ve takvim kalsın" → first hide all, then show those
+
+        action: "show" | "hide" | "toggle"
+        panels: "all"  OR  comma-separated panel keys from:
+                task, subagents, metrics, schedule, progress, projects,
+                telemetry, memory, conversation
+        """
+        targets = [p.strip() for p in panels.split(",") if p.strip()] if panels != "all" else "all"
+        event_bus.panel_control(action, targets)
+        label = "all panels" if panels == "all" else panels
+        return f"[HUD] {action.capitalize()}d: {label}"
+
     # ── Email triage pipeline ─────────────────────────────────────────────────
 
     @tool
@@ -1089,4 +1112,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         finance,                 # Faz 16
         gcp_quota,               # Faz 17
         geo_math,                # Faz 18
+        hud_panels,              # HUD panel control
     ]

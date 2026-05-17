@@ -115,6 +115,10 @@ class JarvisEventBus:
         """Tell Electron to bring the HUD to front (visual output ready)."""
         self.emit({"type": "show_hud"})
 
+    def panel_control(self, action: str, panels) -> None:
+        """Show/hide/toggle HUD panels. panels: 'all' or list of panel name strings."""
+        self.emit({"type": "panel_control", "action": action, "panels": panels})
+
     def session(self, session_id: str, topic: str | None) -> None:
         """Session change event — lets Electron HUD display current session name."""
         self.emit({"type": "session", "id": session_id, "topic": topic})

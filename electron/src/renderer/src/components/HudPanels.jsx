@@ -316,7 +316,31 @@ export function Transcript({ turns = [], typing = false }) {
 }
 
 // ── Top Bar ───────────────────────────────────────────────────────────────────
-export function TopBar({ state, clock, onClose }) {
+const PANEL_DEFS = [
+  { key: 'task',         label: 'Current Task' },
+  { key: 'subagents',    label: 'Active Subagents' },
+  { key: 'metrics',      label: 'System Metrics' },
+  { key: 'schedule',     label: 'Schedule' },
+  { key: 'progress',     label: 'Today Progress' },
+  { key: 'projects',     label: 'Project Tracker' },
+  { key: 'telemetry',    label: 'Telemetry' },
+  { key: 'memory',       label: 'Memory · Vault' },
+  { key: 'conversation', label: 'Conversation' },
+]
+
+export function TopBar({ state, clock, panelVis = {}, onTogglePanel, onSetAllPanels }) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef(null)
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const handler = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [menuOpen])
+
   const stateText = {
     idle:      'STANDBY',
     listening: 'LISTENING',
@@ -324,6 +348,17 @@ export function TopBar({ state, clock, onClose }) {
     thinking:  'REASONING · CLOUD',
     working:   'EXECUTING TASK',
   }[state] || 'STANDBY'
+
+  const btnBase = {
+    background: 'transparent', border: 'none', cursor: 'pointer',
+    fontFamily: 'var(--font-mono)', letterSpacing: '.14em',
+    fontSize: 9, padding: '2px 6px',
+  }
+  const rowStyle = {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '3px 10px', cursor: 'pointer', fontSize: 9,
+    letterSpacing: '.14em', userSelect: 'none',
+  }
 
   return (
     <div className="bar top slot-top" style={{ WebkitAppRegion: 'drag' }}>
@@ -342,8 +377,49 @@ export function TopBar({ state, clock, onClose }) {
       <span className="sep" />
       <span className="dim">{clock.tz}</span>
       <span className="sep" />
-      {/* Window controls (frameless) */}
-      <span style={{ WebkitAppRegion: 'no-drag', display: 'flex', gap: 6, marginLeft: 8 }}>
+      {/* Panels toggle + window close (no-drag zone) */}
+      <span style={{ WebkitAppRegion: 'no-drag', display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8, position: 'relative' }} ref={menuRef}>
+        <button
+          onClick={() => setMenuOpen(o => !o)}
+          style={{ ...btnBase, color: menuOpen ? 'var(--hud-cyan)' : 'var(--hud-line)',
+            border: '1px solid', borderColor: menuOpen ? 'var(--hud-cyan)' : 'var(--hud-line-dim)',
+            borderRadius: 2, padding: '2px 8px' }}
+        >
+          PANELS {menuOpen ? '▴' : '▾'}
+        </button>
+
+        {menuOpen && (
+          <div style={{
+            position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 9999,
+            background: 'rgba(0,8,16,.97)', border: '1px solid var(--hud-line)',
+            minWidth: 176, boxShadow: '0 0 24px rgba(34,211,238,.12)',
+          }}>
+            {PANEL_DEFS.map(({ key, label }) => (
+              <div
+                key={key}
+                onClick={() => onTogglePanel?.(key)}
+                style={{ ...rowStyle, color: panelVis[key] ? 'var(--hud-cyan)' : 'var(--hud-line)' }}
+              >
+                <span style={{ fontSize: 8, width: 10 }}>{panelVis[key] ? '●' : '○'}</span>
+                {label.toUpperCase()}
+              </div>
+            ))}
+            <div style={{ borderTop: '1px solid var(--hud-line-dim)', margin: '3px 0' }} />
+            <div
+              onClick={() => { onSetAllPanels?.(true); setMenuOpen(false) }}
+              style={{ ...rowStyle, color: 'var(--hud-cyan)' }}
+            >
+              <span style={{ fontSize: 8, width: 10 }}>◉</span>SHOW ALL
+            </div>
+            <div
+              onClick={() => { onSetAllPanels?.(false); setMenuOpen(false) }}
+              style={{ ...rowStyle, color: 'var(--hud-line)' }}
+            >
+              <span style={{ fontSize: 8, width: 10 }}>○</span>HIDE ALL
+            </div>
+          </div>
+        )}
+
         <button onClick={() => window.jarvis?.hideHud()}
           style={{ background: 'rgba(239,68,68,.7)', border: 'none', borderRadius: '50%',
             width: 12, height: 12, cursor: 'pointer' }} />

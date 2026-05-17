@@ -282,6 +282,31 @@ export default function App() {
   const [dropResponse, setDropResponse] = useState(null) // {text, done}
   const dragCounter = useRef(0)
 
+  // Panel visibility — all 9 panels, independently togglable
+  const ALL_PANEL_KEYS = ['task','subagents','metrics','schedule','progress','projects','telemetry','memory','conversation']
+  const [panelVis, setPanelVis] = useState(
+    Object.fromEntries(ALL_PANEL_KEYS.map(k => [k, true]))
+  )
+  const togglePanel = useCallback((key) => {
+    setPanelVis(prev => ({ ...prev, [key]: !prev[key] }))
+  }, [])
+  const setAllPanels = useCallback((visible) => {
+    setPanelVis(() => Object.fromEntries(ALL_PANEL_KEYS.map(k => [k, visible])))
+  }, [])
+  const handlePanelControl = useCallback((action, panels) => {
+    const targets = panels === 'all' ? ALL_PANEL_KEYS : (Array.isArray(panels) ? panels : [panels])
+    setPanelVis(prev => {
+      const next = { ...prev }
+      for (const p of targets) {
+        if (!(p in next)) continue
+        if (action === 'show')   next[p] = true
+        else if (action === 'hide')   next[p] = false
+        else if (action === 'toggle') next[p] = !prev[p]
+      }
+      return next
+    })
+  }, [])
+
   // Local chat messages (typed via ChatBar); merged with WS transcript for display
   const [localChat, setLocalChat] = useState([])
   const [chatBusy, setChatBusy]   = useState(false)
@@ -315,7 +340,7 @@ export default function App() {
 
   // Live data from WebSocket
   const { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos } =
-    useJarvisSocket(apiUrl)
+    useJarvisSocket(apiUrl, { onPanelControl: handlePanelControl })
 
   // State → accent: changes color palette when JARVIS switches modes
   useEffect(() => {
@@ -411,7 +436,7 @@ export default function App() {
 
   // Use live data when connected, rich placeholders when offline
   const calendarEvents  = connected ? calEvents : PLACEHOLDER_EVENTS
-  const projects        = connected && todos.length
+  const projects        = connected
     ? todos.map(t => ({
         title: t.title,
         progress: Math.round((t.priority_score || 0) * 100),
@@ -464,23 +489,23 @@ export default function App() {
       <div className="hud-stage" data-density="comfy" data-layout="default">
 
         {/* Top bar */}
-        <TopBar state={state} clock={clock} onClose={() => window.jarvis?.hideHud()} />
+        <TopBar state={state} clock={clock} panelVis={panelVis} onTogglePanel={togglePanel} onSetAllPanels={setAllPanels} />
 
         {/* Left column */}
         <div className="slot-l1" style={{ display: 'flex', minHeight: 0 }}>
-          <CurrentTask state={state} taskName={displayTask.name} steps={displayTask.steps} />
+          {panelVis.task && <CurrentTask state={state} taskName={displayTask.name} steps={displayTask.steps} />}
         </div>
         <div className="slot-l2" style={{ display: 'flex', minHeight: 0 }}>
-          <SubagentsPanel active={activeAgents} />
+          {panelVis.subagents && <SubagentsPanel active={activeAgents} />}
         </div>
         <div className="slot-l3" style={{ display: 'flex', minHeight: 0 }}>
-          <SystemMetrics
+          {panelVis.metrics && <SystemMetrics
             cpu={met.cpu} gpu={met.gpu} ram={met.ram} vram={met.vram}
             mic={Math.round(micLevel * 100)}
             voice={state === 'speaking' ? Math.round(micLevel * 100) : 0}
             model={state === 'thinking' ? 'Gemini 2.5 Pro' : 'Gemini 2.5 Flash'}
             latency={met.latency}
-          />
+          />}
         </div>
 
         {/* Center — orb */}
@@ -506,30 +531,30 @@ export default function App() {
 
         {/* Right column */}
         <div className="slot-r1" style={{ display: 'flex', minHeight: 0 }}>
-          <CalendarPanel today={clock.date} events={calendarEvents} />
+          {panelVis.schedule && <CalendarPanel today={clock.date} events={calendarEvents} />}
         </div>
         <div className="slot-r2" style={{ display: 'flex', minHeight: 0 }}>
-          <ProgressToday
+          {panelVis.progress && <ProgressToday
             jobsDone={progress.jobsDone ?? 0} jobsTotal={progress.jobsTotal || 1}
             runtime={progress.runtime || uptime}
             tokensIn={progress.tokensIn ?? 0} tokensOut={progress.tokensOut ?? 0}
             cloudSpend={cloudSpend} costSaved={costSaved}
-          />
+          />}
         </div>
         <div className="slot-r3" style={{ display: 'flex', minHeight: 0 }}>
-          <ProjectTracker projects={projects} live={connected && todos.length > 0} />
+          {panelVis.projects && <ProjectTracker projects={projects} live={connected && todos.length > 0} />}
         </div>
 
         {/* Center-bottom strip */}
         <div className="slot-cb center-bottom-strip">
           <div style={{ display: 'flex', minHeight: 0 }}>
-            <ActivityFeed lines={feed} />
+            {panelVis.telemetry && <ActivityFeed lines={feed} />}
           </div>
           <div style={{ display: 'flex', minHeight: 0 }}>
-            <VaultPanel entries={vaultEntries} chromaCount={vaultCount} />
+            {panelVis.memory && <VaultPanel entries={vaultEntries} chromaCount={vaultCount} />}
           </div>
           <div style={{ display: 'flex', minHeight: 0 }}>
-            <Transcript turns={displayTranscript} typing={state === 'speaking' || state === 'listening'} />
+            {panelVis.conversation && <Transcript turns={displayTranscript} typing={state === 'speaking' || state === 'listening'} />}
           </div>
         </div>
 

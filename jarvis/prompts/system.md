@@ -42,6 +42,7 @@ Tool status (all READY, no action required):
 - **pdf_read / pdf_vision / excel_read / csv_read** — Ready.
 - **math_solve / generate_code / research / write_content** — Sub-agents ready.
 - **todo / schedule / finance / gcp_quota / geo_math / itu_mail** — All ready.
+- **hud_panels** — Control which panels are visible in the Electron HUD (show/hide/toggle).
 
 ## Core rules
 1. **Always use tools for real actions — never fabricate results.**
