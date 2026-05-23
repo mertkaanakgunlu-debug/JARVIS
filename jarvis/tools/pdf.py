@@ -1,7 +1,8 @@
 """PDF extraction — marker-pdf (ML, cached) with pdfplumber fallback.
 
 Cache strategy:
-  {cache_dir}/{stem}_{sha256[:8]}.md
+  {cache_dir}/{stem}_{sha256[:8]}.md          — markdown text
+  {cache_dir}/{stem}_{sha256[:8]}_images/     — extracted PNG figures (marker-pdf only)
   Re-converts only if PDF is newer than the cached .md.
 
 First run with marker-pdf: downloads ~2-3 GB of models to ~/.cache/marker
@@ -11,6 +12,7 @@ First run with marker-pdf: downloads ~2-3 GB of models to ~/.cache/marker
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 from pathlib import Path
 
@@ -59,8 +61,16 @@ def _is_cache_fresh(pdf_path: Path, cached: Path) -> bool:
 
 # ── Conversion backends ────────────────────────────────────────────────────────
 
-def _convert_marker(pdf_path: Path, cache_dir: Path) -> str:
-    """Convert PDF to markdown via marker-pdf and write to cache."""
+def _img_cache_dir(pdf_path: Path, cache_dir: Path) -> Path:
+    key = hashlib.sha256(str(pdf_path.resolve()).encode()).hexdigest()[:8]
+    return cache_dir / f"{pdf_path.stem}_{key}_images"
+
+
+def _convert_marker(pdf_path: Path, cache_dir: Path) -> tuple[str, list[bytes]]:
+    """Convert PDF to markdown + figure PNGs via marker-pdf, write to cache.
+
+    Returns (markdown_text, [png_bytes, ...]).
+    """
     from marker.converters.pdf import PdfConverter
 
     models = _get_models()
@@ -76,7 +86,22 @@ def _convert_marker(pdf_path: Path, cache_dir: Path) -> str:
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     _cache_path(pdf_path, cache_dir).write_text(md, encoding="utf-8")
-    return md
+
+    # Extract and cache figure images
+    img_bytes_list: list[bytes] = []
+    raw_images = getattr(rendered, "images", None) or {}
+    if raw_images:
+        idir = _img_cache_dir(pdf_path, cache_dir)
+        idir.mkdir(parents=True, exist_ok=True)
+        for i, (name, pil_img) in enumerate(raw_images.items()):
+            buf = io.BytesIO()
+            pil_img.save(buf, format="PNG")
+            data = buf.getvalue()
+            img_bytes_list.append(data)
+            safe_name = name.replace("/", "_").replace("\\", "_")
+            (idir / f"{i:03d}_{safe_name}.png").write_bytes(data)
+
+    return md, img_bytes_list
 
 
 def _read_pdfplumber(pdf_path: Path) -> str:
@@ -103,48 +128,75 @@ def _read_pdfplumber(pdf_path: Path) -> str:
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def read_pdf(path: str | Path, cache_dir: Path | None = None) -> str:
-    """Read a PDF and return its content as markdown.
+    """Read a PDF and return its content as markdown (text-only, for tool calls).
 
     Uses marker-pdf (ML-based, structure-preserving) when installed.
     Falls back to pdfplumber (text-only) otherwise.
     Results are cached to {cache_dir} and reused on subsequent calls.
     """
+    md, _ = read_pdf_multimodal(path, cache_dir)
+    return md
+
+
+def read_pdf_multimodal(
+    path: str | Path,
+    cache_dir: Path | None = None,
+    max_images: int = 20,
+) -> tuple[str, list[bytes]]:
+    """Extract a PDF for multimodal use.
+
+    Returns:
+        (markdown_text, [png_bytes, ...])
+
+    markdown_text  — full text + tables as Markdown, truncated at MAX_CHARS.
+    png_bytes list — figures / images extracted by marker-pdf, as PNG bytes.
+                     Empty list when marker-pdf is unavailable or PDF has no figures.
+
+    Results are cached: markdown in {cache_dir}/*.md,
+    figures in {cache_dir}/*_images/*.png.
+    """
     p = Path(path)
     if not p.exists():
-        return f"[ERROR] File not found: {p}"
+        return f"[ERROR] File not found: {p}", []
     if p.suffix.lower() != ".pdf":
-        return f"[ERROR] Not a PDF: {p}"
+        return f"[ERROR] Not a PDF: {p}", []
 
     if cache_dir is None:
         cache_dir = Path("data") / "pdf_cache"
 
-    cached = _cache_path(p, cache_dir)
+    cached_md = _cache_path(p, cache_dir)
+    idir = _img_cache_dir(p, cache_dir)
 
     # ── Cache hit ──────────────────────────────────────────────────────────────
-    if _is_cache_fresh(p, cached):
-        content = cached.read_text(encoding="utf-8")
+    if _is_cache_fresh(p, cached_md):
+        content = cached_md.read_text(encoding="utf-8")
         header = f"[PDF→MD cache hit: {p.name}]\n\n"
         if len(content) > MAX_CHARS:
-            return header + content[:MAX_CHARS] + f"\n\n[TRUNCATED — {len(content):,} chars total, showing first {MAX_CHARS:,}]"
-        return header + content
+            content = content[:MAX_CHARS] + f"\n\n[TRUNCATED — {len(content):,} chars total, showing first {MAX_CHARS:,}]"
+        # Load cached images if present
+        images: list[bytes] = []
+        if idir.exists():
+            for img_path in sorted(idir.glob("*.png"))[:max_images]:
+                images.append(img_path.read_bytes())
+        return header + content, images
 
     # ── marker-pdf conversion ──────────────────────────────────────────────────
     if _marker_available():
         try:
             log.info(f"Converting {p.name} with marker-pdf...")
-            md = _convert_marker(p, cache_dir)
+            md, images = _convert_marker(p, cache_dir)
             header = f"[marker-pdf conversion: {p.name}]\n\n"
             if len(md) > MAX_CHARS:
-                return header + md[:MAX_CHARS] + f"\n\n[TRUNCATED — {len(md):,} chars total, showing first {MAX_CHARS:,}]"
-            return header + md
+                md = md[:MAX_CHARS] + f"\n\n[TRUNCATED — {len(md):,} chars total, showing first {MAX_CHARS:,}]"
+            return header + md, images[:max_images]
         except Exception as exc:
             log.warning(f"marker-pdf failed ({exc}), falling back to pdfplumber.")
 
-    # ── pdfplumber fallback ────────────────────────────────────────────────────
+    # ── pdfplumber fallback (text only) ────────────────────────────────────────
     try:
         text = _read_pdfplumber(p)
         if len(text) > MAX_CHARS:
             text = text[:MAX_CHARS] + f"\n\n[TRUNCATED — showing first {MAX_CHARS:,} chars]"
-        return text
+        return text, []
     except Exception as exc:
-        return f"[ERROR] Could not read PDF: {exc}"
+        return f"[ERROR] Could not read PDF: {exc}", []

@@ -379,18 +379,26 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         days_ahead: int = 7,
         query: str = "",
         event_id: str = "",
+        events_json: str = "",
     ) -> str:
         """Manage Google Calendar events. OAuth is authenticated and ready — call this tool directly.
 
         Actions:
-          list   — show upcoming events (days_ahead window, default 7)
-          create — add a new event to the calendar (title + date required; time optional for all-day)
-          delete — delete by event_id, or by query keyword (finds first match)
-          search — search future events by keyword
-          update — update event fields (event_id required)
+          list         — show upcoming events (days_ahead window, default 7)
+          create       — add ONE event (title + date required; time optional for all-day).
+                         Built-in deduplication: if an identical event already exists at the
+                         same time, returns SKIPPED — no duplicate is created.
+          batch_create — add MULTIPLE events in a SINGLE tool call to prevent duplicates.
+                         ALWAYS use this when adding more than one event (e.g. a schedule,
+                         exam list, meeting series). Pass events_json as a JSON array:
+                         '[{"title":"..","date":"YYYY-MM-DD","time":"HH:MM",
+                           "duration_minutes":120,"description":"..","location":".."},...]'
+          delete       — delete by event_id, or by query keyword (finds first match)
+          search       — search future events by keyword
+          update       — update event fields (event_id required)
 
         Args:
-            action:           list | create | delete | search | update
+            action:           list | create | batch_create | delete | search | update
             title:            Event title (create/update)
             date:             Date — YYYY-MM-DD, DD/MM/YYYY, 'today', 'tomorrow' (create/update)
             time:             Start time HH:MM in 24h (create/update; omit for all-day event)
@@ -400,6 +408,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             days_ahead:       How many days ahead to look (list action, default 7)
             query:            Keyword for search/delete actions
             event_id:         Calendar event ID for delete/update (use search to find it)
+            events_json:      JSON array of event dicts for batch_create action
         """
         return calendar_control(
             action=action,
@@ -412,6 +421,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             days_ahead=days_ahead,
             query=query,
             event_id=event_id,
+            events_json=events_json,
             settings=settings,
         )
 

@@ -62,6 +62,13 @@ async def lifespan(app: FastAPI):
         if _voice_wakeword:
             start_voice_task(_agent, _settings, wakeword=True)
     yield
+    # ── Shutdown: archive current session so next startup begins clean ──────────
+    if _agent is not None:
+        try:
+            import asyncio as _asyncio
+            await _asyncio.get_event_loop().run_in_executor(None, _agent.reset)
+        except Exception as _e:
+            print(f"[lifespan] auto-reset on shutdown failed: {_e}")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -306,20 +313,20 @@ _EXCEL_EXTS = {".xlsx", ".xls"}
 _CSV_EXTS   = {".csv"}
 _WORD_EXTS  = {".docx", ".doc"}
 
+_IMAGE_MIME: dict[str, str] = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png",  ".webp": "image/webp",
+    ".gif": "image/gif",  ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+}
+
 
 def _upload_system_hint(filename: str, saved_path: Path) -> str:
-    """Build an agent-facing file context string."""
+    """Build an agent-facing file context string for non-image files."""
     ext = Path(filename).suffix.lower()
     if ext in _PDF_EXTS:
         kind = "PDF document"
         hint = f'Use the pdf_read or pdf_vision tool on "{saved_path}" to read it.'
-    elif ext in _IMAGE_EXTS:
-        kind = "image"
-        hint = (
-            f'MANDATORY: call pdf_vision("{saved_path}", question="...") IMMEDIATELY — '
-            f'this tool fully supports PNG, JPG, WEBP, GIF, BMP images. '
-            f'Do NOT say you cannot process images. Do NOT skip this tool call.'
-        )
     elif ext in _EXCEL_EXTS:
         kind = "Excel spreadsheet"
         hint = f'Use the excel_read tool on "{saved_path}" to read it.'
@@ -344,25 +351,80 @@ async def chat_upload(
 ):
     """Accept a file + optional text query, stream JARVIS response.
 
-    Saves the file to data/uploads/, injects the path into the agent prompt,
-    and returns a streaming SSE response identical to /chat/stream.
+    Images are sent directly as multimodal content to the LLM — no intermediate
+    tool call required. Other files (PDF, Excel, CSV, Word) are saved to disk
+    and read via the appropriate tool.
     """
     _check_auth(request)
     agent = get_agent()
 
-    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = Path(file.filename or "upload").suffix.lower()
-    saved_path = _UPLOAD_DIR / f"{_uuid.uuid4().hex}{suffix}"
     content = await file.read()
+    suffix = Path(file.filename or "upload").suffix.lower()
+    user_query = query.strip() or "Please analyze this file."
+
+    # ── Images: pass bytes directly — the LLM sees the image natively ──────────
+    if suffix in _IMAGE_EXTS:
+        image_mime = _IMAGE_MIME.get(suffix, "image/png")
+
+        async def _sse_image() -> AsyncGenerator[str, None]:
+            try:
+                async for token in agent.chat_stream(
+                    user_query,
+                    detected_language=language or "en",
+                    image_bytes=content,
+                    image_mime=image_mime,
+                ):
+                    safe = token.replace("\n", "\\n")
+                    yield f"data: {safe}\n\n"
+            except Exception as e:
+                yield f"data: [ERROR] {e}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _sse_image(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ── Save file to disk (needed for all non-image types) ─────────────────────
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    saved_path = _UPLOAD_DIR / f"{_uuid.uuid4().hex}{suffix}"
     saved_path.write_bytes(content)
 
+    # ── PDFs: marker-pdf → markdown + figures → multimodal message ─────────────
+    if suffix in _PDF_EXTS:
+        from jarvis.tools.pdf import read_pdf_multimodal
+
+        md_text, figures = read_pdf_multimodal(saved_path)
+        full_input = f"[PDF: {file.filename or saved_path.name}]\n\n{md_text}\n\n{user_query}"
+
+        async def _sse_pdf() -> AsyncGenerator[str, None]:
+            try:
+                async for token in agent.chat_stream(
+                    full_input,
+                    detected_language=language or "en",
+                    extra_images=figures or None,
+                ):
+                    safe = token.replace("\n", "\\n")
+                    yield f"data: {safe}\n\n"
+            except Exception as e:
+                yield f"data: [ERROR] {e}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _sse_pdf(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ── Other files (Excel, CSV, Word): tool-hint approach ─────────────────────
     file_hint = _upload_system_hint(file.filename or "file", saved_path)
-    user_query = f'{file_hint}\n\n{query.strip()}' if query.strip() else f'{file_hint}\n\nPlease analyze this file.'
+    full_query = f'{file_hint}\n\n{user_query}'
 
     async def _sse() -> AsyncGenerator[str, None]:
         try:
             async for token in agent.chat_stream(
-                user_query,
+                full_query,
                 detected_language=language or "en",
             ):
                 safe = token.replace("\n", "\\n")

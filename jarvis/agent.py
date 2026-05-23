@@ -16,6 +16,7 @@ cli.py and voice.py import JarvisAgent and AVAILABLE_MODELS from here.
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import uuid
 from collections.abc import AsyncGenerator
@@ -181,6 +182,61 @@ def _trim_history(messages: list[Any], max_messages: int = 20) -> list[Any]:
     non_system = [m for m in messages if not isinstance(m, SM)]
     trimmed = non_system[-max_messages:]
     return system_msgs + trimmed
+
+
+def _build_human_message(
+    text: str,
+    image_bytes: bytes | None = None,
+    image_mime: str = "image/png",
+    extra_images: list[bytes] | None = None,
+) -> HumanMessage:
+    """Build a HumanMessage — plain text or multimodal, depending on attachments.
+
+    image_bytes   — single image (PNG/JPG upload); placed before the text.
+    extra_images  — PDF figures (PNG bytes); placed after the text so the model
+                    reads the markdown context first, then sees the visuals.
+    """
+    # No attachments → plain text message
+    if not image_bytes and not extra_images:
+        return HumanMessage(content=text)
+
+    content: list[dict] = []
+
+    # Single image upload: image first, then the user's question
+    if image_bytes:
+        b64 = base64.b64encode(image_bytes).decode()
+        content.append({"type": "image_url", "image_url": {"url": f"data:{image_mime};base64,{b64}"}})
+
+    # Text block (markdown from PDF, or plain user query)
+    content.append({"type": "text", "text": text})
+
+    # PDF figures: appended after text so markdown context comes first
+    for img in (extra_images or []):
+        b64 = base64.b64encode(img).decode()
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+
+    return HumanMessage(content=content)
+
+
+def _strip_images_for_storage(messages: list[Any]) -> list[Any]:
+    """Replace multimodal HumanMessage content with text-only version before SQLite storage.
+
+    Prevents base64 image blobs from bloating the session history and being
+    replayed in future turns where they're irrelevant.
+    """
+    result = []
+    for m in messages:
+        if isinstance(m, HumanMessage) and isinstance(m.content, list):
+            text_parts = [
+                p.get("text", "")
+                for p in m.content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            text_only = " ".join(t for t in text_parts if t).strip()
+            result.append(HumanMessage(content=f"[image attached] {text_only}" if text_only else "[image attached]"))
+        else:
+            result.append(m)
+    return result
 
 
 # ── Model catalogue (Revizyon 2 — Gemini-only, 5 entries) ─────────────────────
@@ -423,9 +479,19 @@ class JarvisAgent:
     # ── Chat ───────────────────────────────────────────────────────────────────
 
     async def chat(
-        self, user_input: str, detected_language: str = "en"
+        self,
+        user_input: str,
+        detected_language: str = "en",
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/png",
+        extra_images: list[bytes] | None = None,
     ) -> tuple[str, str]:
-        """Run one turn. Returns (response_text, model_label)."""
+        """Run one turn. Returns (response_text, model_label).
+
+        image_bytes   — single uploaded image (PNG/JPG); sent as multimodal block.
+        extra_images  — list of PNG bytes extracted from a PDF by marker-pdf;
+                        appended after the text block.
+        """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
@@ -441,10 +507,12 @@ class JarvisAgent:
             past_sessions_block, open_todos_block,
         )
 
+        human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
+
         initial_messages = (
             [SystemMessage(content=system_prompt)]
             + self._history
-            + [HumanMessage(content=clean_input)]
+            + [human_msg]
         )
 
         self._turn += 1
@@ -496,7 +564,7 @@ class JarvisAgent:
 
         all_msgs = result.get("messages", [])
         non_system = [m for m in all_msgs if not isinstance(m, SystemMessage)]
-        self._history = _trim_history(non_system)
+        self._history = _strip_images_for_storage(_trim_history(non_system))
 
         # Persist conversation state to SQLite
         self.session_store.save_turn(self.session_id, self._history, self._turn)
@@ -538,8 +606,16 @@ class JarvisAgent:
         self,
         user_input: str,
         detected_language: str = "en",
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/png",
+        extra_images: list[bytes] | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Stream one turn token-by-token. Yields text deltas for voice.speak_stream()."""
+        """Stream one turn token-by-token. Yields text deltas for voice.speak_stream().
+
+        image_bytes   — single uploaded image (PNG/JPG); sent as multimodal block.
+        extra_images  — list of PNG bytes extracted from a PDF by marker-pdf;
+                        appended after the text block.
+        """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
@@ -555,10 +631,12 @@ class JarvisAgent:
             past_sessions_block, open_todos_block,
         )
 
+        human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
+
         initial_messages = (
             [SystemMessage(content=system_prompt)]
             + self._history
-            + [HumanMessage(content=clean_input)]
+            + [human_msg]
         )
 
         self._turn += 1
@@ -600,7 +678,7 @@ class JarvisAgent:
             if checkpoint_tuple:
                 real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
                 non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
-                self._history = _trim_history(non_system)
+                self._history = _strip_images_for_storage(_trim_history(non_system))
             else:
                 raise ValueError("no checkpoint")
         except Exception:
@@ -608,7 +686,7 @@ class JarvisAgent:
             from langchain_core.messages import AIMessage
             non_system = [m for m in initial_messages if not isinstance(m, SystemMessage)]
             non_system.append(AIMessage(content=full_response))
-            self._history = _trim_history(non_system)
+            self._history = _strip_images_for_storage(_trim_history(non_system))
 
         # Token usage estimate (streaming doesn't return metadata)
         all_text = " ".join(

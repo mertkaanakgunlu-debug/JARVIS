@@ -138,6 +138,31 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
                       return text.contains(_filter) || id.contains(_filter);
                     }).toList();
                   }
+                  if (filtered.isEmpty) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(32),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.folder_open_outlined,
+                                size: 36, color: JarvisColors.inkFaint),
+                            const SizedBox(height: 12),
+                            Text(
+                              _tagFilter.isNotEmpty
+                                  ? '$_tagFilter kategorisinde giriş yok'
+                                  : _filter.isNotEmpty
+                                      ? '"$_filter" ile eşleşen giriş yok'
+                                      : 'Vault henüz boş',
+                              textAlign: TextAlign.center,
+                              style: JarvisText.sectionHeader
+                                  .copyWith(color: JarvisColors.inkDim),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }
                   return ListView.builder(
                     padding: const EdgeInsets.fromLTRB(18, 0, 18, 100),
                     itemCount: filtered.length,

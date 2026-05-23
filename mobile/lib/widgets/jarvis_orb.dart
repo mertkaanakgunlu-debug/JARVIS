@@ -96,8 +96,8 @@ class _OrbPainter extends CustomPainter {
     final focal = size.width * 0.85;
 
     final sm = speedMul;
-    final rx = math.sin(t * 0.00035 * sm) * 0.5 + 0.2;
-    final ry = t * 0.00045 * sm;
+    final rx = math.sin(t * 0.35 * sm) * 0.5 + 0.2;
+    final ry = t * 0.45 * sm;
 
     final cosRx = math.cos(rx), sinRx = math.sin(rx);
     final cosRy = math.cos(ry), sinRy = math.sin(ry);

@@ -142,6 +142,7 @@ def calendar_control(
     days_ahead: int = 7,
     query: str = "",
     event_id: str = "",
+    events_json: str = "",
     settings: "Settings" = None,
 ) -> str:
     """Execute a Google Calendar action.
@@ -209,6 +210,34 @@ def calendar_control(
                 lines.append(_fmt_event(ev))
             return "\n".join(lines)
 
+        elif action == "batch_create":
+            # ── Batch create: create multiple events in a single tool call ──────
+            # events_json: '[{"title":"..","date":"..","time":"..","duration_minutes":120,"description":"..","location":".."},...]'
+            if not events_json:
+                return "[Calendar] 'events_json' is required for batch_create."
+            try:
+                import json as _json
+                items = _json.loads(events_json)
+                if not isinstance(items, list):
+                    return "[Calendar] 'events_json' must be a JSON array."
+            except Exception as exc:
+                return f"[Calendar] Could not parse events_json: {exc}"
+
+            results = []
+            for item in items:
+                r = calendar_control(
+                    action="create",
+                    title=item.get("title", ""),
+                    date=item.get("date", ""),
+                    time=item.get("time", ""),
+                    duration_minutes=item.get("duration_minutes", 60),
+                    description=item.get("description", ""),
+                    location=item.get("location", ""),
+                    settings=settings,
+                )
+                results.append(r)
+            return "\n".join(results)
+
         elif action == "create":
             if not title or not date:
                 return "[Calendar] 'title' and 'date' are required to create an event."
@@ -220,6 +249,30 @@ def calendar_control(
                 start_dt = start_dt.replace(hour=h, minute=m)
             end_dt = start_dt + timedelta(minutes=duration_minutes)
 
+            # ── Deduplication guard ───────────────────────────────────────────
+            # Check for an existing event with the same title at the same time.
+            # Prevents duplicate creation when the agent loops or retries a call.
+            try:
+                win_start = (start_dt - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+                win_end   = (start_dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+                existing = service.events().list(
+                    calendarId="primary",
+                    q=title,
+                    timeMin=f"{win_start}+03:00",
+                    timeMax=f"{win_end}+03:00",
+                    singleEvents=True,
+                    maxResults=5,
+                ).execute()
+                for ev in existing.get("items", []):
+                    if ev.get("summary", "").lower().strip() == title.lower().strip():
+                        return (
+                            f"[Calendar] SKIPPED — '{title}' already exists at this time "
+                            f"(id: {ev['id'][:16]}). No duplicate created."
+                        )
+            except Exception:
+                pass  # dedup is best-effort; never block creation on API error
+
+            # ── Create ────────────────────────────────────────────────────────
             # Naive datetime string (no UTC offset) + explicit timeZone → Google Calendar
             # stores the event in the user's local timezone, not UTC.
             if not time:

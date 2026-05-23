@@ -47,6 +47,9 @@ dependencies:
   # URL launcher (Drive links)
   url_launcher: ^6.3.0
 
+  # File picker (upload to JARVIS)
+  file_picker: ^8.1.2
+
   # Permission handling
   permission_handler: ^11.3.1
 

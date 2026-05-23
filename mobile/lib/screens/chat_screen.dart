@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 import '../theme/jarvis_theme.dart';
 import '../theme/typography.dart';
 import '../widgets/grid_background.dart';
@@ -20,27 +22,111 @@ class ChatScreen extends ConsumerStatefulWidget {
 }
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
-  final _textCtrl = TextEditingController();
+  final _textCtrl   = TextEditingController();
   final _scrollCtrl = ScrollController();
+  late final FlutterTts _tts;
+  final _ttsBuffer  = StringBuffer();
+
   bool _isComposing = false;
-  bool _isSending = false;
+  bool _isSending   = false;
   String? _loadingNote;
 
   @override
+  void initState() {
+    super.initState();
+    _tts = FlutterTts();
+    _initTts();
+  }
+
+  Future<void> _initTts() async {
+    await _tts.setLanguage('tr-TR');
+    await _tts.setSpeechRate(0.48);
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(0.85); // biraz daha derin ses
+
+    // Android'de mevcut Türkçe erkek sesini bul
+    try {
+      final voices = await _tts.getVoices as List?;
+      if (voices != null) {
+        // tr locale'li erkek ses ara
+        Map? maleVoice = voices.cast<Map>().firstWhere(
+          (v) => (v['locale'] as String? ?? '').startsWith('tr') &&
+                 (v['name'] as String? ?? '').toLowerCase().contains('male'),
+          orElse: () => <String, dynamic>{},
+        );
+        // Erkek yoksa herhangi Türkçe ses
+        if (maleVoice.isEmpty) {
+          maleVoice = voices.cast<Map>().firstWhere(
+            (v) => (v['locale'] as String? ?? '').startsWith('tr'),
+            orElse: () => <String, dynamic>{},
+          );
+        }
+        if (maleVoice.isNotEmpty && maleVoice['name'] != null) {
+          await _tts.setVoice({
+            'name': maleVoice['name'] as String,
+            'locale': (maleVoice['locale'] as String? ?? 'tr-TR'),
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  @override
   void dispose() {
+    _tts.stop();
     _textCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _send(String query) async {
-    if (query.trim().isEmpty || _isSending) return;
-    setState(() { _isSending = true; _loadingNote = null; });
+  // ── TTS helpers ─────────────────────────────────────────────────────────────
 
-    ref.read(transcriptProvider.notifier).add(
-      TranscriptTurn(who: 'u', text: query),
-    );
+  void _speakChunk(String chunk) {
+    final settings = ref.read(settingsSyncProvider);
+    if (!settings.ttsEnabled) return;
+    _ttsBuffer.write(chunk);
+    final text = _ttsBuffer.toString();
+    final idx = _sentenceEnd(text);
+    if (idx >= 0) {
+      final sentence = text.substring(0, idx + 1).trim();
+      _ttsBuffer.clear();
+      if (idx + 1 < text.length) _ttsBuffer.write(text.substring(idx + 1));
+      if (sentence.isNotEmpty) _tts.speak(sentence);
+    }
+  }
+
+  void _flushTts() {
+    final settings = ref.read(settingsSyncProvider);
+    if (!settings.ttsEnabled) { _ttsBuffer.clear(); return; }
+    final remaining = _ttsBuffer.toString().trim();
+    _ttsBuffer.clear();
+    if (remaining.isNotEmpty) _tts.speak(remaining);
+  }
+
+  static int _sentenceEnd(String text) {
+    for (int i = 0; i < text.length; i++) {
+      final c = text[i];
+      if (c == '.' || c == '!' || c == '?') {
+        if (i + 1 >= text.length || text[i + 1] == ' ' || text[i + 1] == '\n') {
+          return i;
+        }
+      }
+    }
+    return -1;
+  }
+
+  // ── Send ─────────────────────────────────────────────────────────────────────
+
+  Future<void> _send(String query) async {
+    query = query.trim();
+    if (query.isEmpty || _isSending) return;
+    setState(() { _isSending = true; _loadingNote = null; });
+    _tts.stop();
+    _ttsBuffer.clear();
+
+    ref.read(transcriptProvider.notifier).add(TranscriptTurn(who: 'u', text: query));
     _textCtrl.clear();
+    setState(() => _isComposing = false);
     _scrollToBottom();
 
     final api = ref.read(apiClientProvider);
@@ -51,12 +137,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     final settings = ref.read(settingsSyncProvider);
 
-    // Auto-wake if needed
+    // Auto-wake PC if needed
     if (settings.autoWake) {
-      final wake = WakeService(
-        api: api,
-        pcMac: settings.pcMac,
-      );
+      final wake = WakeService(api: api, pcMac: settings.pcMac);
       final online = await wake.ensureAwake(
         onStatus: (msg) => setState(() => _loadingNote = msg),
       );
@@ -68,54 +151,37 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         return;
       }
     }
-
     setState(() => _loadingNote = null);
 
     try {
-      // Add empty JARVIS turn to stream into
-      ref.read(transcriptProvider.notifier).add(
-        const TranscriptTurn(who: 'j', text: ''),
-      );
-
-      final buf = StringBuffer();
-      bool isAsync = false;
-      String? taskId;
+      ref.read(transcriptProvider.notifier).add(const TranscriptTurn(who: 'j', text: ''));
 
       await for (final chunk in api.chatStream(query, language: settings.language)) {
         if (chunk == '[DONE]') break;
         if (chunk.startsWith('[ERROR]')) {
-          ref.read(transcriptProvider.notifier).appendToLast(
-            chunk.substring(7),
-          );
+          ref.read(transcriptProvider.notifier).appendToLast(chunk.substring(7));
           break;
         }
-
-        // Check for async response JSON
+        // Async task response
         if (chunk.startsWith('{"async":')) {
           try {
-            final j = _parseJson(chunk);
+            final j = jsonDecode(chunk) as Map<String, dynamic>;
             if (j['async'] == true) {
-              isAsync = true;
-              taskId = j['task_id'] as String?;
+              final taskId = j['task_id'] as String?;
+              ref.read(transcriptProvider.notifier).appendToLast(
+                '🕐 Arka planda çalışıyor — task `$taskId`',
+              );
+              ref.read(tasksProvider.notifier).refresh();
               break;
             }
           } catch (_) {}
         }
-
-        buf.write(chunk.replaceAll(r'\n', '\n'));
-        ref.read(transcriptProvider.notifier).appendToLast(
-          chunk.replaceAll(r'\n', '\n'),
-        );
+        final clean = chunk.replaceAll(r'\n', '\n');
+        ref.read(transcriptProvider.notifier).appendToLast(clean);
+        _speakChunk(clean);
         _scrollToBottom();
       }
-
-      if (isAsync && taskId != null) {
-        // Replace last turn with async task card
-        ref.read(transcriptProvider.notifier).appendToLast(
-          '🕐 Arka planda çalışıyor — task `$taskId`',
-        );
-        ref.read(tasksProvider.notifier).refresh();
-      }
+      _flushTts();
     } catch (e) {
       ref.read(transcriptProvider.notifier).appendToLast('Bağlantı hatası: $e');
     } finally {
@@ -123,9 +189,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _scrollToBottom();
     }
   }
-
-  Map<String, dynamic> _parseJson(String s) =>
-      jsonDecode(s) as Map<String, dynamic>;
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -139,10 +202,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
   }
 
+  // ── Build ────────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     final transcript = ref.watch(transcriptProvider);
-    final isSending = _isSending;
 
     return GridBackground(
       child: SafeArea(
@@ -156,36 +220,34 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(18, 4, 18, 8),
-                  child: Text('// Today · session',
-                      style: JarvisText.sectionHeader),
+                  child: Text('// Today · session', style: JarvisText.sectionHeader),
                 ),
                 Expanded(
                   child: ListView.builder(
                     controller: _scrollCtrl,
                     padding: const EdgeInsets.fromLTRB(18, 0, 18, 120),
-                    itemCount: transcript.length + (isSending ? 1 : 0),
+                    itemCount: transcript.length + (_isSending ? 1 : 0),
                     itemBuilder: (context, index) {
-                      if (index == transcript.length && isSending) {
+                      if (index == transcript.length && _isSending) {
                         return _TypingIndicator(note: _loadingNote);
                       }
-                      final turn = transcript[index];
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 10),
-                        child: _ChatBubble(turn: turn),
+                        child: _ChatBubble(turn: transcript[index]),
                       );
                     },
                   ),
                 ),
               ],
             ),
-            // Composer
             Positioned(
               bottom: 0, left: 0, right: 0,
               child: _Composer(
                 controller: _textCtrl,
                 isComposing: _isComposing,
                 onChanged: (v) => setState(() => _isComposing = v.isNotEmpty),
-                onSubmit: (v) => _send(v),
+                onSubmit: _send,
+                onStopTts: () { _tts.stop(); _ttsBuffer.clear(); },
               ),
             ),
           ],
@@ -194,6 +256,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 }
+
+// ── Chat bubbles ─────────────────────────────────────────────────────────────
 
 class _ChatBubble extends StatelessWidget {
   final TranscriptTurn turn;
@@ -205,9 +269,7 @@ class _ChatBubble extends StatelessWidget {
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.82,
-        ),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.82),
         child: isUser ? _UserBubble(text: turn.text) : _JarvisBubble(text: turn.text),
       ),
     );
@@ -256,10 +318,7 @@ class _JarvisBubble extends StatelessWidget {
             ),
             Text('J.A.R.V.I.S',
                 style: JarvisText.chip.copyWith(
-                  fontSize: 8,
-                  color: JarvisColors.cyanSoft,
-                  letterSpacing: 8 * 0.24,
-                )),
+                  fontSize: 8, color: JarvisColors.cyanSoft, letterSpacing: 8 * 0.24)),
           ],
         ),
         const SizedBox(height: 4),
@@ -270,13 +329,14 @@ class _JarvisBubble extends StatelessWidget {
             border: Border.all(color: JarvisColors.lineDim, width: 1),
             borderRadius: BorderRadius.circular(14),
           ),
-          child: Text(text,
-              style: JarvisText.chatBody.copyWith(color: JarvisColors.cyanSoft)),
+          child: Text(text, style: JarvisText.chatBody.copyWith(color: JarvisColors.cyanSoft)),
         ),
       ],
     );
   }
 }
+
+// ── Typing indicator ─────────────────────────────────────────────────────────
 
 class _TypingIndicator extends StatefulWidget {
   final String? note;
@@ -287,12 +347,14 @@ class _TypingIndicator extends StatefulWidget {
 class _TypingIndicatorState extends State<_TypingIndicator>
     with SingleTickerProviderStateMixin {
   late AnimationController _ctrl;
+
   @override
   void initState() {
     super.initState();
     _ctrl = AnimationController(vsync: this,
         duration: const Duration(milliseconds: 1400))..repeat();
   }
+
   @override void dispose() { _ctrl.dispose(); super.dispose(); }
 
   @override
@@ -321,7 +383,8 @@ class _TypingIndicatorState extends State<_TypingIndicator>
                     width: 6, height: 6,
                     margin: const EdgeInsets.only(right: 4),
                     decoration: BoxDecoration(
-                      color: JarvisColors.cyan.withOpacity(0.3 + 0.7 * (phase < 0.5 ? phase * 2 : (1 - phase) * 2)),
+                      color: JarvisColors.cyan.withOpacity(
+                          0.3 + 0.7 * (phase < 0.5 ? phase * 2 : (1 - phase) * 2)),
                       shape: BoxShape.circle,
                     ),
                   );
@@ -330,8 +393,8 @@ class _TypingIndicatorState extends State<_TypingIndicator>
             ),
             if (widget.note != null) ...[
               const SizedBox(height: 4),
-              Text(widget.note!, style: JarvisText.chip.copyWith(
-                  color: JarvisColors.inkFaint)),
+              Text(widget.note!,
+                  style: JarvisText.chip.copyWith(color: JarvisColors.inkFaint)),
             ],
           ],
         ),
@@ -340,21 +403,111 @@ class _TypingIndicatorState extends State<_TypingIndicator>
   }
 }
 
-class _Composer extends StatelessWidget {
+// ── Composer (STT entegre) ───────────────────────────────────────────────────
+
+class _Composer extends StatefulWidget {
   final TextEditingController controller;
   final bool isComposing;
   final ValueChanged<String> onChanged;
   final ValueChanged<String> onSubmit;
+  final VoidCallback onStopTts;
 
   const _Composer({
     required this.controller,
     required this.isComposing,
     required this.onChanged,
     required this.onSubmit,
+    required this.onStopTts,
   });
 
   @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  final SpeechToText _stt = SpeechToText();
+  bool _sttReady    = false;
+  bool _isListening = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initStt();
+  }
+
+  Future<void> _initStt() async {
+    _sttReady = await _stt.initialize(
+      onStatus: (status) {
+        if (!mounted) return;
+        if (status == 'done' || status == 'notListening') {
+          setState(() => _isListening = false);
+          final text = widget.controller.text.trim();
+          if (text.isNotEmpty) widget.onSubmit(text);
+        }
+      },
+      onError: (_) {
+        if (mounted) setState(() => _isListening = false);
+      },
+    );
+    if (mounted) setState(() {});
+  }
+
+  // Yaygın Türkçe STT yanlış tanıma düzeltmeleri
+  static String _correctStt(String text) {
+    if (text.isEmpty) return text;
+    var t = text;
+    // "Jarvis" → STT genellikle "servis", "jarwis", "cervis" tanıyor
+    t = t.replaceAllMapped(
+      RegExp(r'\b(servis|jarwis|cervis|gervis|harvis|garvis)\b',
+          caseSensitive: false),
+      (_) => 'JARVIS',
+    );
+    // Cümle başındaki büyük harf
+    if (t.isNotEmpty) t = t[0].toUpperCase() + t.substring(1);
+    return t;
+  }
+
+  Future<void> _toggleListen() async {
+    if (_isListening) {
+      await _stt.stop();
+      setState(() => _isListening = false);
+      final text = widget.controller.text.trim();
+      if (text.isNotEmpty) widget.onSubmit(text);
+      return;
+    }
+    if (!_sttReady) {
+      await _initStt();
+      if (!_sttReady) return;
+    }
+    widget.onStopTts();
+    widget.controller.clear();
+    widget.onChanged('');
+    setState(() => _isListening = true);
+    await _stt.listen(
+      onResult: (result) {
+        if (!mounted) return;
+        final corrected = _correctStt(result.recognizedWords);
+        widget.controller.text = corrected;
+        widget.onChanged(corrected);
+      },
+      localeId: 'tr_TR',   // alt çizgi: bazı Android sürümlerinde zorunlu
+      partialResults: true,
+      listenFor: const Duration(seconds: 45),
+      pauseFor: const Duration(seconds: 2), // 3→2: daha hızlı sonuç
+    );
+  }
+
+  @override
+  void dispose() {
+    _stt.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final listening = _isListening;
+    final micColor  = listening ? JarvisColors.red : JarvisColors.cyan;
+
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 18, 12),
       decoration: BoxDecoration(
@@ -373,20 +526,26 @@ class _Composer extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
                   color: Colors.black.withOpacity(0.6),
-                  border: Border.all(color: JarvisColors.lineDim),
+                  border: Border.all(
+                    color: listening ? JarvisColors.red.withOpacity(0.6) : JarvisColors.lineDim),
                   borderRadius: BorderRadius.circular(22),
                 ),
                 child: TextField(
-                  controller: controller,
-                  onChanged: onChanged,
-                  onSubmitted: onSubmit,
+                  controller: widget.controller,
+                  onChanged: widget.onChanged,
+                  onSubmitted: widget.onSubmit,
                   style: JarvisText.chatBody,
                   maxLines: 1,
                   textInputAction: TextInputAction.send,
                   decoration: InputDecoration(
-                    hintText: 'Type or hold to speak…',
+                    hintText: listening
+                        ? 'Dinliyorum…'
+                        : 'Type or hold to speak…',
                     hintStyle: JarvisText.chatBody.copyWith(
-                      color: JarvisColors.inkFaint),
+                      color: listening
+                          ? JarvisColors.red.withOpacity(0.7)
+                          : JarvisColors.inkFaint,
+                    ),
                     border: InputBorder.none,
                     isDense: true,
                     contentPadding: EdgeInsets.zero,
@@ -395,26 +554,46 @@ class _Composer extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            // Send / mic button
-            GestureDetector(
-              onTap: () => onSubmit(controller.text),
-              child: Container(
-                width: 48, height: 48,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [
-                      JarvisColors.cyan.withOpacity(0.3),
-                      JarvisColors.cyan.withOpacity(0.08),
-                    ],
+            // Send button (when composing) / Mic button (when idle)
+            widget.isComposing && !listening
+                ? GestureDetector(
+                    onTap: () => widget.onSubmit(widget.controller.text),
+                    child: Container(
+                      width: 48, height: 48,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: JarvisColors.cyan.withOpacity(0.2),
+                        border: Border.all(color: JarvisColors.cyan),
+                        boxShadow: [BoxShadow(
+                            color: JarvisColors.cyan.withOpacity(0.3), blurRadius: 12)],
+                      ),
+                      child: const Icon(Icons.send_rounded,
+                          color: JarvisColors.cyanSoft, size: 20),
+                    ),
+                  )
+                : GestureDetector(
+                    onTap: _toggleListen,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 48, height: 48,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(colors: [
+                          micColor.withOpacity(0.35),
+                          micColor.withOpacity(0.08),
+                        ]),
+                        border: Border.all(color: micColor, width: listening ? 2 : 1),
+                        boxShadow: [BoxShadow(
+                            color: micColor.withOpacity(listening ? 0.5 : 0.3),
+                            blurRadius: listening ? 18 : 12)],
+                      ),
+                      child: Icon(
+                        listening ? Icons.stop_rounded : Icons.mic,
+                        color: listening ? JarvisColors.red : JarvisColors.cyanSoft,
+                        size: 20,
+                      ),
+                    ),
                   ),
-                  border: Border.all(color: JarvisColors.cyan, width: 1),
-                  boxShadow: [BoxShadow(
-                      color: JarvisColors.cyan.withOpacity(0.3), blurRadius: 12)],
-                ),
-                child: const Icon(Icons.mic, color: JarvisColors.cyanSoft, size: 20),
-              ),
-            ),
           ],
         ),
       ),

@@ -73,11 +73,40 @@ class ScheduleScreen extends ConsumerWidget {
                   );
                 },
                 loading: () => const Center(child: CircularProgressIndicator()),
-                error: (e, _) => Center(
-                  child: Text('Takvim yüklenemedi\n$e',
-                      textAlign: TextAlign.center,
-                      style: JarvisText.chip.copyWith(color: JarvisColors.red)),
-                ),
+                error: (e, _) {
+                  final msg = e.toString();
+                  final notConfigured = msg.contains('Calendar unavailable') ||
+                      msg.contains('credentials') ||
+                      msg.contains('token') ||
+                      msg.contains('500');
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.calendar_today_outlined,
+                              size: 40, color: JarvisColors.inkFaint),
+                          const SizedBox(height: 16),
+                          Text(
+                            notConfigured
+                                ? 'Google Takvim henüz bağlı değil.\nPC\'de Google OAuth kurulumu gerekiyor.'
+                                : 'Takvim yüklenemedi.',
+                            textAlign: TextAlign.center,
+                            style: JarvisText.sectionHeader.copyWith(
+                                color: JarvisColors.inkDim),
+                          ),
+                          const SizedBox(height: 8),
+                          IconButton(
+                            icon: const Icon(Icons.refresh,
+                                color: JarvisColors.inkFaint),
+                            onPressed: () => ref.invalidate(_calendarTodayProvider),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
           ],

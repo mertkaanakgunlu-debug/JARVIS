@@ -40,17 +40,18 @@ class JarvisTheme {
         surface: JarvisColors.bg,
         error: JarvisColors.red,
       ),
-      fontFamily: 'ShareTechMono',
+      // No global fontFamily — HUD widgets set ShareTechMono/Orbitron explicitly;
+      // chat & body text uses system font for Türkçe character support.
       textTheme: const TextTheme(
         bodyMedium: TextStyle(
           color: JarvisColors.ink,
           fontSize: 13,
-          letterSpacing: 0.04 * 13,
+          letterSpacing: 0,
         ),
         bodySmall: TextStyle(
           color: JarvisColors.inkDim,
           fontSize: 11,
-          letterSpacing: 0.04 * 11,
+          letterSpacing: 0,
         ),
       ),
       iconTheme: const IconThemeData(color: JarvisColors.inkDim, size: 20),

@@ -8,7 +8,6 @@ import '../providers/ws_provider.dart';
 import 'home_screen.dart';
 import 'tasks_screen.dart';
 import 'schedule_screen.dart';
-import 'chat_screen.dart';
 import 'vault_screen.dart';
 
 class HomeShell extends ConsumerStatefulWidget {
@@ -25,7 +24,6 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     HomeScreen(),
     TasksScreen(),
     ScheduleScreen(),
-    ChatScreen(),
     VaultScreen(),
   ];
 
@@ -60,7 +58,6 @@ class _JarvisBottomNav extends ConsumerWidget {
     (label: 'CORE',  icon: _CoreIcon()),
     (label: 'TASKS', icon: _TasksIcon()),
     (label: 'SCHED', icon: _SchedIcon()),
-    (label: 'COMMS', icon: _CommsIcon()),
     (label: 'VAULT', icon: _VaultIcon()),
   ];
 
@@ -147,14 +144,6 @@ class _SchedIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       Icon(Icons.calendar_today_outlined, size: 18,
-          color: IconTheme.of(context).color);
-}
-
-class _CommsIcon extends StatelessWidget {
-  const _CommsIcon();
-  @override
-  Widget build(BuildContext context) =>
-      Icon(Icons.chat_bubble_outline, size: 18,
           color: IconTheme.of(context).color);
 }
 

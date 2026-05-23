@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'providers/settings_provider.dart';
+import 'providers/state_provider.dart';
 import 'providers/ws_provider.dart';
 import 'screens/home_shell.dart';
 import 'screens/lock_screen.dart';
@@ -17,9 +18,11 @@ class JarvisApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsSyncProvider);
 
-    // Kick off WebSocket connection when settings are ready
+    // Kick off WebSocket + event dispatchers when settings are ready
     if (settings.host.isNotEmpty) {
-      ref.read(wsClientProvider); // trigger provider initialisation
+      ref.read(wsClientProvider);      // WS bağlantısı
+      ref.read(wsDispatcherProvider);  // metrics/calendar/vault eventlerini dağıt
+      ref.read(stateListenerProvider); // orb state sync
     }
 
     return MaterialApp(
