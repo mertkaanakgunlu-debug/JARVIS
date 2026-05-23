@@ -2,10 +2,10 @@
 > **Read this first at the start of every new Claude Code session.**
 > Update this file after every meaningful change.
 
-## Current Iteration: 3 — Orchestrator + Tools + Voice (COMPLETE)
+## Current State: Faz 21 + Multimodal Polish (COMPLETE)
 
-**Started:** 2026-05-08
-**Completed:** 2026-05-09
+**Branch:** `langgraph-migration`
+**Last updated:** 2026-05-23
 
 ---
 
@@ -13,139 +13,260 @@
 
 ### Done ✅
 
-#### Iteration 1 — Text CLI MVP (2026-05-08)
-- [x] Full codebase scaffolded: config, agent, memory, cli, tools, prompts
-- [x] Ollama + Qwen 2.5 7B running locally
-- [x] ChromaDB embeddings (nomic-embed-text via Ollama)
-- [x] Gemini API wired (flash + pro tiers)
-- [x] pydantic-ai v1 migration complete
-- [x] Rich REPL with gold/blue theme + JARVIS banner
+#### Faz 1 — LangGraph Migration (2026-05-09)
+- [x] Replaced pydantic-ai orchestrator with LangGraph `StateGraph`
+- [x] `JarvisAgent` public API preserved (`chat`, `chat_stream`, `switch_model`, `reset`)
+- [x] `SqliteSaver` checkpointer → per-session cross-turn memory
+- [x] Legacy pydantic-ai code retained under `jarvis/legacy/`
 
-#### Iteration 2 — Orchestrator + Sub-agents (2026-05-08/09)
-- [x] 4 sub-agents: math_solve, write_content, research, generate_code
-- [x] Direct tools: shell_run, file_read, file_write, file_list, note_append, pdf_read, web_search (Tavily), report_write, report_compile
-- [x] LaTeX → PDF pipeline via pdflatex (MiKTeX)
-- [x] Retry logic: run_with_retry() for 429/503; daily-quota detection → auto-fallback
-- [x] Cloud-only orchestration (local Qwen retained only as degraded emergency fallback)
+#### Faz 2 — Graph Topology (2026-05-09)
+- [x] `START → route_from_start → [planner →] agent ↔ tools → critic → END`
+- [x] `planner_node` — step-by-step planning activated by `/think` prefix (Gemini Pro)
+- [x] `critic_node` — quality scoring with up to 2 revision loops (Gemini Pro)
+- [x] `agent_node` — ReAct executor (Vertex Flash, AI Studio Flash fallback)
+- [x] `graph/state.py` — `JarvisState` TypedDict with `add_messages` reducer
 
-#### Iteration 3 — Voice I/O (2026-05-08)
-- [x] STT: Faster-Whisper large-v3-turbo (GPU, auto-downloads ~800 MB)
-- [x] TTS: edge-tts v7.x — en-US-ChristopherNeural, tr-TR-AhmetNeural
-- [x] VAD: energy-based silence detection (1.5 s configurable)
-- [x] Quasi-live streaming: chat_stream() → sentence-chunked TTS queue
-- [x] Language auto-detection; Turkish → system prompt injection
-- [x] Exit phrases: English + Turkish
+#### Faz 3 — marker-pdf ML Extraction
+- [x] `tools/pdf.py` — marker-pdf (ML, ~2-3 GB models, cached) with pdfplumber fallback
+- [x] `read_pdf_multimodal()` — returns `(markdown_text, [png_bytes])` for multimodal pipeline
+- [x] Cache: `{stem}_{sha256[:8]}.md` + `*_images/` dir for extracted figures
 
-#### Major fixes & additions (2026-05-09)
-- [x] **File access widened:** `_resolve()` in files.py now allows absolute paths within `~` (home dir). User files on Desktop/Documents/OneDrive now accessible.
-- [x] **Excel reader:** `jarvis/tools/excel.py` — pandas-based, auto-detects header row, emits correct `skiprows` hint. Replaces manual guessing.
-- [x] **Python script runner:** `jarvis/tools/python_exec.py` — subprocess with 60 s timeout; used for plot generation.
-- [x] **2 new tools registered:** `excel_read` and `python_run` in agent.py (now 15 tools total).
-- [x] **System prompt updated:** new tools documented, data → plot → LaTeX workflow, ASCII-only mandate for code args.
-- [x] **Dependencies added:** pandas, openpyxl, matplotlib, scipy.
-- [x] **build_cloud_model() utility:** unified Groq/Gemini model factory in utils.py; all 4 sub-agents use it.
-- [x] **Groq integration (optional):** GROQ_API_KEY in .env activates Groq provider. Currently commented out (free-tier TPM limits too low for complex orchestration with 5400+ token prompt). Key preserved for simple/voice path if needed.
-- [x] **Gemini fallback bug fixed:** `build_cloud_model()` was ignoring `model_id` for Gemini — now passes it correctly.
-- [x] **tool_use_failed retry:** 400 tool-use-failed errors (Groq Unicode issue) now caught and retried with ASCII reminder.
-- [x] **HW5 completed end-to-end:** pdf_read → excel_read → Python plot script → 4 PNGs → LaTeX report → 272 KB 5-page PDF at `vault/reports/HW5/HW5_Report.pdf`.
-- [x] **`/model` command:** numbered menu, numara veya isimle seçim, runtime model switch via `switch_model()`.
-- [x] **Natural language model switching:** Türkçe/İngilizce "Modeli flash yap", "Switch to pro" etc. — 18/18 test geçti.
-- [x] **AVAILABLE_MODELS catalogue:** 8 models (4 Gemini, 4 Groq) in agent.py with TPM/RPD info.
+#### Faz 4 — Plotting + Data Analysis
+- [x] `tools/plotting.py` — `generate_plot()` — seaborn/matplotlib with auto-format
+- [x] `tools/data_analysis.py` — `read_csv_file()`, `analyze_data()` — pandas descriptive stats
+- [x] `plot_data` and `csv_read` tools in graph
+
+#### Faz 5 — Vertex AI / Pro-first Architecture
+- [x] Dual LLM setup: `llm_fast` (Vertex Flash) + `llm_pro` (Vertex Pro for critic/planner)
+- [x] AI Studio (free) fallback chain when Vertex ADC not configured
+- [x] `gcp_quota.py` — GCP credit budget tracking (`VERTEX_CREDIT_USD` in .env)
+- [x] Cloud primary switched from Flash-Lite → Flash → Pro (progressive upgrades)
+
+#### Faz 6 — RAG Document Indexer
+- [x] `tools/indexer.py` — chunk + embed files into ChromaDB via `index_doc` tool
+- [x] `vault_search` tool — semantic search across indexed vault content
+
+#### Faz 7 — Deep Web Research
+- [x] `tools/webfetch.py` — `fetch_url()` — trafilatura + firecrawl fallback
+- [x] `tools/deep_research.py` — multi-step research with citation synthesis
+- [x] `url_read`, `deep_web_research` tools in graph
+
+#### Faz 8 — Spotify + Wake-word
+- [x] `tools/spotify.py` — spotipy playback control (play, pause, skip, volume, search)
+- [x] `spotify` tool in graph
+- [x] `--wakeword` flag — openwakeword "Hey JARVIS" hands-free activation
+- [x] `voice.py` updated: energy-VAD + wakeword detection in same loop
+
+#### Faz 9 — FastAPI Server + Google Integrations (OAuth)
+- [x] `api.py` — FastAPI REST server: `/chat`, `/chat/stream`, `/chat/upload`, HUD WebSocket
+- [x] `api_routers/` — 7 routers: calendar, finance, push, system, tasks, todos, vault
+- [x] `tools/calendar.py` — Google Calendar API v3: list/create/batch_create/delete/search/update
+- [x] `tools/gmail.py` — Gmail API v1: list/read/search/send/label/thread
+- [x] `--api` entry point wired in `__main__.py`
+
+#### Faz 10 — Background Monitor + Notifications
+- [x] `monitor.py` — `JarvisMonitor`: polls Gmail + Calendar + todos on configurable intervals
+- [x] `notify.py` — Windows toast notifications via `winotify`
+- [x] `--monitor` standalone mode + combined `--monitor --voice` mode
+
+#### Faz 11 — HUD WebSocket
+- [x] `ws.py` — `EventBus` with `tool_call()`, `show_hud()` — broadcasts to all WebSocket clients
+- [x] Mobile home screen subscribes to `/ws` for live tool/token feed
+- [x] Gemini usage metadata (input/output tokens, model name) pushed to HUD after each LLM call
+
+#### Faz 12-B — Entity Extractor
+- [x] `entity_extractor.py` — async Flash-Lite structured-output call after each turn
+- [x] Extracts: people, dates, tasks, locations, topics → stored to ChromaDB as metadata
+
+#### Faz 13-A — Session Summarizer
+- [x] `session_summarizer.py` — Flash-Lite summary on `/reset` or session archive
+- [x] Summary stored in vault + ChromaDB for future recall
+
+#### Faz 13-C — Scheduler Store
+- [x] `scheduler.py` — `SchedulerStore`: SQLite-backed scheduled task CRUD
+- [x] `schedule` tool in graph (create/list/complete/delete scheduled items)
+- [x] Monitor polls due tasks every `MONITOR_SCHEDULE_INTERVAL_SEC` seconds
+
+#### Faz 13-D — Todo Store
+- [x] `todo_store.py` — `TodoStore`: SQLite-backed todo CRUD with priority/deadline
+- [x] `todo_analyzer.py` — Flash analysis pass for priority ranking
+- [x] `todo` tool in graph (add/list/complete/delete/analyze)
+- [x] Morning reminder + deadline alerts via monitor
+
+#### Faz 14 — Google Drive
+- [x] `tools/drive.py` — Drive API v3: list/search/download/upload/share/delete
+- [x] `google_drive` tool in graph
+- [x] Local file cache at `data/drive_cache/`
+
+#### Faz 15 — ITU Webmail (IMAP/SMTP)
+- [x] `tools/itu_mail.py` — ITU mail via standard IMAP (read) + SMTP (send)
+- [x] `itu_mail` tool in graph (list/read/search/send)
+
+#### Faz 16 — Finance / Burgan Bank
+- [x] `tools/finance.py` — budget tracking, transaction CRUD
+- [x] `finance_store.py` — SQLite finance DB (WAL mode)
+- [x] `finance_extractor.py` — parses Burgan Bank statement emails
+- [x] `finance_reporter.py` — generates monthly budget reports
+- [x] `finance` tool in graph; `api_routers/finance.py` for mobile
+
+#### Faz 17 — GCP Quota Tracker
+- [x] `gcp_quota.py` — `quota_status()`, `quota_usage_today()`, `quota_forecast()`
+- [x] `usage.py` — `UsageTracker`: per-session token + cost accounting
+- [x] `gcp_quota` tool in graph (`status` / `usage` / `forecast` actions)
+- [x] Vertex AI credit budget display in CLI `/status`
+
+#### Faz 18 — Geo-math Computation
+- [x] `tools/geo_math_tool.py` — symbolic math, FDM wave simulation (Devito), seismic analysis
+- [x] `subagents/geomath.py` (via `geo_math` tool) — Gemini Pro sub-agent for complex problems
+- [x] `geo_math` tool in graph; triggers `event_bus.show_hud()` for visual outputs
+- [x] WolframAlpha integration (optional, `WOLFRAM_APP_ID` in .env)
+
+#### Faz 19 — Task Executor + WoL + Mobile Push + Mobile API
+- [x] `task_executor.py` — `TaskExecutor`: background ThreadPoolExecutor for long-running jobs
+- [x] `wol.py` — Wake-on-LAN magic packet sender
+- [x] `fcm_sender.py` — Firebase Cloud Messaging push notifications to phone
+- [x] `push_store.py` — FCM token registry (SQLite)
+- [x] `api_routers/push.py` — `/push/register`, `/push/send`
+- [x] Mobile API routes: tasks, todos, vault, calendar, finance, system
+
+#### Faz 19A — Flutter Mobile App
+- [x] `mobile/` — Flutter app targeting Android
+- [x] 10 screens: Home (HUD orb + panels), Chat, Schedule, Tasks, Vault, Finance Detail, Task Detail, Settings, Lock, Finance
+- [x] WebSocket provider for live HUD feed
+- [x] REST API client (`core/api_client.dart`) with Bearer auth + SSE streaming
+
+#### Faz 20–21 — HUD Panel System + Polish
+- [x] Panel visibility system — configurable HUD panels (weather, calendar, tasks, finance, etc.)
+- [x] `hud_panels` tool in graph — agent can show/hide panels
+- [x] Project Tracker panel with real data
+- [x] Image upload: PNG/JPG sent as multimodal base64 blocks directly to LLM
+- [x] PDF upload: `read_pdf_multimodal()` → markdown + figures → multimodal message
+- [x] Calendar `batch_create` + per-event deduplication guard
+- [x] `_strip_images_for_storage()` — images stripped from SQLite session history
+- [x] Session auto-reset on FastAPI shutdown
+- [x] System prompt: Turkish filler ban, no-narration-before-tool-calls rule
 
 ### In Progress 🔄
-*(none)*
+*(none — working tree clean)*
 
 ### Blocked ⛔
 *(none)*
 
 ### Up Next ⬜
-- **Iteration 4:** Wake-word via Porcupine ("Hey JARVIS") — always-listening loop
-- **Iteration 5:** FastAPI server + PWA over Tailscale (phone access)
-- **Iteration 6:** WoL, Spotify, calendar/email read-only, Word/PPT generation
+- **Phase 0:** Repository hygiene — `README.md` ✅ done, `ProjectState.md` ✅ done (this file), `.gitignore` hardening for vault data, `Jarvis.rar` cleanup
+- **email_triage tool:** defined in `graph/tools.py` but not in the `return` list — verify if intentional or accidental omission
+- **Vertex AI ADC:** configure `gcloud auth application-default login` to activate Vertex Pro
+- **iOS mobile app:** Android app done; iOS build not started
+- **Wake-word tuning:** openwakeword false positive rate on "Hey JARVIS"
 
 ---
 
 ## Active Configuration (.env)
 
 ```
-GEMINI_API_KEY=AIza...        ← primary orchestrator
-TAVILY_API_KEY=tvly-dev-...   ← web search
-#GROQ_API_KEY=gsk_...         ← commented out; activate for Groq provider
-GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
-GROQ_MODEL_FALLBACK=llama-3.3-70b-versatile
-CLOUD_MODEL=gemini-2.5-flash-lite   ← primary (1000 RPD free)
-CLOUD_MODEL_PRO=gemini-2.5-pro      ← pro tier override
-CLOUD_TIER=flash
-ESCALATION_WORD_THRESHOLD=50
-LOCAL_MODEL=qwen2.5:7b-instruct
+GEMINI_API_KEY=AIza...             ← AI Studio (free tier fallback)
+TAVILY_API_KEY=tvly-dev-...        ← web search
+GOOGLE_CLOUD_PROJECT=...           ← Vertex AI project (ADC auth)
+CLOUD_MODEL=gemini-2.5-pro         ← primary (all user-facing responses)
+CLOUD_MODEL_FALLBACK=gemini-2.5-flash
+TRIAGE_MODEL=gemini-2.5-flash      ← email triage, session summarizer
+VERTEX_MODEL_PRIMARY=gemini-2.5-pro
+VERTEX_MODEL_FAST=gemini-2.5-flash
+JARVIS_API_KEY=...                 ← REST API auth token
+JARVIS_API_PORT=8000
+SPOTIFY_CLIENT_ID=...
+SPOTIFY_CLIENT_SECRET=...
 EMBED_MODEL=nomic-embed-text
 USER_NAME=Sir
+CALENDAR_TIMEZONE=Europe/Istanbul
 ```
-
----
-
-## Key Decisions
-
-| Decision | Choice | Reason | Date |
-|---|---|---|---|
-| LLM backend | Cloud-only orchestrator | Qwen 2.5 7B too weak for sub-agent delegation | 2026-05-08 |
-| Cloud primary | `gemini-2.5-flash-lite` | 1000 RPD free tier; 2.0-flash (200 RPD) and 2.5-flash (50 RPD) exhausted in testing | 2026-05-09 |
-| Cloud fallback | `gemini-2.5-flash-lite` | Same model — if primary exhausted, fallback is same model (low RPD risk) | 2026-05-09 |
-| Groq | Commented out (optional) | Free-tier TPM ≤ 12k; system prompt alone is ~5400 tokens; no headroom for multi-step tool calling | 2026-05-09 |
-| Agent framework | Pydantic-AI v1.x | Dual-backend, validated tool calls | 2026-05-08 |
-| Memory recall | n=2 (was n=5) | Reduces prompt tokens; important when Groq is active | 2026-05-09 |
-| max_tokens | 4000 | Enough for tool-call JSON; prevents TPM overflow on Groq | 2026-05-09 |
-| File access | workspace OR home (~) | Desktop/OneDrive files must be accessible | 2026-05-09 |
-| Excel header detection | Max string-count heuristic | First row with most non-null string values = header | 2026-05-09 |
-| ASCII mandate | In system prompt | Groq rejects Unicode in function call JSON | 2026-05-09 |
-| Vector DB | ChromaDB (local) | Zero-cost, offline | 2026-05-08 |
-| Vault format | Obsidian Markdown | Human-readable, future-proof | 2026-05-08 |
 
 ---
 
 ## Architecture (Current)
 
 ```
-CLI (Rich)
-  │
-  ├─ /model → switch_model() runtime model change (8 models in catalogue)
-  ├─ natural language "modeli flash yap" → auto-detected, no LLM call needed
-  │
-  └─ JarvisAgent.chat() / chat_stream()
-       │
-       ├─ _cloud_primary  → gemini-2.5-flash-lite  (default)
-       ├─ _cloud_fallback → gemini-2.5-flash-lite  (daily quota hit)
-       └─ _local_model    → qwen2.5:7b-instruct    (503/UNAVAILABLE emergency only)
-            │
-            └─ 15 registered tools:
-                 Direct: shell_run, file_read, file_write, file_list,
-                         note_append, pdf_read, excel_read, python_run,
-                         web_search, report_write, report_compile
-                 Sub-agents: math_solve, write_content, research, generate_code
-                    └─ All sub-agents use build_cloud_model() → same Gemini/Groq
+Entry points:
+  python -m jarvis                    CLI (Rich REPL)
+  python -m jarvis --voice            Voice (Faster-Whisper STT + edge-tts TTS)
+  python -m jarvis --voice --wakeword Always-listening "Hey JARVIS"
+  python -m jarvis --api              FastAPI REST + WebSocket HUD (port 8000)
+  python -m jarvis --monitor          Standalone background watcher
+
+LangGraph StateGraph (graph/graph.py):
+  START → route_from_start
+           ├─ planner_node  (Gemini Pro — activated by /think)
+           └─ agent_node    (Gemini Flash — tool loop)
+                └─ tools_node (ToolNode — executes @tool calls)
+                └─ critic_node (Gemini Pro — accept / revise up to 2×)
+                └─ END
+
+Models:
+  llm_fast  → Vertex Flash (gemini-2.5-flash) — executor
+             → AI Studio Flash → Flash-Lite fallback chain
+  llm_pro   → Vertex Pro (gemini-2.5-pro) — critic, planner
+  triage    → gemini-2.5-flash — email triage, session summarizer, entity extractor
+
+Memory:
+  ChromaDB (data/chroma/) — semantic recall, entity metadata, indexed docs
+  SQLite (data/sessions.db) — session history, todos, schedules, finance, push tokens
+  Obsidian vault (vault/) — daily conversation logs, notes, reports
+
+API (api.py + api_routers/):
+  POST   /chat            non-streaming single turn
+  POST   /chat/stream     SSE streaming
+  POST   /chat/upload     multimodal file upload (image: base64 inline, PDF: marker-pdf)
+  GET/POST /tasks, /todos, /vault, /calendar, /finance, /system, /push
+  WS     /ws              HUD event feed (tool calls, token counts)
+
+Mobile (mobile/ — Flutter/Android):
+  Home screen: HUD orb + configurable panels
+  Chat, Schedule, Tasks, Vault, Finance, Settings, Lock screens
 ```
 
 ---
 
-## Tool Reference (15 tools)
+## Tool Registry (35 tools in graph/tools.py)
 
-| Tool | What it does |
-|---|---|
-| `shell_run(cmd)` | PowerShell command (safe deny-list) |
-| `file_read(path)` | Read text file (absolute or workspace-relative) |
-| `file_write(path, content)` | Write file (creates parents) |
-| `file_list(path)` | List directory |
-| `note_append(topic, body)` | Save to vault/notes/ |
-| `pdf_read(path)` | Extract text from PDF |
-| `excel_read(path, sheet?)` | Read .xlsx — auto-detects header, emits skiprows hint |
-| `python_run(script_path)` | Execute .py script (60 s timeout) |
-| `web_search(query)` | Tavily quick lookup |
-| `report_write(title, body)` | Write LaTeX .tex to vault/reports/ |
-| `report_compile(tex_path)` | pdflatex → PDF (MiKTeX) |
-| `math_solve(problem)` | MathAgent sub-agent → LaTeX |
-| `write_content(topic, style)` | WriterAgent → LaTeX prose |
-| `research(query)` | ResearchAgent → web-augmented LaTeX |
-| `generate_code(spec)` | CoderAgent → Python/LaTeX |
+| # | Tool | Category | What it does |
+|---|---|---|---|
+| 1 | `shell_run` | System | PowerShell (deny-list guarded) |
+| 2 | `file_read` | File | Read text file |
+| 3 | `file_write` | File | Write file (creates parents) |
+| 4 | `file_list` | File | List directory |
+| 5 | `pdf_read` | Document | marker-pdf → markdown (cached) |
+| 6 | `pdf_vision` | Document | Gemini Vision for visual PDFs/images |
+| 7 | `excel_read` | Document | pandas + header auto-detection |
+| 8 | `python_run` | Execution | subprocess .py runner (60 s timeout) |
+| 9 | `web_search` | Research | Tavily quick lookup |
+| 10 | `note_append` | Memory | Append to vault/notes/ |
+| 11 | `report_write` | Report | Write LaTeX .tex |
+| 12 | `report_compile` | Report | pdflatex → PDF |
+| 13 | `math_solve` | Subagent | MathAgent (Gemini Pro) → LaTeX |
+| 14 | `write_content` | Subagent | WriterAgent → academic prose |
+| 15 | `research` | Subagent | ResearchAgent → web-augmented LaTeX |
+| 16 | `generate_code` | Subagent | CoderAgent → Python/LaTeX |
+| 17 | `csv_read` | Data | Read CSV (pandas) |
+| 18 | `data_analyze` | Data | Descriptive stats on CSV/Excel |
+| 19 | `plot_data` | Data | seaborn/matplotlib plot generation |
+| 20 | `report_compose` | Report | Multi-section LaTeX report builder |
+| 21 | `vault_search` | Memory | Semantic search across indexed vault |
+| 22 | `index_doc` | Memory | Chunk + embed file into ChromaDB |
+| 23 | `url_read` | Research | Fetch URL (trafilatura + firecrawl) |
+| 24 | `deep_web_research` | Research | Multi-step research + citations |
+| 25 | `spotify` | Media | Spotify playback control |
+| 26 | `google_calendar` | Google | Calendar list/create/batch_create/delete/search/update |
+| 27 | `gmail` | Google | Gmail list/read/search/send/label |
+| 28 | `schedule` | Productivity | Scheduled task CRUD |
+| 29 | `todo` | Productivity | Todo CRUD + priority analysis |
+| 30 | `google_drive` | Google | Drive list/search/download/upload |
+| 31 | `itu_mail` | Email | ITU IMAP/SMTP mail |
+| 32 | `finance` | Finance | Burgan Bank transactions + budget |
+| 33 | `gcp_quota` | System | GCP credit status / forecast |
+| 34 | `geo_math` | Science | Geo-math, FDM simulation, seismic |
+| 35 | `hud_panels` | UI | Show/hide mobile HUD panels |
+
+*Note: `email_triage` is defined in `graph/tools.py` but currently missing from the `return` list — investigate.*
 
 ---
 
@@ -153,58 +274,98 @@ CLI (Rich)
 
 | File | Purpose |
 |---|---|
-| `jarvis/config.py` | Settings (pydantic-settings + .env); AVAILABLE_MODELS-aware label |
-| `jarvis/agent.py` | Orchestrator agent; AVAILABLE_MODELS, switch_model(), build_agent() |
-| `jarvis/memory.py` | ChromaDB recall (n=2) + vault markdown writer |
-| `jarvis/cli.py` | Rich REPL; /model menu + NL switch detection; /recall, /status, /help |
-| `jarvis/utils.py` | build_cloud_model(), is_daily_quota_error(), run_with_retry() |
-| `jarvis/__main__.py` | Entry point (`python -m jarvis`, `--voice` flag) |
-| `jarvis/tools/shell.py` | Shell exec with deny-list |
-| `jarvis/tools/files.py` | file_read/write/list — allows ~/ paths |
-| `jarvis/tools/notes.py` | vault/notes/ appender |
-| `jarvis/tools/pdf.py` | pdfplumber text extraction |
-| `jarvis/tools/excel.py` | pandas Excel reader with header auto-detection |
-| `jarvis/tools/python_exec.py` | subprocess .py runner with timeout |
-| `jarvis/tools/web.py` | Tavily search |
-| `jarvis/tools/latex.py` | latex_write() + latex_compile() |
-| `jarvis/subagents/math.py` | MathAgent (uses build_cloud_model) |
-| `jarvis/subagents/writer.py` | WriterAgent (uses build_cloud_model) |
-| `jarvis/subagents/research.py` | ResearchAgent (uses build_cloud_model) |
-| `jarvis/subagents/coder.py` | CoderAgent (uses build_cloud_model) |
-| `jarvis/voice.py` | VoiceEngine (STT + TTS + VAD) |
-| `jarvis/prompts/system.md` | JARVIS system prompt (includes ASCII mandate, workflow) |
-| `.env` | API keys, model names, thresholds |
+| `jarvis/__main__.py` | Entry point — `--voice`, `--wakeword`, `--api`, `--monitor`, `--port` |
+| `jarvis/agent.py` | `JarvisAgent` — wraps LangGraph, manages session state, model fallback |
+| `jarvis/config.py` | pydantic-settings from .env; Vertex + AI Studio model config |
+| `jarvis/memory.py` | ChromaDB semantic recall + Obsidian vault writer |
+| `jarvis/cli.py` | Rich REPL; `/model`, `/recall`, `/status`, `/reset`, `/help` |
+| `jarvis/api.py` | FastAPI REST server + WebSocket HUD (Faz 9 + 11 + 19) |
+| `jarvis/api_routers/` | 7 modular API routers |
+| `jarvis/monitor.py` | Background daemon — Gmail + Calendar + todos polling |
+| `jarvis/notify.py` | Windows toast notifications |
+| `jarvis/ws.py` | WebSocket event bus — HUD live feed |
+| `jarvis/voice.py` | VoiceEngine — Faster-Whisper STT + edge-tts TTS + VAD + wakeword |
+| `jarvis/voice_api.py` | Voice loop for API mode |
+| `jarvis/graph/graph.py` | LangGraph StateGraph builder |
+| `jarvis/graph/nodes.py` | agent_node, planner_node, critic_node, routing functions |
+| `jarvis/graph/state.py` | `JarvisState` TypedDict |
+| `jarvis/graph/streaming.py` | astream → async text generator |
+| `jarvis/graph/tools.py` | 35 LangChain `@tool` wrappers (make_tools factory) |
+| `jarvis/tools/` | 18 tool implementation modules |
+| `jarvis/subagents/` | math, writer, research, coder, geomath sub-agents |
+| `jarvis/entity_extractor.py` | Async entity extraction after each turn |
+| `jarvis/session_store.py` | SQLite session history (WAL mode) |
+| `jarvis/session_summarizer.py` | Flash-Lite session summary on /reset |
+| `jarvis/scheduler.py` | Scheduled task SQLite store |
+| `jarvis/todo_store.py` | Todo SQLite store |
+| `jarvis/todo_analyzer.py` | Flash priority analysis |
+| `jarvis/finance_store.py` | Finance SQLite DB |
+| `jarvis/finance_extractor.py` | Burgan Bank email parser |
+| `jarvis/finance_reporter.py` | Monthly budget report generator |
+| `jarvis/task_executor.py` | Background ThreadPoolExecutor for long jobs |
+| `jarvis/usage.py` | Token + cost tracking per session |
+| `jarvis/gcp_quota.py` | GCP quota/credit tracker |
+| `jarvis/wol.py` | Wake-on-LAN |
+| `jarvis/fcm_sender.py` | Firebase Cloud Messaging |
+| `jarvis/push_store.py` | FCM device token registry |
+| `jarvis/notify.py` | Windows toast |
+| `jarvis/legacy/` | Old pydantic-ai code (kept for reference) |
+| `jarvis/prompts/system.md` | Main system prompt |
+| `mobile/` | Flutter Android app |
+| `vault/` | Obsidian-compatible markdown vault |
+| `data/` | ChromaDB, SQLite DBs, pdf_cache, uploads (gitignored) |
 
 ---
 
 ## Known Issues / Gotchas
 
-1. **Gemini free-tier RPD**: `gemini-2.5-flash-lite` = 1000 RPD; `gemini-2.5-flash` = 50 RPD; `gemini-2.0-flash` = 200 RPD. Development testing burned through 2.5-flash and 2.0-flash quotas on 2026-05-09. Quotas reset at midnight UTC.
-2. **Groq TPM**: System prompt + tool schemas = ~5400 input tokens. Free-tier limits: qwen/qwen3-32b = 6k TPM (insufficient), llama-3.3-70b = 12k TPM (hallucinates tool calls), llama-4-scout = 30k TPM (too small model, refuses complex tasks). Groq only viable for simple 1-step queries.
-3. **Excel skiprows**: The improved `excel_read` auto-detects header row and emits the correct `skiprows` parameter. Always trust this output when writing plot scripts.
-4. **ChromaDB under OneDrive**: may cause sync churn. `data/chroma/` is gitignored. Move `CHROMA_DIR` outside OneDrive in `.env` if sync becomes noisy.
-5. **pydantic-ai v1**: use `output_type=`, `result.output`, `OpenAIProvider`, `GoogleGLAProvider`. Old docs use `result_type=`, `result.data` — wrong.
-6. **tool_use_failed (Groq)**: Groq rejects Unicode characters in function call JSON. ASCII-only mandate in system prompt addresses this. Also caught and retried in agent.chat().
-7. **MiKTeX path**: `C:\Users\mertk\AppData\Local\Programs\MiKTeX\miktex\bin\x64\pdflatex.EXE`
+1. **Vertex AI ADC:** `gcloud auth application-default login` required on this machine for Vertex Pro/Flash. Without it, falls back to AI Studio (free tier RPD limits apply).
+2. **Gemini free-tier RPD:** gemini-2.5-pro = 25 RPD (free); gemini-2.5-flash = 1500 RPD. Quotas reset midnight UTC.
+3. **marker-pdf first run:** downloads ~2-3 GB of layout models to `~/.cache/marker`. Subsequent runs use cache.
+4. **MiKTeX path:** `C:\Users\mertk\AppData\Local\Programs\MiKTeX\miktex\bin\x64\pdflatex.EXE` — hardcoded fallback in `latex.py`.
+5. **`email_triage` tool omitted from graph return list** — defined but not exported. Verify intentional.
+6. **vault/ gitignore:** conversation transcripts and notes are NOT gitignored. Phase 0 cleanup pending.
+7. **Jarvis.rar:** untracked large archive in project root. Should be gitignored or removed.
+8. **ChromaDB under OneDrive:** may cause sync churn. Move `CHROMA_DIR` outside OneDrive if noisy.
+9. **openwakeword false positives:** "Hey JARVIS" model may trigger on similar-sounding phrases. Threshold tuning may be needed.
+10. **ProjectState.md was frozen at Iteration 3** — this rewrite corrects that (2026-05-23).
 
 ---
 
 ## Next Session Checklist
 1. Read this file
-2. Check `log.md` for last session's decisions
-3. Verify Ollama running: `ollama ps`
-4. Activate venv: `.\.venv\Scripts\Activate.ps1`
-5. Run JARVIS: `python -m jarvis`
+2. Check `git log --oneline -5` for recent commits
+3. Activate venv: `.\.venv\Scripts\Activate.ps1`
+4. Optionally start Ollama for embeddings: `ollama serve`
+5. Run JARVIS: `python -m jarvis` (CLI) or `python -m jarvis --api` (server)
+6. Verify Vertex ADC if using Pro: `gcloud auth application-default print-access-token`
 
 ---
 
-## Roadmap
+## Completed Roadmap
 
-| # | Name | Status |
+| Faz | Name | Status |
 |---|---|---|
-| 1 | Text CLI MVP | ✅ Complete |
-| 2 | Orchestrator + Sub-agents + LaTeX | ✅ Complete |
-| 3 | Voice I/O (Whisper + edge-tts) | ✅ Complete |
-| 4 | **Wake-word** (Porcupine "Hey JARVIS") | ⬜ Next |
-| 5 | FastAPI server + PWA over Tailscale | ⬜ |
-| 6 | WoL, Spotify, calendar/email, Word/PPT | ⬜ |
+| 1 | LangGraph Migration | ✅ |
+| 2 | Graph Topology (planner + critic) | ✅ |
+| 3 | marker-pdf ML Extraction | ✅ |
+| 4 | Plotting + Data Analysis | ✅ |
+| 5 | Vertex AI / Pro-first Architecture | ✅ |
+| 6 | RAG Document Indexer | ✅ |
+| 7 | Deep Web Research | ✅ |
+| 8 | Spotify + Wake-word | ✅ |
+| 9 | FastAPI + Google OAuth (Calendar/Gmail) | ✅ |
+| 10 | Background Monitor + Notifications | ✅ |
+| 11 | HUD WebSocket | ✅ |
+| 12-B | Entity Extractor | ✅ |
+| 13-A | Session Summarizer | ✅ |
+| 13-C | Scheduler Store | ✅ |
+| 13-D | Todo Store | ✅ |
+| 14 | Google Drive | ✅ |
+| 15 | ITU Webmail (IMAP/SMTP) | ✅ |
+| 16 | Finance / Burgan Bank | ✅ |
+| 17 | GCP Quota Tracker | ✅ |
+| 18 | Geo-math + FDM Simulation | ✅ |
+| 19 | Task Executor + WoL + FCM Push | ✅ |
+| 19A | Flutter Mobile App (Android) | ✅ |
+| 20–21 | HUD Panels + Multimodal Polish | ✅ |
