@@ -1,3 +1,10 @@
+> **ARCHIVED — Pre-Iteration 1 blueprint (circa 2026-05-07)**
+> This document describes a zero-cost Ollama-only architecture that was superseded before Iteration 1 launched.
+> Current architecture uses Vertex AI Gemini 2.5 Pro/Flash, LangGraph orchestration, and FastAPI.
+> See [README.md](../../README.md) and [docs/ARCHITECTURE.md](../ARCHITECTURE.md) for the real state.
+
+---
+
 Here is the compacted, definitive blueprint of Project J.A.R.V.I.S., structured for immediate execution.
 
 ### **Project J.A.R.V.I.S. – Executive Summary**

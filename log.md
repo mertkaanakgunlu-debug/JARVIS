@@ -192,3 +192,15 @@ Deleted `data/chroma/` — 128 stale test entries were injecting 2000+ tokens of
 ### ProjectState.md overhauled
 
 Complete rewrite: Iteration 3 complete, all 15 tools, updated architecture, key decisions, known issues, full file map, roadmap.
+
+---
+
+## 2026-05-24 — log.md frozen; see ProjectState.md and CHANGELOG.md
+
+Faz 4 through Faz 21 are complete (35 tools, LangGraph orchestration, FastAPI, Electron HUD,
+Flutter Android app, Kotlin wakeword service). The detailed state is in ProjectState.md, which
+is kept current. This file has not been updated since 2026-05-09 and is now frozen.
+
+Going forward: use CHANGELOG.md for notable additions and ProjectState.md for current architecture.
+
+See docs/ARCHITECTURE.md for a subsystem map and the phased refactor roadmap in the Claude plan file.

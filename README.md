@@ -116,6 +116,25 @@ Jarvis/
 └── data/                   # ChromaDB, SQLite DBs, caches (gitignored)
 ```
 
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `jarvis/` | Python package — orchestrator, tools, API, voice, monitor |
+| `jarvis/graph/` | LangGraph `StateGraph` (agent, planner, critic, tools nodes) |
+| `jarvis/subagents/` | 5 pydantic-ai sub-agents bridged via `_run_coro` |
+| `jarvis/prompts/` | System prompt + sub-agent prompts + workflow snippets |
+| `jarvis/legacy/` | Rollback copy of pydantic-ai orchestrator (do not import) |
+| `electron/` | Electron HUD — 3 windows, 9 panels |
+| `mobile/` | Flutter Android app — 10 screens + Kotlin `WakeWordService` |
+| `vault/` | Obsidian-compatible markdown vault (conversations gitignored) |
+| `data/` | ChromaDB, SQLite `sessions.db`, caches (gitignored) |
+| `docs/` | Architecture map, tool list, safety notes |
+| `.claude/worktrees/` | **Scratch branches created by Claude Code — never canonical source** |
+
+**Active development branch:** `langgraph-migration`
+**Install:** `pip install -r requirements.txt` (canonical; `pyproject.toml` has no dep list)
+
 ## Architecture Overview
 
 ```
