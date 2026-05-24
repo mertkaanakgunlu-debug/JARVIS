@@ -12,8 +12,20 @@ build/
 # Vector DB (writes frequently, noisy in OneDrive sync)
 data/
 
-# Vault — include markdown, exclude any temp files
+# Vault — conversation logs are private; keep directory via .gitkeep
+vault/conversations/*.md
 vault/**/*.tmp
+
+# Archives (e.g. Jarvis.rar backup)
+*.rar
+
+# Flutter / Dart build artifacts
+mobile/.dart_tool/
+mobile/build/
+.dart_tool/
+
+# Claude Code worktrees (scratch branches — not canonical)
+.claude/worktrees/
 
 # Node / Electron
 node_modules/
