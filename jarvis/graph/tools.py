@@ -39,6 +39,7 @@ from jarvis.gcp_quota import (                        # Faz 17
 )
 from jarvis.tools.geo_math_tool import geo_math_control  # Faz 18
 from jarvis.ws import event_bus                           # HUD show_hud signal
+from jarvis.tool_registry import TOOL_SPECS  # noqa: F401  # Phase 3 confirmation gate reads these
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
