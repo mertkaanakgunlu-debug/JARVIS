@@ -156,6 +156,10 @@ class ChatRequest(BaseModel):
     force_async: bool = False
 
 
+class ConfirmRequest(BaseModel):
+    decision: str  # "approve" | "deny" | "deny:<optional guidance>"
+
+
 class ChatResponse(BaseModel):
     response: str
     model: str
@@ -300,6 +304,32 @@ async def chat_stream(body: ChatRequest, request: Request):
 
     return StreamingResponse(
         _sse_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/chat/confirm/{conf_id}")
+async def chat_confirm(conf_id: str, body: ConfirmRequest, request: Request):
+    """Resume an interrupted graph after the user approves or denies an L3 tool call.
+
+    Streams the agent's continuation response via Server-Sent Events.
+    decision values: "approve" | "deny" | "deny:<optional guidance>"
+    """
+    _check_auth(request)
+    agent = get_agent()
+
+    async def _sse() -> AsyncGenerator[str, None]:
+        try:
+            async for token in agent.resume_and_stream(conf_id, body.decision):
+                safe = token.replace("\n", "\\n")
+                yield f"data: {safe}\n\n"
+        except Exception as e:
+            yield f"data: [ERROR] {e}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _sse(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -20,3 +20,4 @@ class JarvisState(TypedDict):
     revise_count: int    # critic revision loop counter
     critic_verdict: str  # "accept" | "revise" | "redirect"
     critique: str        # feedback for executor
+    confirmation_result: str  # "approved" | "denied" — set by confirmation_node

@@ -29,10 +29,12 @@ from langgraph.prebuilt import ToolNode
 from jarvis.graph.state import JarvisState
 from jarvis.graph.nodes import (
     make_agent_node,
+    make_confirmation_node,
     make_planner_node,
     make_critic_node,
     route_from_start,
     route_from_agent,
+    route_from_confirmation,
     route_from_critic,
 )
 from jarvis.graph.tools import make_tools
@@ -128,12 +130,14 @@ def build_graph(
     llm_pro_with_tools = llm_pro.bind_tools(tools)   # Faz 5: Pro agent for complex queries
 
     agent_node = make_agent_node(llm_fast_with_tools, llm_pro_with_tools)
+    confirmation_node = make_confirmation_node(settings)
     planner_node = make_planner_node(llm_pro)
     critic_node = make_critic_node(llm_pro)
     tools_node = ToolNode(tools)
 
     builder = StateGraph(JarvisState)
     builder.add_node("agent", agent_node)
+    builder.add_node("confirmation", confirmation_node)
     builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
     builder.add_node("critic", critic_node)
@@ -146,11 +150,18 @@ def build_graph(
     )
     builder.add_edge("planner", "agent")
 
-    # agent → tools (tool calls) or critic (final response)
+    # agent → confirmation (tool calls) or critic (final response)
     builder.add_conditional_edges(
         "agent",
         route_from_agent,
-        {"tools": "tools", "critic": "critic"},
+        {"confirmation": "confirmation", "critic": "critic"},
+    )
+
+    # confirmation → tools (approved) or agent (denied — LLM acknowledges)
+    builder.add_conditional_edges(
+        "confirmation",
+        route_from_confirmation,
+        {"tools": "tools", "agent": "agent"},
     )
     builder.add_edge("tools", "agent")
 

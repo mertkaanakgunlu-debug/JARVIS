@@ -296,10 +296,10 @@ def route_from_start(state: JarvisState) -> str:
 
 
 def route_from_agent(state: JarvisState) -> str:
-    """tool calls present → 'tools'; else → 'critic'."""
+    """tool calls present → 'confirmation'; else → 'critic'."""
     last_msg = state["messages"][-1]
     if isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None):
-        return "tools"
+        return "confirmation"
     return "critic"
 
 
@@ -311,3 +311,81 @@ def route_from_critic(state: JarvisState) -> str:
     if verdict in ("revise", "redirect") and revise_count < 2:
         return "agent"
     return END
+
+
+def make_confirmation_node(settings):
+    """Return a node that gates L3 tool calls behind a user interrupt (Phase 3).
+
+    When confirmation_gate_enabled=False (default), the node is a no-op passthrough.
+    When enabled, it interrupts the graph before any tool call that has
+    requires_confirmation=True in TOOL_SPECS.  The resume value must be either
+    "approve" or "deny" / "deny:<optional guidance>".
+    """
+    from langgraph.types import interrupt as _interrupt
+    from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
+    from jarvis.tool_registry import get_spec
+
+    async def confirmation_node(state: JarvisState) -> dict:
+        # Gate disabled — immediate passthrough
+        if not settings.confirmation_gate_enabled:
+            return {"confirmation_result": "approved"}
+
+        # Find last AI message with tool calls
+        last_ai: AIMessage | None = None
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                last_ai = msg
+                break
+
+        if last_ai is None:
+            return {"confirmation_result": "approved"}
+
+        # Only interrupt for tools explicitly marked requires_confirmation
+        confirmable = [
+            tc for tc in last_ai.tool_calls
+            if (spec := get_spec(tc.get("name", ""))) and spec.requires_confirmation
+        ]
+        if not confirmable:
+            return {"confirmation_result": "approved"}
+
+        # Interrupt — pauses the graph until resume_and_stream() is called
+        tools_info = [
+            {"name": tc.get("name"), "args": tc.get("args", {}), "id": tc.get("id")}
+            for tc in confirmable
+        ]
+        decision = _interrupt({"tools": tools_info, "count": len(confirmable)})
+
+        # decision is the value passed to Command(resume=...) on resume
+        if isinstance(decision, str) and decision.lower().startswith("deny"):
+            guidance = decision[4:].lstrip(":").strip()
+            # Inject stub ToolMessages so LangGraph state is valid, then route to agent
+            stub_msgs = [
+                ToolMessage(
+                    content="[DENIED by user — action not authorized]",
+                    tool_call_id=tc.get("id", ""),
+                )
+                for tc in last_ai.tool_calls
+            ]
+            ack_msg = HumanMessage(
+                content=(
+                    "Your last tool call(s) were denied by the user."
+                    + (f" Reason: {guidance}." if guidance else "")
+                    + " Do NOT retry them. Acknowledge that the action was not executed."
+                )
+            )
+            return {
+                "confirmation_result": "denied",
+                "messages": stub_msgs + [ack_msg],
+            }
+
+        return {"confirmation_result": "approved"}
+
+    confirmation_node.__name__ = "confirmation_node"
+    return confirmation_node
+
+
+def route_from_confirmation(state: JarvisState) -> str:
+    """approved → 'tools'; denied → 'agent' (LLM acknowledges denial)."""
+    if state.get("confirmation_result", "approved") == "denied":
+        return "agent"
+    return "tools"

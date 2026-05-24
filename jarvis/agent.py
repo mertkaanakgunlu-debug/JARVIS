@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
 import uuid
 from collections.abc import AsyncGenerator
@@ -25,8 +26,10 @@ from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.errors import GraphInterrupt
 
 from jarvis.config import Settings
+from jarvis.context_builder import ContextBuilder
 from jarvis.entity_extractor import extract_entities
 from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
@@ -36,6 +39,16 @@ from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
+
+
+# ── Phase 3: confirmation gate ────────────────────────────────────────────────
+
+class ConfirmationRequired(Exception):
+    """Raised by chat() when LangGraph interrupts for user confirmation of an L3 tool call."""
+    def __init__(self, conf_id: str, payload: dict) -> None:
+        self.conf_id = conf_id
+        self.payload = payload
+        super().__init__(f"confirmation_required:{conf_id}")
 
 
 # ── HUD activity feed callback ────────────────────────────────────────────────
@@ -276,6 +289,12 @@ class JarvisAgent:
         # Faz 13-D: to-do store (same DB file, separate table)
         self.todo_store = TodoStore(Path("data") / "sessions.db")
 
+        # Phase 4: context builder (deduplicates 5-call memory retrieval)
+        self._context_builder = ContextBuilder(self.memory, self.todo_store, self.session_store)
+
+        # Phase 3: pending interrupted graphs awaiting user confirmation
+        self._pending_confirmations: dict[str, dict] = {}
+
         # Strong refs to background tasks — prevents GC from cancelling them mid-flight
         self._bg_tasks: set[asyncio.Task] = set()
 
@@ -424,43 +443,6 @@ class JarvisAgent:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    def _build_todos_block(self, n: int = 5) -> str:
-        """Build a compact open-todos block for system prompt injection (Faz 13-D)."""
-        try:
-            todos = self.todo_store.top_open(n=n)
-        except Exception:
-            return "(no open tasks)"
-        if not todos:
-            return "(no open tasks)"
-        from jarvis.todo_store import PRIORITY_LABELS
-        lines = [f"Open tasks ({len(todos)} shown, priority order):"]
-        for t in todos:
-            pri = PRIORITY_LABELS.get(t.get("priority") or "", "⬜ pending analysis")
-            due = f" [due {t['due_date']}]" if t.get("due_date") else ""
-            lines.append(f"- [{t['id']}] {t['title']}{due} — {pri}")
-        return "\n".join(lines)
-
-    def _build_past_sessions_block(self, hits: list[dict]) -> str:
-        if not hits:
-            return "(no relevant past sessions)"
-        lines = []
-        for h in hits:
-            topic = h.get("topic_hint") or "(no topic)"
-            when = h.get("last_active", "")[:10]   # YYYY-MM-DD
-            lines.append(
-                f"- **{when} · {topic}** (id={h['session_id']}):\n  {h['summary']}"
-            )
-        return "\n".join(lines)
-
-    def _build_entities_block(self, n: int = 5) -> str:
-        entities = self.session_store.top_entities(n=n)
-        if not entities:
-            return "(none yet)"
-        return "\n".join(
-            f"- **{e['name']}** ({e['type']}): {e['description'] or 'mentioned in conversation'}"
-            for e in entities
-        )
-
     # ── Chat ───────────────────────────────────────────────────────────────────
 
     async def chat(
@@ -481,15 +463,11 @@ class JarvisAgent:
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
 
-        memory_ctx = self.memory.recall(clean_input, n=3)
-        past_sessions = self.memory.recall_summaries(clean_input, n=3)
-        past_sessions_block = self._build_past_sessions_block(past_sessions)
-        entities_block = self._build_entities_block()
-        open_todos_block = self._build_todos_block()   # Faz 13-D
+        ctx = self._context_builder.build(clean_input)
         system_prompt = _load_system_prompt(
-            self.settings, memory_ctx, detected_language,
-            self._env_block, clean_input, entities_block,
-            past_sessions_block, open_todos_block,
+            self.settings, ctx.memory_ctx, detected_language,
+            self._env_block, clean_input, ctx.entities_block,
+            ctx.past_sessions_block, ctx.open_todos_block,
         )
 
         human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
@@ -505,7 +483,7 @@ class JarvisAgent:
             "messages": initial_messages,
             "user_query": clean_input,
             "language": detected_language,
-            "memory_context": memory_ctx,
+            "memory_context": ctx.memory_ctx,
             "needs_planning": needs_planning,
             "use_pro_agent": use_pro_agent,
             "plan": "",
@@ -523,6 +501,16 @@ class JarvisAgent:
 
         try:
             result = await self._graph.ainvoke(state, config=config)
+        except GraphInterrupt as exc:
+            event_bus.state("idle")
+            try:
+                payload = exc.args[0][0].value
+            except Exception:
+                payload = {}
+            conf_id = str(uuid.uuid4())
+            self._pending_confirmations[conf_id] = config
+            event_bus.confirmation_required(conf_id, payload)
+            raise ConfirmationRequired(conf_id, payload) from exc
         except Exception as exc:
             msg = str(exc)
             if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
@@ -605,15 +593,11 @@ class JarvisAgent:
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
 
-        memory_ctx = self.memory.recall(clean_input, n=3)
-        past_sessions = self.memory.recall_summaries(clean_input, n=3)
-        past_sessions_block = self._build_past_sessions_block(past_sessions)
-        entities_block = self._build_entities_block()
-        open_todos_block = self._build_todos_block()   # Faz 13-D
+        ctx = self._context_builder.build(clean_input)
         system_prompt = _load_system_prompt(
-            self.settings, memory_ctx, detected_language,
-            self._env_block, clean_input, entities_block,
-            past_sessions_block, open_todos_block,
+            self.settings, ctx.memory_ctx, detected_language,
+            self._env_block, clean_input, ctx.entities_block,
+            ctx.past_sessions_block, ctx.open_todos_block,
         )
 
         human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
@@ -629,7 +613,7 @@ class JarvisAgent:
             "messages": initial_messages,
             "user_query": clean_input,
             "language": detected_language,
-            "memory_context": memory_ctx,
+            "memory_context": ctx.memory_ctx,
             "needs_planning": needs_planning,
             "use_pro_agent": use_pro_agent,
             "plan": "",
@@ -647,13 +631,29 @@ class JarvisAgent:
 
         chunks: list[str] = []
         _first_chunk = True
+        _confirmation_issued = False
 
-        async for delta in graph_stream_to_text(self._graph, state, config):
-            if _first_chunk:
-                event_bus.state("speaking")
-                _first_chunk = False
-            chunks.append(delta)
-            yield delta
+        try:
+            async for delta in graph_stream_to_text(self._graph, state, config):
+                if _first_chunk:
+                    event_bus.state("speaking")
+                    _first_chunk = False
+                chunks.append(delta)
+                yield delta
+        except GraphInterrupt as exc:
+            _confirmation_issued = True
+            try:
+                payload = exc.args[0][0].value
+            except Exception:
+                payload = {}
+            conf_id = str(uuid.uuid4())
+            self._pending_confirmations[conf_id] = config
+            event_bus.confirmation_required(conf_id, payload)
+            yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
+
+        if _confirmation_issued:
+            event_bus.state("idle")
+            return
 
         full_response = "".join(chunks)
 
@@ -697,5 +697,83 @@ class JarvisAgent:
         self.memory.log_turn("assistant", full_response)
 
         self._schedule_entity_extraction(clean_input, full_response)
+
+        event_bus.state("idle")
+
+    async def resume_and_stream(
+        self,
+        conf_id: str,
+        decision: str,
+    ) -> AsyncGenerator[str, None]:
+        """Resume a graph interrupted for confirmation and stream the agent's response.
+
+        decision: "approve" to proceed, "deny" or "deny:<guidance>" to cancel.
+        """
+        from langgraph.types import Command
+        from langchain_core.messages import AIMessageChunk
+
+        config = self._pending_confirmations.pop(conf_id, None)
+        if config is None:
+            yield "[ERROR: confirmation session expired or not found]"
+            return
+
+        event_bus.state("thinking")
+        chunks: list[str] = []
+        _first_chunk = True
+
+        try:
+            async for chunk, metadata in self._graph.astream(
+                Command(resume=decision),
+                config,
+                stream_mode="messages",
+            ):
+                if metadata.get("langgraph_node") != "agent":
+                    continue
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                if getattr(chunk, "tool_call_chunks", None):
+                    continue
+                content = chunk.content
+                texts: list[str] = []
+                if isinstance(content, str) and content:
+                    texts.append(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            t = part.get("text", "")
+                            if t:
+                                texts.append(t)
+                for text in texts:
+                    if _first_chunk:
+                        event_bus.state("speaking")
+                        _first_chunk = False
+                    chunks.append(text)
+                    yield text
+        except Exception as exc:
+            event_bus.state("idle")
+            yield f"[ERROR: {exc}]"
+            return
+
+        full_response = "".join(chunks)
+
+        # Rebuild history from checkpointer
+        try:
+            checkpoint_tuple = self._checkpointer.get_tuple(config)
+            if checkpoint_tuple:
+                real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
+                non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
+                self._history = _strip_images_for_storage(_trim_history(non_system))
+            else:
+                raise ValueError("no checkpoint")
+        except Exception:
+            from langchain_core.messages import AIMessage
+            non_system = list(self._history)
+            non_system.append(AIMessage(content=full_response))
+            self._history = _strip_images_for_storage(_trim_history(non_system))
+
+        self.session_store.save_turn(self.session_id, self._history, self._turn)
+        self.memory.store("assistant", full_response, self.session_id)
+        self.memory.log_turn("assistant", full_response)
+        self._schedule_entity_extraction("", full_response)
 
         event_bus.state("idle")

@@ -139,6 +139,10 @@ class JarvisEventBus:
             "elapsed_sec": elapsed_sec,
         })
 
+    def confirmation_required(self, conf_id: str, payload: dict) -> None:
+        """Notify HUD / mobile that a risky L3 tool call needs user approval (Phase 3)."""
+        self.emit({"type": "confirmation_required", "id": conf_id, "payload": payload})
+
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
 event_bus = JarvisEventBus()

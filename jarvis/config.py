@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # Faz 9: REST API server (python -m jarvis --api)
     jarvis_api_key: str = ""    # set in .env; empty = auth disabled (local-only)
     jarvis_api_port: int = 8000
+
+    # Phase 3: confirmation gate — interrupt before L3 tool calls (opt-in)
+    confirmation_gate_enabled: bool = False
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"
