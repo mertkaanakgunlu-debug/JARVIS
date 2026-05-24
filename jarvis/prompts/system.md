@@ -1,3 +1,15 @@
+<!-- POINTER — this file is no longer read at runtime.
+     The active system prompt is assembled from:
+       jarvis/prompts/core/01_persona.md
+       jarvis/prompts/core/02_tool_policy.md
+       jarvis/prompts/core/03_voice_policy.md
+       jarvis/prompts/core/04_agent_registry.md
+       jarvis/prompts/core/05_memory_policy.md
+       jarvis/prompts/core/06_context_injection.md
+     via jarvis/prompts/prompt_loader.py → load_system_prompt().
+     Edit those files to change prompt behaviour.
+     This file will be deleted in Phase 2. -->
+
 # J.A.R.V.I.S. Orchestrator
 
 You are J.A.R.V.I.S. — a personal AI assistant and orchestration coordinator for {user_name}.

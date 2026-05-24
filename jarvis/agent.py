@@ -26,7 +26,7 @@ from typing import Any
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from jarvis.config import Settings, LANG_NAMES
+from jarvis.config import Settings
 from jarvis.entity_extractor import extract_entities
 from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
@@ -83,11 +83,6 @@ class _HudEventCallback(BaseCallbackHandler):
 
 
 # ── System prompt helpers ──────────────────────────────────────────────────────
-
-_DATA_REPORT_KEYWORDS = frozenset([
-    "pdf", "excel", "xlsx", "xls", "csv", "report", "rapor", "plot", "grafik",
-    "chart", "data", "veri", "analiz", "analysis", "hw", "odev", "ödev",
-])
 
 _FLASH_TRIVIAL_SIGNALS = frozenset([
     # Pure status lookups — no reasoning required
@@ -153,27 +148,17 @@ def _load_system_prompt(
     past_sessions_block: str = "",
     open_todos_block: str = "",
 ) -> str:
-    prompt_path = Path(__file__).parent / "prompts" / "system.md"
-    raw = prompt_path.read_text(encoding="utf-8")
-    raw = raw.replace("{user_name}", settings.user_name)
-    raw = raw.replace("{memory_context}", memory_context or "(no prior context retrieved)")
-    raw = raw.replace("{entities_block}", entities_block or "(none yet)")
-    raw = raw.replace("{past_sessions_block}", past_sessions_block or "(no relevant past sessions)")
-    raw = raw.replace("{open_todos_block}", open_todos_block or "(no open tasks)")
-
-    if any(kw in user_query.lower() for kw in _DATA_REPORT_KEYWORDS):
-        workflow_path = Path(__file__).parent / "prompts" / "workflows" / "data_report.md"
-        raw += "\n\n" + workflow_path.read_text(encoding="utf-8")
-
-    raw += env_block
-
-    if detected_language != "en":
-        lang_name = LANG_NAMES.get(detected_language[:2], detected_language)
-        raw += (
-            f"\n\nIMPORTANT: The user is speaking {lang_name}. "
-            f"You MUST respond entirely in {lang_name}."
-        )
-    return raw
+    from jarvis.prompts.prompt_loader import PromptContext, load_system_prompt
+    return load_system_prompt(PromptContext(
+        user_name=settings.user_name,
+        memory_context=memory_context,
+        entities_block=entities_block,
+        past_sessions_block=past_sessions_block,
+        open_todos_block=open_todos_block,
+        env_block=env_block,
+        detected_language=detected_language,
+        user_query=user_query,
+    ))
 
 
 def _trim_history(messages: list[Any], max_messages: int = 20) -> list[Any]:
