@@ -31,25 +31,20 @@ async def count():
 
 @router.get("/recent")
 async def recent(n: int = 20):
-    """Return recent vault entries across docs + memory turns."""
+    """Return recent indexed document chunks (up to n)."""
     mem = _get()
     try:
-        entries = mem.recent_entries(n)
-    except AttributeError:
-        # Fallback: search for empty string to get all (sorted by insert order)
-        try:
-            results = mem._docs.peek(n)
-            entries = [
-                {
-                    "id": did,
-                    "text": doc[:200],
-                    "metadata": meta,
-                    "type": meta.get("type", "NOTE"),
-                }
-                for did, doc, meta in zip(
-                    results["ids"], results["documents"], results["metadatas"]
-                )
-            ]
-        except Exception:
-            entries = []
-    return entries
+        results = mem._docs_collection.peek(n)
+        return [
+            {
+                "id": did,
+                "text": doc[:200],
+                "metadata": meta,
+                "type": meta.get("doc_type", "document"),
+            }
+            for did, doc, meta in zip(
+                results["ids"], results["documents"], results["metadatas"]
+            )
+        ]
+    except Exception:
+        return []
