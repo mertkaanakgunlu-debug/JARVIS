@@ -88,6 +88,7 @@ console = Console()
 # Keywords mapped to model IDs for fuzzy natural-language matching.
 # Longer / more specific keywords first so they win over shorter ones.
 _MODEL_KEYWORDS: list[tuple[list[str], str]] = [
+    (["yerel model", "yerel modele", "local model", "ollama", "qwen2.5", "qwen 2.5"], "local/qwen2.5-7b"),
     (["2.5-pro", "2.5 pro", "gemini pro", "gemini-pro", "pro"], "gemini-2.5-pro"),
     (["flash-lite", "flash lite", "flash-lite", "lite"],         "gemini-2.5-flash-lite"),
     (["2.5-flash", "2.5 flash", "gemini 2.5", "gemini2.5"],      "gemini-2.5-flash"),
@@ -204,7 +205,7 @@ def _show_model_menu(agent: JarvisAgent) -> None:
             last_provider = provider
 
         active_mark = " [gold3]★[/gold3]" if mid == current_id else ""
-        _PROVIDER_LABELS = {"vertex": "Vertex", "aistudio": "AI Studio", "gemini": "Gemini", "groq": "Groq"}
+        _PROVIDER_LABELS = {"vertex": "Vertex", "aistudio": "AI Studio", "gemini": "Gemini", "groq": "Groq", "local": "Ollama"}
         provider_str = _PROVIDER_LABELS.get(provider, provider.title())
         table.add_row(str(i), label + active_mark, provider_str, desc)
 
@@ -247,7 +248,11 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
             summaries_count = agent.memory.count_summaries()
             active = agent._active_model_id or settings.effective_cloud_model
             cost = agent.usage.session_cost
-            ef_label = "Gemini text-embedding-004" if agent.memory._gemini_ef_active else "default ONNX"
+            ef_label = {
+                "ollama": "Ollama nomic-embed-text (local)",
+                "gemini": "Gemini text-embedding-004",
+                "default": "default ONNX",
+            }[agent.memory._embedding_backend]
             total_sessions = agent.session_store.total_sessions()
             total_entities = agent.session_store.total_entities()
             history_len = len(agent._history)

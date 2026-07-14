@@ -1,8 +1,14 @@
 """Hybrid memory: ChromaDB (semantic recall) + Markdown vault (persistent log).
 
-Two ChromaDB collections:
-  jarvis_memory — conversation turns (default EF, local ONNX)
-  jarvis_docs   — indexed documents for RAG (Gemini text-embedding-004)
+Three ChromaDB collections:
+  jarvis_memory    — conversation turns (default EF, local ONNX)
+  jarvis_docs      — indexed documents for RAG
+  jarvis_summaries — session summaries for RAG
+
+jarvis_docs/jarvis_summaries prefer, in order (Faz 1 — local-first):
+  1. Ollama nomic-embed-text (local, free) if reachable
+  2. Gemini text-embedding-004 (cloud, higher quality) if an API key is set
+  3. ChromaDB's default ONNX EF (same as jarvis_memory already uses)
 """
 
 from __future__ import annotations
@@ -16,6 +22,41 @@ import chromadb
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
+
+
+def _build_ollama_ef(settings: "Settings"):
+    """ChromaDB-compatible EF using Ollama's nomic-embed-text (local, free).
+
+    Probes reachability once at construction (short timeout) rather than
+    per-embed-call, so an absent/stopped Ollama server fails fast here and
+    falls through to Gemini/default instead of stalling every recall.
+    """
+    try:
+        import httpx
+
+        base_url = settings.ollama_base_url
+        model = settings.embed_model
+        httpx.get(f"{base_url}/api/tags", timeout=1.5).raise_for_status()
+
+        class _OllamaEF:
+            def __call__(self, input: list[str]) -> list[list[float]]:
+                out = []
+                with httpx.Client(timeout=30) as client:
+                    for text in input:
+                        r = client.post(
+                            f"{base_url}/api/embeddings",
+                            json={"model": model, "prompt": text},
+                        )
+                        r.raise_for_status()
+                        out.append(r.json()["embedding"])
+                return out
+
+            def name(self) -> str:
+                return f"ollama-{model}"
+
+        return _OllamaEF()
+    except Exception:
+        return None
 
 
 def _build_gemini_ef(api_key: str):
@@ -46,6 +87,17 @@ def _build_gemini_ef(api_key: str):
         return None
 
 
+def _build_embedding_function(settings: "Settings"):
+    """Preferred embedding function + a short label, local-first (see module docstring)."""
+    ef = _build_ollama_ef(settings)
+    if ef is not None:
+        return ef, "ollama"
+    ef = _build_gemini_ef(settings.gemini_api_key)
+    if ef is not None:
+        return ef, "gemini"
+    return None, "default"
+
+
 class Memory:
     def __init__(self, settings: "Settings") -> None:
         self._vault = settings.vault_dir
@@ -62,20 +114,19 @@ class Memory:
         # jarvis_memory: conversation recall — default ONNX EF (local, lightweight)
         self._collection = self._client.get_or_create_collection("jarvis_memory")
 
-        # jarvis_docs: document RAG — Gemini embeddings for higher semantic quality
-        gemini_ef = _build_gemini_ef(settings.gemini_api_key)
-        doc_kwargs = {"embedding_function": gemini_ef} if gemini_ef else {}
+        # jarvis_docs / jarvis_summaries: RAG collections — local-first EF choice
+        # (Ollama nomic-embed-text -> Gemini -> ChromaDB default; see _build_embedding_function)
+        ef, self._embedding_backend = _build_embedding_function(settings)
+        doc_kwargs = {"embedding_function": ef} if ef else {}
         try:
             self._docs_collection = self._client.get_or_create_collection(
                 "jarvis_docs", **doc_kwargs
             )
-            self._gemini_ef_active = gemini_ef is not None
         except ValueError:
             # EF conflict: collection exists with a different EF — open without custom EF
             self._docs_collection = self._client.get_or_create_collection("jarvis_docs")
-            self._gemini_ef_active = False
+            self._embedding_backend = "default"
 
-        # jarvis_summaries: session summary RAG — Gemini embeddings (high quality, low volume)
         try:
             self._summaries_collection = self._client.get_or_create_collection(
                 "jarvis_summaries", **doc_kwargs

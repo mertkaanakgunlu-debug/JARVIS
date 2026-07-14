@@ -488,7 +488,9 @@ async def status(request: Request):
 async def reset(request: Request):
     _check_auth(request)
     agent = get_agent()
-    agent.reset()
+    # reset() blocks on JarvisAgent._state_lock (BUG-8) — offload so a
+    # concurrent in-flight chat() doesn't freeze this whole event loop.
+    await asyncio.get_event_loop().run_in_executor(None, agent.reset)
     return {"ok": True, "message": "Conversation history cleared"}
 
 

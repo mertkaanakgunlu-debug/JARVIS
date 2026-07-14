@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. — Architecture Map
 
-> Last updated: 2026-05-24 (Faz 21 state).
+> Last updated: 2026-07-14 (Faz 1 — local-first brain + model router).
 > Source of truth is always the code; this document summarises it.
 
 ## Entry points
@@ -18,12 +18,12 @@
 ```
 START
   └─ route_from_start
-       ├─ planner_node   (/think — Gemini Pro, step-by-step plan)
-       └─ agent_node     (Gemini Flash ReAct executor)
+       ├─ planner_node   (/think — reasoning role, step-by-step plan)
+       └─ agent_node     (fast role by default, reasoning role for complex queries)
             └─ route_from_agent
                  ├─ tools_node   (LangGraph ToolNode — 35 tools)
                  │    └─ route_from_tools → agent_node (loop until done)
-                 └─ critic_node  (Gemini Pro, accept or revise, up to 2×)
+                 └─ critic_node  (reasoning role, accept or revise, up to 2×)
                       └─ route_from_critic → {agent_node | END}
 ```
 
@@ -33,22 +33,26 @@ START
 
 **Key files:**
 - `jarvis/agent.py` — `JarvisAgent` wrapper, history management, multimodal pipeline
+- `jarvis/providers/__init__.py` — `get_llm(role, settings)` role→provider router (Faz 1)
 - `jarvis/graph/graph.py` — `build_graph()` StateGraph builder
 - `jarvis/graph/nodes.py` — all node functions + routing predicates
 - `jarvis/graph/tools.py` — `make_tools()` factory (35 `@tool` wrappers)
 - `jarvis/graph/state.py` — `JarvisState` TypedDict
 - `jarvis/graph/streaming.py` — `astream_response()` async text generator
 
-## Models
+## Models (Faz 1 — role→provider router, `jarvis/providers/get_llm`)
 
-| Role | Model | Provider |
+| Role | Primary | Fallback chain |
 |---|---|---|
-| Agent (execution) | `gemini-2.5-flash` | Vertex AI |
-| Planner / Critic | `gemini-2.5-pro` | Vertex AI |
-| Fallback | `gemini-2.0-flash` / `flash-lite` | AI Studio (free tier) |
-| Sub-agents (5×) | `gemini-2.5-pro` / `flash` | Vertex AI |
-| Embeddings (memory) | `nomic-embed-text` | Ollama (local) |
-| Embeddings (docs) | Gemini embedding | Vertex AI |
+| `fast` / `local` / `realtime` (agent execution) | `qwen2.5:7b-instruct` via Ollama | configured cloud tiers: Vertex Flash, then AI Studio `gemini-2.5-flash` |
+| `reasoning` (planner / critic / complex queries) | configured cloud tiers: Vertex Pro, then AI Studio `gemini-2.5-flash` | local Ollama (final fallback — nothing is cloud-mandatory) |
+| Sub-agents (5×, pydantic-ai) | `gemini-2.5-pro` / `flash` | Vertex AI (unchanged — not yet migrated to the router) |
+| Embeddings (docs / summaries) | `nomic-embed-text` via Ollama | Gemini `text-embedding-004`, then ChromaDB default ONNX |
+| Embeddings (conversation memory) | ChromaDB default ONNX (unchanged — already local) | — |
+
+A manual `/model` switch (`switch_model()`) pins the `fast` role to a specific cloud model
+(`Settings.pin_cloud_model`), bypassing the local-first default; `reasoning` is never affected by
+the pin. See [MEMORY.md](../MEMORY.md) for the local-first pivot rationale.
 
 ## Tools (35 registered)
 
@@ -70,9 +74,9 @@ Migration to LangGraph sub-graphs is Phase 8 of the refactor roadmap.
 
 | Layer | Technology | Collections / Tables |
 |---|---|---|
-| Semantic memory | ChromaDB + ONNX (`nomic-embed-text`) | `jarvis_memory` |
-| Document RAG | ChromaDB + Gemini embeddings | `jarvis_docs` |
-| Session summaries | ChromaDB + Gemini embeddings | `jarvis_summaries` |
+| Semantic memory | ChromaDB, default ONNX EF | `jarvis_memory` |
+| Document RAG | ChromaDB, Ollama `nomic-embed-text` → Gemini → default ONNX | `jarvis_docs` |
+| Session summaries | ChromaDB, Ollama `nomic-embed-text` → Gemini → default ONNX | `jarvis_summaries` |
 | Sessions / entities | SQLite `sessions.db` | `sessions`, `messages`, `entities` |
 | Scheduled tasks | SQLite `sessions.db` | `scheduled_tasks` |
 | Todos | SQLite `sessions.db` | `todos` |
@@ -91,6 +95,8 @@ Migration to LangGraph sub-graphs is Phase 8 of the refactor roadmap.
 | `POST /reset` | Archive session + clear history |
 | `GET /ws` | WebSocket HUD event bus |
 | `POST /voice/ptt/start` | Push-to-talk trigger |
+| `GET /health` | Liveness check |
+| `POST /chat/confirm/{conf_id}` | Resume a Phase 3 gate interrupt (approve/deny/edit) |
 | `/todos/*` | Todo CRUD |
 | `/finance/*` | Finance queries + budget |
 | `/calendar/*` | Google Calendar |
@@ -111,14 +117,15 @@ Event bus: `JarvisEventBus` in `jarvis/ws.py` — 13 typed emit helpers, 30s/60s
 State: Riverpod. Transport: WebSocket + REST + SSE + FCM.
 Kotlin `WakeWordService.kt`: foreground service for always-on wakeword detection.
 
-## Known gaps (tracked in refactor roadmap)
+## Known gaps (tracked in refactor roadmap — see [ROADMAP.md](../ROADMAP.md) for the current,
+maintained version of this list; updated 2026-07-14)
 
-| Gap | Phase |
-|---|---|
-| No tool risk metadata / confirmation gate | Phase 2–3 |
-| Monolithic `system.md` prompt | Phase 1 |
-| Memory retrieval duplicated in `agent.py` | Phase 4 |
-| `TaskExecutor` in-memory only (lost on restart) | Phase 5 |
-| `JarvisMonitor` not started in `--api` mode | Phase 6 |
-| No voice barge-in / TTS interruption | Phase 7 |
-| Sub-agents still on pydantic-ai | Phase 8 |
+| Gap | Phase | Status |
+|---|---|---|
+| No tool risk metadata / confirmation gate | Phase 2–3 | ✅ shipped 2026-05-24, but not functionally complete — see [SAFETY.md](SAFETY.md) |
+| Monolithic `system.md` prompt | Phase 1 | ✅ shipped 2026-05-24 (`jarvis/prompts/core/*.md` + `prompt_loader.py`) |
+| Memory retrieval duplicated in `agent.py` | Phase 4 | ✅ shipped 2026-05-24 (`jarvis/context_builder.py`) |
+| `TaskExecutor` in-memory only (lost on restart) | Phase 5 | ⬜ not started |
+| `JarvisMonitor` not started in `--api` mode | Phase 6 | ⬜ not started |
+| No voice barge-in / TTS interruption | Phase 7 | ⬜ not started |
+| Sub-agents still on pydantic-ai | Phase 8 | ⬜ not started |

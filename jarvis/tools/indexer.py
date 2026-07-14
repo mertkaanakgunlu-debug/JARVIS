@@ -99,5 +99,9 @@ def index_file(path: Path, memory: "Memory") -> str:
         return f"[ERROR] No content chunks produced from {path.name}"
 
     n = memory.index_document(str(path), chunks, doc_type)
-    ef_note = " (Gemini embeddings)" if memory._gemini_ef_active else " (default embeddings)"
+    ef_note = {
+        "ollama": " (Ollama embeddings)",
+        "gemini": " (Gemini embeddings)",
+        "default": " (default embeddings)",
+    }[memory._embedding_backend]
     return f"Indexed '{path.name}': {n} chunks stored{ef_note}. Use vault_search to query."

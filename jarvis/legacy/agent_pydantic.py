@@ -1,4 +1,12 @@
-"""Pydantic-AI orchestrator with hybrid routing and sub-agent delegation."""
+"""Pydantic-AI orchestrator with hybrid routing and sub-agent delegation.
+
+QUARANTINED (Faz 1, 2026-07-14): this file is not imported by any live code
+path (verified by grep before relying on that — see CLAUDE.md). Its local-model
+path (OpenAIModel + OpenAIProvider against Ollama's OpenAI-compatible endpoint,
+below) has been superseded by jarvis/providers/get_llm() — that's the current
+local-first entry point, not this. Full retirement of jarvis/legacy/ is Faz 8;
+kept here only for reference until then.
+"""
 
 from __future__ import annotations
 

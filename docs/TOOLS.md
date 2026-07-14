@@ -52,6 +52,10 @@ Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass + `TOOL_SPE
 | `google_drive` | L3 | external_api | ✓ | ✓ | 60s | Drive: search/read/download (L1) · upload/share/delete (L3) |
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
 
-> **Phase 3** will insert a LangGraph `confirmation` node that reads `requires_confirmation` and
-> `risk_level` from `jarvis/tool_registry.py` to interrupt before L3 tool calls across all modes
-> (CLI, API, voice, mobile). See [ARCHITECTURE.md](ARCHITECTURE.md).
+> **Phase 3 has shipped** (`jarvis/graph/nodes.py`'s `make_confirmation_node`, commit `7e7e471`):
+> a LangGraph `confirmation` node reads `requires_confirmation`/`risk_level` from
+> `jarvis/tool_registry.py` and interrupts before gated tool calls. It does **not** yet work
+> "across all modes" as originally planned, though — only the FastAPI `/chat/confirm` path
+> resumes an interrupted call; the CLI text/voice loops don't handle the interrupt at all, and
+> the gate is disabled by default (`confirmation_gate_enabled=False`). See
+> [SAFETY.md](SAFETY.md) and [ROADMAP.md](../ROADMAP.md) P0 for the remaining work.

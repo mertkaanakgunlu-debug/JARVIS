@@ -2,9 +2,11 @@
 langgraph>=0.2.50
 langgraph-checkpoint-sqlite>=2.0
 langchain-core>=0.3
-langchain-google-genai>=2.0           # AI Studio Gemini (free tier fallback)
-langchain-google-vertexai>=2.0        # Vertex AI Gemini (uses GCP credits)
+langchain-google-genai>=2.0           # AI Studio Gemini (cloud escalation tier)
+langchain-google-vertexai>=2.0        # Vertex AI Gemini (uses GCP credits, opt-in)
 langchain-groq>=0.2                    # Groq Llama models (fast intent classifier)
+langchain-openai>=0.2                  # ChatOpenAI against Ollama's OpenAI-compatible endpoint
+                                        # (local-first Faz 1 primary — see jarvis/providers/)
 
 # Sub-agent runner: math/writer/research/coder/geomath use pydantic-ai via _run_coro bridge.
 # Migration to LangGraph sub-graphs is tracked as Phase 8 of the refactor roadmap.

@@ -154,7 +154,7 @@
 
 ### Up Next ⬜
 - **Phase 0:** Repository hygiene — `README.md` ✅ done, `ProjectState.md` ✅ done (this file), `.gitignore` hardening for vault data, `Jarvis.rar` cleanup
-- **email_triage tool:** defined in `graph/tools.py` but not in the `return` list — verify if intentional or accidental omission
+- ~~**email_triage tool:** defined in `graph/tools.py` but not in the `return` list — verify if intentional or accidental omission~~ — removed entirely in commit `576aa75` (2026-05-24). No longer applicable.
 - **Vertex AI ADC:** configure `gcloud auth application-default login` to activate Vertex Pro
 - **iOS mobile app:** Android app done; iOS build not started
 - **Wake-word tuning:** openwakeword false positive rate on "Hey JARVIS"
@@ -266,7 +266,7 @@ Mobile (mobile/ — Flutter/Android):
 | 34 | `geo_math` | Science | Geo-math, FDM simulation, seismic |
 | 35 | `hud_panels` | UI | Show/hide mobile HUD panels |
 
-*Note: `email_triage` is defined in `graph/tools.py` but currently missing from the `return` list — investigate.*
+*Note (corrected 2026-07-14): `email_triage` was removed entirely from `graph/tools.py` in commit `576aa75` (2026-05-24) — this is no longer a loose end.*
 
 ---
 
@@ -277,6 +277,8 @@ Mobile (mobile/ — Flutter/Android):
 | `jarvis/__main__.py` | Entry point — `--voice`, `--wakeword`, `--api`, `--monitor`, `--port` |
 | `jarvis/agent.py` | `JarvisAgent` — wraps LangGraph, manages session state, model fallback |
 | `jarvis/config.py` | pydantic-settings from .env; Vertex + AI Studio model config |
+| `jarvis/context_builder.py` | `ContextBuilder` — extracted memory/todo/entity/session recall used by `agent.py` (Phase 4, 2026-05-24) |
+| `jarvis/tool_registry.py` | `ToolSpec` risk-metadata registry (risk level, confirmation requirement) for all tools (Phase 2, 2026-05-24) |
 | `jarvis/memory.py` | ChromaDB semantic recall + Obsidian vault writer |
 | `jarvis/cli.py` | Rich REPL; `/model`, `/recall`, `/status`, `/reset`, `/help` |
 | `jarvis/api.py` | FastAPI REST server + WebSocket HUD (Faz 9 + 11 + 19) |
@@ -323,7 +325,7 @@ Mobile (mobile/ — Flutter/Android):
 2. **Gemini free-tier RPD:** gemini-2.5-pro = 25 RPD (free); gemini-2.5-flash = 1500 RPD. Quotas reset midnight UTC.
 3. **marker-pdf first run:** downloads ~2-3 GB of layout models to `~/.cache/marker`. Subsequent runs use cache.
 4. **MiKTeX path:** `C:\Users\mertk\AppData\Local\Programs\MiKTeX\miktex\bin\x64\pdflatex.EXE` — hardcoded fallback in `latex.py`.
-5. **`email_triage` tool omitted from graph return list** — defined but not exported. Verify intentional.
+5. ~~**`email_triage` tool omitted from graph return list** — defined but not exported. Verify intentional.~~ Resolved: removed entirely in commit `576aa75` (2026-05-24).
 6. **vault/ gitignore:** conversation transcripts and notes are NOT gitignored. Phase 0 cleanup pending.
 7. **Jarvis.rar:** untracked large archive in project root. Should be gitignored or removed.
 8. **ChromaDB under OneDrive:** may cause sync churn. Move `CHROMA_DIR` outside OneDrive if noisy.

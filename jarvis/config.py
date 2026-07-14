@@ -25,6 +25,14 @@ class Settings(BaseSettings):
 
     # Phase 3: confirmation gate — interrupt before L3 tool calls (opt-in)
     confirmation_gate_enabled: bool = False
+
+    # Faz 1: set by JarvisAgent.switch_model() when the user manually pins a
+    # specific cloud model — bypasses the local-first router's Ollama-primary
+    # default for the "fast" role (jarvis/providers/get_llm) so the pinned
+    # model actually answers instead of being silently overridden. Does not
+    # affect the "reasoning" role (critic/planner), same as pre-Faz-1 behavior
+    # where switch_model() never touched the Pro/critic model either.
+    pin_cloud_model: bool = False
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"
@@ -122,8 +130,9 @@ class Settings(BaseSettings):
 
     @property
     def effective_cloud_model(self) -> str:
-        if self.cloud_tier == "pro":
-            return self.cloud_model_pro
+        # BUG-24: cloud_tier is only ever "vertex" | "aistudio" | "flash" (see
+        # switch_model() in agent.py) — a "pro" branch here was unreachable
+        # dead code; cloud_model is always the right answer.
         return self.cloud_model
 
     @property

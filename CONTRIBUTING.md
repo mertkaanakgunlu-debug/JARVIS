@@ -3,7 +3,7 @@
 ## Setup
 
 ```powershell
-cd C:\Users\mertk\OneDrive\Desktop\Jarvis
+cd C:\Users\mertk\Desktop\Jarvis
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt   # canonical install — pyproject.toml has no dep list

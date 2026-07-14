@@ -19,6 +19,7 @@ import asyncio
 import base64
 import json
 import re
+import threading
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -75,7 +76,10 @@ class _HudEventCallback(BaseCallbackHandler):
             or serialized.get("kwargs", {}).get("model")
             or serialized.get("name", "llm")
         )
-        event_bus.tool_call(str(model), kind="cloud")
+        # Faz 1: the fast role now routes to Ollama by default — "gemini" is
+        # the only cloud family in play today, so its absence means local.
+        kind = "cloud" if "gemini" in str(model).lower() else "local"
+        event_bus.tool_call(str(model), kind=kind)
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
@@ -240,6 +244,7 @@ def _strip_images_for_storage(messages: list[Any]) -> list[Any]:
 # ── Model catalogue (Revizyon 2 — Gemini-only, 5 entries) ─────────────────────
 
 AVAILABLE_MODELS: list[tuple[str, str, str, str]] = [
+    ("local/qwen2.5-7b",               "Qwen2.5 7B Instruct (local)",  "local",    "Ollama · RTX 4070 · default fast+reasoning router"),
     ("vertex/gemini-2.5-pro",          "Gemini 2.5 Pro (Vertex)",      "vertex",   "Vertex credits · orchestrator + vision"),
     ("vertex/gemini-2.5-flash",        "Gemini 2.5 Flash (Vertex)",    "vertex",   "Vertex credits · sub-agent executor"),
     ("aistudio/gemini-2.5-flash",      "Gemini 2.5 Flash (AI Studio)", "aistudio", "50 RPD free · mid fallback"),
@@ -260,12 +265,28 @@ def _label_for(model_id: str) -> str:
 class JarvisAgent:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        # BUG-22: switch_model() used to build a local `new_settings` copy that
+        # was never persisted anywhere but the compiled graph closure — a later
+        # quota-fallback rebuild had no way to see it and silently reverted to
+        # construction-time `self.settings`, discarding the user's chosen model.
+        # This is the settings switch_model()/the fallback rebuild actually act on.
+        self._effective_settings = settings
         self.memory = Memory(settings)
         self.workspace = Path(".").resolve()
         self._env_block = _build_env_block(self.workspace)
         self._using_fallback = False
         self._active_model_id: str | None = None
-        self._turn: int = 0
+        # Faz 1: which role (fast/local vs reasoning) served the most recent
+        # turn — None before the first turn. Drives _cloud_model's per-turn
+        # label since the router now picks a provider per turn, not once.
+        self._last_turn_used_pro: bool | None = None
+
+        # BUG-8: this singleton is mutated from the main loop, TaskExecutor's
+        # background thread, and API endpoints (e.g. /reset) concurrently.
+        # threading.Lock (not asyncio.Lock) because those callers run on
+        # independent event loops, not just independent tasks on one loop —
+        # see _acquire_state_lock() and jarvis/graph/graph.py's docstring.
+        self._state_lock = threading.Lock()
 
         db_path = Path("data") / "jarvis_checkpoints.db"
         self._checkpointer = make_checkpointer(db_path)
@@ -279,9 +300,14 @@ class JarvisAgent:
         if last:
             self.session_id = last
             self._history: list[Any] = self.session_store.load_history(last, limit=20)
+            # BUG-11: resume this session's own turn counter too — restarting
+            # it at 0 would let the next turn reuse an old thread_id
+            # ("{session_id}-t1") and resurrect a stale LangGraph checkpoint.
+            self._turn: int = self.session_store.last_turn_idx(last)
         else:
             self.session_id = self.session_store.new_session()
             self._history: list[Any] = []
+            self._turn: int = 0
 
         # Faz 13-C: scheduler store (same DB file, separate table)
         self.scheduler = SchedulerStore(Path("data") / "sessions.db")
@@ -303,62 +329,109 @@ class JarvisAgent:
 
     @property
     def _cloud_model(self) -> str:
-        if self._active_model_id:
-            return _label_for(self._active_model_id)
-        if self.settings.use_vertex:
-            return _label_for(f"vertex/{self.settings.vertex_model_fast}")
+        """Display label for whichever role/provider served the most recent turn.
+
+        Faz 1: the graph now picks between the local "fast" role and the cloud
+        "reasoning" role per turn (see _is_trivially_simple/use_pro_agent in
+        chat()/chat_stream()), so a single static label no longer tells the
+        whole story — this reflects the actual choice instead. Before the
+        first turn, falls back to the old static/pinned label.
+        """
         suffix = " (fallback)" if self._using_fallback else ""
-        return self.settings.cloud_model_label + suffix
+        s = self._effective_settings
+
+        if self._last_turn_used_pro is None:
+            if self._active_model_id:
+                return _label_for(self._active_model_id) + suffix
+            if s.use_vertex:
+                return _label_for(f"vertex/{s.vertex_model_fast}") + suffix
+            return s.cloud_model_label + suffix
+
+        if self._last_turn_used_pro:
+            if s.use_vertex:
+                return f"{s.vertex_model_primary} (Vertex, reasoning){suffix}"
+            return f"{s.cloud_model_fallback} (AI Studio, reasoning){suffix}"
+
+        if self._active_model_id and s.pin_cloud_model:
+            return _label_for(self._active_model_id) + suffix
+
+        return f"{s.local_model} (Ollama, local){suffix}"
 
     @property
     def current_model_label(self) -> str:
         return self._cloud_model
 
+    async def _acquire_state_lock(self) -> None:
+        """Acquire _state_lock without blocking the calling event loop's thread."""
+        await asyncio.get_running_loop().run_in_executor(None, self._state_lock.acquire)
+
     def reset(self) -> None:
-        """Archive current session and start a fresh one. Triggers summarization if content exists."""
-        old_session_id = self.session_id
-        had_content = self._turn > 0 or len(self._history) > 0
-        self.session_store.archive_session(old_session_id)
+        """Archive current session and start a fresh one. Triggers summarization if content exists.
+
+        Synchronous + blocking acquire — safe from the CLI's sync context;
+        callers on an event loop (e.g. the /reset endpoint) must offload this
+        via run_in_executor so they don't freeze the loop while it waits.
+        """
+        with self._state_lock:
+            old_session_id = self.session_id
+            had_content = self._turn > 0 or len(self._history) > 0
+            self.session_store.archive_session(old_session_id)
+            self.session_id = self.session_store.new_session()
+            self._history = []
+            self._turn = 0
         if had_content:
             self._schedule_summarize_one(old_session_id)
-        self.session_id = self.session_store.new_session()
-        self._history = []
-        self._turn = 0
         event_bus.session(self.session_id, None)
 
     def switch_session(self, session_id: str) -> int:
         """Load a past session's history. Returns number of messages loaded."""
-        self._history = self.session_store.load_history(session_id, limit=20)
-        self.session_id = session_id
-        self._turn = 0  # reset to avoid thread_id namespace collisions
+        with self._state_lock:
+            self._history = self.session_store.load_history(session_id, limit=20)
+            self.session_id = session_id
+            # BUG-11: resume this session's own turn counter instead of
+            # restarting at 0 — a fresh 0 would let the next turn reuse an
+            # old thread_id ("{session_id}-t1") and resurrect that session's
+            # very first LangGraph checkpoint into the current conversation.
+            self._turn = self.session_store.last_turn_idx(session_id)
+            n = len(self._history)
         topic = next(
             (s["topic_hint"] for s in self.session_store.list_sessions(50) if s["id"] == session_id),
             None,
         )
         event_bus.session(session_id, topic)
-        return len(self._history)
+        return n
 
     def switch_model(self, model_id: str) -> str:
         import copy
         new_settings = copy.copy(self.settings)
 
-        if model_id.startswith("vertex/"):
+        if model_id.startswith("local/") or model_id == "local":
+            # Faz 1: explicit un-pin — return the fast role to the local-first
+            # Ollama-primary default (see jarvis/providers/get_llm).
+            new_settings.pin_cloud_model = False
+        elif model_id.startswith("vertex/"):
             real_id = model_id.removeprefix("vertex/")
             new_settings.cloud_tier = "vertex"
             new_settings.vertex_model_fast = real_id
+            new_settings.pin_cloud_model = True
         elif model_id.startswith("aistudio/"):
             real_id = model_id.removeprefix("aistudio/")
             new_settings.cloud_tier = "aistudio"
             new_settings.cloud_model = real_id
+            new_settings.pin_cloud_model = True
         elif model_id.startswith("groq/"):
             raise ValueError("Groq is an optional intent classifier — not a primary orchestrator model.")
         else:
             new_settings.cloud_tier = "aistudio"
             new_settings.cloud_model = model_id
+            new_settings.pin_cloud_model = True
 
-        self._graph = build_graph(new_settings, self.workspace, self.memory, self._checkpointer)
-        self._active_model_id = model_id
-        self._using_fallback = False
+        new_graph = build_graph(new_settings, self.workspace, self.memory, self._checkpointer)
+        with self._state_lock:
+            self._graph = new_graph
+            self._effective_settings = new_settings
+            self._active_model_id = model_id
+            self._using_fallback = False
         return _label_for(model_id)
 
     # ── Entity extraction (fire-and-forget) ────────────────────────────────────
@@ -381,9 +454,24 @@ class JarvisAgent:
     # ── Session summarization (Faz 13-A, fire-and-forget) ─────────────────────
 
     def _schedule_summary_backfill(self) -> None:
-        """On startup: summarize+embed all archived sessions that have no summary yet."""
+        """On startup: summarize+embed all archived sessions that have no summary yet.
+
+        No-ops if there's no event loop running yet — true in both real entry
+        points (cli.py/api.py construct JarvisAgent before asyncio.run()/
+        uvicorn start their loop), not just tests. Known gap: this means
+        backfill currently never actually runs; left as-is for Faz 0 (would
+        need the CLI/API entry points to re-invoke this once their loop is
+        up — out of scope for a data-integrity-only pass). Checking for a
+        loop *before* constructing the coroutine (rather than catching the
+        RuntimeError from create_task after the fact) avoids leaking an
+        unawaited coroutine object each time.
+        """
         pending = self.session_store.sessions_needing_summary()
         if not pending:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
             return
 
         async def _backfill() -> None:
@@ -408,13 +496,9 @@ class JarvisAgent:
                 except Exception:
                     continue
 
-        try:
-            task = asyncio.create_task(_backfill())
-            self._bg_tasks.add(task)
-            task.add_done_callback(self._bg_tasks.discard)
-        except RuntimeError:
-            # No running event loop yet (e.g. unit-test context) — skip silently.
-            pass
+        task = asyncio.create_task(_backfill())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     def _schedule_summarize_one(self, session_id: str) -> None:
         """Fire-and-forget: summarize a single just-archived session."""
@@ -463,86 +547,102 @@ class JarvisAgent:
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
 
-        ctx = self._context_builder.build(clean_input)
-        system_prompt = _load_system_prompt(
-            self.settings, ctx.memory_ctx, detected_language,
-            self._env_block, clean_input, ctx.entities_block,
-            ctx.past_sessions_block, ctx.open_todos_block,
-        )
-
-        human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
-
-        initial_messages = (
-            [SystemMessage(content=system_prompt)]
-            + self._history
-            + [human_msg]
-        )
-
-        self._turn += 1
-        state = {
-            "messages": initial_messages,
-            "user_query": clean_input,
-            "language": detected_language,
-            "memory_context": ctx.memory_ctx,
-            "needs_planning": needs_planning,
-            "use_pro_agent": use_pro_agent,
-            "plan": "",
-            "response": "",
-            "revise_count": 0,
-            "critic_verdict": "",
-            "critique": "",
-        }
-        config = {
-            "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
-            "callbacks": [_HudEventCallback()],
-        }
-
-        event_bus.state("thinking")
-
+        # BUG-8: serialize the whole turn — self._history/_turn/session_id are
+        # read at the start and written back at the end; a concurrent caller
+        # (TaskExecutor's background thread, another request) interleaving in
+        # between would clobber one turn's result with the other's.
+        await self._acquire_state_lock()
         try:
-            result = await self._graph.ainvoke(state, config=config)
-        except GraphInterrupt as exc:
-            event_bus.state("idle")
+            ctx = self._context_builder.build(clean_input)
+            system_prompt = _load_system_prompt(
+                self.settings, ctx.memory_ctx, detected_language,
+                self._env_block, clean_input, ctx.entities_block,
+                ctx.past_sessions_block, ctx.open_todos_block,
+            )
+
+            human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
+
+            initial_messages = (
+                [SystemMessage(content=system_prompt)]
+                + self._history
+                + [human_msg]
+            )
+
+            self._turn += 1
+            # Faz 1: record which role this turn requested so _cloud_model can
+            # report the provider that actually answered (see that property).
+            self._last_turn_used_pro = use_pro_agent
+            state = {
+                "messages": initial_messages,
+                "user_query": clean_input,
+                "language": detected_language,
+                "memory_context": ctx.memory_ctx,
+                "needs_planning": needs_planning,
+                "use_pro_agent": use_pro_agent,
+                "plan": "",
+                "response": "",
+                "revise_count": 0,
+                "critic_verdict": "",
+                "critique": "",
+            }
+            config = {
+                "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
+                "callbacks": [_HudEventCallback()],
+            }
+
+            event_bus.state("thinking")
+
             try:
-                payload = exc.args[0][0].value
-            except Exception:
-                payload = {}
-            conf_id = str(uuid.uuid4())
-            self._pending_confirmations[conf_id] = config
-            event_bus.confirmation_required(conf_id, payload)
-            raise ConfirmationRequired(conf_id, payload) from exc
-        except Exception as exc:
-            msg = str(exc)
-            if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
-                print(f"\n[JARVIS] Quota hit — falling back to AI Studio Flash.")
-                self._using_fallback = True
-                import copy
-                fb_settings = copy.copy(self.settings)
-                fb_settings.cloud_tier = "aistudio"
-                fb_settings.cloud_model = self.settings.cloud_model_fallback
-                self._graph = build_graph(fb_settings, self.workspace, self.memory, self._checkpointer)
                 result = await self._graph.ainvoke(state, config=config)
-            else:
-                raise
+            except GraphInterrupt as exc:
+                event_bus.state("idle")
+                try:
+                    payload = exc.args[0][0].value
+                except Exception:
+                    payload = {}
+                conf_id = str(uuid.uuid4())
+                self._pending_confirmations[conf_id] = config
+                event_bus.confirmation_required(conf_id, payload)
+                raise ConfirmationRequired(conf_id, payload) from exc
+            except Exception as exc:
+                msg = str(exc)
+                if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
+                    print(f"\n[JARVIS] Quota hit — falling back to AI Studio Flash.")
+                    self._using_fallback = True
+                    import copy
+                    # BUG-22: base the fallback on _effective_settings (which
+                    # reflects any prior switch_model()), not the original
+                    # construction-time self.settings — otherwise this silently
+                    # reverts a manually-chosen model back to the startup default.
+                    fb_settings = copy.copy(self._effective_settings)
+                    fb_settings.cloud_tier = "aistudio"
+                    fb_settings.cloud_model = self._effective_settings.cloud_model_fallback
+                    self._graph = build_graph(fb_settings, self.workspace, self.memory, self._checkpointer)
+                    self._effective_settings = fb_settings
+                    result = await self._graph.ainvoke(state, config=config)
+                else:
+                    raise
 
-        response = result.get("response", "")
-        if not response:
-            from langchain_core.messages import AIMessage
-            for m in reversed(result.get("messages", [])):
-                if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-                    response = m.content
-                    break
+            response = result.get("response", "")
+            if not response:
+                from langchain_core.messages import AIMessage
+                for m in reversed(result.get("messages", [])):
+                    if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+                        response = m.content
+                        break
 
-        self._record_usage_from_result(result, use_pro_agent)
+            self._record_usage_from_result(result, use_pro_agent)
 
-        all_msgs = result.get("messages", [])
-        non_system = [m for m in all_msgs if not isinstance(m, SystemMessage)]
-        self._history = _strip_images_for_storage(_trim_history(non_system))
+            all_msgs = result.get("messages", [])
+            non_system = [m for m in all_msgs if not isinstance(m, SystemMessage)]
+            self._history = _strip_images_for_storage(_trim_history(non_system))
 
-        # Persist conversation state to SQLite
-        self.session_store.save_turn(self.session_id, self._history, self._turn)
-        if self._turn == 1:
-            self.session_store.set_topic_hint(self.session_id, clean_input[:60])
+            # Persist conversation state to SQLite
+            self.session_store.save_turn(self.session_id, self._history, self._turn)
+            if self._turn == 1:
+                self.session_store.set_topic_hint(self.session_id, clean_input[:60])
+        finally:
+            self._state_lock.release()
 
         self.memory.store("user", clean_input, self.session_id)
         self.memory.store("assistant", response, self.session_id)
@@ -593,103 +693,113 @@ class JarvisAgent:
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
         use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
 
-        ctx = self._context_builder.build(clean_input)
-        system_prompt = _load_system_prompt(
-            self.settings, ctx.memory_ctx, detected_language,
-            self._env_block, clean_input, ctx.entities_block,
-            ctx.past_sessions_block, ctx.open_todos_block,
-        )
-
-        human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
-
-        initial_messages = (
-            [SystemMessage(content=system_prompt)]
-            + self._history
-            + [human_msg]
-        )
-
-        self._turn += 1
-        state = {
-            "messages": initial_messages,
-            "user_query": clean_input,
-            "language": detected_language,
-            "memory_context": ctx.memory_ctx,
-            "needs_planning": needs_planning,
-            "use_pro_agent": use_pro_agent,
-            "plan": "",
-            "response": "",
-            "revise_count": 0,
-            "critic_verdict": "",
-            "critique": "",
-        }
-        config = {
-            "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
-            "callbacks": [_HudEventCallback()],
-        }
-
-        event_bus.state("thinking")
-
-        chunks: list[str] = []
-        _first_chunk = True
-        _confirmation_issued = False
-
+        # BUG-8: serialize the whole turn (see chat() for why) — held across
+        # the yields too, since the generator can sit parked mid-stream while
+        # self._history/_turn still reflect the *previous* completed turn.
+        await self._acquire_state_lock()
         try:
-            async for delta in graph_stream_to_text(self._graph, state, config):
-                if _first_chunk:
-                    event_bus.state("speaking")
-                    _first_chunk = False
-                chunks.append(delta)
-                yield delta
-        except GraphInterrupt as exc:
-            _confirmation_issued = True
+            ctx = self._context_builder.build(clean_input)
+            system_prompt = _load_system_prompt(
+                self.settings, ctx.memory_ctx, detected_language,
+                self._env_block, clean_input, ctx.entities_block,
+                ctx.past_sessions_block, ctx.open_todos_block,
+            )
+
+            human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
+
+            initial_messages = (
+                [SystemMessage(content=system_prompt)]
+                + self._history
+                + [human_msg]
+            )
+
+            self._turn += 1
+            # Faz 1: record which role this turn requested so _cloud_model can
+            # report the provider that actually answered (see that property).
+            self._last_turn_used_pro = use_pro_agent
+            state = {
+                "messages": initial_messages,
+                "user_query": clean_input,
+                "language": detected_language,
+                "memory_context": ctx.memory_ctx,
+                "needs_planning": needs_planning,
+                "use_pro_agent": use_pro_agent,
+                "plan": "",
+                "response": "",
+                "revise_count": 0,
+                "critic_verdict": "",
+                "critique": "",
+            }
+            config = {
+                "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
+                "callbacks": [_HudEventCallback()],
+            }
+
+            event_bus.state("thinking")
+
+            chunks: list[str] = []
+            _first_chunk = True
+            _confirmation_issued = False
+
             try:
-                payload = exc.args[0][0].value
+                async for delta in graph_stream_to_text(self._graph, state, config):
+                    if _first_chunk:
+                        event_bus.state("speaking")
+                        _first_chunk = False
+                    chunks.append(delta)
+                    yield delta
+            except GraphInterrupt as exc:
+                _confirmation_issued = True
+                try:
+                    payload = exc.args[0][0].value
+                except Exception:
+                    payload = {}
+                conf_id = str(uuid.uuid4())
+                self._pending_confirmations[conf_id] = config
+                event_bus.confirmation_required(conf_id, payload)
+                yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
+
+            if _confirmation_issued:
+                event_bus.state("idle")
+                return
+
+            full_response = "".join(chunks)
+
+            # Rebuild history from checkpointer to preserve tool messages (Faz 12-B fix)
+            try:
+                checkpoint_tuple = self._checkpointer.get_tuple(config)
+                if checkpoint_tuple:
+                    real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
+                    non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
+                    self._history = _strip_images_for_storage(_trim_history(non_system))
+                else:
+                    raise ValueError("no checkpoint")
             except Exception:
-                payload = {}
-            conf_id = str(uuid.uuid4())
-            self._pending_confirmations[conf_id] = config
-            event_bus.confirmation_required(conf_id, payload)
-            yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
-
-        if _confirmation_issued:
-            event_bus.state("idle")
-            return
-
-        full_response = "".join(chunks)
-
-        # Rebuild history from checkpointer to preserve tool messages (Faz 12-B fix)
-        try:
-            checkpoint_tuple = self._checkpointer.get_tuple(config)
-            if checkpoint_tuple:
-                real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
-                non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
+                # Fallback: rebuild manually (loses tool messages, but doesn't crash)
+                from langchain_core.messages import AIMessage
+                non_system = [m for m in initial_messages if not isinstance(m, SystemMessage)]
+                non_system.append(AIMessage(content=full_response))
                 self._history = _strip_images_for_storage(_trim_history(non_system))
-            else:
-                raise ValueError("no checkpoint")
-        except Exception:
-            # Fallback: rebuild manually (loses tool messages, but doesn't crash)
-            from langchain_core.messages import AIMessage
-            non_system = [m for m in initial_messages if not isinstance(m, SystemMessage)]
-            non_system.append(AIMessage(content=full_response))
-            self._history = _strip_images_for_storage(_trim_history(non_system))
 
-        # Token usage estimate (streaming doesn't return metadata)
-        all_text = " ".join(
-            m.content for m in initial_messages
-            if hasattr(m, "content") and isinstance(m.content, str)
-        )
-        est_in = max(1, len(all_text) // 4)
-        est_out = max(1, len(full_response) // 4)
-        model_id = self._active_model_id or (
-            f"vertex/{self.settings.vertex_model_primary}" if use_pro_agent
-            else f"vertex/{self.settings.vertex_model_fast}"
-        )
-        self.usage.record(model_id, est_in, est_out)
+            # Token usage estimate (streaming doesn't return metadata)
+            all_text = " ".join(
+                m.content for m in initial_messages
+                if hasattr(m, "content") and isinstance(m.content, str)
+            )
+            est_in = max(1, len(all_text) // 4)
+            est_out = max(1, len(full_response) // 4)
+            model_id = self._active_model_id or (
+                f"vertex/{self.settings.vertex_model_primary}" if use_pro_agent
+                else f"vertex/{self.settings.vertex_model_fast}"
+            )
+            self.usage.record(model_id, est_in, est_out)
 
-        # Persist conversation state to SQLite
-        self.session_store.save_turn(self.session_id, self._history, self._turn)
-        if self._turn == 1:
-            self.session_store.set_topic_hint(self.session_id, clean_input[:60])
+            # Persist conversation state to SQLite
+            self.session_store.save_turn(self.session_id, self._history, self._turn)
+            if self._turn == 1:
+                self.session_store.set_topic_hint(self.session_id, clean_input[:60])
+        finally:
+            self._state_lock.release()
 
         self.memory.store("user", clean_input, self.session_id)
         self.memory.store("assistant", full_response, self.session_id)
@@ -717,61 +827,70 @@ class JarvisAgent:
             yield "[ERROR: confirmation session expired or not found]"
             return
 
-        event_bus.state("thinking")
-        chunks: list[str] = []
-        _first_chunk = True
-
+        # BUG-8: same turn-serialization as chat()/chat_stream() — this
+        # resumes and finishes the SAME turn that chat_stream() started
+        # (and unlocked at its confirmation-interrupt yield), so it needs
+        # the lock for the same reason: self._history/_turn get written here.
+        await self._acquire_state_lock()
         try:
-            async for chunk, metadata in self._graph.astream(
-                Command(resume=decision),
-                config,
-                stream_mode="messages",
-            ):
-                if metadata.get("langgraph_node") != "agent":
-                    continue
-                if not isinstance(chunk, AIMessageChunk):
-                    continue
-                if getattr(chunk, "tool_call_chunks", None):
-                    continue
-                content = chunk.content
-                texts: list[str] = []
-                if isinstance(content, str) and content:
-                    texts.append(content)
-                elif isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            t = part.get("text", "")
-                            if t:
-                                texts.append(t)
-                for text in texts:
-                    if _first_chunk:
-                        event_bus.state("speaking")
-                        _first_chunk = False
-                    chunks.append(text)
-                    yield text
-        except Exception as exc:
-            event_bus.state("idle")
-            yield f"[ERROR: {exc}]"
-            return
+            event_bus.state("thinking")
+            chunks: list[str] = []
+            _first_chunk = True
 
-        full_response = "".join(chunks)
+            try:
+                async for chunk, metadata in self._graph.astream(
+                    Command(resume=decision),
+                    config,
+                    stream_mode="messages",
+                ):
+                    if metadata.get("langgraph_node") != "agent":
+                        continue
+                    if not isinstance(chunk, AIMessageChunk):
+                        continue
+                    if getattr(chunk, "tool_call_chunks", None):
+                        continue
+                    content = chunk.content
+                    texts: list[str] = []
+                    if isinstance(content, str) and content:
+                        texts.append(content)
+                    elif isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                t = part.get("text", "")
+                                if t:
+                                    texts.append(t)
+                    for text in texts:
+                        if _first_chunk:
+                            event_bus.state("speaking")
+                            _first_chunk = False
+                        chunks.append(text)
+                        yield text
+            except Exception as exc:
+                event_bus.state("idle")
+                yield f"[ERROR: {exc}]"
+                return
 
-        # Rebuild history from checkpointer
-        try:
-            checkpoint_tuple = self._checkpointer.get_tuple(config)
-            if checkpoint_tuple:
-                real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
-                non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
+            full_response = "".join(chunks)
+
+            # Rebuild history from checkpointer
+            try:
+                checkpoint_tuple = self._checkpointer.get_tuple(config)
+                if checkpoint_tuple:
+                    real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
+                    non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
+                    self._history = _strip_images_for_storage(_trim_history(non_system))
+                else:
+                    raise ValueError("no checkpoint")
+            except Exception:
+                from langchain_core.messages import AIMessage
+                non_system = list(self._history)
+                non_system.append(AIMessage(content=full_response))
                 self._history = _strip_images_for_storage(_trim_history(non_system))
-            else:
-                raise ValueError("no checkpoint")
-        except Exception:
-            from langchain_core.messages import AIMessage
-            non_system = list(self._history)
-            non_system.append(AIMessage(content=full_response))
-            self._history = _strip_images_for_storage(_trim_history(non_system))
 
-        self.session_store.save_turn(self.session_id, self._history, self._turn)
+            self.session_store.save_turn(self.session_id, self._history, self._turn)
+        finally:
+            self._state_lock.release()
+
         self.memory.store("assistant", full_response, self.session_id)
         self.memory.log_turn("assistant", full_response)
         self._schedule_entity_extraction("", full_response)

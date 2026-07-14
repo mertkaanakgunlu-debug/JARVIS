@@ -2,12 +2,18 @@
 
 SQLite database at data/sessions.db with three tables:
   sessions  — one row per conversation session
-  messages  — all LangChain messages serialized via langchain_core.load.dumps
+  messages  — one turn_idx bucket per session, each holding a FULL cumulative
+              snapshot of that session's (trimmed) history — not a delta.
+              save_turn() drops all older buckets for the session, so exactly
+              one survives at a time; readers only ever need MAX(turn_idx).
   entities  — named entities extracted across all turns
 
 Design decisions:
 - WAL journal mode + autocommit for FastAPI concurrent access safety
-- threading.Lock guards writes (single-process, multi-thread via FastAPI)
+- threading.Lock guards ALL reads and writes (single-process, multi-thread via
+  FastAPI/TaskExecutor) — a read must never observe a write mid-flight
+- Multi-statement writes (save_turn) run inside an explicit BEGIN/COMMIT so a
+  crash or exception can't leave a session's messages half-deleted
 - langchain_core.load.dumps/loads preserves tool_calls in AIMessage/ToolMessage
 - Corrupt DB → rename to .corrupt-<ts> + rebuild (never silently lose data)
 """
@@ -149,10 +155,11 @@ class SessionStore:
         return sid
 
     def latest_session(self) -> str | None:
-        row = self._conn.execute(
-            "SELECT id FROM sessions WHERE status='active' "
-            "ORDER BY last_active DESC LIMIT 1"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM sessions WHERE status='active' "
+                "ORDER BY last_active DESC LIMIT 1"
+            ).fetchone()
         return row["id"] if row else None
 
     def archive_session(self, session_id: str) -> None:
@@ -170,15 +177,17 @@ class SessionStore:
             )
 
     def list_sessions(self, n: int = 10) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT id, created_at, last_active, message_count, topic_hint, status "
-            "FROM sessions ORDER BY last_active DESC LIMIT ?",
-            (n,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, created_at, last_active, message_count, topic_hint, status "
+                "FROM sessions ORDER BY last_active DESC LIMIT ?",
+                (n,),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def total_sessions(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()
         return row["c"] if row else 0
 
     # ── Message persistence ───────────────────────────────────────────────────
@@ -189,51 +198,83 @@ class SessionStore:
         messages: list[BaseMessage],
         turn_idx: int,
     ) -> None:
+        """Persist the full (trimmed) history snapshot as of this turn.
+
+        Drops every turn_idx bucket <= this one for the session first — each
+        snapshot is self-contained (not a delta), so keeping old buckets
+        around only wastes space and, if a turn_idx is ever reused (e.g.
+        after switch_session), would resurrect stale rows on read.
+        """
         ts = datetime.now().isoformat()
         with self._lock:
-            # Remove existing rows for this turn (idempotent upsert)
-            self._conn.execute(
-                "DELETE FROM messages WHERE session_id=? AND turn_idx=?",
-                (session_id, turn_idx),
-            )
-            for i, msg in enumerate(messages):
-                try:
-                    payload = lc_dumps(msg)
-                except Exception:
-                    # Fallback: bare dict for types langchain_core can't serialize
-                    payload = json.dumps({"type": type(msg).__name__, "content": str(msg.content)})
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
                 self._conn.execute(
-                    "INSERT INTO messages(session_id, turn_idx, msg_idx, payload_json, ts) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (session_id, turn_idx, i, payload, ts),
+                    "DELETE FROM messages WHERE session_id=? AND turn_idx<=?",
+                    (session_id, turn_idx),
                 )
-            # Update session metadata
-            self._conn.execute(
-                "UPDATE sessions SET last_active=?, message_count=? WHERE id=?",
-                (ts, len(messages), session_id),
-            )
+                for i, msg in enumerate(messages):
+                    try:
+                        payload = lc_dumps(msg)
+                    except Exception:
+                        # Fallback: bare dict for types langchain_core can't serialize
+                        payload = json.dumps({"type": type(msg).__name__, "content": str(msg.content)})
+                    self._conn.execute(
+                        "INSERT INTO messages(session_id, turn_idx, msg_idx, payload_json, ts) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (session_id, turn_idx, i, payload, ts),
+                    )
+                # Update session metadata
+                self._conn.execute(
+                    "UPDATE sessions SET last_active=?, message_count=? WHERE id=?",
+                    (ts, len(messages), session_id),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def load_history(self, session_id: str, limit: int = 20) -> list[BaseMessage]:
-        """Return the last `limit` non-system messages for a session."""
-        rows = self._conn.execute(
-            "SELECT payload_json FROM messages "
-            "WHERE session_id=? "
-            "ORDER BY turn_idx DESC, msg_idx DESC "
-            "LIMIT ?",
-            (session_id, limit * 4),  # overfetch: multiple messages per turn
-        ).fetchall()
+        """Return the latest saved snapshot of non-system messages for a session.
+
+        Each turn_idx bucket is a full cumulative snapshot, not a delta —
+        reading only the single latest bucket (MAX(turn_idx)) avoids
+        re-introducing earlier snapshots as duplicates. Older buckets may
+        still exist on disk from before save_turn started collapsing them.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT payload_json FROM messages "
+                "WHERE session_id=? AND turn_idx=("
+                "  SELECT MAX(turn_idx) FROM messages WHERE session_id=?"
+                ") ORDER BY msg_idx",
+                (session_id, session_id),
+            ).fetchall()
 
         messages: list[BaseMessage] = []
-        for row in reversed(rows):
+        for row in rows:
             try:
-                msg = lc_loads(row["payload_json"])
-                messages.append(msg)
+                messages.append(lc_loads(row["payload_json"]))
             except Exception:
                 pass
 
         from langchain_core.messages import SystemMessage
         non_system = [m for m in messages if not isinstance(m, SystemMessage)]
         return non_system[-limit:]
+
+    def last_turn_idx(self, session_id: str) -> int:
+        """Highest turn_idx saved for this session (0 if none yet).
+
+        Used to resume the turn counter on session re-entry — restarting it
+        at 0 would let a new turn reuse an old LangGraph thread_id
+        (`{session_id}-t{turn}`) and resurrect a stale checkpoint.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(turn_idx), 0) AS m FROM messages WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        return row["m"] if row else 0
 
     # ── Entity memory ─────────────────────────────────────────────────────────
 
@@ -264,25 +305,28 @@ class SessionStore:
                 )
 
     def top_entities(self, n: int = 20) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT name, type, description, mention_count, last_seen "
-            "FROM entities ORDER BY mention_count DESC, last_seen DESC LIMIT ?",
-            (n,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, type, description, mention_count, last_seen "
+                "FROM entities ORDER BY mention_count DESC, last_seen DESC LIMIT ?",
+                (n,),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def search_entities(self, query: str) -> list[dict]:
         pattern = f"%{query}%"
-        rows = self._conn.execute(
-            "SELECT name, type, description, mention_count, last_seen "
-            "FROM entities WHERE name LIKE ? OR description LIKE ? "
-            "ORDER BY mention_count DESC LIMIT 10",
-            (pattern, pattern),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, type, description, mention_count, last_seen "
+                "FROM entities WHERE name LIKE ? OR description LIKE ? "
+                "ORDER BY mention_count DESC LIMIT 10",
+                (pattern, pattern),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def total_entities(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) AS c FROM entities").fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS c FROM entities").fetchone()
         return row["c"] if row else 0
 
     # ── Summary persistence (Faz 13-A) ───────────────────────────────────────
@@ -297,21 +341,29 @@ class SessionStore:
 
     def sessions_needing_summary(self) -> list[dict]:
         """Return archived sessions that have no summary yet — backfill queue."""
-        rows = self._conn.execute(
-            "SELECT id, topic_hint, last_active, message_count FROM sessions "
-            "WHERE status='archived' AND (summary IS NULL OR summary='') "
-            "AND message_count > 0 "
-            "ORDER BY last_active DESC"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, topic_hint, last_active, message_count FROM sessions "
+                "WHERE status='archived' AND (summary IS NULL OR summary='') "
+                "AND message_count > 0 "
+                "ORDER BY last_active DESC"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def load_full_history(self, session_id: str) -> list[BaseMessage]:
-        """Return all messages for a session in order — used for summarization."""
-        rows = self._conn.execute(
-            "SELECT payload_json FROM messages WHERE session_id=? "
-            "ORDER BY turn_idx, msg_idx",
-            (session_id,),
-        ).fetchall()
+        """Return the latest saved snapshot of messages for a session — used for summarization.
+
+        See load_history(): only the MAX(turn_idx) bucket is read, since each
+        bucket is a full cumulative snapshot rather than a per-turn delta.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT payload_json FROM messages "
+                "WHERE session_id=? AND turn_idx=("
+                "  SELECT MAX(turn_idx) FROM messages WHERE session_id=?"
+                ") ORDER BY msg_idx",
+                (session_id, session_id),
+            ).fetchall()
         msgs: list[BaseMessage] = []
         for row in rows:
             try:

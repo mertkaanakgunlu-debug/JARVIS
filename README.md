@@ -37,7 +37,7 @@ See [ProjectState.md](ProjectState.md) for the full Faz inventory and architectu
 ## Installation
 
 ```powershell
-cd C:\Users\mertk\OneDrive\Desktop\Jarvis
+cd C:\Users\mertk\Desktop\Jarvis
 
 # 1. Create virtual environment
 python -m venv .venv
@@ -140,16 +140,21 @@ Jarvis/
 ```
 LangGraph StateGraph:
   START → route_from_start
-           ├─ planner_node  (/think — Gemini Pro step-by-step plan)
-           └─ agent_node    (Gemini Flash ReAct executor)
+           ├─ planner_node  (/think — reasoning role step-by-step plan)
+           └─ agent_node    (fast role by default, reasoning role for complex queries)
                 └─ tools_node  (executes any of 35 tools)
-                └─ critic_node (Gemini Pro — accept or revise up to 2×)
+                └─ critic_node (reasoning role — accept or revise up to 2×)
                 └─ END
 ```
 
-- **Primary model:** Gemini 2.5 Pro (Vertex AI) for critic/planner; Flash for execution
-- **Fallback:** AI Studio free-tier Flash → Flash-Lite
-- **Memory:** ChromaDB (semantic) + SQLite (sessions, todos, schedules, finance) + vault (markdown)
+- **Primary model (Faz 1 — local-first):** Ollama `qwen2.5:7b-instruct` for routine execution
+  (`fast` role); cloud (Vertex Pro, else AI Studio Gemini Flash) is the escalation tier for hard
+  reasoning (`reasoning` role — planner/critic/complex queries), with local Ollama as its own
+  final fallback. See `jarvis/providers/get_llm(role, settings)`.
+- **Fallback:** each role falls back through whatever cloud tiers are actually configured;
+  AI Studio Flash is always the last resort since it only needs an API key, no Vertex ADC.
+- **Memory:** ChromaDB (semantic; docs/summaries prefer Ollama `nomic-embed-text`) + SQLite
+  (sessions, todos, schedules, finance) + vault (markdown)
 
 ## Completed Phases
 

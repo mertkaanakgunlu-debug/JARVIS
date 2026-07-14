@@ -27,7 +27,29 @@
       "PowerShell($gcloud = \"C:\\\\Users\\\\mertk\\\\AppData\\\\Local\\\\Google\\\\Cloud SDK\\\\google-cloud-sdk\\\\bin\\\\gcloud.cmd\"; & $gcloud auth application-default print-access-token 2>&1 | Select-Object -First 3)",
       "Bash('.venv\\\\Scripts\\\\python.exe' -c ' *)",
       "Bash(Select-String -Pattern \"Vertex|version|Warning\" -NotMatch)",
-      "Bash(Select-Object -First 10)"
+      "Bash(Select-Object -First 10)",
+      "Bash(grep -E \"^\\\\.env$\")",
+      "Bash(python -c \"import imap_tools, os; print\\(os.path.dirname\\(imap_tools.__file__\\)\\)\")",
+      "Bash(cd \"C:\\\\Users\\\\mertk\\\\Desktop\\\\Jarvis\" && echo \"--- electron dir exists? ---\" && ls -d electron 2>&1 && echo \"--- pwd ---\" && pwd && echo \"--- OneDrive path exists? ---\" && ls -d \"/c/Users/mertk/OneDrive/Desktop/Jarvis\" 2>&1 && echo \"--- git remote / config sanity ---\" && git rev-parse --show-toplevel)",
+      "Bash(ls -la .env.example)",
+      "Bash(grep -n \"CONFIRMATION\" .env.example)",
+      "Bash(find . -iname \"mailbox.py\" -path \"*imap_tools*\")",
+      "Bash(find . -type d -iname \"imap_tools*\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -)",
+      "PowerShell(python --version)",
+      "PowerShell(py --version)",
+      "Bash(grep -n \"^\\\\s*if.*'/\\\\|^\\\\s*elif.*'/\\\\|command ==\" jarvis/cli.py)",
+      "Bash(grep -n \"except Exception\\\\|except.*:\\\\s*$\\\\|return f\\\\\"\\\\[Error\\\\|raise\" \"C:\\\\Users\\\\mertk\\\\Desktop\\\\Jarvis\\\\jarvis\\\\tools\\\\calendar.py\")",
+      "Bash(find / -iname \"mailbox.py\" -path \"*imap_tools*\" 2>/dev/null | head -5)",
+      "Bash(py -c ' *)",
+      "Bash(grep -rn \"agent_pydantic\\\\|jarvis.legacy\\\\|jarvis\\\\\\\\\\\\\\\\legacy\" --include=\"*.py\" .)",
+      "Bash(python -c \"import langchain_core; print\\(langchain_core.__file__\\)\")",
+      "Bash(python3 -c \"import langchain_core; print\\(langchain_core.__file__\\)\")",
+      "Read(//c//**)",
+      "Bash(where python3 *)",
+      "Bash(where py *)",
+      "Bash(find \"C:\\\\Users\\\\mertk\\\\Desktop\\\\Jarvis\" -iname \"tool.py\" -path \"*langchain_core*\" 2>/dev/null | head; find / -iname \"base.py\" -path \"*langchain_core*tools*\" 2>/dev/null | head -5 *)"
     ]
   }
 }
