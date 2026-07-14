@@ -42,6 +42,8 @@ HELP_TEXT = """\
   [gold3]/sessions[/gold3]         Son oturumları listele
   [gold3]/session[/gold3] [dim]<id>[/dim]     Geçmiş oturuma geç
   [gold3]/entities[/gold3]         Tanınan varlıkları (kişi/proje/dosya) listele
+  [gold3]/facts[/gold3]            Bilinen kalıcı gerçekleri (semantic memory) listele
+  [gold3]/meta[/gold3]             Persona/direktif dosyalarının sürüm kaydını göster
   [gold3]/reset[/gold3]            Mevcut oturumu arşivle, yeni başlat
   [gold3]/help[/gold3]             Bu mesajı göster
   [gold3]/exit[/gold3]             Çıkış (Ctrl+C de çalışır)
@@ -255,11 +257,15 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
             }[agent.memory._embedding_backend]
             total_sessions = agent.session_store.total_sessions()
             total_entities = agent.session_store.total_entities()
+            total_facts = agent.facts_store.total_facts()
+            total_procedures = agent.procedure_store.total()
             history_len = len(agent._history)
             console.print(
                 f"[dim]Session ID:[/dim]      [bold]{agent.session_id}[/bold] [dim]({history_len} messages loaded)[/dim]\n"
                 f"[dim]Total sessions:[/dim]  [bold]{total_sessions}[/bold]\n"
                 f"[dim]Known entities:[/dim]  [bold]{total_entities}[/bold]\n"
+                f"[dim]Known facts:[/dim]     [bold]{total_facts}[/bold] [dim](semantic memory)[/dim]\n"
+                f"[dim]Procedures:[/dim]      [bold]{total_procedures}[/bold] [dim](procedural memory)[/dim]\n"
                 f"[dim]Summaries indexed:[/dim][bold]{summaries_count}[/bold]\n"
                 f"[dim]Memory turns:[/dim]    [bold]{count}[/bold]\n"
                 f"[dim]Vault chunks:[/dim]    [bold]{docs_count}[/bold] [dim](embed: {ef_label})[/dim]\n"
@@ -377,6 +383,36 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
                         str(r["mention_count"]),
                     )
                 console.print(table)
+            continue
+
+        if lower == "/facts":
+            rows = agent.facts_store.list_facts(n=20)
+            if not rows:
+                console.print("[dim]Henüz kayıtlı gerçek yok. Birkaç konuşma sonrası oluşur.[/dim]")
+            else:
+                table = Table(
+                    show_header=True,
+                    header_style="bold gold3",
+                    border_style="dim",
+                    title="[bold gold3]Bilinen Gerçekler (Semantic Memory)[/bold gold3]",
+                    title_justify="left",
+                )
+                table.add_column("Gerçek", style="bold")
+                table.add_column("Anılma", justify="right", width=6)
+                table.add_column("Son görülme", width=19)
+                for r in rows:
+                    table.add_row(r["fact_text"], str(r["mention_count"]), (r["last_seen"] or "")[:19])
+                console.print(table)
+            continue
+
+        if lower == "/meta":
+            from pathlib import Path as _Path
+            from rich.markdown import Markdown
+            versions_path = _Path(__file__).parent / "prompts" / "CORE_VERSIONS.md"
+            if versions_path.exists():
+                console.print(Markdown(versions_path.read_text(encoding="utf-8")))
+            else:
+                console.print("[dim](CORE_VERSIONS.md bulunamadı)[/dim]")
             continue
 
         if lower.startswith("/recall "):

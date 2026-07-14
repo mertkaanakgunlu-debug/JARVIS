@@ -12,12 +12,6 @@ from pathlib import Path
 from jarvis.config import LANG_NAMES
 
 _CORE_DIR = Path(__file__).parent / "core"
-_WORKFLOW_DIR = Path(__file__).parent / "workflows"
-
-_DATA_REPORT_KEYWORDS = frozenset([
-    "pdf", "excel", "xlsx", "xls", "csv", "report", "rapor", "plot", "grafik",
-    "chart", "data", "veri", "analiz", "analysis", "hw", "odev", "ödev",
-])
 
 
 @dataclass
@@ -27,6 +21,8 @@ class PromptContext:
     entities_block: str = ""
     past_sessions_block: str = ""
     open_todos_block: str = ""
+    facts_block: str = ""       # Faz 2 — semantic memory
+    procedure_block: str = ""   # Faz 2 — procedural memory
     env_block: str = ""
     detected_language: str = "en"
     user_query: str = ""
@@ -45,10 +41,11 @@ def load_system_prompt(ctx: PromptContext) -> str:
     raw = raw.replace("{entities_block}", ctx.entities_block or "(none yet)")
     raw = raw.replace("{past_sessions_block}", ctx.past_sessions_block or "(no relevant past sessions)")
     raw = raw.replace("{open_todos_block}", ctx.open_todos_block or "(no open tasks)")
-
-    if any(kw in ctx.user_query.lower() for kw in _DATA_REPORT_KEYWORDS):
-        workflow = (_WORKFLOW_DIR / "data_report.md").read_text(encoding="utf-8")
-        raw += "\n\n" + workflow
+    raw = raw.replace("{facts_block}", ctx.facts_block or "(none yet)")
+    raw = raw.replace(
+        "{procedure_block}",
+        ctx.procedure_block or "(no specific workflow matched — proceed normally)",
+    )
 
     raw += ctx.env_block
 

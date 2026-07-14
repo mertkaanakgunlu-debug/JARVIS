@@ -13,6 +13,7 @@
 | System prompt rules | `jarvis/prompts/core/*.md` (see [prompt_loader.py](../jarvis/prompts/prompt_loader.py)) | "NEVER" directives (no hallucination, no fake data, etc.) — **not** `jarvis/prompts/system.md`, which is a dead pointer file left over from before the Phase 1 prompt-modularization split |
 | `ToolSpec` risk metadata | `jarvis/tool_registry.py` | `risk_level` (L1-L3) + `requires_confirmation` per tool |
 | Confirmation gate | `jarvis/graph/nodes.py` (`make_confirmation_node`) | Interrupts the graph before tool calls where `requires_confirmation=True` |
+| Meta-memory write-guard (Faz 2) | `jarvis/tools/files.py` (`PROTECTED_WRITE_PREFIXES`, checked in `write()`) | Unconditional, always-on — unlike the confirmation gate below, does **not** depend on `confirmation_gate_enabled` or which interface is running. `file_write` raises `PermissionError` for any path under `jarvis/prompts/core/` (persona/safety directives), regardless of what the agent is instructed to do. Read access is unaffected — only writes are blocked. |
 
 ## Known gap: the gate does not currently protect anything end-to-end
 

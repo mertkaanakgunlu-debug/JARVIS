@@ -230,6 +230,13 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         timeout_seconds=30,
         description="ITU webmail IMAP/SMTP: list/read/search (L1 actions) + send/reply/trash (L3 actions)",
     ),
+
+    # ── Faz 2: cognitive memory ────────────────────────────────────────────────
+    ToolSpec(
+        "procedure_save", "memory", 2, False, "local_write",
+        timeout_seconds=15,
+        description="Save a reusable multi-step workflow to procedural memory",
+    ),
 ]}
 
 

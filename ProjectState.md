@@ -2,6 +2,13 @@
 > **Read this first at the start of every new Claude Code session.**
 > Update this file after every meaningful change.
 
+> **Note (2026-07-14):** a second, separate phase numbering ("Faz 0-8") started 2026-07-14 for
+> the local-first evolution plan — see [ROADMAP.md](ROADMAP.md), [HANDOFF.md](HANDOFF.md),
+> [MEMORY.md](MEMORY.md). It is unrelated to this file's "Faz 1-21" feature-inventory numbering
+> below (which stops at the 2026-05-23 refactor baseline); Faz 0-2 of the new plan (data-integrity
+> stabilization, local-first model router, 5-layer cognitive memory) are done as of this date.
+> Reconciling the two numbering schemes into one is deferred to the new plan's own Faz 8 cleanup.
+
 ## Current State: Faz 21 + Multimodal Polish (COMPLETE)
 
 **Branch:** `langgraph-migration`
@@ -226,7 +233,7 @@ Mobile (mobile/ — Flutter/Android):
 
 ---
 
-## Tool Registry (35 tools in graph/tools.py)
+## Tool Registry (36 tools in graph/tools.py)
 
 | # | Tool | Category | What it does |
 |---|---|---|---|
@@ -265,6 +272,7 @@ Mobile (mobile/ — Flutter/Android):
 | 33 | `gcp_quota` | System | GCP credit status / forecast |
 | 34 | `geo_math` | Science | Geo-math, FDM simulation, seismic |
 | 35 | `hud_panels` | UI | Show/hide mobile HUD panels |
+| 36 | `procedure_save` | Memory | Save a reusable multi-step workflow to procedural memory (Faz 2) |
 
 *Note (corrected 2026-07-14): `email_triage` was removed entirely from `graph/tools.py` in commit `576aa75` (2026-05-24) — this is no longer a loose end.*
 
@@ -279,7 +287,10 @@ Mobile (mobile/ — Flutter/Android):
 | `jarvis/config.py` | pydantic-settings from .env; Vertex + AI Studio model config |
 | `jarvis/context_builder.py` | `ContextBuilder` — extracted memory/todo/entity/session recall used by `agent.py` (Phase 4, 2026-05-24) |
 | `jarvis/tool_registry.py` | `ToolSpec` risk-metadata registry (risk level, confirmation requirement) for all tools (Phase 2, 2026-05-24) |
-| `jarvis/memory.py` | ChromaDB semantic recall + Obsidian vault writer |
+| `jarvis/memory.py` | ChromaDB recall (episodic/facts/procedures/docs/summaries) + Obsidian vault writer |
+| `jarvis/facts_store.py` | SQLite store for semantic-memory facts (Faz 2) |
+| `jarvis/fact_extractor.py` | Async durable-fact extraction after each turn (Faz 2) |
+| `jarvis/procedure_store.py` | SQLite store for procedural-memory workflows (Faz 2) |
 | `jarvis/cli.py` | Rich REPL; `/model`, `/recall`, `/status`, `/reset`, `/help` |
 | `jarvis/api.py` | FastAPI REST server + WebSocket HUD (Faz 9 + 11 + 19) |
 | `jarvis/api_routers/` | 7 modular API routers |

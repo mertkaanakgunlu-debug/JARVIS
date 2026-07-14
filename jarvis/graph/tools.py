@@ -773,6 +773,34 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
         return f"⚠ Bilinmeyen action: '{action}'. Geçerli: add, list, today, done, delete, edit, analyze"
 
+    # ── Faz 2: Procedural memory ────────────────────────────────────────────────
+
+    @tool
+    def procedure_save(name: str, description: str, body: str) -> str:
+        """Save a reusable multi-step workflow to procedural memory for future recall.
+
+        Call this after completing a genuinely reusable multi-tool task — not
+        every task, only ones worth remembering as a repeatable pattern (e.g. a
+        specific report-generation pipeline, a particular multi-step data
+        transform). The next time a semantically similar request comes in, this
+        workflow is automatically suggested in context — no need to ask the user
+        to repeat themselves.
+
+        Parameters:
+            name:        short identifier, e.g. "budget_chart_report"
+            description: 1-2 sentences describing WHEN this workflow applies —
+                         this is what gets semantically matched against future
+                         requests, so be specific about the triggering situation.
+            body:        the actual step-by-step instructions (same free-form
+                         style as a workflow doc — numbered steps, tool names).
+        """
+        from jarvis.procedure_store import ProcedureStore
+
+        store = ProcedureStore(Path("data") / "sessions.db")
+        pid = store.add(name, description, body, source="agent")
+        memory.store_procedure(pid, name, description, body)
+        return f"✅ Procedure saved: {name} (id={pid})"
+
     # ── Faz 14: Google Drive ──────────────────────────────────────────────────
 
     @tool
@@ -1098,4 +1126,5 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         gcp_quota,               # Faz 17
         geo_math,                # Faz 18
         hud_panels,              # HUD panel control
+        procedure_save,          # Faz 2 — procedural memory
     ]

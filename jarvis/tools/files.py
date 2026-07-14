@@ -9,6 +9,13 @@ from pathlib import Path
 PROTECTED_DIRS = {".venv", ".git", "data"}
 MAX_READ_BYTES = 512_000  # 512 KB
 
+# Faz 2 — meta memory: persona/safety/directive files stay agent-*readable*
+# (the agent needs to see its own instructions) but must never be agent-
+# *writable* — a self-editing safety directive is actively unsafe (see
+# MEMORY.md's local-first plan, "de-prioritized" list). Checked only in
+# write(), not read() or the shared _resolve().
+PROTECTED_WRITE_PREFIXES = (Path("jarvis") / "prompts" / "core",)
+
 _HOME = Path(os.path.expanduser("~")).resolve()
 
 
@@ -51,6 +58,12 @@ def read(path_str: str, workspace: Path) -> str:
 def write(path_str: str, content: str, workspace: Path) -> str:
     """Write content to a file, creating parent directories if needed."""
     p = _resolve(path_str, workspace)
+    for prefix in PROTECTED_WRITE_PREFIXES:
+        if _is_within(p, (workspace / prefix).resolve()):
+            raise PermissionError(
+                f"Path '{path_str}' is inside a protected persona/directive directory "
+                f"and can never be written by the agent — meta-memory is human-edited only."
+            )
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
     return f"Written {len(content)} chars to {p.relative_to(workspace)}"

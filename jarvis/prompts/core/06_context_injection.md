@@ -7,5 +7,11 @@
 ## Known entities
 {entities_block}
 
+## Known facts about the user
+{facts_block}
+
 ## Relevant memory
 {memory_context}
+
+## Suggested workflow for this request
+{procedure_block}

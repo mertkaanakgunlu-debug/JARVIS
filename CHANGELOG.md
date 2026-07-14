@@ -6,6 +6,41 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Faz 2] — 2026-07-14 — 5-layer cognitive memory
+
+- **Semantic memory:** new `jarvis/fact_extractor.py` (mirrors `entity_extractor.py`) runs a
+  Flash-Lite structured-output call after each turn to extract durable facts (stable
+  preferences, relationships, recurring constraints — not one-off task detail). New SQLite
+  `facts` table (`jarvis/facts_store.py`) + new `jarvis_facts` ChromaDB collection (local-first
+  EF chain). Dedup is inline at insert time via embedding-similarity lookup
+  (`Memory.find_similar_fact`) — a close match bumps the existing fact instead of inserting a
+  duplicate.
+- **Fixed global-vs-session recall scoping:** `Memory.recall()` (episodic, `jarvis_memory`) now
+  takes an optional `session_id` filter; `ContextBuilder.build()` passes the current session
+  through, so a session's raw turns no longer leak into another session's context. Facts and
+  session summaries remain deliberately cross-session — that's the point of those layers.
+- **Procedural memory:** the hardcoded `_DATA_REPORT_KEYWORDS` keyword match in
+  `prompt_loader.py` is gone, replaced by semantic retrieval against a new SQLite `procedures`
+  table (`jarvis/procedure_store.py`) + `jarvis_procedures` ChromaDB collection. The pre-existing
+  `prompts/workflows/data_report.md` auto-seeds as the first row on startup — zero regression.
+  New tool `procedure_save` (#36) lets the agent explicitly persist a new reusable workflow.
+- **Meta memory:** `jarvis/tools/files.py`'s `write()` now refuses any path under
+  `jarvis/prompts/core/` (`PermissionError`) — persona/safety directives are now provably never
+  agent-writable, not just agent-writable-but-not-instructed-to. New
+  `jarvis/prompts/CORE_VERSIONS.md` tracks a human-bumped version/updated stamp per core prompt
+  file; new `/meta` and `/facts` CLI commands.
+- **Fix (BUG-25):** entity extraction (now entity + fact extraction together,
+  `_schedule_memory_extraction`) no longer fires on trivially short exchanges (a bare
+  "ok"/"tamam" ack) — guarded by `JarvisAgent._should_extract`, verified to still fire for
+  `resume_and_stream()`'s legitimate empty-user-text-but-real-response case.
+- **Bonus fix (found live during verification, not in the original plan):** the first-pass
+  recall-distance thresholds for `recall_facts`/`recall_procedures` were calibrated assuming
+  distances in the same range as the pre-existing `recall()`/`recall_summaries()` cutoffs
+  (0.5-0.6) — but ChromaDB's default ONNX EF (the fallback whenever Ollama isn't reachable,
+  confirmed live-active on this dev machine) produces much larger distances in practice
+  (~0.07 paraphrase, ~0.7 related-but-reworded, ~1.7+ unrelated). Recalibrated to 1.1/1.0 based
+  on measured values so recall doesn't silently go empty under the fallback EF.
+
 ## [Faz 1] — 2026-07-14 — Local-first brain + model router
 
 - **New `jarvis/providers/` module:** `get_llm(role, settings, *, tools=, max_output_tokens=)`

@@ -38,6 +38,19 @@
   exact same call 429s with `RESOURCE_EXHAUSTED ... "Your prepayment credits are depleted"`. Treat
   that message as "back off and retry," not "this key is unusable" — don't over-conclude from a
   single failed call.
+- **Ollama is not left running between sessions** — confirmed 2026-07-14 during Faz 2 verification
+  (installed and working during Faz 1 earlier the same day, but `http://localhost:11434/api/tags`
+  was unreachable by the time Faz 2 verification ran). Don't assume it's up; the default-ONNX-EF
+  fallback path (see below) is a real, regularly-hit state on this machine, not a hypothetical.
+- **ChromaDB's default ONNX EF distance scale is much wider than it looks at first glance** —
+  measured live (2026-07-14, Faz 2 verification): a near-exact paraphrase scores ~0.07, a
+  legitimately related but differently-worded query scores ~0.7, and something genuinely unrelated
+  scores ~1.7+. A `distance_max` cutoff in the 0.45-0.6 range (which is what `recall()`'s existing
+  `0.6` and `recall_summaries()`'s existing `0.55` use) will silently reject real, relevant matches
+  under this EF specifically — it's fine for near-duplicate detection (tight thresholds, e.g.
+  `find_similar_fact`'s `0.15`) but too tight for general semantic recall. `recall_facts`/
+  `recall_procedures` (`jarvis/memory.py`) use `1.1`/`1.0` for this reason — see the comment above
+  `find_similar_fact` in that file before adding another distance-thresholded recall method.
 
 ## Direction: LOCAL-FIRST pivot (owner decision, 2026-07-14)
 
@@ -125,6 +138,33 @@ The north-star target came from an owner-commissioned research report
   via `_safe_construct()`, which swallows construction-time failures (e.g. a missing API key) and
   drops that tier rather than raising — needed so `build_graph()` still succeeds on a pure-local
   config with zero cloud credentials, which is a legitimate, intended setup now.
+- **5-layer cognitive memory (Faz 2, 2026-07-14):** Working (context window) and Episodic
+  (`jarvis_memory`) were already solid; this phase built out Semantic, Procedural, and Meta.
+  Design decisions worth knowing before touching any of it:
+  - **Store pattern**: `jarvis/facts_store.py`/`jarvis/procedure_store.py` follow
+    `todo_store.py`'s exact shape — their own `sqlite3` connection to the shared
+    `data/sessions.db`, own `threading.Lock`, schema also registered in
+    `session_store.py._apply_migrations` for the bootstrap-ordering safety net (same
+    belt-and-suspenders pattern todos/finance/schedule already use). `Memory` (`memory.py`)
+    never touches SQLite directly — it only owns ChromaDB + the vault; the two facts/procedure
+    SQLite stores are constructed and owned by `JarvisAgent`, same as `todo_store`/`scheduler`.
+  - **Episodic vs. semantic scoping is the crux of the whole design**: `Memory.recall()`
+    (episodic, `jarvis_memory`) is session-scoped by default now (`session_id` filter) — raw
+    past turns from other sessions must never leak in. `recall_facts()`/`recall_summaries()`
+    are deliberately cross-session — that's the entire point of those two layers. Don't
+    "fix" one to match the other; the asymmetry is intentional.
+  - **`jarvis/prompts/CORE_VERSIONS.md` lives one directory above `jarvis/prompts/core/` on
+    purpose** — `prompt_loader.py` globs every `*.md` file directly inside `core/` into the
+    composed system prompt; a version-tracking file placed inside that directory would leak
+    its own table text into every prompt sent to the LLM.
+  - **Meta memory's "never agent-writable"** refers to the *runtime* JARVIS agent (via the
+    `file_write` tool, now blocked for `jarvis/prompts/core/` by `PROTECTED_WRITE_PREFIXES` in
+    `jarvis/tools/files.py`) — not Claude Code development sessions editing these files under
+    direct human review, which is the human-edit path the design assumes.
+  - **Procedural memory's "learning" is explicit, not automatic**: the `procedure_save` tool
+    is agent-invoked when it judges a task worth remembering — there's no silent/automatic
+    successful-sequence mining. Keep it that way unless explicitly asked to build the
+    automatic version; it's a materially bigger, quality-riskier feature.
 
 ## Known permanently-true gotchas
 

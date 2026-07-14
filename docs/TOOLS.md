@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. — Tool Registry
 
-35 tools registered by `make_tools()` in `jarvis/graph/tools.py`.
+36 tools registered by `make_tools()` in `jarvis/graph/tools.py`.
 Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass + `TOOL_SPECS` dict).
 
 ## Risk levels
@@ -51,6 +51,7 @@ Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass + `TOOL_SPE
 | `gmail` | L3 | external_api | ✓ | — | 30s | Gmail: list/read/search (L1) · send/reply/trash (L3) |
 | `google_drive` | L3 | external_api | ✓ | ✓ | 60s | Drive: search/read/download (L1) · upload/share/delete (L3) |
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
+| `procedure_save` | L2 | memory | — | — | 15s | Save a reusable multi-step workflow to procedural memory (Faz 2) |
 
 > **Phase 3 has shipped** (`jarvis/graph/nodes.py`'s `make_confirmation_node`, commit `7e7e471`):
 > a LangGraph `confirmation` node reads `requires_confirmation`/`risk_level` from

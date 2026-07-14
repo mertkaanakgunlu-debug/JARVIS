@@ -95,6 +95,11 @@ class SessionStore:
         # Faz 16: finance tables
         from jarvis.finance_store import _FINANCE_TABLES
         conn.executescript(_FINANCE_TABLES)
+        # Faz 2: semantic memory (facts) + procedural memory (procedures) tables
+        from jarvis.facts_store import _FACTS_TABLE
+        conn.executescript(_FACTS_TABLE)
+        from jarvis.procedure_store import _PROCEDURE_TABLE
+        conn.executescript(_PROCEDURE_TABLE)
 
     def _open(self, path: Path) -> sqlite3.Connection:
         conn = None

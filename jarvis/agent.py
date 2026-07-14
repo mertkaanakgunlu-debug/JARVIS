@@ -32,10 +32,13 @@ from langgraph.errors import GraphInterrupt
 from jarvis.config import Settings
 from jarvis.context_builder import ContextBuilder
 from jarvis.entity_extractor import extract_entities
+from jarvis.fact_extractor import extract_facts   # Faz 2
 from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
 from jarvis.scheduler import SchedulerStore  # Faz 13-C
 from jarvis.todo_store import TodoStore      # Faz 13-D
+from jarvis.facts_store import FactStore           # Faz 2
+from jarvis.procedure_store import ProcedureStore  # Faz 2
 from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
@@ -164,6 +167,8 @@ def _load_system_prompt(
     entities_block: str = "",
     past_sessions_block: str = "",
     open_todos_block: str = "",
+    facts_block: str = "",
+    procedure_block: str = "",
 ) -> str:
     from jarvis.prompts.prompt_loader import PromptContext, load_system_prompt
     return load_system_prompt(PromptContext(
@@ -172,6 +177,8 @@ def _load_system_prompt(
         entities_block=entities_block,
         past_sessions_block=past_sessions_block,
         open_todos_block=open_todos_block,
+        facts_block=facts_block,
+        procedure_block=procedure_block,
         env_block=env_block,
         detected_language=detected_language,
         user_query=user_query,
@@ -315,6 +322,11 @@ class JarvisAgent:
         # Faz 13-D: to-do store (same DB file, separate table)
         self.todo_store = TodoStore(Path("data") / "sessions.db")
 
+        # Faz 2: semantic memory (facts) + procedural memory (procedures) stores
+        self.facts_store = FactStore(Path("data") / "sessions.db")
+        self.procedure_store = ProcedureStore(Path("data") / "sessions.db")
+        self._seed_procedures_if_empty()
+
         # Phase 4: context builder (deduplicates 5-call memory retrieval)
         self._context_builder = ContextBuilder(self.memory, self.todo_store, self.session_store)
 
@@ -326,6 +338,30 @@ class JarvisAgent:
 
         # Faz 13-A: backfill summaries for archived sessions in background
         self._schedule_summary_backfill()
+
+    def _seed_procedures_if_empty(self) -> None:
+        """One-time migration: register the pre-Faz-2 static workflow file as the
+        first procedure row, so retiring the old hardcoded keyword-trigger (see
+        prompt_loader.py) is a no-op for existing behavior. No-op if
+        jarvis_procedures already has content (repeat startups, or once the
+        agent has learned procedures of its own via procedure_save).
+        """
+        if self.memory.count_procedures() > 0:
+            return
+        workflow_path = Path(__file__).parent / "prompts" / "workflows" / "data_report.md"
+        if not workflow_path.exists():
+            return
+        try:
+            body = workflow_path.read_text(encoding="utf-8")
+            name = "data_report"
+            description = (
+                "Workflow for tasks involving data files (PDF/Excel/CSV) and a final "
+                "PDF report: read the data, delegate plot scripting, write LaTeX, compile."
+            )
+            pid = self.procedure_store.add(name, description, body, source="seed")
+            self.memory.store_procedure(pid, name, description, body)
+        except Exception:
+            pass
 
     @property
     def _cloud_model(self) -> str:
@@ -436,14 +472,45 @@ class JarvisAgent:
 
     # ── Entity extraction (fire-and-forget) ────────────────────────────────────
 
-    def _schedule_entity_extraction(self, user_text: str, response: str) -> None:
+    @staticmethod
+    def _should_extract(user_text: str, response: str) -> bool:
+        """BUG-25 guard: skip memory extraction (entities + facts) for
+        trivially short exchanges (a bare "ok"/"tamam" ack) so it doesn't burn
+        a Flash-Lite call on every turn. Requires BOTH sides to be short —
+        resume_and_stream() legitimately passes user_text="" with a real,
+        non-trivial response, and that call site must keep firing.
+        """
+        return not (len(user_text.split()) <= 3 and len(response.split()) <= 10)
+
+    def _schedule_memory_extraction(self, user_text: str, response: str) -> None:
+        """Fire-and-forget: extract entities + durable facts from this exchange.
+
+        Faz 2: extended from entity-only extraction (formerly
+        _schedule_entity_extraction) to also run fact extraction (semantic
+        memory) concurrently, sharing one guard and one background task so
+        both concerns fire/skip together at the same trigger point.
+        """
+        if not self._should_extract(user_text, response):
+            return
         session_id = self.session_id
 
         async def _do() -> None:
             try:
-                entities = await extract_entities(user_text, response, self.settings)
+                entities, facts = await asyncio.gather(
+                    extract_entities(user_text, response, self.settings),
+                    extract_facts(user_text, response, self.settings),
+                )
                 for e in entities:
                     self.session_store.upsert_entity(e.name, e.type, e.description, session_id)
+                for f in facts:
+                    existing = self.memory.find_similar_fact(f.fact_text)
+                    if existing:
+                        self.facts_store.bump_fact(existing["fact_id"])
+                    else:
+                        fid = self.facts_store.insert_fact(
+                            f.subject, f.predicate, f.object, f.fact_text, session_id,
+                        )
+                        self.memory.store_fact(fid, f.fact_text, f.subject, f.predicate, session_id)
             except Exception:
                 pass
 
@@ -553,11 +620,12 @@ class JarvisAgent:
         # between would clobber one turn's result with the other's.
         await self._acquire_state_lock()
         try:
-            ctx = self._context_builder.build(clean_input)
+            ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(
                 self.settings, ctx.memory_ctx, detected_language,
                 self._env_block, clean_input, ctx.entities_block,
                 ctx.past_sessions_block, ctx.open_todos_block,
+                ctx.facts_block, ctx.procedure_block,
             )
 
             human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
@@ -649,7 +717,7 @@ class JarvisAgent:
         self.memory.log_turn("user", clean_input)
         self.memory.log_turn("assistant", response)
 
-        self._schedule_entity_extraction(clean_input, response)
+        self._schedule_memory_extraction(clean_input, response)
 
         event_bus.state("speaking")
         event_bus.state("idle")
@@ -698,11 +766,12 @@ class JarvisAgent:
         # self._history/_turn still reflect the *previous* completed turn.
         await self._acquire_state_lock()
         try:
-            ctx = self._context_builder.build(clean_input)
+            ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(
                 self.settings, ctx.memory_ctx, detected_language,
                 self._env_block, clean_input, ctx.entities_block,
                 ctx.past_sessions_block, ctx.open_todos_block,
+                ctx.facts_block, ctx.procedure_block,
             )
 
             human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
@@ -806,7 +875,7 @@ class JarvisAgent:
         self.memory.log_turn("user", clean_input)
         self.memory.log_turn("assistant", full_response)
 
-        self._schedule_entity_extraction(clean_input, full_response)
+        self._schedule_memory_extraction(clean_input, full_response)
 
         event_bus.state("idle")
 
@@ -893,6 +962,6 @@ class JarvisAgent:
 
         self.memory.store("assistant", full_response, self.session_id)
         self.memory.log_turn("assistant", full_response)
-        self._schedule_entity_extraction("", full_response)
+        self._schedule_memory_extraction("", full_response)
 
         event_bus.state("idle")

@@ -1,12 +1,15 @@
 """Context builder — extracts and formats memory/entity/todo blocks for system prompt injection.
 
-Eliminates the duplicated 5-call retrieval block that previously lived inline
-in both JarvisAgent.chat() and JarvisAgent.chat_stream().
+Eliminates the duplicated retrieval block that previously lived inline in both
+JarvisAgent.chat() and JarvisAgent.chat_stream(). Faz 2 added facts_block
+(semantic memory) and procedure_block (procedural memory) alongside the
+original four.
 
 Usage:
     cb = ContextBuilder(memory, todo_store, session_store)
-    ctx = cb.build(user_query)
-    # ctx.memory_ctx, ctx.past_sessions_block, ctx.entities_block, ctx.open_todos_block
+    ctx = cb.build(user_query, session_id=session_id)
+    # ctx.memory_ctx, ctx.past_sessions_block, ctx.entities_block,
+    # ctx.open_todos_block, ctx.facts_block, ctx.procedure_block
 """
 from __future__ import annotations
 
@@ -17,6 +20,12 @@ from dataclasses import dataclass
 class MemoryPolicy:
     recall_n: int = 3            # how many memory chunks to pull per turn
     recall_summaries_n: int = 3  # how many past session summaries to pull
+    recall_facts_n: int = 5      # how many semantic-memory facts to pull (Faz 2)
+    # See jarvis/memory.py's comment above find_similar_fact for why these are
+    # this loose — calibrated against the default-ONNX-EF fallback, not just
+    # the best-case Ollama embedder.
+    facts_distance_max: float = 1.1     # Faz 2
+    procedure_distance_max: float = 1.0  # Faz 2
 
 
 @dataclass
@@ -25,6 +34,8 @@ class ContextData:
     past_sessions_block: str
     entities_block: str
     open_todos_block: str
+    facts_block: str
+    procedure_block: str
 
 
 class ContextBuilder:
@@ -36,15 +47,29 @@ class ContextBuilder:
         self._session_store = session_store
         self.policy = policy or MemoryPolicy()
 
-    def build(self, query: str) -> ContextData:
-        """Run all retrieval calls and return formatted context blocks."""
-        memory_ctx = self._memory.recall(query, n=self.policy.recall_n)
+    def build(self, query: str, session_id: str | None = None) -> ContextData:
+        """Run all retrieval calls and return formatted context blocks.
+
+        session_id (Faz 2): scopes episodic recall (memory_ctx) to this
+        session only, so raw past turns from other sessions never leak into
+        the current one. Facts and past-session summaries stay cross-session
+        by design — that's the whole point of those two layers.
+        """
+        memory_ctx = self._memory.recall(query, n=self.policy.recall_n, session_id=session_id)
         past_hits = self._memory.recall_summaries(query, n=self.policy.recall_summaries_n)
+        fact_hits = self._memory.recall_facts(
+            query, n=self.policy.recall_facts_n, distance_max=self.policy.facts_distance_max,
+        )
+        procedure_hits = self._memory.recall_procedures(
+            query, n=1, distance_max=self.policy.procedure_distance_max,
+        )
         return ContextData(
             memory_ctx=memory_ctx,
             past_sessions_block=self._format_past_sessions(past_hits),
             entities_block=self._format_entities(),
             open_todos_block=self._format_todos(),
+            facts_block=self._format_facts(fact_hits),
+            procedure_block=procedure_hits[0]["body"] if procedure_hits else "",
         )
 
     # ── Formatters (extracted from JarvisAgent private methods) ─────────────────
@@ -67,6 +92,11 @@ class ContextBuilder:
             f"- **{e['name']}** ({e['type']}): {e.get('description') or 'mentioned in conversation'}"
             for e in entities
         )
+
+    def _format_facts(self, hits: list[dict]) -> str:
+        if not hits:
+            return "(none yet)"
+        return "\n".join(f"- {h['fact_text']}" for h in hits)
 
     def _format_todos(self, n: int = 5) -> str:
         try:

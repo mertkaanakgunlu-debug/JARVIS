@@ -1,11 +1,15 @@
 """Hybrid memory: ChromaDB (semantic recall) + Markdown vault (persistent log).
 
-Three ChromaDB collections:
-  jarvis_memory    — conversation turns (default EF, local ONNX)
-  jarvis_docs      — indexed documents for RAG
-  jarvis_summaries — session summaries for RAG
+Five ChromaDB collections:
+  jarvis_memory     — conversation turns, episodic (default EF, local ONNX).
+                      Session-scoped on recall (Faz 2) — see recall().
+  jarvis_docs       — indexed documents for RAG
+  jarvis_summaries  — session summaries for RAG (cross-session by design)
+  jarvis_facts      — semantic memory: durable facts (Faz 2, cross-session by design)
+  jarvis_procedures — procedural memory: recallable tool-sequences (Faz 2)
 
-jarvis_docs/jarvis_summaries prefer, in order (Faz 1 — local-first):
+jarvis_docs/jarvis_summaries/jarvis_facts/jarvis_procedures prefer, in order
+(Faz 1 — local-first):
   1. Ollama nomic-embed-text (local, free) if reachable
   2. Gemini text-embedding-004 (cloud, higher quality) if an API key is set
   3. ChromaDB's default ONNX EF (same as jarvis_memory already uses)
@@ -134,6 +138,21 @@ class Memory:
         except ValueError:
             self._summaries_collection = self._client.get_or_create_collection("jarvis_summaries")
 
+        # jarvis_facts / jarvis_procedures: Faz 2 semantic + procedural memory layers
+        try:
+            self._facts_collection = self._client.get_or_create_collection(
+                "jarvis_facts", **doc_kwargs
+            )
+        except ValueError:
+            self._facts_collection = self._client.get_or_create_collection("jarvis_facts")
+
+        try:
+            self._procedures_collection = self._client.get_or_create_collection(
+                "jarvis_procedures", **doc_kwargs
+            )
+        except ValueError:
+            self._procedures_collection = self._client.get_or_create_collection("jarvis_procedures")
+
     # ------------------------------------------------------------------
     # Semantic memory (conversations)
     # ------------------------------------------------------------------
@@ -148,16 +167,28 @@ class Memory:
             metadatas=[{"role": role, "session": session_id, "ts": datetime.now().isoformat()}],
         )
 
-    def recall(self, query: str, n: int = 5, max_doc_chars: int = 200) -> str:
-        """Return a formatted block of relevant past memories, or empty string."""
+    def recall(
+        self, query: str, n: int = 5, max_doc_chars: int = 200,
+        session_id: str | None = None,
+    ) -> str:
+        """Return a formatted block of relevant past memories, or empty string.
+
+        session_id, when given, scopes recall to that session only (Faz 2 —
+        episodic memory must not leak another session's raw turns; cross-session
+        recall of *content* is the job of recall_summaries()/recall_facts()
+        instead, which are cross-session by design).
+        """
         count = self._collection.count()
         if count == 0:
             return ""
-        results = self._collection.query(
+        query_kwargs: dict = dict(
             query_texts=[query],
             n_results=min(n, count),
             include=["documents", "distances"],
         )
+        if session_id:
+            query_kwargs["where"] = {"session": session_id}
+        results = self._collection.query(**query_kwargs)
         docs = results.get("documents", [[]])[0]
         distances = results.get("distances", [[]])[0]
         if not docs:
@@ -299,6 +330,123 @@ class Memory:
 
     def count_summaries(self) -> int:
         return self._summaries_collection.count()
+
+    # ------------------------------------------------------------------
+    # Semantic memory: durable facts (Faz 2)
+    # ------------------------------------------------------------------
+
+    # Distance thresholds below were calibrated empirically against ChromaDB's
+    # default ONNX EF (squared-L2 on normalized embeddings, range ~0-4) — the
+    # fallback that's actually active whenever Ollama isn't reachable, which
+    # is a real, not hypothetical, state (confirmed live on the dev machine).
+    # Measured: near-exact paraphrase ~0.07, same-topic-different-wording
+    # ~0.7, genuinely unrelated ~1.7+. A tight ~0.5 cutoff (this module's
+    # first-pass default) silently returned nothing for legitimately relevant
+    # but differently-phrased recall queries under this EF — recall_facts/
+    # recall_procedures use a looser cutoff than find_similar_fact's dedup
+    # probe (which *should* stay tight — only near-identical phrasing should
+    # ever count as a duplicate).
+
+    def find_similar_fact(self, fact_text: str, distance_max: float = 0.15) -> dict | None:
+        """Nearest existing fact to fact_text, or None if nothing is within distance_max.
+
+        Used as a dedup probe before inserting a newly-extracted fact — a hit
+        means "reconfirm the existing fact" (bump_fact) rather than "insert a
+        new row". Threshold is intentionally tight: only near-identical
+        phrasing should count as a duplicate.
+        """
+        count = self._facts_collection.count()
+        if count == 0:
+            return None
+        results = self._facts_collection.query(
+            query_texts=[fact_text], n_results=1, include=["metadatas", "distances"],
+        )
+        ids = results.get("ids", [[]])[0]
+        dists = results.get("distances", [[]])[0]
+        if not ids or dists[0] > distance_max:
+            return None
+        meta = results.get("metadatas", [[]])[0][0] or {}
+        return {
+            "fact_id": int(ids[0]),
+            "subject": meta.get("subject", ""),
+            "predicate": meta.get("predicate", ""),
+        }
+
+    def store_fact(
+        self, fact_id: int, fact_text: str, subject: str, predicate: str, session_id: str,
+    ) -> None:
+        """Embed and store a fact. fact_id (the facts-table row id) is the Chroma id."""
+        self._facts_collection.add(
+            documents=[fact_text],
+            ids=[str(fact_id)],
+            metadatas=[{"subject": subject, "predicate": predicate, "session": session_id}],
+        )
+
+    def recall_facts(self, query: str, n: int = 5, distance_max: float = 1.1) -> list[dict]:
+        """Return semantically relevant durable facts — cross-session by design."""
+        count = self._facts_collection.count()
+        if count == 0:
+            return []
+        results = self._facts_collection.query(
+            query_texts=[query], n_results=min(n, count),
+            include=["documents", "metadatas", "distances"],
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        dists = results.get("distances", [[]])[0]
+        out = []
+        for doc, meta, dist in zip(docs, metas, dists):
+            if dist > distance_max:
+                continue
+            out.append({
+                "fact_text": doc,
+                "subject": (meta or {}).get("subject", ""),
+                "predicate": (meta or {}).get("predicate", ""),
+                "score": round(1.0 - dist, 3),
+            })
+        return out
+
+    def count_facts(self) -> int:
+        return self._facts_collection.count()
+
+    # ------------------------------------------------------------------
+    # Procedural memory: recallable tool-sequences (Faz 2)
+    # ------------------------------------------------------------------
+
+    def store_procedure(self, procedure_id: int, name: str, description: str, body: str) -> None:
+        """Embed a procedure's description; body travels along as metadata payload
+        (not itself embedded — only the description drives retrieval quality)."""
+        self._procedures_collection.add(
+            documents=[description],
+            ids=[str(procedure_id)],
+            metadatas=[{"name": name, "body": body}],
+        )
+
+    def recall_procedures(self, query: str, n: int = 1, distance_max: float = 1.0) -> list[dict]:
+        """Return the best-matching procedure(s) for this query, or [] if none are close enough."""
+        count = self._procedures_collection.count()
+        if count == 0:
+            return []
+        results = self._procedures_collection.query(
+            query_texts=[query], n_results=min(n, count),
+            include=["metadatas", "distances"],
+        )
+        metas = results.get("metadatas", [[]])[0]
+        dists = results.get("distances", [[]])[0]
+        out = []
+        for meta, dist in zip(metas, dists):
+            if dist > distance_max:
+                continue
+            meta = meta or {}
+            out.append({
+                "name": meta.get("name", ""),
+                "body": meta.get("body", ""),
+                "score": round(1.0 - dist, 3),
+            })
+        return out
+
+    def count_procedures(self) -> int:
+        return self._procedures_collection.count()
 
     # ------------------------------------------------------------------
     # Vault (markdown log)

@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. — Architecture Map
 
-> Last updated: 2026-07-14 (Faz 1 — local-first brain + model router).
+> Last updated: 2026-07-14 (Faz 2 — 5-layer cognitive memory).
 > Source of truth is always the code; this document summarises it.
 
 ## Entry points
@@ -54,7 +54,7 @@ A manual `/model` switch (`switch_model()`) pins the `fast` role to a specific c
 (`Settings.pin_cloud_model`), bypassing the local-first default; `reasoning` is never affected by
 the pin. See [MEMORY.md](../MEMORY.md) for the local-first pivot rationale.
 
-## Tools (35 registered)
+## Tools (36 registered)
 
 See [TOOLS.md](TOOLS.md) for the full list with risk levels.
 
@@ -70,19 +70,36 @@ See [TOOLS.md](TOOLS.md) for the full list with risk levels.
 
 Migration to LangGraph sub-graphs is Phase 8 of the refactor roadmap.
 
-## Memory layers
+## Memory layers (Faz 2 — 5-layer cognitive memory)
 
-| Layer | Technology | Collections / Tables |
-|---|---|---|
-| Semantic memory | ChromaDB, default ONNX EF | `jarvis_memory` |
-| Document RAG | ChromaDB, Ollama `nomic-embed-text` → Gemini → default ONNX | `jarvis_docs` |
-| Session summaries | ChromaDB, Ollama `nomic-embed-text` → Gemini → default ONNX | `jarvis_summaries` |
-| Sessions / entities | SQLite `sessions.db` | `sessions`, `messages`, `entities` |
-| Scheduled tasks | SQLite `sessions.db` | `scheduled_tasks` |
-| Todos | SQLite `sessions.db` | `todos` |
-| Finance | SQLite `sessions.db` | `transactions`, `budgets` |
-| Push tokens | SQLite `sessions.db` | `push_tokens` |
-| Vault | Filesystem markdown | `vault/conversations/`, `vault/notes/`, `vault/reports/` |
+The research report's 5-layer taxonomy (Working → Episodic → Semantic → Procedural → Meta).
+Working (LLM context window) and Episodic were already solid pre-Faz-2; Semantic,
+Procedural, and Meta are Faz 2's additions.
+
+| Layer | Technology | Collections / Tables | Scope |
+|---|---|---|---|
+| Working memory | LangGraph state / context window | `JarvisState.messages` | current turn only |
+| Episodic memory | ChromaDB, default ONNX EF | `jarvis_memory` | **session-scoped** on recall (Faz 2 fix — `Memory.recall(session_id=...)`) |
+| Semantic memory | SQLite `sessions.db` (`facts`) + ChromaDB (Ollama `nomic-embed-text` → Gemini → default ONNX) | `facts`, `jarvis_facts` | cross-session by design |
+| Procedural memory | SQLite `sessions.db` (`procedures`) + ChromaDB (same EF chain) | `procedures`, `jarvis_procedures` | cross-session by design |
+| Meta memory | Markdown, human-edited only | `jarvis/prompts/core/*.md` + `jarvis/prompts/CORE_VERSIONS.md` | write-protected — see [SAFETY.md](SAFETY.md) |
+| Document RAG | ChromaDB, Ollama `nomic-embed-text` → Gemini → default ONNX | `jarvis_docs` | cross-session |
+| Session summaries | ChromaDB, same EF chain | `jarvis_summaries` | cross-session |
+| Sessions / entities | SQLite `sessions.db` | `sessions`, `messages`, `entities` | entities are global (unchanged by Faz 2) |
+| Scheduled tasks | SQLite `sessions.db` | `scheduled_tasks` | — |
+| Todos | SQLite `sessions.db` | `todos` | — |
+| Finance | SQLite `sessions.db` | `transactions`, `budgets` | — |
+| Push tokens | SQLite `sessions.db` | `push_tokens` | — |
+| Vault | Filesystem markdown | `vault/conversations/`, `vault/notes/`, `vault/reports/` | — |
+
+Semantic (facts) and procedural (workflows) recall are injected into the system prompt
+every turn via `ContextBuilder.build()` → `{facts_block}`/`{procedure_block}` placeholders
+in `jarvis/prompts/core/06_context_injection.md`. Facts are extracted per-turn by
+`jarvis/fact_extractor.py` (mirrors `entity_extractor.py`) and deduped at insert time via
+embedding-similarity lookup (`Memory.find_similar_fact`), gated by the same trivial-turn
+guard as entity extraction (`JarvisAgent._should_extract`, BUG-25). Procedures seed from
+the pre-Faz-2 `prompts/workflows/data_report.md` on first run and grow via the
+`procedure_save` tool.
 
 ## API surface (FastAPI)
 

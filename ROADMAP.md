@@ -24,7 +24,7 @@
 |---|---|---|---|---|
 | 0 | Hafıza-kritik stabilizasyon | Faz 1-2'nin temeli | M | ✅ done (2026-07-14) |
 | 1 | Local-first beyin + model router | "Zeka" yarısı; hafıza/ses/offline'ı açar | M-L | ✅ done (2026-07-14) |
-| 2 | 5 katmanlı bilişsel hafıza | **1. öncelik**; salt-yazılım | L | ⬜ next |
+| 2 | 5 katmanlı bilişsel hafıza | **1. öncelik**; salt-yazılım | L | ✅ done (2026-07-14) |
 | 3 | Gerçek zamanlı yerel ses | En yüksek UX; Faz 1'e bağlı | XL | ⬜ |
 | 4 | Güvenlik çekirdeği + async araç | Otonomi/MCP/IoT ön koşulu | L | ⬜ |
 | 5 | MCP katmanı | IoT yazılım ön koşulu | M | ⬜ |
@@ -204,22 +204,75 @@ correct role→provider; tool-calling works on the local model. **Status: ✅ fu
 (Ollama installed + both models pulled this session; a real `chat()` turn answered via
 `qwen2.5:7b-instruct (Ollama, local)`; tool-calling on the local model confirmed directly).
 
-## Faz 2 — 5 Katmanlı Bilişsel Hafıza  ← order IoT hardware around here (for later)
+## Faz 2 — 5 Katmanlı Bilişsel Hafıza ✅ done (2026-07-14)
 
-- [ ] **Semantic (first):** per-turn/session fact-triple extraction + consolidation/dedup/decay;
-      reuse `entity_extractor.py` + `session_summarizer.py` as the engine; new SQLite facts table
-      + local embeddings. **Fix global-vs-session recall scoping** — `memory.py` recall is global
-      across all sessions today.
-- [ ] **Procedural:** evolve the static keyword-triggered `prompts/workflows/` markdown into a
-      parameterized, recallable store of successful tool sequences.
-- [ ] **Meta:** externalize persona/directives/safety from hardcoded `prompts/core/*.md` into
-      versioned, **human-edited (never agent-writable)** config.
-- [ ] Graph-RAG deferred; `networkx` over SQLite if ever needed.
-- Related debt: **[BUG-25]** entity extraction fires after every trivial turn with no guard
-      (`agent.py:552`) — add length/cooldown batching here.
+- [x] **Semantic:** per-turn fact extraction + consolidation/dedup; new `jarvis/fact_extractor.py`
+      (mirrors `entity_extractor.py`) + new SQLite `facts` table (`jarvis/facts_store.py`) + new
+      `jarvis_facts` ChromaDB collection (local-first EF chain, reusing
+      `_build_embedding_function()`). Dedup happens inline at insert time via embedding-similarity
+      lookup (`Memory.find_similar_fact`) — a close match bumps the existing row's
+      `mention_count`/`last_seen` instead of inserting a duplicate; no separate batch
+      consolidation job (kept deliberately small — see plan risk note). "Decay" is a recall-time
+      ranking signal, not deletion — this is a personal memory store. **Fixed global-vs-session
+      recall scoping**: `Memory.recall()` (episodic, `jarvis_memory`) now takes an optional
+      `session_id` filter, and `ContextBuilder.build()` passes the current session through —
+      episodic recall no longer leaks another session's raw turns. Facts (and session summaries,
+      unchanged) remain deliberately cross-session — that's the entire point of those two layers.
+- [x] **Procedural:** the hardcoded `_DATA_REPORT_KEYWORDS` substring match in `prompt_loader.py`
+      is gone. New SQLite `procedures` table (`jarvis/procedure_store.py`) + `jarvis_procedures`
+      ChromaDB collection; the pre-existing `prompts/workflows/data_report.md` is auto-seeded as
+      the first row on startup (`JarvisAgent._seed_procedures_if_empty`, zero regression from
+      removing the keyword trigger). Retrieval is now semantic (`Memory.recall_procedures`),
+      matched each turn against the user's query. New tool `procedure_save` (#36) lets the agent
+      explicitly persist a new reusable workflow after a genuinely reusable multi-tool task —
+      deliberately explicit/auditable, not automatic silent capture.
+- [x] **Meta:** two concrete, narrow deliverables (not the full Faz 4 `policy_guard` scope).
+      (a) Runtime write-guard: `jarvis/tools/files.py`'s `write()` now refuses any path under
+      `jarvis/prompts/core/` (`PermissionError`) — persona/safety directives stay
+      agent-*readable* but are now provably never agent-*writable*, closing a real gap (nothing
+      previously stopped `file_write` from targeting its own instructions). (b) Versioning: new
+      `jarvis/prompts/CORE_VERSIONS.md` (deliberately one level *above* `jarvis/prompts/core/`,
+      since `prompt_loader.py` globs every `*.md` directly inside that dir into the composed
+      system prompt) tracks version/updated/note per core file, human-bumped. New `/meta` CLI
+      command displays it; new `/facts` CLI command lists known facts (mirrors `/entities`).
+- [x] **[BUG-25]** entity extraction (and now fact extraction) guard: `_schedule_entity_extraction`
+      renamed `_schedule_memory_extraction`, gated by `JarvisAgent._should_extract` — skips only
+      when *both* the user text and the response are ≤3/≤10 words (a bare "ok"/"tamam" ack),
+      verified against all 3 call sites including `resume_and_stream()`'s legitimate
+      `user_text=""` case (which has a real, non-trivial response and must keep firing).
+- [ ] Graph-RAG — still deferred, not needed at this scale.
 
-**Verify:** a fact stated in session A is recalled in a new session B; facts table populated +
-consolidation dedupes; session-scoped recall doesn't leak another session's memory.
+**Bonus finding (not in the original plan, caught during verification):** the first-pass default
+distance thresholds for `recall_facts`/`recall_procedures` (0.5/0.45, modeled on `recall()`'s
+existing `0.6` and `recall_summaries()`'s existing `0.55`) assumed distances in that same rough
+range — but empirically, ChromaDB's default ONNX EF (the fallback whenever Ollama isn't
+reachable, confirmed live-active on this dev machine during verification — not hypothetical)
+produces much larger distances: ~0.07 for a near-exact paraphrase, ~0.7 for a legitimately
+related but differently-worded query, ~1.7+ for something unrelated. The original thresholds
+would have silently returned nothing for real, relevant recall queries under the default-EF
+fallback. Fixed by recalibrating both to 1.1/1.0 based on measured distances (see the comment in
+`memory.py` above `find_similar_fact`); the tight dedup threshold (`find_similar_fact`, 0.15) was
+intentionally left alone — it should only ever catch near-identical phrasing.
+
+**Verify:** ✅ all confirmed live in isolated temp dirs (never the real `data/` — see
+[MEMORY.md](MEMORY.md)'s isolate-test-data-paths note), no test suite exists in-repo: a fact
+stored under one session is recalled from a different session (cross-session, by design); a
+near-duplicate restatement bumps the existing row instead of inserting a new one; an unrelated
+fact is correctly *not* flagged as a duplicate; episodic recall scoped to session B does not
+surface session A's raw turns, while scoped-to-A and un-scoped recall both still work; the seeded
+`data_report` procedure is retrieved for a data/report-shaped query (no regression) and *not*
+retrieved for an unrelated query; the real `procedure_save` tool (invoked directly, not just its
+underlying storage calls) persists to SQLite *and* Chroma and is retrievable afterward;
+`file_write` raises `PermissionError` under `jarvis/prompts/core/` while `file_read` still works
+there and `file_write` still works elsewhere; the trivial-turn guard skips a bare "ok" exchange
+but still fires for `resume_and_stream()`'s empty-user-text/real-response case and for
+substantive exchanges; a full real `JarvisAgent()` construction (including auto-seeding,
+`ContextBuilder.build()`, and system-prompt composition) succeeds end-to-end with no exceptions,
+and re-construction doesn't duplicate the seed; a real `python -m jarvis` startup (against the
+real, pre-existing session) loads cleanly and shuts down on EOF with no exceptions from any Faz 2
+code path (the one error surfaced — Vertex ADC missing — is the same pre-existing, already-
+documented gap from Faz 1, unrelated to this phase, and happened only after every Faz 2 code path
+had already run cleanly).
 
 ## Faz 3 — Gerçek Zamanlı Yerel Ses
 
