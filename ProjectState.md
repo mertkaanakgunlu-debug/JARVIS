@@ -5,8 +5,9 @@
 > **Note (2026-07-14):** a second, separate phase numbering ("Faz 0-8") started 2026-07-14 for
 > the local-first evolution plan — see [ROADMAP.md](ROADMAP.md), [HANDOFF.md](HANDOFF.md),
 > [MEMORY.md](MEMORY.md). It is unrelated to this file's "Faz 1-21" feature-inventory numbering
-> below (which stops at the 2026-05-23 refactor baseline); Faz 0-2 of the new plan (data-integrity
-> stabilization, local-first model router, 5-layer cognitive memory) are done as of this date.
+> below (which stops at the 2026-05-23 refactor baseline); Faz 0-3 of the new plan (data-integrity
+> stabilization, local-first model router, 5-layer cognitive memory, real-time local voice +
+> remote `/ws` audio transport) are done as of this date.
 > Reconciling the two numbering schemes into one is deferred to the new plan's own Faz 8 cleanup.
 
 ## Current State: Faz 21 + Multimodal Polish (COMPLETE)
@@ -297,8 +298,8 @@ Mobile (mobile/ — Flutter/Android):
 | `jarvis/monitor.py` | Background daemon — Gmail + Calendar + todos polling |
 | `jarvis/notify.py` | Windows toast notifications |
 | `jarvis/ws.py` | WebSocket event bus — HUD live feed |
-| `jarvis/voice.py` | VoiceEngine — Faster-Whisper STT + edge-tts TTS + VAD + wakeword |
-| `jarvis/voice_api.py` | Voice loop for API mode |
+| `jarvis/voice/` | Faz 3 (new plan): `RealtimeVoiceEngine` — Silero-VAD end-of-turn + streaming Whisper STT + Piper local TTS (edge-tts fallback) + barge-in; `AudioIO` protocol (`io_duplex.py` local sounddevice, `io_remote_ws.py` remote `/ws` client); `session.py` turn orchestration; `session_manager.py` local/remote arbitration. Replaces the old flat `jarvis/voice.py` |
+| `jarvis/voice_api.py` | Voice loop for API mode (wakeword/PTT-gated, now built on `jarvis/voice/`) |
 | `jarvis/graph/graph.py` | LangGraph StateGraph builder |
 | `jarvis/graph/nodes.py` | agent_node, planner_node, critic_node, routing functions |
 | `jarvis/graph/state.py` | `JarvisState` TypedDict |

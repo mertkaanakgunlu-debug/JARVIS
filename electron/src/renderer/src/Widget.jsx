@@ -43,6 +43,7 @@ function applyWidgetAccent(accent) {
 
 export default function Widget() {
   const [apiUrl, setApiUrl] = useState(null)
+  const [apiKey, setApiKey] = useState('')
   const [accent, setAccent] = useState(STATE_ACCENT.idle)
 
   useEffect(() => {
@@ -51,12 +52,12 @@ export default function Widget() {
     document.body.style.background = 'transparent'
     document.documentElement.style.background = 'transparent'
     applyWidgetAccent(accent)
-    window.jarvis?.onConfig(cfg => setApiUrl(cfg.apiUrl))
+    window.jarvis?.onConfig(cfg => { setApiUrl(cfg.apiUrl); setApiKey(cfg.apiKey || '') })
     if (!window.jarvis) setApiUrl('http://127.0.0.1:8000')
     return () => window.jarvis?.removeAllListeners('config')
   }, [])
 
-  const { connected, state } = useJarvisSocket(apiUrl)
+  const { connected, state } = useJarvisSocket(apiUrl, apiKey)
   const micLevel = useFakeMic(state)
 
   // Update accent when state changes

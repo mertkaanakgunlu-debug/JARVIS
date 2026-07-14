@@ -16,6 +16,7 @@ import {
   ActivityFeed, VaultPanel, Transcript,
 } from './components/HudPanels'
 import useJarvisSocket from './hooks/useJarvisSocket'
+import useRemoteAudioSession from './hooks/useRemoteAudioSession'
 import useClock from './hooks/useClock'
 import { useFakeMic, useFakeFeed, useFakeMetrics } from './hooks/useFakeData'
 
@@ -314,15 +315,36 @@ export default function App() {
     setLocalChat(prev => [...prev.slice(-40), msg])
   }, [])
 
-  // Get API URL from Electron main process
+  // Get API URL/key from Electron main process
+  const [apiKey, setApiKey] = useState('')
   useEffect(() => {
-    window.jarvis?.onConfig(cfg => setApiUrl(cfg.apiUrl))
+    window.jarvis?.onConfig(cfg => { setApiUrl(cfg.apiUrl); setApiKey(cfg.apiKey || '') })
     // Fallback for browser dev mode
     if (!window.jarvis) setApiUrl('http://127.0.0.1:8000')
     return () => window.jarvis?.removeAllListeners('config')
   }, [])
 
-  // Space → Push-to-Talk: tell the voice loop to listen immediately
+  // Faz 3: Electron itself as the mic/speaker for a JARVIS conversation, using
+  // the server's Whisper/Piper (see docs/VOICE_PROTOCOL.md). Independent of
+  // the local wakeword/PTT loop -- /ws's audio_session_start automatically
+  // pauses that loop for the duration of this session. Declared before
+  // useJarvisSocket() because that hook's onAudioChunk/onAudioControl options
+  // need remoteAudio's handlers; sendRaw (which remoteAudio needs) flows the
+  // other way, passed into start()/stop() at call time instead.
+  const remoteAudio = useRemoteAudioSession()
+
+  // Live data from WebSocket
+  const {
+    connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos,
+    micLevel: wsMicLevel, sendRaw,
+  } = useJarvisSocket(apiUrl, apiKey, {
+    onPanelControl: handlePanelControl,
+    onAudioChunk: (buf) => remoteAudio.handleAudioChunk(buf),
+    onAudioControl: (msg) => remoteAudio.handleAudioControl(msg),
+  })
+
+  // Space → toggle the remote-audio session (first press starts capture +
+  // begins streaming mic audio to the backend; second press stops it).
   // (ignored when a text input / textarea is focused so ChatBar still works)
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -330,17 +352,12 @@ export default function App() {
       const tag = document.activeElement?.tagName?.toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
       e.preventDefault()
-      if (apiUrl) {
-        fetch(`${apiUrl}/voice/ptt/start`, { method: 'POST' }).catch(() => {})
-      }
+      if (remoteAudio.active) remoteAudio.stop(sendRaw)
+      else remoteAudio.start(sendRaw)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [apiUrl])
-
-  // Live data from WebSocket
-  const { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos } =
-    useJarvisSocket(apiUrl, { onPanelControl: handlePanelControl })
+  }, [remoteAudio, sendRaw])
 
   // State → accent: changes color palette when JARVIS switches modes
   useEffect(() => {
@@ -422,7 +439,13 @@ export default function App() {
   const fakeFeed     = useFakeFeed(state)
   const fakeMetrics  = useFakeMetrics(state)
 
-  const micLevel = connected ? (metrics.micLevel ?? fakeMic) : fakeMic
+  // Faz 3: real (not simulated) level once a voice session (local or remote)
+  // is actively pushing mic_level events; falls back to the animated fake
+  // meter otherwise. The *5 scale is a starting heuristic (ambient room noise
+  // measured ~0.00002 RMS, speech ~0.14 during verification) -- recalibrate
+  // once seen live, this can't be judged from text alone.
+  const realMicLevel = wsMicLevel != null ? Math.min(1, wsMicLevel.rms * 5) : null
+  const micLevel = connected && realMicLevel != null ? realMicLevel : fakeMic
   const feed     = connected && feedLines.length ? feedLines : fakeFeed
   const met      = connected ? metrics : fakeMetrics
 

@@ -1,7 +1,7 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen } from 'electron'
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, session } from 'electron'
 import { join } from 'path'
 import { spawn } from 'child_process'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import http from 'http'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -10,15 +10,48 @@ const JARVIS_API = process.env.JARVIS_API_URL || 'http://127.0.0.1:8000'
 // In preview/production, this is undefined → load from built files.
 const RENDERER_URL = process.env['ELECTRON_RENDERER_URL']
 
-// ── Python backend management ──────────────────────────────────────────────────
-let pythonProcess = null
-
 function jarvisRoot() {
   // JARVIS_ROOT env override (useful for packaged builds)
   if (process.env.JARVIS_ROOT) return process.env.JARVIS_ROOT
   // app.getAppPath() → .../Jarvis/electron  →  parent = repo root
   return join(app.getAppPath(), '..')
 }
+
+// Faz 3: the renderer needs JARVIS_API_KEY to authenticate its /ws connection
+// (?token=) now that the socket can carry live mic audio and synthesized
+// speech, not just read-only telemetry — a bigger stakes jump than before.
+// The Python backend reads this from the same .env file via its own
+// load_dotenv() call; Electron's own process.env normally won't have it set
+// (it isn't inherited from anywhere), so read the .env file directly rather
+// than adding a new npm dependency for one value.
+function readEnvValue(key) {
+  try {
+    const envPath = join(jarvisRoot(), '.env')
+    if (!existsSync(envPath)) return ''
+    const content = readFileSync(envPath, 'utf-8')
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eq = trimmed.indexOf('=')
+      if (eq === -1) continue
+      if (trimmed.slice(0, eq).trim() !== key) continue
+      let value = trimmed.slice(eq + 1).trim()
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1)
+      }
+      return value
+    }
+  } catch (_) {
+    // Missing/unreadable .env just means no key -- same as auth being disabled
+    // server-side, not a crash-worthy condition.
+  }
+  return ''
+}
+
+const JARVIS_API_KEY = process.env.JARVIS_API_KEY || readEnvValue('JARVIS_API_KEY')
+
+// ── Python backend management ──────────────────────────────────────────────────
+let pythonProcess = null
 
 function isPortInUse(port) {
   return new Promise(resolve => {
@@ -134,7 +167,7 @@ function createMainWindow() {
   })
 
   mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow.webContents.send('config', { apiUrl: JARVIS_API })
+    mainWindow.webContents.send('config', { apiUrl: JARVIS_API, apiKey: JARVIS_API_KEY })
     // Window is shown by app.whenReady after backend is confirmed up
   })
 }
@@ -175,7 +208,7 @@ function createWidgetWindow() {
 
   // Double-click widget → open main window
   widgetWindow.webContents.on('did-finish-load', () => {
-    widgetWindow.webContents.send('config', { apiUrl: JARVIS_API })
+    widgetWindow.webContents.send('config', { apiUrl: JARVIS_API, apiKey: JARVIS_API_KEY })
   })
 }
 
@@ -254,6 +287,13 @@ ipcMain.on('jarvis-state', (_, state) => {
 app.whenReady().then(async () => {
   // Auto-start with Windows (silent — no window on login)
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true })
+
+  // Faz 3: explicit permission handler for the remote-audio session's
+  // getUserMedia() call, rather than relying on Electron's version-dependent
+  // default behavior for media requests.
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(permission === 'media')
+  })
 
   createTray()          // tray icon visible immediately
   createMainWindow()    // hidden — user opens manually or via JARVIS activity

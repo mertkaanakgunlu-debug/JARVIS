@@ -21,6 +21,11 @@
 - Vertex AI needs `gcloud auth application-default login` once for ADC; without it the app
   falls back to the AI Studio free tier automatically.
 - `marker-pdf`'s first run downloads ~2-3 GB of layout models to `~/.cache/marker` — one-time cost.
+- **No Node.js/npm on PATH** (confirmed 2026-07-14, Faz 3) — neither Bash nor PowerShell can find
+  `node`, and the Electron app's own bundled `node_modules/electron`/`esbuild.cmd` couldn't be
+  coaxed into a standalone interpreter either. Any Electron (`electron/`) JS/JSX change made by a
+  Claude Code session cannot be syntax-checked or run in this environment — it needs the owner's
+  own `npm run dev`/build step before being trusted. `.venv`'s Python is unaffected.
 - **Ollama installed 2026-07-14** (during Faz 1's rollout — `winget install Ollama.Ollama`), with
   `qwen2.5:7b-instruct` (4.7 GB) and `nomic-embed-text` (274 MB) pulled. The Windows installer's own
   auto-started service and a manually-launched `ollama.exe serve` raced for port 11434 once and left
@@ -165,6 +170,69 @@ The north-star target came from an owner-commissioned research report
     is agent-invoked when it judges a task worth remembering — there's no silent/automatic
     successful-sequence mining. Keep it that way unless explicitly asked to build the
     automatic version; it's a materially bigger, quality-riskier feature.
+- **Real-time local voice + remote audio transport (Faz 3, 2026-07-14):** `jarvis/voice/` (package)
+  replaced the flat `jarvis/voice.py`. Design decisions worth knowing before touching any of it:
+  - **Silero VAD MUST stay pinned to v5.1.2, not a newer tag** — confirmed by live A/B testing
+    against real (Piper-synthesized) speech, not assumed from docs: v6.2.1's exported `.onnx` graph
+    declares the *exact same* input/output names and shapes as v5.1.2 (`input`/`state`/`sr` →
+    `output`/`stateN`) but with the standard frame-by-frame streaming calling convention (raw
+    ONNX, bypassing the `silero-vad` pip package — see below) it never produces a usable
+    speech-probability signal: max ~0.33 across a 3-second spoken sentence, indistinguishable from
+    noise. v5.1.2 scores real speech at 0.85-0.93 mean and silence/noise at 0.003-0.01. Re-verify
+    with the same A/B method (`jarvis/voice/vad.py`'s module docstring has the exact commit SHAs)
+    before ever bumping this pin — don't trust a matching I/O shape as "it'll behave the same."
+  - **Don't install the `silero-vad` PyPI package** — its `pyproject.toml` hard-requires
+    `torch`/`torchaudio` even though inference can run ONNX-only, which this project has
+    deliberately avoided (see the VRAM budget note below). `jarvis/voice/vad.py`'s `SileroVAD`
+    loads the raw `.onnx` weights directly via `onnxruntime` (already a dependency via
+    openwakeword/faster-whisper/chromadb) instead.
+  - **Piper voice names are verified against the live `rhasspy/piper-voices` `voices.json`, not
+    assumed from general knowledge**: only `tr_TR-dfki-medium` (Turkish) and `en_US-lessac-medium`
+    (English) are configured. Early research surfaced `fahrettin`/`fettah` as other Turkish Piper
+    voice candidates — those are not currently published; don't reintroduce them without
+    re-checking `voices.json` live first.
+  - **Piper chosen over Kokoro-82M specifically because Kokoro doesn't support Turkish at all**
+    (its language list is English/Spanish/French/Hindi/Italian/Japanese/Portuguese/Mandarin only)
+    — this wasn't a close call given this user's primary language.
+  - **`AudioIO` (`jarvis/voice/io_base.py`) is deliberately a *thin transport* Protocol** (raw
+    frames in, PCM chunks out) — NOT a place for VAD/STT/TTS logic. All of that lives once in
+    `RealtimeVoiceEngine` (`engine.py`), which is transport-blind and works identically whether the
+    injected `AudioIO` is `DuplexAudioIO` (local sounddevice) or `RemoteWsAudioIO` (binary `/ws`
+    frames). If you're tempted to add turn-segmentation or transcription logic inside an `AudioIO`
+    implementation, that's the wrong layer — it would duplicate logic between the two backends.
+  - **`VoiceModels`/`get_shared_voice_models()` (`engine.py`) is a lazy, process-wide singleton** —
+    the local wakeword/PTT loop and every remote `/ws` session share ONE loaded Whisper/VAD/Piper
+    instance rather than each reloading from scratch. Safe specifically because
+    `jarvis/voice/session_manager.py` enforces at most one active engine instance at a time (local
+    XOR one remote client) and `RealtimeVoiceEngine.events()` already resets VAD state at the start
+    of every session. Don't add a second, competing model-loading path without that same
+    non-concurrency guarantee.
+  - **Barge-in has NO true acoustic echo cancellation** — a real DSP problem this project doesn't
+    solve. Mitigation is a `SustainedGate` requiring *sustained, high-confidence* speech
+    (`vad_barge_in_threshold`/`vad_barge_in_duration_s` in `config.py`, both higher/longer than
+    normal turn-taking) during playback, specifically to reduce false triggers from the
+    assistant's own voice bleeding from speakers back into an open mic. Headphones sidestep the
+    problem; don't chase a full AEC implementation without being asked — this was a deliberate,
+    documented scope boundary, not an oversight.
+  - **Remote audio session arbitration is first-claim-wins, process-wide, not per-conversation** —
+    `jarvis/voice/session_manager.py`'s `try_claim`/`release` are simple module-level state (no
+    lock — safe because the check-then-set has no `await` in between on one event loop, same
+    reasoning as the pre-existing unlocked `_ptt_event`/`_ww_stop` pattern in `voice_api.py`).
+    Electron's main process always spawns the backend with `--wakeword`
+    (`electron/src/main/index.js`), so starting a remote session must auto-pause the local loop's
+    *next* claim (`pause_local_voice()`/`resume_local_voice()`) or the remote session would almost
+    always get rejected as "busy."
+  - **Full wire protocol is documented in `docs/VOICE_PROTOCOL.md`** — read that before extending
+    the remote-audio path (e.g. the mobile fast-follow) rather than reverse-engineering it from
+    Electron's JS (`electron/src/renderer/src/hooks/useRemoteAudioSession.js` is the only
+    implemented client today).
+  - **Electron JS changes in this phase are UNVERIFIED beyond careful manual reading** — this dev
+    machine has no Node.js/npm on PATH (confirmed: not in Bash or PowerShell PATH, and the bundled
+    `electron.exe`/`esbuild.cmd` under `electron/node_modules` couldn't be coaxed into a working
+    standalone interpreter either), so none of the `.jsx`/`.js` files touched this phase have been
+    syntax-checked, let alone run. Run `npm run dev` (or the project's normal Electron dev command)
+    before trusting this code — see [ROADMAP.md](ROADMAP.md)'s Faz 3 verify section for the full
+    human hand-off checklist.
 
 ## Known permanently-true gotchas
 

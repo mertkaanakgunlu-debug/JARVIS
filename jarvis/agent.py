@@ -809,6 +809,7 @@ class JarvisAgent:
             chunks: list[str] = []
             _first_chunk = True
             _confirmation_issued = False
+            interrupted = False
 
             try:
                 async for delta in graph_stream_to_text(self._graph, state, config):
@@ -827,6 +828,14 @@ class JarvisAgent:
                 self._pending_confirmations[conf_id] = config
                 event_bus.confirmation_required(conf_id, payload)
                 yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
+            except (asyncio.CancelledError, GeneratorExit):
+                # BUG-13: barge-in (or any other cancellation of the task driving this
+                # generator) must propagate — never swallow — so the caller's await
+                # correctly observes it. The turn is discarded (no history/session_store
+                # write below), but event_bus still needs to leave "idle", not stuck on
+                # "thinking"/"speaking" — handled in the finally block below.
+                interrupted = True
+                raise
 
             if _confirmation_issued:
                 event_bus.state("idle")
@@ -869,6 +878,8 @@ class JarvisAgent:
                 self.session_store.set_topic_hint(self.session_id, clean_input[:60])
         finally:
             self._state_lock.release()
+            if interrupted:
+                event_bus.state("idle")
 
         self.memory.store("user", clean_input, self.session_id)
         self.memory.store("assistant", full_response, self.session_id)
@@ -889,7 +900,6 @@ class JarvisAgent:
         decision: "approve" to proceed, "deny" or "deny:<guidance>" to cancel.
         """
         from langgraph.types import Command
-        from langchain_core.messages import AIMessageChunk
 
         config = self._pending_confirmations.pop(conf_id, None)
         if config is None:
@@ -905,35 +915,26 @@ class JarvisAgent:
             event_bus.state("thinking")
             chunks: list[str] = []
             _first_chunk = True
+            interrupted = False
 
+            # BUG-12: reuse the same helper chat_stream() uses instead of an inline
+            # copy-pasted filter — this method independently had the same
+            # draft+revision concatenation bug (both untagged by pass boundary),
+            # now fixed once, in one place.
             try:
-                async for chunk, metadata in self._graph.astream(
-                    Command(resume=decision),
-                    config,
-                    stream_mode="messages",
+                async for text in graph_stream_to_text(
+                    self._graph, Command(resume=decision), config
                 ):
-                    if metadata.get("langgraph_node") != "agent":
-                        continue
-                    if not isinstance(chunk, AIMessageChunk):
-                        continue
-                    if getattr(chunk, "tool_call_chunks", None):
-                        continue
-                    content = chunk.content
-                    texts: list[str] = []
-                    if isinstance(content, str) and content:
-                        texts.append(content)
-                    elif isinstance(content, list):
-                        for part in content:
-                            if isinstance(part, dict) and part.get("type") == "text":
-                                t = part.get("text", "")
-                                if t:
-                                    texts.append(t)
-                    for text in texts:
-                        if _first_chunk:
-                            event_bus.state("speaking")
-                            _first_chunk = False
-                        chunks.append(text)
-                        yield text
+                    if _first_chunk:
+                        event_bus.state("speaking")
+                        _first_chunk = False
+                    chunks.append(text)
+                    yield text
+            except (asyncio.CancelledError, GeneratorExit):
+                # BUG-13: see chat_stream()'s identical fix — must propagate, not
+                # swallow, so a barge-in cancellation is correctly observed.
+                interrupted = True
+                raise
             except Exception as exc:
                 event_bus.state("idle")
                 yield f"[ERROR: {exc}]"
@@ -959,6 +960,8 @@ class JarvisAgent:
             self.session_store.save_turn(self.session_id, self._history, self._turn)
         finally:
             self._state_lock.release()
+            if interrupted:
+                event_bus.state("idle")
 
         self.memory.store("assistant", full_response, self.session_id)
         self.memory.log_turn("assistant", full_response)

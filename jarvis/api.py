@@ -24,6 +24,8 @@ Auth:
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -40,6 +42,8 @@ from jarvis.agent import JarvisAgent
 from jarvis.ws import event_bus, start_metrics_task, start_live_data_task, live_data_snapshot
 from jarvis.voice_api import start_voice_task, trigger_ptt
 
+logger = logging.getLogger(__name__)
+
 # Mobile routers
 from jarvis.api_routers import todos as todos_router
 from jarvis.api_routers import finance as finance_router
@@ -51,6 +55,7 @@ from jarvis.api_routers import system as system_router
 
 # ── App lifespan ──────────────────────────────────────────────────────────────
 
+_voice_enabled: bool = False    # set by run_server() before uvicorn starts — True for --voice or --wakeword
 _voice_wakeword: bool = False   # set by run_server() before uvicorn starts
 
 
@@ -59,8 +64,8 @@ async def lifespan(app: FastAPI):
     start_metrics_task()
     if _agent is not None:
         start_live_data_task(_agent, _settings)
-        if _voice_wakeword:
-            start_voice_task(_agent, _settings, wakeword=True)
+        if _voice_enabled or _voice_wakeword:
+            start_voice_task(_agent, _settings, wakeword=_voice_wakeword)
     yield
     # ── Shutdown: archive current session so next startup begins clean ──────────
     if _agent is not None:
@@ -195,6 +200,11 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
 
     Authentication: ?token=<JARVIS_API_KEY> query param.
     If API key is set and token is wrong, connection is closed with code 4401.
+
+    Faz 3: this same connection can also carry a remote-audio session — binary
+    PCM mic/TTS frames multiplexed alongside the existing JSON event stream via
+    audio_session_start/stop control messages. See docs/VOICE_PROTOCOL.md for
+    the full wire format.
     """
     if _settings and _settings.jarvis_api_key:
         if token != _settings.jarvis_api_key:
@@ -206,12 +216,137 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
     if agent:
         await event_bus.broadcast({"type": "state", "value": "idle"})
         await live_data_snapshot(agent, _settings)
+
+    audio_owner_id = f"remote-ws-{id(websocket)}"
+    audio_io = None
+    audio_task: "asyncio.Task | None" = None
+
+    async def _stop_audio_session(reason: str) -> None:
+        nonlocal audio_io, audio_task
+        if audio_io is None and audio_task is None:
+            return
+        from jarvis.voice.session_manager import release
+        from jarvis.voice_api import resume_local_voice
+
+        if audio_io is not None:
+            await audio_io.stop()
+        if audio_task is not None:
+            audio_task.cancel()
+            try:
+                await audio_task
+            except asyncio.CancelledError:
+                pass
+        audio_io = None
+        audio_task = None
+        release(audio_owner_id)
+        resume_local_voice()
+        await event_bus.send_text_to(websocket, {"type": "audio_session_end", "reason": reason})
+
+    async def _start_audio_session(control: dict) -> None:
+        nonlocal audio_io, audio_task
+
+        if audio_task is not None:
+            # Already active on THIS connection (e.g. a client retry/double
+            # send) -- without this guard, try_claim() below would succeed
+            # (this connection already owns the claim) and silently leak the
+            # existing engine/task by overwriting these nonlocals before
+            # tearing them down. Client must call audio_session_stop first.
+            await event_bus.send_text_to(
+                websocket,
+                {"type": "audio_session_nack", "reason": "bad_request",
+                 "detail": "a session is already active on this connection"},
+            )
+            return
+
+        if not _settings or not _settings.jarvis_api_key:
+            # Remote audio is opt-in-by-configuration, not available with zero
+            # setup -- once this channel can carry live mic audio and
+            # synthesized speech, an unauthenticated connection matters a lot
+            # more than read-only telemetry did.
+            await event_bus.send_text_to(websocket, {"type": "audio_session_nack", "reason": "unauthenticated"})
+            return
+        if agent is None:
+            await event_bus.send_text_to(websocket, {"type": "audio_session_nack", "reason": "bad_request"})
+            return
+        try:
+            sample_rate = int(control.get("sample_rate", 16000))
+            if sample_rate <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            await event_bus.send_text_to(websocket, {"type": "audio_session_nack", "reason": "bad_request"})
+            return
+
+        from jarvis.voice.session_manager import try_claim
+        if not try_claim(audio_owner_id):
+            await event_bus.send_text_to(
+                websocket,
+                {"type": "audio_session_nack", "reason": "busy", "detail": "another audio session is active"},
+            )
+            return
+
+        from jarvis.voice.io_remote_ws import RemoteWsAudioIO
+        from jarvis.voice.engine import RealtimeVoiceEngine, get_shared_voice_models
+        from jarvis.voice.session import drive_voice_session
+        from jarvis.voice_api import pause_local_voice, run_one_response
+
+        # Electron's main process always spawns the backend with --wakeword
+        # (electron/src/main/index.js) — pause that loop's next claim so it
+        # doesn't compete with this remote session for the shared agent state.
+        pause_local_voice()
+
+        audio_io = RemoteWsAudioIO(websocket, event_bus, sample_rate)
+        models = await get_shared_voice_models(_settings)
+        engine = RealtimeVoiceEngine(audio_io, _settings, models=models)
+        await engine.load()
+        await engine.start()
+
+        async def _handle_transcript(text: str, lang: str):
+            return run_one_response(agent, engine, text, lang)
+
+        async def _run_session() -> None:
+            try:
+                await drive_voice_session(engine, _handle_transcript)
+            except Exception as exc:
+                logger.error("[voice] remote audio session error: %s", exc, exc_info=True)
+            finally:
+                await engine.stop()
+
+        audio_task = asyncio.create_task(_run_session())
+        await event_bus.send_text_to(websocket, {"type": "audio_session_ack", "session_id": audio_owner_id})
+
     try:
         while True:
-            await websocket.receive_text()
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+
+            raw_bytes = message.get("bytes")
+            if raw_bytes is not None:
+                if audio_io is not None:
+                    audio_io.push_mic_frame(raw_bytes)
+                continue
+
+            raw_text = message.get("text")
+            if raw_text is None:
+                continue
+            try:
+                control = json.loads(raw_text)
+            except (ValueError, TypeError):
+                continue
+            kind = control.get("type") if isinstance(control, dict) else None
+            if kind == "audio_session_start":
+                await _start_audio_session(control)
+            elif kind == "audio_session_stop":
+                await _stop_audio_session("client_requested")
     except WebSocketDisconnect:
-        event_bus.disconnect(websocket)
+        pass
     except Exception:
+        pass
+    finally:
+        # Covers the connection ending (disconnect/error) while a session was
+        # still active -- distinct from the explicit audio_session_stop path
+        # above, which already handled the normal client-requested case.
+        await _stop_audio_session("connection_closed")
         event_bus.disconnect(websocket)
 
 
@@ -226,6 +361,30 @@ async def voice_ptt_start(request: Request):
     ok = trigger_ptt()
     if not ok:
         raise HTTPException(status_code=503, detail="Voice loop not running")
+    return {"ok": True}
+
+
+@app.post("/voice/local/pause")
+async def voice_local_pause(request: Request):
+    """Manually stop the local wakeword/PTT loop from claiming new turns (Faz 3).
+
+    /ws's audio_session_start already does this automatically; this endpoint is
+    a manual override for testing/troubleshooting the remote-audio path without
+    relying on that automatic pause (e.g. to guarantee the local mic won't
+    activate at all while testing).
+    """
+    _check_auth(request)
+    from jarvis.voice_api import pause_local_voice
+    pause_local_voice()
+    return {"ok": True}
+
+
+@app.post("/voice/local/resume")
+async def voice_local_resume(request: Request):
+    """Re-enable the local wakeword/PTT loop after a manual /voice/local/pause."""
+    _check_auth(request)
+    from jarvis.voice_api import resume_local_voice
+    resume_local_voice()
     return {"ok": True}
 
 
@@ -496,9 +655,10 @@ async def reset(request: Request):
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-def run_server(settings: Settings, port: int = 8000, wakeword: bool = False) -> None:
+def run_server(settings: Settings, port: int = 8000, voice: bool = False, wakeword: bool = False) -> None:
     """Start the Uvicorn server (blocking)."""
-    global _voice_wakeword
+    global _voice_enabled, _voice_wakeword
+    _voice_enabled = voice
     _voice_wakeword = wakeword
 
     try:

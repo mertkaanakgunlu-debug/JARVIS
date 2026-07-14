@@ -114,7 +114,17 @@ class Settings(BaseSettings):
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
 
     voice_silence_duration: float = 1.5  # seconds of silence before VAD stops recording
-    voice_chunk_ms: int = 50             # audio chunk size in ms (smaller = snappier)
+    voice_chunk_ms: int = 50             # vestigial post-Faz-3 (Silero VAD replaced RMS-threshold
+                                          # detection) — left in place, unused, rather than deleted
+
+    # Faz 3: real-time local voice — Silero-VAD end-of-turn + Piper local TTS + barge-in.
+    tts_engine: str = "piper"            # "piper" | "edge" (edge-tts stays available as a fallback)
+    tts_allow_cloud_fallback: bool = True  # use edge-tts when no Piper voice is configured for a language
+    vad_speech_threshold: float = 0.5      # Silero VAD speech-probability threshold for normal turn-taking
+    vad_barge_in_threshold: float = 0.75   # higher bar while JARVIS is speaking — speaker-bleed mitigation
+    vad_barge_in_duration_s: float = 0.4   # sustained speech required to count as a barge-in, not a blip
+    audio_input_device: str = ""           # "" = system default sounddevice input
+    audio_output_device: str = ""          # "" = system default sounddevice output
 
     @property
     def ollama_api_url(self) -> str:

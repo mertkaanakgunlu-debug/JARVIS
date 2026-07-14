@@ -653,18 +653,62 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
         _print_jarvis(response, model_label)
 
 
+async def _run_voice_response(agent: JarvisAgent, engine, text: str, lang: str, settings: Settings) -> None:
+    """One turn's response: agent.chat_stream() -> engine.speak_stream(), sentence-
+    chunked so TTS starts before generation finishes. Runs as a cancellable task
+    (see jarvis/voice/session.py) so a BargeIn event can interrupt it mid-flight."""
+    console.print("[dim]Thinking...[/dim]", end="\r")
+    response_chunks: list[str] = []
+    llm_error: list[BaseException] = []
+
+    async def _collecting_stream():
+        try:
+            async for delta in agent.chat_stream(text, detected_language=lang):
+                response_chunks.append(delta)
+                yield delta
+        except Exception as exc:
+            # Deliberately Exception, not BaseException -- asyncio.CancelledError
+            # (a barge-in cancelling this task) must propagate, never be swallowed.
+            llm_error.append(exc)
+            return
+
+    try:
+        await engine.speak_stream(_collecting_stream(), lang=lang)
+    except Exception as exc:
+        _print_error(f"TTS error: {exc}")
+
+    if llm_error:
+        from jarvis.utils import is_daily_quota_error
+        exc = llm_error[0]
+        if is_daily_quota_error(exc):
+            _print_error(
+                f"Daily quota exhausted on {settings.effective_cloud_model} "
+                f"and {settings.cloud_model_fallback} both. Free-tier daily quotas "
+                "reset at midnight UTC. Wait or upgrade billing."
+            )
+        else:
+            _print_error(f"LLM error: {exc}")
+
+    if response_chunks:
+        _print_jarvis("".join(response_chunks), agent.current_model_label)
+
+
 async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=None) -> None:
     try:
-        from jarvis.voice import VoiceEngine, is_exit_phrase
+        from jarvis.voice.engine import RealtimeVoiceEngine
+        from jarvis.voice.io_duplex import DuplexAudioIO
+        from jarvis.voice.wakeword import WakewordDetector
+        from jarvis.voice.text import is_exit_phrase
+        from jarvis.voice.session import drive_voice_session, STOP_SESSION
     except ImportError as exc:
         _print_error(
             f"Voice dependencies not installed: {exc}\n"
-            "Run: pip install faster-whisper sounddevice edge-tts miniaudio numpy"
+            "Run: pip install -r requirements.txt"
         )
         return
 
     settings = agent.settings
-    voice = VoiceEngine(settings)
+    engine = RealtimeVoiceEngine(DuplexAudioIO(settings), settings)
     loop = asyncio.get_running_loop()
 
     _print_banner(settings, monitor_active=monitor is not None)
@@ -672,14 +716,17 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
         console.print('[gold3]Wake-word mode.[/gold3] Say "[bold]Hey JARVIS[/bold]" to activate, then speak.')
     else:
         console.print("[gold3]Voice mode active.[/gold3] Speak naturally — JARVIS listens automatically.")
-    console.print("[dim]Say 'goodbye' / 'güle güle' to exit.  Ctrl+C also works.[/dim]\n")
+    console.print("[dim]Say 'goodbye' / 'güle güle' to exit.  Ctrl+C also works.[/dim]")
+    console.print("[dim]You can interrupt JARVIS mid-sentence by speaking — barge-in is on.[/dim]\n")
 
-    console.print("[dim]Loading voice models (first run downloads ~800 MB)...[/dim]")
-    await loop.run_in_executor(None, voice.load)
+    console.print("[dim]Loading voice models (first run downloads several hundred MB)...[/dim]")
+    await engine.load()
 
+    ww_detector = None
     if wakeword:
         console.print("[dim]Loading wake-word model (hey_jarvis)...[/dim]")
-        ok = await loop.run_in_executor(None, voice.load_wakeword)
+        ww_detector = WakewordDetector()
+        ok = await loop.run_in_executor(None, ww_detector.load)
         if ok:
             console.print('[gold3]Ready.[/gold3] Waiting for "Hey JARVIS"...\n')
         else:
@@ -688,78 +735,62 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
     else:
         console.print("[gold3]Ready.[/gold3]\n")
 
-    while True:
-        if wakeword:
-            console.print('[dim]Waiting for "Hey JARVIS"...[/dim]', end="\r")
-            try:
-                await loop.run_in_executor(None, voice.listen_for_wakeword)
-            except (KeyboardInterrupt, asyncio.CancelledError):
-                console.print("\n[dim]JARVIS offline. Goodbye.[/dim]")
-                break
-            console.print("[gold3]Hey! Listening...[/gold3]              ")
-
-        console.print("[dim]Listening...[/dim]", end="\r")
-        try:
-            text, lang = await loop.run_in_executor(None, voice.listen)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            console.print("\n[dim]JARVIS offline. Goodbye.[/dim]")
-            break
-
-        if not text:
-            continue
-
+    async def _handle_transcript(text: str, lang: str):
         console.print(f"[bold blue]{settings.user_name}:[/bold blue] {text}   ")
 
         if is_exit_phrase(text):
             farewell = "Goodbye, Sir." if lang != "tr" else "Güle güle, efendim."
             console.print(f"[dim]JARVIS:[/dim] {farewell}")
-            await voice.speak(farewell, lang)
-            break
 
-        # Voice-mode model switch (natural language only)
+            async def _single(t=farewell):
+                yield t
+
+            await engine.speak_stream(_single(), lang)
+            return STOP_SESSION
+
         detected_switch = _detect_model_switch(text)
         if detected_switch:
             try:
                 label = agent.switch_model(detected_switch)
                 msg = f"Model değiştirildi: {label}"
                 console.print(f"[gold3]✓[/gold3] {msg}")
-                await voice.speak(msg, lang)
+
+                async def _single(t=msg):
+                    yield t
+
+                await engine.speak_stream(_single(), lang)
             except ValueError as e:
                 _print_error(str(e))
-            continue
+            return None
 
-        console.print("[dim]Thinking...[/dim]", end="\r")
-        response_chunks: list[str] = []
-        llm_error: list[BaseException] = []
+        return _run_voice_response(agent, engine, text, lang, settings)
 
-        async def _collecting_stream():
+    def _on_barge_in() -> None:
+        console.print("[dim](interrupted)[/dim]")
+
+    try:
+        while True:
+            if wakeword and ww_detector is not None:
+                console.print('[dim]Waiting for "Hey JARVIS"...[/dim]', end="\r")
+                await loop.run_in_executor(None, ww_detector.listen)
+                console.print("[gold3]Hey! Listening...[/gold3]              ")
+
+            await engine.start()
             try:
-                async for delta in agent.chat_stream(text, detected_language=lang):
-                    response_chunks.append(delta)
-                    yield delta
-            except BaseException as exc:
-                llm_error.append(exc)
-                return
-
-        try:
-            await voice.speak_stream(_collecting_stream(), lang=lang)
-        except Exception as exc:
-            _print_error(f"TTS error: {exc}")
-
-        if llm_error:
-            from jarvis.utils import is_daily_quota_error
-            exc = llm_error[0]
-            if is_daily_quota_error(exc):
-                _print_error(
-                    f"Daily quota exhausted on {settings.effective_cloud_model} "
-                    f"and {settings.cloud_model_fallback} both. Free-tier daily quotas "
-                    "reset at midnight UTC. Wait or upgrade billing."
+                outcome = await drive_voice_session(
+                    engine, _handle_transcript,
+                    on_barge_in=_on_barge_in,
+                    stop_after_first_turn=wakeword,
                 )
-            else:
-                _print_error(f"LLM error: {exc}")
+            finally:
+                await engine.stop()
 
-        if response_chunks:
-            _print_jarvis("".join(response_chunks), agent.current_model_label)
+            if outcome == "exit" or not wakeword:
+                break
+            # outcome == "turn_complete" and wakeword=True: loop back and
+            # re-gate on the wake phrase for the next command.
+    except KeyboardInterrupt:
+        console.print("\n[dim]JARVIS offline. Goodbye.[/dim]")
 
 
 def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> None:

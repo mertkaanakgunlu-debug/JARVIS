@@ -67,9 +67,17 @@ spotipy>=2.23             # Spotify Web API wrapper
 # Voice I/O (Iteration 3)
 faster-whisper>=1.1      # STT — CTranslate2 based, multilingual, no PyTorch
 sounddevice>=0.4         # Audio capture + playback
-edge-tts>=7.0            # TTS — Microsoft Neural (English + Turkish); v6 gives 403
-miniaudio>=1.14          # MP3 decode for edge-tts output (pure Python)
+edge-tts>=7.0            # TTS — cloud fallback tier only as of Faz 3 (Piper is primary)
+miniaudio>=1.14          # MP3 decode for edge-tts fallback output (pure Python)
 numpy>=1.24              # Audio array math
+
+# Real-time local voice (Faz 3): Silero-VAD (raw .onnx via onnxruntime — NOT the
+# silero-vad pip package, which hard-requires torch) + Piper local TTS + barge-in.
+# onnxruntime is already a transitive dep (openwakeword/faster-whisper/chromadb);
+# pinned explicitly now that jarvis/voice/vad.py depends on it directly.
+piper-tts>=1.4            # Local TTS — no torch, ships its own espeak-ng phonemizer data
+onnxruntime>=1.16
+scipy>=1.11               # server-side resample fallback for non-16kHz remote-audio clients
 
 # REST API server (Faz 9: python -m jarvis --api)
 fastapi>=0.115           # async web framework

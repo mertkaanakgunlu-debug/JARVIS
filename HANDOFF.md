@@ -3,116 +3,165 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-14 (same-day continuation, third phase)
+## Last session: 2026-07-14 (same-day continuation, fourth phase — Faz 3)
 
-**Context:** Picked up directly from this same day's earlier sessions, which had finished Faz 0
-(memory-critical stabilization) and Faz 1 (local-first brain + model router) — both done but
-still uncommitted at the start of this session. This session first committed that prior work as
-a checkpoint, then implemented Faz 2 — 5-layer cognitive memory, the owner's #1 priority.
+**Context:** Picked up directly from this same day's earlier sessions (Faz 0-2, all committed).
+Implemented Faz 3 — real-time local voice — end to end, then, per the owner's decision mid-session
+(asked via a scoping question), expanded it to also include genuine remote binary audio transport
+over `/ws` plus an Electron client, rather than staying PC-local-only as originally bulleted in
+ROADMAP.md.
 
-**What happened this session:**
+**What happened this session (all uncommitted — see Git state below):**
 
-1. **Committed Faz 0 + Faz 1** as a single combined commit (`58dd51f`) — the two phases' diffs
-   were too intertwined across shared files (`agent.py`, `graph/graph.py`) to cleanly hunk-split
-   without real risk of a bad split on a 600+ line diff with no test suite to catch mistakes; one
-   commit matches existing precedent (the immediately prior commit also combined two phases).
-2. **Faz 2 implemented — 5-layer cognitive memory complete:**
-   - **Semantic:** new `jarvis/fact_extractor.py` + `jarvis/facts_store.py` (SQLite `facts`
-     table) + `jarvis_facts` ChromaDB collection. Dedup at insert time via embedding-similarity
-     (`Memory.find_similar_fact`). `Memory.recall()` gained a `session_id` filter — episodic
-     recall no longer leaks another session's raw turns; facts stay deliberately cross-session.
-   - **Procedural:** new `jarvis/procedure_store.py` (SQLite `procedures` table) +
-     `jarvis_procedures` ChromaDB collection, replacing the old hardcoded
-     `_DATA_REPORT_KEYWORDS` keyword match with semantic retrieval. The pre-existing
-     `data_report.md` workflow auto-seeds as the first row (zero regression). New tool
-     `procedure_save` (#36) — agent-invoked, explicit, not automatic silent capture.
-   - **Meta:** `jarvis/tools/files.py` now refuses any `file_write` under `jarvis/prompts/core/`
-     (`PermissionError`) — persona/safety directives are provably never agent-writable. New
-     `jarvis/prompts/CORE_VERSIONS.md` (deliberately outside `core/`'s glob) tracks a
-     human-bumped version/updated stamp per core prompt file. New `/meta` + `/facts` CLI
-     commands.
-   - **[BUG-25] fixed:** entity+fact extraction (`_schedule_entity_extraction` renamed
-     `_schedule_memory_extraction`) now skips trivially short exchanges via
-     `JarvisAgent._should_extract`, verified against all 3 call sites.
-   - **Bonus fix found during verification:** first-pass recall-distance thresholds
-     (0.5/0.45) were too tight for ChromaDB's default ONNX EF fallback (confirmed live-active —
-     Ollama wasn't running during this session despite being installed in Faz 1) — recalibrated
-     to 1.1/1.0 based on measured distances. See [MEMORY.md](MEMORY.md) for the full gotcha.
-   - Full detail + exact verification performed is in [ROADMAP.md](ROADMAP.md)'s Faz 2 section.
-3. **Committed Faz 2** — see git log for the commit hash; message covers all of the above.
-4. **Docs updated to reflect Faz 2:** `ROADMAP.md`, `MEMORY.md`, `CHANGELOG.md`,
-   `ProjectState.md` (tool table + file map + a note flagging the two parallel phase-numbering
-   schemes now in play), `docs/ARCHITECTURE.md` (rewrote the Memory layers table around the
-   5-layer taxonomy), `docs/TOOLS.md`, `docs/SAFETY.md` (new working-mechanisms row for the
-   write-guard, kept separate from the still-broken confirmation-gate section).
+1. **Local voice pipeline rebuilt** as new package `jarvis/voice/` (replaces the flat
+   `jarvis/voice.py`, deleted): Silero-VAD (raw `.onnx` via `onnxruntime`) for end-of-turn
+   detection, one-shot `faster-whisper` STT at end-of-turn (unchanged path, just relocated), local
+   **Piper** TTS (`tr_TR-dfki-medium` + `en_US-lessac-medium`, `edge-tts` kept as fallback),
+   full-duplex `sounddevice` I/O (`DuplexAudioIO`, callback-mode, replaces per-turn blocking
+   record+play), and **barge-in** (sustained-high-confidence-speech gate during playback aborts
+   audio + cancels the in-flight `agent.chat_stream()` task).
+2. **A real, live-tested bug caught during this session, not assumed**: the Silero VAD model must
+   stay pinned to **v5.1.2**, not the newer v6.2.1 — both tags export the identical I/O shape
+   (`input`/`state`/`sr` → `output`/`stateN`) but v6.2.1's graph never produces a usable
+   speech-probability signal with the standard streaming calling convention (max ~0.33 across a
+   3-second spoken sentence; v5.1.2 scores the same audio at 0.85-0.93 mean). Full comparison
+   method is in `jarvis/voice/vad.py`'s module docstring — re-verify with real audio before ever
+   touching this pin.
+3. **Faz 3's bundled bug fixes**: BUG-12 (critic draft+revision concatenation — fixed by tracking
+   `metadata["langgraph_step"]` in `graph_stream_to_text()`), BUG-13 (`chat_stream()`/
+   `resume_and_stream()` only caught `GraphInterrupt`, dropping barge-in-cancelled turns silently —
+   now propagate `CancelledError` while still guaranteeing `event_bus.state("idle")`), BUG-23
+   (openwakeword buffer never reset — now calls `Model.reset()` per session), plus a wiring gap
+   (`--api --voice` without `--wakeword` previously started zero voice).
+4. **Scope expanded mid-session (owner decision)** to also build remote binary audio transport over
+   the existing `/ws` connection — `RemoteWsAudioIO` satisfies the same `AudioIO` protocol as the
+   local backend (deliberately a *thin transport* interface — no duplicated VAD/STT/TTS logic
+   between the two), so `RealtimeVoiceEngine` is fully transport-blind. Session arbitration
+   (`jarvis/voice/session_manager.py`, first-claim-wins) + auto-pause of the local wakeword loop
+   (Electron always spawns the backend with `--wakeword`) + a shared, lazily-loaded `VoiceModels`
+   singleton (`get_shared_voice_models()`) so the local loop and remote sessions don't each reload
+   Whisper/VAD/Piper. Full wire protocol written to new `docs/VOICE_PROTOCOL.md`.
+5. **Electron HUD**: `useRemoteAudioSession` (new hook) + `pcm-capture-worklet.js` (new
+   `AudioWorkletProcessor`) let the HUD act as mic/speaker via `getUserMedia`/Web Audio — no new
+   npm dependencies. Spacebar now toggles this session instead of the old fire-and-forget PTT POST
+   (that endpoint is untouched, still serves the local path). Security fix pulled forward from the
+   Faz 8 backlog (**BUG-elec**): Electron now sends `?token=` on `/ws` (reads `JARVIS_API_KEY` from
+   the same `.env` the backend reads); the server also refuses `audio_session_start` when no API
+   key is configured at all.
+6. **Two real bugs caught during my own final review pass** (after the "it all passes" verification
+   round, re-reading the trickiest code once more before considering this done):
+   - **Barge-in was silently dropping the first ~0.4s of the user's interrupting speech** — the
+     frames that built up confidence for the barge-in gate were fed only to that gate, never
+     accumulated anywhere, so by the time `BargeIn` fired and normal turn-tracking resumed, that
+     window was gone. Fixed with a small rolling tail buffer (`jarvis/voice/engine.py`) seeded into
+     the turn buffer the moment barge-in fires, plus a new `VadTurnSegmenter.force_speaking()`
+     (`vad.py`) so the segmenter resumes from an already-speaking state instead of waiting for its
+     own (redundant) speech-start detection. Verified with a scripted test isolating exactly this
+     timing (`verify_bargein_tail.py` in scratchpad, not committed).
+   - **A second `audio_session_start` on the same `/ws` connection while one was already active
+     would silently leak the previous engine/task** (`try_claim` would just re-succeed since the
+     connection already owns the claim, and the code would overwrite the tracked task/audio_io
+     without tearing down the old ones first). Fixed with an explicit guard in `jarvis/api.py`'s
+     `_start_audio_session`, rejecting the duplicate with `nack: "bad_request"`.
 
-**Verification performed (all isolated, no test suite exists in-repo):** scripted checks
-(`22/22` passed) directly exercising fact dedup/insert/bump, cross-session fact recall, episodic
-session-scoping (no leak), procedure seed+retrieval regression check, the meta-memory
-write-guard (blocks core/, allows elsewhere, read still works), and the BUG-25 guard including
-the `resume_and_stream()` edge case — all in a fresh `tempfile.mkdtemp()`, never the real
-`data/`. A full real `JarvisAgent()` construction in an isolated `os.chdir()`'d temp dir (per the
-isolate-test-data-paths lesson — `JarvisAgent` has no injectable path override, only
-`os.chdir()` before construction works) confirmed seeding, `ContextBuilder.build()`, and system
-prompt composition all work end-to-end, and that re-construction doesn't duplicate the seed. The
-real `procedure_save` **tool object** (via `make_tools()` + `.invoke()`, not just its underlying
-storage calls) was also exercised directly. Finally, a real `python -m jarvis` startup against
-the actual project session loaded and shut down cleanly on EOF with no exceptions from any Faz 2
-code path — the one error surfaced (Vertex ADC missing) is the same pre-existing, already-
-documented Faz 1 gap, and only happened after all Faz 2 code had already run cleanly.
+## Verification performed (all isolated / no real user data touched)
 
-**Environment note (unrelated to Faz 2, spotted in passing, not fixed):** running
-`python -m jarvis` with piped/non-interactive stdout on this machine's Turkish codepage
-(`cp1254`) crashes in Rich's Windows console renderer trying to print the banner
-(`UnicodeEncodeError`) unless `PYTHONIOENCODING=utf-8` is set first. Doesn't affect normal
-interactive use (a real terminal); only hit when scripting/piping into the CLI non-interactively.
-Not a Faz 2 regression — the crash point (`_print_banner`) is pre-existing code this session
-never touched.
+**Mechanically verified, with real (not mocked) components wherever the environment allowed —
+this environment turned out to have real audio hardware, so more was actually testable than a
+typical headless sandbox:**
+- `SustainedGate`/`VadTurnSegmenter` pure-logic transitions at exact scripted frame indices.
+- **Real Silero VAD v5.1.2 inference** (downloaded live, not mocked) against real Piper-synthesized
+  speech: English 0.85 mean / Turkish 0.93 mean speech-probability vs. silence 0.003-0.01 — this is
+  what caught the v6.2.1 regression in the first place.
+- **Real Piper synthesis** for both configured voices, producing sane non-silent audio; **real
+  Whisper STT round-trip** of that same audio (correct transcript + correct language detection for
+  both English and Turkish).
+- **Real hardware smoke test**: `RealtimeVoiceEngine.load()` (all three models together) +
+  `engine.start()`/`events()` against this machine's actual microphone for ~1.5s of ambient
+  silence — zero false `SpeechStarted`/`FinalTranscript`/`BargeIn`, confirming the VAD threshold
+  correctly rejects background noise. Also directly exercised `DuplexAudioIO`'s real
+  `InputStream`/`OutputStream` open/close mechanics (capture only; playback was fed silence only —
+  deliberately did not autonomously play audible test phrases through the user's speakers without
+  them present to expect it).
+- **Full Part B protocol**, via `starlette.testclient.TestClient` against the real FastAPI app (a
+  fake agent stood in only to avoid depending on Ollama/cloud credentials being configured — the
+  session/protocol logic itself is 100% real): session ack/busy-nack/re-claim-after-release,
+  binary frame dispatch, unauthenticated rejection, and the double-start guard added during review.
+- Scripted, deterministic isolation test for the barge-in tail-buffer fix (fake `AudioIO` yielding
+  labeled frames, confirms exactly which frame indices survive into the transcribed buffer).
+- Full-package compile + import check across every modified/new Python file — no circular imports.
+
+**NOT verifiable in this environment — explicit hand-off, needed before calling this actually
+done:**
+- **All Electron/JS changes are unverified beyond careful manual reading** — this dev machine has
+  no Node.js/npm on PATH (confirmed absent from both Bash and PowerShell; the bundled
+  `electron.exe`/`esbuild.cmd` under `node_modules` couldn't be coaxed into a standalone
+  interpreter either). Run `npm run dev` (or however this project normally launches Electron)
+  before trusting any of: `useJarvisSocket.js`, `useRemoteAudioSession.js`,
+  `pcm-capture-worklet.js`, `App.jsx`, `Widget.jsx`, `main/index.js`.
+- Headphones test (self-hear quality, no feedback loop).
+- Speaker + live barge-in test — actually interrupting JARVIS mid-sentence by speaking; the
+  acoustic self-bleed false-positive risk is fundamentally a real-microphone-with-speakers concern
+  that can't be simulated.
+- Turkish pronunciation/prosody quality judgment (mechanical checks confirm non-silent, correctly-
+  durationed, round-trips-through-Whisper audio — not whether it *sounds* good).
+- Electron's `getUserMedia` permission grant + real round-trip audio quality/latency over that path.
+- End-to-end first-audio latency with real device/driver latency included.
 
 ## Git state as of this session
 
 - Branch: `langgraph-migration`, **not merged to `main`**.
-- Faz 0 + Faz 1: committed (`58dd51f`).
-- Faz 2: committed — see `git log --oneline -3` for the hash; nothing from this session should
-  be left uncommitted. Run `git status` to confirm before starting new work.
-- Still 21 stray `.claude/worktrees/*` directories from past sessions, still untouched (still
-  needs explicit go-ahead — destructive, Faz 8 territory).
+- **Everything from this session is uncommitted.** `git status`: 18 modified files, 1 deletion
+  (`jarvis/voice.py`), 4 new paths (`jarvis/voice/`, `docs/VOICE_PROTOCOL.md`,
+  `electron/src/renderer/src/audio/`, `electron/.../hooks/useRemoteAudioSession.js`). This is a
+  large diff (full new backend package + Electron changes) — review before committing; consider
+  whether to split Part A (local engine) and Part B (remote transport) into separate commits given
+  their different verification confidence levels (Part A hardware-tested live, Part B protocol-
+  tested but Electron-side unverified).
+- Still 21 stray `.claude/worktrees/*` directories from past sessions, untouched (still needs
+  explicit go-ahead — destructive, Faz 8 territory; unrelated to this session).
 
 ## Recommended next steps (pick up here)
 
-1. **Start Faz 3** ([ROADMAP.md](ROADMAP.md)) — real-time local voice (Silero-VAD + streaming
-   faster-whisper + Kokoro/Piper TTS + barge-in). Largest remaining phase (`XL` effort), highest
-   day-to-day UX impact, depends on Faz 1's local token streaming.
-2. Ollama needs to be running (`ollama serve`, or launch the Ollama app from the Start Menu) for
-   the local-first brain *and* the better-quality embedding backend for facts/procedures/docs/
-   summaries to actually be used — confirmed OFF by default between sessions on this machine; if
-   it's not running everything still works via the cloud/default-ONNX fallback chains, just with
-   the wider recall-distance behavior documented in [MEMORY.md](MEMORY.md).
-3. Optional, not blocking anything: `gcloud auth application-default login` if Vertex Pro/Flash
-   access is wanted (AI Studio Flash + local Ollama both already work without it).
-4. Confirm whether the 21 stray worktrees/branches should be cleaned up (still deferred, still
-   needs your go-ahead — destructive).
-5. Not in this session's scope but noted in ROADMAP.md's bug backlog: `BUG-backfill` (startup
-   summary backfill never actually runs — both real entry points construct `JarvisAgent` before
-   their event loop starts) is a candidate for a future small fix, either standalone or folded
-   into Faz 8 cleanup.
+1. **Run the human hand-off checklist above** — this is the real gate before considering Faz 3
+   done, not just merged code. In particular: `npm run dev` in `electron/` to catch any JS mistakes
+   the lack of Node.js here couldn't, then actually talk to JARVIS via `--voice`, `--wakeword`, and
+   the Electron spacebar toggle with real hardware.
+2. Decide on commit strategy (see Git state above) and whether to merge/keep this on
+   `langgraph-migration` before starting Faz 4.
+3. **Faz 4 — Güvenlik Çekirdeği + Asenkron Araçlar** ([ROADMAP.md](ROADMAP.md)) is next per the
+   roadmap — the full safety kernel, prerequisite for MCP/IoT/proactivity. Not started.
+4. Mobile (Flutter) remote-audio client is an explicitly deferred fast-follow, not scheduled —
+   `docs/VOICE_PROTOCOL.md` exists specifically so that doesn't require reverse-engineering
+   Electron's implementation when it's eventually picked up.
+5. Separately noticed, not fixed, not this session's scope: the Android app's always-on wake-word
+   service + native overlay + Flutter MethodChannel bridge exist but are entirely disconnected
+   (nothing calls `startWakeWordService()`; a SharedPreferences key mismatch breaks even the
+   boot-autostart fallback). Pre-existing, unrelated to Faz 3.
+6. Confirm whether the 21 stray worktrees/branches should be cleaned up (still deferred, still
+   needs owner go-ahead — destructive).
 
 ## Environment checklist to resume work
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-ollama serve                                          # or launch the Ollama app — local brain +
-                                                       # better embedding backend; NOT auto-started,
-                                                       # confirmed off at the start of this session
-gcloud auth application-default print-access-token    # optional — only for Vertex Pro/Flash;
-                                                       # still missing on this machine, not required
-python -m jarvis                                      # or --api / --voice / --monitor
+ollama serve                                          # optional — local LLM brain + embeddings;
+                                                       # NOT required for voice (Piper/Whisper/
+                                                       # Silero are all independent of Ollama)
+python -m jarvis --voice                              # local voice, continuous, barge-in enabled
+python -m jarvis --voice --wakeword                   # local voice, "Hey JARVIS"-gated
+python -m jarvis --api --wakeword                     # API mode + local voice + remote-audio path
+                                                       # available to Electron over /ws
 ```
+
+**New this session:** `pip install -r requirements.txt` now also needs `piper-tts` + `scipy`
+(added to requirements.txt). First run of anything voice-related downloads: Silero VAD's `.onnx`
+(~2MB, from a pinned GitHub commit) to `~/.cache/jarvis/silero_vad.onnx`, and Piper's two voice
+models (~60MB total) to `~/.cache/jarvis/piper_voices/` — both automatic, no action needed.
+
+**Electron:** this session's changes need `npm run dev` (or equivalent) run by the owner — this
+Claude Code environment had no Node.js available to do that itself (see MEMORY.md).
 
 If `pip install -r requirements.txt` hits `resolution-too-deep`, use `uv pip install -r
 requirements.txt --python .\.venv\Scripts\python.exe` instead (Google Cloud SDK's loose transitive
 pins).
-
-If running the CLI non-interactively (piped stdin/stdout, e.g. for a scripted smoke test), set
-`$env:PYTHONIOENCODING = "utf-8"` first or the banner print will crash on this machine's codepage
-— see the environment note above. Normal interactive use is unaffected.

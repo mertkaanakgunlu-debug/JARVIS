@@ -25,7 +25,7 @@
 | 0 | Hafıza-kritik stabilizasyon | Faz 1-2'nin temeli | M | ✅ done (2026-07-14) |
 | 1 | Local-first beyin + model router | "Zeka" yarısı; hafıza/ses/offline'ı açar | M-L | ✅ done (2026-07-14) |
 | 2 | 5 katmanlı bilişsel hafıza | **1. öncelik**; salt-yazılım | L | ✅ done (2026-07-14) |
-| 3 | Gerçek zamanlı yerel ses | En yüksek UX; Faz 1'e bağlı | XL | ⬜ |
+| 3 | Gerçek zamanlı yerel ses | En yüksek UX; Faz 1'e bağlı | XL | ✅ done (2026-07-14) |
 | 4 | Güvenlik çekirdeği + async araç | Otonomi/MCP/IoT ön koşulu | L | ⬜ |
 | 5 | MCP katmanı | IoT yazılım ön koşulu | M | ⬜ |
 | 6 | Fiziksel dünya / IoT | ⛔ Donanıma bağlı (Faz 0+4+5) | L + HW | ⬜ deferred |
@@ -274,22 +274,70 @@ code path (the one error surfaced — Vertex ADC missing — is the same pre-exi
 documented gap from Faz 1, unrelated to this phase, and happened only after every Faz 2 code path
 had already run cleanly).
 
-## Faz 3 — Gerçek Zamanlı Yerel Ses
+## Faz 3 — Gerçek Zamanlı Yerel Ses ✅ done (2026-07-14)
 
-- [ ] Local streaming-cascade on the 4070: Silero-VAD + end-of-turn, windowed/streaming
-      faster-whisper (already installed, large-v3-turbo), Kokoro-82M or Piper local TTS.
-- [ ] Add a **binary audio channel** to `/ws` (`jarvis/ws.py` is JSON-only today); always-open
-      duplex mic replacing the per-turn mic + whole-reply buffer (`voice.py`/`voice_api.py:111-130`).
-- [ ] **Barge-in:** keep the input stream open during playback; interrupt on user speech.
-- [ ] Turkish: rely on whisper large-v3-turbo multilingual first; LoRA fine-tune only if measured
-      WER is unacceptable (deferred — it's an ML sub-project).
-- [ ] Optional cloud toggle: add Gemini Live later as a second "realtime" role if desired.
-- Related debt: **[BUG-12]** critic-revision draft+revision concatenation in streaming
-      (`streaming.py:26`); **[BUG-13]** `chat_stream()` only catches `GraphInterrupt` (`agent.py:636`);
-      **[BUG-23]** openwakeword buffer never reset between sessions (`voice.py:138`).
+- [x] Local streaming-cascade on the 4070: Silero-VAD (raw `.onnx` via `onnxruntime`, **not** the
+      `silero-vad` pip package — hard-requires torch; pinned to **v5.1.2**, not v6.2.1, after live
+      testing found v6.2.1's exported graph doesn't produce a usable speech-probability signal with
+      the standard streaming calling convention despite an identical I/O shape — see
+      `jarvis/voice/vad.py`'s comment before ever bumping this pin) + end-of-turn detection.
+      Streaming = one-shot `faster-whisper` transcribe at VAD-detected end-of-turn (already
+      installed, large-v3-turbo) stays the sole *authoritative* path — faster-whisper has no real
+      incremental decode; a periodic re-transcribe for live partial captions was scoped as an
+      optional stretch goal and not built (never needed to drive a turn). **Piper**, not
+      Kokoro-82M, for local TTS — Kokoro doesn't support Turkish at all; Piper has `tr_TR-dfki-medium`
+      + `en_US-lessac-medium` (candidate names `fahrettin`/`fettah` from early research turned out
+      not to be currently published — verified against the live `rhasspy/piper-voices` `voices.json`,
+      not assumed). `edge-tts` kept as a per-language fallback tier, not deleted.
+- [x] Added a **binary audio channel** to `/ws` (`jarvis/ws.py` was JSON-only) — see
+      `docs/VOICE_PROTOCOL.md` for the full wire spec. Always-open duplex mic
+      (`jarvis/voice/io_duplex.py`'s `DuplexAudioIO`, callback-mode `sounddevice`) replaced the old
+      per-turn mic + whole-reply buffer. Also built genuine **remote** transport over that same
+      channel (`jarvis/voice/io_remote_ws.py`'s `RemoteWsAudioIO`, same `AudioIO` protocol as the
+      local backend — no duplicated VAD/STT/TTS logic) — scope was explicitly expanded mid-phase
+      (owner decision) beyond the original PC-local-only bullet, with an Electron client
+      implementation (`useRemoteAudioSession` + an `AudioWorklet`) as the proof; mobile's own
+      client-side capture/playback is an explicitly deferred fast-follow (new Dart deps + Android
+      permission UX + real cellular jitter — materially separate effort; the protocol itself is
+      already client-agnostic).
+- [x] **Barge-in:** the input stream stays open during playback; sustained high-confidence speech
+      (deliberately higher threshold + longer duration than normal turn-taking — a pragmatic
+      mitigation for the acoustic self-bleed false-trigger risk, since this design has no true
+      echo cancellation) interrupts playback and cancels the in-flight `agent.chat_stream()` task.
+- [x] Turkish: relies on whisper large-v3-turbo's multilingual capability, confirmed working live
+      (round-tripped Piper-synthesized Turkish speech through Whisper, correct transcript + language
+      detection) — no LoRA fine-tune needed.
+- [ ] Optional cloud toggle (Gemini Live as a second "realtime" role) — not built, not asked for.
+- [x] **[BUG-12]** fixed — critic-revision draft+revision concatenation in streaming
+      (`jarvis/graph/streaming.py`'s `graph_stream_to_text()` now tracks
+      `metadata["langgraph_step"]` and inserts a separator at the pass boundary;
+      `resume_and_stream()`'s independent copy-pasted duplicate now calls the shared helper).
+- [x] **[BUG-13]** fixed — `chat_stream()`/`resume_and_stream()` now propagate
+      `asyncio.CancelledError`/`GeneratorExit` (never swallow) while still guaranteeing
+      `event_bus.state("idle")` fires, so a barge-in cancellation doesn't leave the HUD stuck.
+- [x] **[BUG-23]** fixed — `openwakeword`'s `Model.reset()` now runs at the start of each listening
+      session (confirmed real method — clears both `prediction_buffer` and the mel-spectrogram
+      preprocessor buffer).
+- [x] Bonus fixes bundled in: `--api --voice` (no `--wakeword`) previously started zero voice —
+      `run_server()` now gates on `voice or wakeword`. `cli.py`'s `_collecting_stream()` no longer
+      swallows `CancelledError`. `jarvis/ws.py` hardened with a per-connection writer task (JSON
+      broadcasts and binary audio chunks can no longer race on one socket) and a receive-loop fix
+      (a binary frame previously raised `KeyError` and silently dropped that client). Security fix
+      pulled forward from the Faz 8 backlog (**`BUG-elec`**): Electron's `/ws` connection now sends
+      `?token=` (reads `JARVIS_API_KEY` from the same `.env` the backend reads); the server also
+      refuses `audio_session_start` outright when no API key is configured at all.
 
-**Verify:** interrupting mid-speech stops the assistant (barge-in); measured first-token latency
-in target band; `--voice` runs on the fully local stack.
+**Verify:** ✅ confirmed live: Silero VAD scores real (Piper-synthesized) speech at 0.85-0.93 mean
+probability vs. silence/noise at 0.003-0.01 (both languages); Piper→Whisper round-trip produces the
+expected text + correct language detection for English and Turkish; `RealtimeVoiceEngine.load()` +
+`events()` run end-to-end against real local microphone/speaker hardware (ambient silence over
+~1.5s correctly produces zero false transcripts/barge-ins); the full remote-audio protocol
+(session claim/busy-reject/release, binary frame dispatch, unauthenticated-rejection) verified via
+`starlette.testclient.TestClient` against the real FastAPI app with a real (non-mocked)
+`get_shared_voice_models()` load. **Not verifiable in this environment, hand-off to the owner:**
+perceived TTS/barge-in quality over real speakers (headphones test, speaker+live-interruption
+test), Turkish pronunciation/prosody judgment, Electron's `getUserMedia` permission grant + real
+round-trip audio over that path, end-to-end first-audio latency with real device/driver latency.
 
 ## Faz 4 — Güvenlik Çekirdeği + Asenkron Araçlar
 
@@ -393,8 +441,8 @@ also reported via this session's code-review tooling.
 | BUG-11 | agent.py:333 | switch_session thread_id collision corrupts history | 0 ✅ |
 | BUG-dup | session_store.py:216 | save_turn/load_history duplicate messages (cumulative snapshot read as delta) | 0 ✅ |
 | BUG-backfill | agent.py:413 | summary backfill leaks unawaited coroutine; never actually runs at startup | 0 (leak fixed; feature gap deferred) |
-| BUG-12 | graph/streaming.py:26 | critic draft+revision concatenated, persisted | 3 |
-| BUG-13 | agent.py:636 | chat_stream only catches GraphInterrupt, drops turn | 3 |
+| BUG-12 | graph/streaming.py:26 | critic draft+revision concatenated, persisted | 3 ✅ |
+| BUG-13 | agent.py:636 | chat_stream only catches GraphInterrupt, drops turn | 3 ✅ |
 | BUG-14 | graph/nodes.py:144 | agent_node ainvoke unguarded | 4 |
 | BUG-recursion | graph/state.py:11 | no recursion_limit / tool-call cap | 4 |
 | BUG-confirm-payload | api.py:249 | `/chat` 500 loses ConfirmationRequired payload | 4 |
@@ -413,7 +461,7 @@ also reported via this session's code-review tooling.
 | BUG-emptyresp | graph/nodes.py:215 | empty LLM response saved as success | 8 |
 | BUG-24 | config.py:125 | effective_cloud_model "pro" branch dead code | 1 ✅ |
 | BUG-upload | api.py:391 | /chat/upload no size cap, no cleanup | 8 |
-| BUG-23 | voice.py:138 | openwakeword buffer never reset between sessions | 3 |
+| BUG-23 | voice.py:138 | openwakeword buffer never reset between sessions | 3 ✅ |
 | BUG-usage | usage.py:63 | UsageTracker clobbers across concurrent processes | 8 |
 | BUG-25 | agent.py:552 | entity extraction fires every trivial turn | 2 |
 | BUG-elec | electron/App.jsx | HUD never sends API-key header | 8 |

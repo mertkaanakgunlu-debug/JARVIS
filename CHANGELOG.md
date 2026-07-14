@@ -6,6 +6,80 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Faz 3] — 2026-07-14 — Real-time local voice + remote `/ws` audio transport
+
+- **Local voice pipeline rebuilt on `jarvis/voice/`** (new package, replaces the flat
+  `jarvis/voice.py`): Silero-VAD (raw `.onnx` via `onnxruntime` — not the `silero-vad` pip package,
+  which hard-requires torch; pinned to **v5.1.2**, not the newer v6.2.1, after live testing showed
+  v6.2.1's exported graph doesn't produce a usable speech-probability signal with the standard
+  streaming calling convention despite an identical I/O shape) replaces energy/RMS-threshold VAD
+  for end-of-turn detection. **Piper** becomes the primary local TTS engine (Turkish
+  `tr_TR-dfki-medium`, English `en_US-lessac-medium`) — chosen over Kokoro-82M specifically because
+  Kokoro doesn't support Turkish at all; `edge-tts` stays wired as a per-language fallback tier
+  (mirrors the Faz 1 LLM router's local-first-not-cloud-forbidden pattern), not deleted.
+- **Full-duplex, not per-turn-blocking:** `DuplexAudioIO` opens one continuously-open callback-mode
+  `sounddevice` `InputStream` (previously: a fresh blocking stream per utterance) and a per-turn
+  `OutputStream` fed from a thread-safe playback buffer — the mic stays open during playback, which
+  is what makes barge-in possible.
+- **Barge-in:** sustained, high-confidence speech (deliberately higher threshold + longer duration
+  than normal turn-taking, to reduce false triggers from the assistant's own voice bleeding from
+  speakers back into the mic — no true acoustic echo cancellation exists in this design) during
+  playback aborts audio immediately and cancels the in-flight `agent.chat_stream()` task. Fixed
+  **BUG-13** as part of this: `chat_stream()`/`resume_and_stream()` only caught `GraphInterrupt`,
+  so a barge-in cancellation (`asyncio.CancelledError`) skipped all turn bookkeeping and left the
+  HUD stuck on "thinking"/"speaking" — now propagates correctly while still guaranteeing
+  `event_bus.state("idle")` fires.
+- **Fixed BUG-12:** the critic's up-to-one-revision loop tags both the draft and the revision
+  `langgraph_node="agent"`, so the streamed/voiced text was a run-on concatenation of both with no
+  separator — `graph_stream_to_text()` now tracks `metadata["langgraph_step"]` and inserts a
+  paragraph break at the pass boundary. `resume_and_stream()`'s independent copy-pasted duplicate
+  of the same buggy filter now calls the shared helper instead.
+- **Fixed BUG-23:** `openwakeword`'s prediction/mel-spectrogram buffers are now reset
+  (`Model.reset()`) at the start of each listening session instead of never.
+- **Fixed a wiring gap:** `python -m jarvis --api --voice` (no `--wakeword`) previously started the
+  API with zero voice — `--api` never read `args.voice`. `run_server()` now gates on `voice or
+  wakeword`.
+- **Remote binary audio transport over the existing `/ws` connection** (see new
+  `docs/VOICE_PROTOCOL.md` for the full wire spec): a client can act as the mic/speaker for a
+  conversation using the server's Whisper/Piper instead of on-device engines. `RemoteWsAudioIO`
+  satisfies the same transport-agnostic `AudioIO` protocol as the local `DuplexAudioIO`, so
+  `RealtimeVoiceEngine`'s VAD/STT/TTS/barge-in logic is identical either way — no duplication.
+  Session arbitration (`jarvis/voice/session_manager.py`) is first-claim-wins between the local
+  wakeword/PTT loop and at most one remote client; starting a remote session auto-pauses the local
+  loop's next claim (Electron's main process always spawns the backend with `--wakeword`).
+  `VoiceModels`/`get_shared_voice_models()` load Whisper/VAD/Piper once and share them across the
+  local engine and every remote session in the same process, instead of reloading per-session.
+- **`jarvis/ws.py` hardened:** each connection now gets its own outgoing queue + writer task, so
+  JSON telemetry broadcasts and binary audio chunks can never race on the same socket — previously
+  `broadcast()` was the only thing that ever wrote to a client. Also fixed a latent bug: the `/ws`
+  receive loop looped `websocket.receive_text()` forever just to detect disconnects — a binary
+  frame would have raised `KeyError` and silently dropped that client, which would have surfaced
+  the moment any client sent one. Now branches on `websocket.receive()`'s message type.
+- **Security fix pulled forward from the Faz 8 backlog (`BUG-elec`):** the Electron HUD's `/ws`
+  connection never sent `?token=`, which mattered little for read-only telemetry but matters a lot
+  more once the socket can carry live mic audio and synthesized speech. Electron's main process now
+  reads `JARVIS_API_KEY` from the same `.env` file the Python backend reads and passes it to the
+  renderer; the server also refuses `audio_session_start` outright when no API key is configured at
+  all (remote audio is opt-in-by-configuration).
+- **Electron HUD:** `useRemoteAudioSession` (new hook) + `pcm-capture-worklet.js` (new
+  `AudioWorkletProcessor`) let the HUD itself become the mic/speaker via `getUserMedia` + Web Audio
+  — no new npm dependencies (standard Web Platform APIs). The spacebar handler changed from a
+  fire-and-forget PTT POST to a start/stop toggle for this new session type (the old
+  `/voice/ptt/start` endpoint is untouched — still serves the local wakeword/PTT path, a parallel
+  trigger). The HUD's mic-level meter now shows real telemetry (a new `mic_level` WS event) instead
+  of 100% simulated data whenever a voice session is active.
+- **Explicitly deferred:** mobile (Flutter) gets no client-side audio-capture/playback code this
+  phase — new Dart dependencies, Android runtime mic-permission UX, and real cellular/Tailscale
+  jitter are a materially separate effort from the LAN-only Electron implementation. The protocol
+  is written down (`docs/VOICE_PROTOCOL.md`) specifically so that fast-follow doesn't require
+  reverse-engineering it later. (Also noted, unrelated, not fixed: the Android app already has an
+  always-on wake-word service + native overlay + Flutter MethodChannel bridge for a "wake word →
+  on-device STT" flow, but the whole chain is disconnected — nothing calls
+  `startWakeWordService()`, and a SharedPreferences key mismatch breaks even the boot-autostart
+  fallback.)
+
+---
+
 ## [Faz 2] — 2026-07-14 — 5-layer cognitive memory
 
 - **Semantic memory:** new `jarvis/fact_extractor.py` (mirrors `entity_extractor.py`) runs a

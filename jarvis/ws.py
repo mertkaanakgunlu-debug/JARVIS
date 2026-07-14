@@ -25,7 +25,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional, Set
+from typing import Dict, Optional, Set, Tuple
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -33,10 +33,23 @@ logger = logging.getLogger(__name__)
 
 
 class JarvisEventBus:
-    """Singleton broadcaster: push JSON events to all HUD clients."""
+    """Singleton broadcaster: push JSON events (and, as of Faz 3, binary audio
+    chunks) to connected clients.
+
+    Faz 3: each connection gets its own outgoing asyncio.Queue + dedicated writer
+    task, spawned in connect()/torn down in disconnect(). Before this, broadcast()
+    was the only thing that ever wrote to a socket; adding per-connection binary
+    audio chunks (send_bytes_to, for a remote-audio session) introduced a SECOND
+    concurrent writer per connection (e.g. a 5s metrics tick racing a mid-utterance
+    audio chunk on the same socket). Routing every write through one queue/task
+    per connection keeps JarvisEventBus the sole owner of everything written to
+    a given socket, so JSON broadcasts and binary audio chunks can never race.
+    """
 
     def __init__(self) -> None:
         self._clients: Set[WebSocket] = set()
+        self._queues: Dict[WebSocket, "asyncio.Queue[Tuple[str, object]]"] = {}
+        self._writer_tasks: Dict[WebSocket, asyncio.Task] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ── Connection management ──────────────────────────────────────────────────
@@ -45,26 +58,63 @@ class JarvisEventBus:
         await ws.accept()
         self._clients.add(ws)
         self._loop = asyncio.get_event_loop()
+        queue: "asyncio.Queue[Tuple[str, object]]" = asyncio.Queue()
+        self._queues[ws] = queue
+        self._writer_tasks[ws] = asyncio.create_task(self._writer_loop(ws, queue))
         logger.debug("HUD client connected (%d total)", len(self._clients))
 
     def disconnect(self, ws: WebSocket) -> None:
         self._clients.discard(ws)
+        self._queues.pop(ws, None)
+        task = self._writer_tasks.pop(ws, None)
+        if task is not None:
+            task.cancel()
         logger.debug("HUD client disconnected (%d remaining)", len(self._clients))
+
+    async def _writer_loop(self, ws: WebSocket, queue: "asyncio.Queue[Tuple[str, object]]") -> None:
+        """The only place that ever calls ws.send_text()/send_bytes() for this
+        connection — both JSON broadcasts and binary audio chunks flow through
+        the same queue, in send order, never concurrently."""
+        try:
+            while True:
+                kind, payload = await queue.get()
+                try:
+                    if kind == "text":
+                        await ws.send_text(payload)  # type: ignore[arg-type]
+                    else:
+                        await ws.send_bytes(payload)  # type: ignore[arg-type]
+                except Exception:
+                    self.disconnect(ws)
+                    return
+        except asyncio.CancelledError:
+            return
 
     # ── Broadcasting ───────────────────────────────────────────────────────────
 
     async def broadcast(self, event: dict) -> None:
-        """Send event dict to all connected WebSocket clients."""
+        """Enqueue event dict for all connected WebSocket clients (non-blocking —
+        actual delivery happens on each connection's own writer task)."""
         if not self._clients:
             return
-        msg  = json.dumps(event, ensure_ascii=False)
-        dead: Set[WebSocket] = set()
+        msg = json.dumps(event, ensure_ascii=False)
         for ws in list(self._clients):
-            try:
-                await ws.send_text(msg)
-            except Exception:
-                dead.add(ws)
-        self._clients -= dead
+            queue = self._queues.get(ws)
+            if queue is not None:
+                queue.put_nowait(("text", msg))
+
+    async def send_text_to(self, ws: WebSocket, event: dict) -> None:
+        """Targeted JSON send to ONE connection (e.g. an audio-session control
+        message meant for only the client that owns that session)."""
+        queue = self._queues.get(ws)
+        if queue is not None:
+            queue.put_nowait(("text", json.dumps(event, ensure_ascii=False)))
+
+    async def send_bytes_to(self, ws: WebSocket, data: bytes) -> None:
+        """Targeted binary send to ONE connection (a remote-audio session's TTS
+        chunks) — goes through the same per-connection queue as JSON broadcasts."""
+        queue = self._queues.get(ws)
+        if queue is not None:
+            queue.put_nowait(("binary", data))
 
     def emit(self, event: dict) -> None:
         """Thread-safe fire-and-forget broadcast (callable from sync code)."""
@@ -82,6 +132,12 @@ class JarvisEventBus:
     def message(self, who: str, text: str) -> None:
         """New conversation message. who='u' (user) or 'j' (JARVIS)."""
         self.emit({"type": "message", "who": who, "text": text})
+
+    def mic_level(self, source: str, rms: float) -> None:
+        """Real (not simulated) audio level (Faz 3) — source: 'input' | 'output'.
+        Replaces the HUD's previous 100%-fake useFakeMic animation whenever a
+        local or remote voice session is active."""
+        self.emit({"type": "mic_level", "source": source, "rms": rms})
 
     def tool_call(self, body: str, kind: str = "tool") -> None:
         """Tool invocation event for the activity feed.

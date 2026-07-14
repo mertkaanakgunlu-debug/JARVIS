@@ -22,7 +22,17 @@ async def graph_stream_to_text(
 
     Skips tool-call chunks (these have tool_call_chunks but no text content).
     Skips messages from non-agent nodes (tools, critic).
+
+    BUG-12: when the critic requests a revision, the "agent" node runs a second
+    time in the same turn (up to one retry — see route_from_critic's
+    revise_count < 2 cap) — both the draft and the revision are tagged
+    langgraph_node="agent", so the node-name filter alone can't tell them apart.
+    Without a separator the reconstructed text is the draft immediately
+    followed by the revision, garbled with no boundary. metadata["langgraph_step"]
+    (a real, populated key — see langgraph's pregel/_algo.py) increments between
+    the two passes, so a change in it marks the boundary.
     """
+    last_step: int | None = None
     async for chunk, metadata in graph.astream(
         state,
         config,
@@ -34,6 +44,10 @@ async def graph_stream_to_text(
             continue
         if getattr(chunk, "tool_call_chunks", None):
             continue
+        step = metadata.get("langgraph_step")
+        if last_step is not None and step != last_step:
+            yield "\n\n"
+        last_step = step
         content = chunk.content
         if isinstance(content, str) and content:
             yield content

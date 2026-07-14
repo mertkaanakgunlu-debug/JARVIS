@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. — Architecture Map
 
-> Last updated: 2026-07-14 (Faz 2 — 5-layer cognitive memory).
+> Last updated: 2026-07-14 (Faz 3 — real-time local voice + remote `/ws` audio transport).
 > Source of truth is always the code; this document summarises it.
 
 ## Entry points
@@ -8,9 +8,9 @@
 | Command | What runs |
 |---|---|
 | `python -m jarvis` | `cli.py` Rich REPL |
-| `python -m jarvis --voice` | `VoiceEngine` STT/TTS loop |
-| `python -m jarvis --wakeword` | openwakeword "Hey JARVIS" → voice loop |
-| `python -m jarvis --api` | FastAPI REST + WebSocket on :8000 |
+| `python -m jarvis --voice` | `RealtimeVoiceEngine` (Silero-VAD + Whisper + Piper) full-duplex loop, barge-in |
+| `python -m jarvis --wakeword` | openwakeword "Hey JARVIS" → voice loop (implies `--voice`) |
+| `python -m jarvis --api` | FastAPI REST + WebSocket on :8000; add `--voice`/`--wakeword` to also start the voice task |
 | `python -m jarvis --monitor` | `JarvisMonitor` daemon only (no chat UI) |
 
 ## Orchestrator — LangGraph StateGraph
@@ -110,8 +110,9 @@ the pre-Faz-2 `prompts/workflows/data_report.md` on first run and grow via the
 | `POST /chat/upload` | Multimodal file upload (image/PDF/other) |
 | `GET /status` | Session info, model, memory count |
 | `POST /reset` | Archive session + clear history |
-| `GET /ws` | WebSocket HUD event bus |
-| `POST /voice/ptt/start` | Push-to-talk trigger |
+| `GET /ws` | WebSocket HUD event bus — also carries a Faz 3 remote-audio session (binary PCM + control JSON, see below) |
+| `POST /voice/ptt/start` | Push-to-talk trigger (local wakeword/PTT loop) |
+| `POST /voice/local/pause` / `POST /voice/local/resume` | Faz 3: manually pause/resume the local wakeword/PTT loop (normally automatic — see below) |
 | `GET /health` | Liveness check |
 | `POST /chat/confirm/{conf_id}` | Resume a Phase 3 gate interrupt (approve/deny/edit) |
 | `/todos/*` | Todo CRUD |
@@ -122,17 +123,51 @@ the pre-Faz-2 `prompts/workflows/data_report.md` on first run and grow via the
 | `/tasks/*` | Async task status |
 | `/system/*` | System info |
 
+## Voice (Faz 3 — real-time local voice + remote audio transport)
+
+`jarvis/voice/` (package, replaces the old flat `jarvis/voice.py`):
+
+| File | Role |
+|---|---|
+| `engine.py` | `RealtimeVoiceEngine` — transport-blind orchestrator: Silero-VAD end-of-turn segmentation, one-shot Whisper STT at end-of-turn, Piper/edge-tts TTS, barge-in detection. `VoiceModels`/`get_shared_voice_models()` load Whisper/VAD/Piper once and share them across the local engine instance and every remote `/ws` session in the same process. |
+| `io_base.py` | `AudioIO` — the thin transport `Protocol` (`raw_frames`, `play_chunk`, `abort_playback`, `mic_level`, …) that keeps VAD/STT/TTS logic out of both transports below |
+| `io_duplex.py` | `DuplexAudioIO` — local full-duplex `sounddevice` (callback-mode `InputStream` always open + a per-turn `OutputStream`) |
+| `io_remote_ws.py` | `RemoteWsAudioIO` — same contract carried as binary PCM frames over one `/ws` connection instead of local hardware; server-side resample via `scipy` if the client isn't already at 16kHz |
+| `session.py` | `drive_voice_session()` — shared turn-taking orchestration (races the next `VoiceEvent` against an in-flight response task so `BargeIn` can cancel it), used by both `cli.py` and `voice_api.py`/`api.py` |
+| `session_manager.py` | First-claim-wins arbitration between the local loop and (at most one) remote client — see `jarvis_api_key`-gated auth note below |
+| `vad.py` | `SileroVAD` (raw `.onnx` via `onnxruntime` — **not** the `silero-vad` pip package, which hard-requires torch; pinned to v5.1.2, see the file's comment on why v6.2.1 doesn't work with this calling convention), `SustainedGate`/`VadTurnSegmenter` (pure logic) |
+| `stt_whisper.py`, `wakeword.py`, `tts_piper.py`, `text.py` | moved from the old `voice.py`, mostly unchanged |
+
+**Remote audio protocol** (Electron today; same protocol designed for a future mobile fast-follow
+— see `docs/VOICE_PROTOCOL.md`): a client sends `{"type":"audio_session_start", sample_rate}` over
+`/ws`, gets back `audio_session_ack`/`nack`, then exchanges binary PCM16LE mono frames both ways
+(mic in, synthesized speech out) plus `audio_format`/`audio_playback_stop`/`audio_session_end`
+control messages. Requires `JARVIS_API_KEY` to be configured (rejected with `nack:
+"unauthenticated"` otherwise) — once this socket can carry live audio, an unauthenticated
+connection is a materially bigger deal than the read-only telemetry it carried before Faz 3.
+Starting a remote session auto-pauses the local wakeword/PTT loop's next claim (Electron's main
+process always spawns the backend with `--wakeword`) and auto-resumes it when the session ends.
+
 ## HUD (Electron)
 
 3 windows: main overlay, settings, mini-orb.
 9 panels: chat, schedule, tasks, finance, memory, status, calendar, voice, system.
-Event bus: `JarvisEventBus` in `jarvis/ws.py` — 13 typed emit helpers, 30s/60s/120s cadence.
+Event bus: `JarvisEventBus` in `jarvis/ws.py` — per-connection outgoing queue + writer task (Faz 3,
+so JSON broadcasts and binary audio chunks never race on one socket), 14 typed emit helpers,
+30s/60s/120s cadence. Faz 3: real (not simulated) `mic_level` events replace the renderer's
+`useFakeMic` animation whenever a voice session (local or remote) is active; `useRemoteAudioSession`
+(renderer) lets the HUD itself be the mic/speaker via `getUserMedia` + an `AudioWorklet`.
 
 ## Mobile (Flutter Android)
 
 10 screens: home, chat, schedule, tasks, vault, finance, settings, voice, notifications, calendar.
 State: Riverpod. Transport: WebSocket + REST + SSE + FCM.
-Kotlin `WakeWordService.kt`: foreground service for always-on wakeword detection.
+Kotlin `WakeWordService.kt`: foreground service for always-on wakeword detection — **built but
+not wired up** (nothing calls `startWakeWordService()`, and a SharedPreferences key mismatch
+breaks the boot-autostart fallback too); pre-existing, unrelated to Faz 3, not fixed.
+Voice input today is a separate, independent, on-device `speech_to_text`/`flutter_tts` path (manual
+mic button in the chat composer) — does not use Faz 3's remote-audio protocol; that client-side
+implementation is an explicitly deferred fast-follow (protocol is already client-agnostic).
 
 ## Known gaps (tracked in refactor roadmap — see [ROADMAP.md](../ROADMAP.md) for the current,
 maintained version of this list; updated 2026-07-14)
@@ -144,5 +179,5 @@ maintained version of this list; updated 2026-07-14)
 | Memory retrieval duplicated in `agent.py` | Phase 4 | ✅ shipped 2026-05-24 (`jarvis/context_builder.py`) |
 | `TaskExecutor` in-memory only (lost on restart) | Phase 5 | ⬜ not started |
 | `JarvisMonitor` not started in `--api` mode | Phase 6 | ⬜ not started |
-| No voice barge-in / TTS interruption | Phase 7 | ⬜ not started |
+| No voice barge-in / TTS interruption | Phase 7 | ✅ shipped 2026-07-14 (new-plan Faz 3 — `jarvis/voice/engine.py`) |
 | Sub-agents still on pydantic-ai | Phase 8 | ⬜ not started |

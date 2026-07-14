@@ -11,14 +11,23 @@
  *   {type:"calendar",events:[{time,title,where,kind}]}
  *   {type:"vault",   entries:[{title,tag,ts}], count:N}
  *   {type:"progress",jobsDone:N,jobsTotal:N,runtime:"...",tokensIn:N,tokensOut:N}
+ *   {type:"mic_level", source:"input"|"output", rms:N}
+ *
+ * Faz 3 remote-audio session (see docs/VOICE_PROTOCOL.md):
+ *   {type:"audio_session_ack"|"audio_session_nack"|"audio_session_end"|"audio_format"|"audio_playback_stop", ...}
+ *   plus raw PCM16LE binary frames sharing this same connection (routed to
+ *   options.onAudioChunk, not the JSON switch below). Sending an audio_session_*
+ *   control message or a binary frame is done via the returned sendRaw().
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 
 const RECONNECT_MS = 3000
 
-function useJarvisSocket(apiUrl, options = {}) {
-  const wsUrl = apiUrl ? apiUrl.replace(/^http/, 'ws') + '/ws' : null
+function useJarvisSocket(apiUrl, apiKey, options = {}) {
+  const wsUrl = apiUrl
+    ? apiUrl.replace(/^http/, 'ws') + '/ws' + (apiKey ? `?token=${encodeURIComponent(apiKey)}` : '')
+    : null
 
   const [connected, setConnected]   = useState(false)
   const [state, setState]           = useState('idle')
@@ -30,18 +39,24 @@ function useJarvisSocket(apiUrl, options = {}) {
   const [vaultData, setVaultData]   = useState({ entries: [], count: 0 })
   const [progress, setProgress]     = useState({ jobsDone: 0, jobsTotal: 0, runtime: '00:00:00', tokensIn: 0, tokensOut: 0 })
   const [todos, setTodos]           = useState([])
+  const [micLevel, setMicLevel]     = useState(null)  // real (not simulated) level once a session is active
 
   const wsRef           = useRef(null)
   const feedId          = useRef(0)
   const timerRef        = useRef(null)
   const onPanelCtrlRef  = useRef(options.onPanelControl)
+  const onAudioChunkRef = useRef(options.onAudioChunk)
+  const onAudioCtrlRef  = useRef(options.onAudioControl)
   useEffect(() => { onPanelCtrlRef.current = options.onPanelControl })
+  useEffect(() => { onAudioChunkRef.current = options.onAudioChunk })
+  useEffect(() => { onAudioCtrlRef.current = options.onAudioControl })
 
   const connect = useCallback(() => {
     if (!wsUrl) return
     if (wsRef.current && wsRef.current.readyState < 2) return // already open/connecting
 
     const ws = new WebSocket(wsUrl)
+    ws.binaryType = 'arraybuffer'  // default 'blob' forces an async hop before bytes are usable
     wsRef.current = ws
 
     ws.onopen = () => {
@@ -59,6 +74,11 @@ function useJarvisSocket(apiUrl, options = {}) {
     }
 
     ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        onAudioChunkRef.current?.(ev.data)
+        return
+      }
+
       let msg
       try { msg = JSON.parse(ev.data) } catch { return }
 
@@ -114,6 +134,18 @@ function useJarvisSocket(apiUrl, options = {}) {
           setProgress(p => ({ ...p, ...msg }))
           break
 
+        case 'mic_level':
+          setMicLevel({ source: msg.source, rms: msg.rms })
+          break
+
+        case 'audio_session_ack':
+        case 'audio_session_nack':
+        case 'audio_session_end':
+        case 'audio_format':
+        case 'audio_playback_stop':
+          onAudioCtrlRef.current?.(msg)
+          break
+
         default:
           break
       }
@@ -128,7 +160,19 @@ function useJarvisSocket(apiUrl, options = {}) {
     }
   }, [connect])
 
-  return { connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos }
+  const sendRaw = useCallback((dataOrJson) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    ws.send(typeof dataOrJson === 'string' || dataOrJson instanceof ArrayBuffer
+      ? dataOrJson
+      : JSON.stringify(dataOrJson))
+    return true
+  }, [])
+
+  return {
+    connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos,
+    micLevel, sendRaw,
+  }
 }
 
 export default useJarvisSocket
