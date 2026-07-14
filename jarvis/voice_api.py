@@ -28,6 +28,7 @@ _voice_task: Optional[asyncio.Task] = None
 _ptt_event:  Optional[asyncio.Event]    = None   # asyncio — signals PTT press
 _ww_stop:    Optional[threading.Event]  = None   # threading — stops wakeword thread
 _local_paused: bool = False   # set by pause_local_voice()/resume_local_voice()
+_bg_watchers: set = set()     # strong refs to _watch_background_task's tasks (Faz 4)
 
 
 async def _wait_for_activation(ww_detector, wakeword: bool, loop: asyncio.AbstractEventLoop) -> bool:
@@ -70,18 +71,65 @@ async def _wait_for_activation(ww_detector, wakeword: bool, loop: asyncio.Abstra
     return False
 
 
-async def run_one_response(agent, engine, text: str, lang: str) -> None:
+async def run_one_response(
+    agent, engine, text: str, lang: str,
+    transport: str = "voice-local", set_pending_confirmation=None,
+) -> None:
     """One turn's response, as a cancellable task (see jarvis/voice/session.py) —
     a BargeIn event interrupts this mid-flight. Public (no leading underscore):
     reused as-is by jarvis/api.py's /ws remote-audio session handler, not just
-    this module's local wakeword/PTT loop."""
+    this module's local wakeword/PTT loop.
+
+    Faz 4 adds two things over the pre-Faz-4 version:
+    (a) BUG-4: chat_stream() interrupting for confirmation yields the
+        __jarvis_confirm__ marker as a single delta -- detected here and
+        swapped for a natural spoken question instead of being read aloud
+        as raw JSON (see jarvis/voice/session.py's parse_confirm_marker).
+    (b) Async scheduler: a query TaskExecutor.should_async() flags (long
+        tools -- deep_web_research/report_compile/geo_math/...) is handed
+        off to the background executor with a short spoken acknowledgement
+        instead of blocking this turn -- and the mic -- in silence for up
+        to minutes. Only active when agent has a _task_executor attached
+        (--api mode; see jarvis/api.py's _wire_routers()) -- the standalone
+        CLI --voice loop has no such executor and is unaffected.
+    """
+    from jarvis.voice.session import parse_confirm_marker, describe_confirmation, PendingConfirmation
+
     event_bus.message("u", text)
     event_bus.state("thinking")
 
+    executor = getattr(agent, "_task_executor", None)
+    if executor is not None and executor.should_async(text):
+        ack = (
+            "Bu biraz zaman alacak, arka planda üzerinde çalışıyorum. Bitince haber veririm."
+            if lang == "tr" else
+            "This will take a moment -- I'm working on it in the background and will let "
+            "you know when it's done."
+        )
+        event_bus.state("speaking")
+
+        async def _ack_stream(t=ack):
+            yield t
+
+        try:
+            await engine.speak_stream(_ack_stream(), lang=lang)
+        except Exception as exc:
+            logger.error("[voice] background-ack TTS error: %s", exc, exc_info=True)
+        event_bus.message("j", ack)
+        task = executor.submit(text)
+        _watch_background_task(task)
+        return
+
     response_chunks: list[str] = []
+    confirm_marker: dict | None = None
 
     async def _collecting_stream():
-        async for token in agent.chat_stream(text, detected_language=lang):
+        nonlocal confirm_marker
+        async for token in agent.chat_stream(text, detected_language=lang, transport=transport):
+            marker = parse_confirm_marker(token)
+            if marker is not None:
+                confirm_marker = marker
+                return
             response_chunks.append(token)
             yield token
 
@@ -91,8 +139,51 @@ async def run_one_response(agent, engine, text: str, lang: str) -> None:
     except Exception as exc:
         logger.error("[voice] turn error: %s", exc, exc_info=True)
 
+    if confirm_marker is not None:
+        question = describe_confirmation(confirm_marker, lang)
+        event_bus.message("j", question)
+
+        async def _question_stream(t=question):
+            yield t
+
+        try:
+            await engine.speak_stream(_question_stream(), lang=lang)
+        except Exception as exc:
+            logger.error("[voice] confirmation prompt TTS error: %s", exc, exc_info=True)
+
+        if set_pending_confirmation is not None:
+            set_pending_confirmation(PendingConfirmation(confirm_marker["id"], confirm_marker["payload"]))
+        return
+
     if response_chunks:
         event_bus.message("j", "".join(response_chunks))
+
+
+def _watch_background_task(task) -> None:
+    """Fire a Windows toast when a voice-submitted background task finishes --
+    closes the loop on the "I'm working on it" ack for the in-the-room case
+    (TaskExecutor._dispatch_push already covers the away-from-PC/mobile case
+    via FCM). Polls task.status rather than requiring TaskExecutor to grow a
+    callback mechanism it doesn't otherwise need."""
+
+    async def _watch() -> None:
+        try:
+            while task.status in ("queued", "running"):
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            return
+        try:
+            from jarvis.notify import toast
+            if task.status == "done":
+                toast("JARVIS ✓ Görev tamamlandı", (task.result_text or "")[:120])
+            elif task.status == "failed":
+                toast("JARVIS ✗ Görev başarısız", (task.error or "Bilinmeyen hata")[:120])
+        except Exception:
+            pass
+
+    t = asyncio.create_task(_watch())
+    _bg_watchers.add(t)
+    t.add_done_callback(_bg_watchers.discard)
 
 
 async def _voice_loop(agent, settings, wakeword: bool) -> None:
@@ -102,7 +193,7 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
         from jarvis.voice.engine import RealtimeVoiceEngine, get_shared_voice_models
         from jarvis.voice.io_duplex import DuplexAudioIO
         from jarvis.voice.wakeword import WakewordDetector
-        from jarvis.voice.session import drive_voice_session
+        from jarvis.voice.session import drive_voice_session, resolve_confirmation
     except ImportError as exc:
         logger.warning("[voice] Dependencies unavailable (%s) — voice disabled.", exc)
         return
@@ -137,12 +228,31 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
 
     event_bus.state("idle")
 
+    pending_confirmation = None
+
+    def _set_pending(p) -> None:
+        nonlocal pending_confirmation
+        pending_confirmation = p
+
     async def _handle_transcript(text: str, lang: str):
         # No exit-phrase handling here, unlike the CLI's --voice mode: this loop
         # is a persistent background task tied to the server's lifetime, not
         # the conversation's — saying "goodbye" is just a normal chat turn
         # (matches the pre-Faz-3 behavior, which never special-cased it either).
-        return run_one_response(agent, engine, text, lang)
+        nonlocal pending_confirmation
+
+        # Faz 4 / BUG-4: a pending confirmation always consumes the *next*
+        # utterance as its yes/no answer, not a new command.
+        if pending_confirmation is not None:
+            pending, pending_confirmation = pending_confirmation, None
+            return resolve_confirmation(
+                agent, engine, pending, text, lang,
+                on_message=lambda full: event_bus.message("j", full),
+            )
+
+        return run_one_response(
+            agent, engine, text, lang, transport="voice-local", set_pending_confirmation=_set_pending,
+        )
 
     def _on_barge_in() -> None:
         event_bus.state("listening")

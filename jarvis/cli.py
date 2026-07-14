@@ -15,7 +15,7 @@ from rich.rule import Rule
 from rich.prompt import Prompt
 from rich import print as rprint
 
-from jarvis.agent import JarvisAgent, AVAILABLE_MODELS
+from jarvis.agent import JarvisAgent, AVAILABLE_MODELS, ConfirmationRequired
 from jarvis.config import Settings
 
 BANNER = """[bold gold3]
@@ -37,6 +37,7 @@ HELP_TEXT = """\
   [gold3]/budget[/gold3]           Token kullanımı ve Vertex kredi tahmini
   [gold3]/quota[/gold3]            GCP kota + Vertex kullanım durumu (RPM, kredi, tahmin)
   [gold3]/monitor[/gold3]          Proaktif monitör durumunu göster
+  [gold3]/killswitch[/gold3]       Güvenlik anahtarı durumu (alt: on, off <sebep>)
   [gold3]/todo[/gold3]             To-do listesi (alt: today, analyze, add <başlık>)
   [gold3]/schedule[/gold3]         Planlı görev ve hatırlatıcıları listele
   [gold3]/sessions[/gold3]         Son oturumları listele
@@ -212,6 +213,40 @@ def _show_model_menu(agent: JarvisAgent) -> None:
         table.add_row(str(i), label + active_mark, provider_str, desc)
 
     console.print(table)
+
+
+# ── Confirmation gate (Faz 4 / BUG-3) ────────────────────────────────────────
+
+async def _handle_confirmation_cli(agent: JarvisAgent, conf_id: str, payload: dict) -> None:
+    """A tool call was interrupted for confirmation (jarvis.agent.ConfirmationRequired).
+    Show what's pending, ask once, then resume the same turn via
+    agent.resume_and_stream() with the user's decision."""
+    tools = payload.get("tools", [])
+    lines = []
+    for t in tools:
+        desc = t.get("description") or f"{t.get('name')}({t.get('args')})"
+        lines.append(f"• {desc}")
+    console.print(Panel(
+        "\n".join(lines) or "(no detail)",
+        title="[bold red]Confirmation required[/bold red]",
+        border_style="red",
+    ))
+    try:
+        raw = Prompt.ask(
+            "[bold]Approve?[/bold] [dim](y = yes, anything else = deny + reason)[/dim]",
+            default="n",
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        raw = "n"
+
+    decision = "approve" if raw.lower() in ("y", "yes", "evet", "onay", "onayla") else f"deny:{raw}"
+
+    chunks: list[str] = []
+    with console.status("[gold3]Thinking…[/gold3]", spinner="dots"):
+        async for token in agent.resume_and_stream(conf_id, decision):
+            chunks.append(token)
+    if chunks:
+        _print_jarvis("".join(chunks), agent.current_model_label)
 
 
 # ── Main loops ─────────────────────────────────────────────────────────────────
@@ -437,6 +472,41 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
                 ))
             continue
 
+        # ── /killswitch command (Faz 4) ─────────────────────────────────────
+        if lower == "/killswitch" or lower.startswith("/killswitch "):
+            sub = user_input[len("/killswitch"):].strip()
+            from jarvis import kill_switch as _ks
+
+            if not sub or sub == "status":
+                st = _ks.status()
+                if st.get("enabled", True):
+                    console.print("Kill switch: [green]ON[/green] — actions flow normally.")
+                else:
+                    console.print(
+                        f"Kill switch: [bold red]OFF[/bold red] — risky external actions "
+                        f"(email send, calendar write, shell exec, ...) are blocked. "
+                        f"Reason: {st.get('reason') or '(none given)'}"
+                    )
+                continue
+
+            if sub == "on":
+                _ks.enable()
+                console.print("[gold3]✓[/gold3] Kill switch re-enabled — JARVIS may act normally again.")
+                continue
+
+            if sub == "off" or sub.startswith("off "):
+                reason_text = sub[4:].strip() if sub.startswith("off ") else ""
+                _ks.disable(reason_text)
+                console.print(
+                    "[bold red]⚠[/bold red] Kill switch OFF — every risky external action "
+                    "(email send, calendar write, shell exec, ...) is now blocked."
+                    + (f" Reason: {reason_text}" if reason_text else "")
+                )
+                continue
+
+            _print_error(f"Bilinmeyen alt komut: '{sub}'. Geçerli: status, on, off <sebep>")
+            continue
+
         # ── /quota command (Faz 17) ─────────────────────────────────────────
         if lower in ("/quota", "/quota status", "/quota usage", "/quota forecast"):
             from jarvis.gcp_quota import quota_status, quota_usage_today, quota_forecast
@@ -643,27 +713,53 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
             continue
 
         # ── Regular chat turn ───────────────────────────────────────────────
+        confirmation: ConfirmationRequired | None = None
         with console.status("[gold3]Thinking…[/gold3]", spinner="dots"):
             try:
-                response, model_label = await agent.chat(user_input)
+                response, model_label = await agent.chat(user_input, transport="cli-text")
+            except ConfirmationRequired as cr:
+                confirmation = cr
             except Exception as e:
                 _print_error(f"Error: {e}")
                 continue
 
+        if confirmation is not None:
+            await _handle_confirmation_cli(agent, confirmation.conf_id, confirmation.payload)
+            continue
+
         _print_jarvis(response, model_label)
 
 
-async def _run_voice_response(agent: JarvisAgent, engine, text: str, lang: str, settings: Settings) -> None:
+async def _run_voice_response(
+    agent: JarvisAgent, engine, text: str, lang: str, settings: Settings,
+    set_pending_confirmation=None,
+) -> None:
     """One turn's response: agent.chat_stream() -> engine.speak_stream(), sentence-
     chunked so TTS starts before generation finishes. Runs as a cancellable task
-    (see jarvis/voice/session.py) so a BargeIn event can interrupt it mid-flight."""
+    (see jarvis/voice/session.py) so a BargeIn event can interrupt it mid-flight.
+
+    Faz 4 / BUG-4: if the graph interrupts for confirmation, chat_stream()
+    yields the __jarvis_confirm__ marker as a single delta instead of real
+    text -- previously that raw JSON was spoken verbatim. Now it's detected,
+    swapped for a natural spoken question, and set_pending_confirmation()
+    tells the enclosing loop the *next* transcript is the yes/no answer, not
+    a new command (see jarvis/voice/session.py's resolve_confirmation).
+    """
+    from jarvis.voice.session import parse_confirm_marker, describe_confirmation, PendingConfirmation
+
     console.print("[dim]Thinking...[/dim]", end="\r")
     response_chunks: list[str] = []
     llm_error: list[BaseException] = []
+    confirm_marker: dict | None = None
 
     async def _collecting_stream():
+        nonlocal confirm_marker
         try:
-            async for delta in agent.chat_stream(text, detected_language=lang):
+            async for delta in agent.chat_stream(text, detected_language=lang, transport="voice-cli"):
+                marker = parse_confirm_marker(delta)
+                if marker is not None:
+                    confirm_marker = marker
+                    return
                 response_chunks.append(delta)
                 yield delta
         except Exception as exc:
@@ -676,6 +772,22 @@ async def _run_voice_response(agent: JarvisAgent, engine, text: str, lang: str, 
         await engine.speak_stream(_collecting_stream(), lang=lang)
     except Exception as exc:
         _print_error(f"TTS error: {exc}")
+
+    if confirm_marker is not None:
+        question = describe_confirmation(confirm_marker, lang)
+        console.print(f"[bold yellow]JARVIS (confirmation):[/bold yellow] {question}")
+
+        async def _single(t=question):
+            yield t
+
+        try:
+            await engine.speak_stream(_single(), lang)
+        except Exception as exc:
+            _print_error(f"TTS error: {exc}")
+
+        if set_pending_confirmation is not None:
+            set_pending_confirmation(PendingConfirmation(confirm_marker["id"], confirm_marker["payload"]))
+        return
 
     if llm_error:
         from jarvis.utils import is_daily_quota_error
@@ -699,7 +811,9 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
         from jarvis.voice.io_duplex import DuplexAudioIO
         from jarvis.voice.wakeword import WakewordDetector
         from jarvis.voice.text import is_exit_phrase
-        from jarvis.voice.session import drive_voice_session, STOP_SESSION
+        from jarvis.voice.session import (
+            drive_voice_session, STOP_SESSION, PendingConfirmation, resolve_confirmation,
+        )
     except ImportError as exc:
         _print_error(
             f"Voice dependencies not installed: {exc}\n"
@@ -735,8 +849,30 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
     else:
         console.print("[gold3]Ready.[/gold3]\n")
 
+    pending_confirmation: "PendingConfirmation | None" = None
+
+    def _set_pending(p: "PendingConfirmation | None") -> None:
+        nonlocal pending_confirmation
+        pending_confirmation = p
+
     async def _handle_transcript(text: str, lang: str):
+        nonlocal pending_confirmation
         console.print(f"[bold blue]{settings.user_name}:[/bold blue] {text}   ")
+
+        # Faz 4 / BUG-4: a pending confirmation always consumes the *next*
+        # utterance as its yes/no answer -- checked before exit-phrase/model-
+        # switch detection so e.g. "hayır" during a pending confirmation
+        # denies it rather than being misread as an unrelated command.
+        if pending_confirmation is not None:
+            pending, pending_confirmation = pending_confirmation, None
+
+            async def _resolve():
+                await resolve_confirmation(
+                    agent, engine, pending, text, lang,
+                    on_message=lambda full: _print_jarvis(full, agent.current_model_label),
+                )
+
+            return _resolve()
 
         if is_exit_phrase(text):
             farewell = "Goodbye, Sir." if lang != "tr" else "Güle güle, efendim."
@@ -763,7 +899,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
                 _print_error(str(e))
             return None
 
-        return _run_voice_response(agent, engine, text, lang, settings)
+        return _run_voice_response(agent, engine, text, lang, settings, _set_pending)
 
     def _on_barge_in() -> None:
         console.print("[dim](interrupted)[/dim]")

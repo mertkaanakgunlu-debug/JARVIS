@@ -14,14 +14,108 @@ jarvis/voice_api.py already used pre-Faz-3 for racing wakeword against PTT.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any
 
 from jarvis.voice.engine import RealtimeVoiceEngine
 from jarvis.voice.events import BargeIn, FinalTranscript, MicLevel, SpeechStarted
 
 logger = logging.getLogger(__name__)
+
+
+# ── Confirmation gate over voice (Faz 4 / BUG-4) ─────────────────────────────
+#
+# agent.chat_stream() yields a single complete delta -- json.dumps({"__jarvis_
+# confirm__": True, "id": conf_id, "payload": {...}}) -- when the graph
+# interrupts for confirmation, instead of raising (that's chat()'s contract,
+# not chat_stream()'s). Before Faz 4 nothing looked for this marker in any
+# voice loop, so it was spoken to the user as raw JSON. The fix lives here,
+# not per-loop: cli.py's --voice loop and voice_api.py's run_one_response
+# (itself shared by the local wakeword/PTT loop AND api.py's remote /ws
+# session) all drive a turn the same way, so the marker-detect / ask /
+# resume-on-next-transcript logic is written once and reused by all three.
+
+_AFFIRMATIVE_WORDS = frozenset({
+    "yes", "yeah", "yep", "yup", "sure", "correct", "confirm", "confirmed",
+    "go ahead", "do it", "affirmative",
+    "evet", "onaylıyorum", "onayla", "onaylıyorum", "tamam", "olur", "yap", "aynen",
+})
+
+
+@dataclass
+class PendingConfirmation:
+    conf_id: str
+    payload: dict
+
+
+def parse_confirm_marker(delta: str) -> dict | None:
+    """If delta is exactly the __jarvis_confirm__ JSON marker chat_stream()
+    yields on interrupt, return the parsed {"id", "payload", ...} dict; else
+    None. chat_stream() always yields this marker as a single complete
+    delta (one `yield json.dumps(...)` call) so no cross-chunk buffering
+    is needed here."""
+    s = delta.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(obj, dict) and obj.get("__jarvis_confirm__") and obj.get("id"):
+        return obj
+    return None
+
+
+def describe_confirmation(marker: dict, lang: str = "en") -> str:
+    """Natural-language, TTS-safe question for a pending confirmation marker
+    (as returned by parse_confirm_marker) -- no markdown, spoken aloud."""
+    tools = (marker.get("payload") or {}).get("tools", [])
+    parts = [t.get("description") or t.get("name") or "an action" for t in tools]
+    if lang == "tr":
+        body = " ve ".join(parts) if len(parts) > 1 else (parts[0] if parts else "hassas bir işlem")
+        return f"Devam etmeden önce onayınız gerekiyor: {body}. Onaylıyor musunuz?"
+    body = "; and ".join(parts) if len(parts) > 1 else (parts[0] if parts else "a sensitive action")
+    return f"Before I continue, I need your OK to {body}. Should I go ahead?"
+
+
+def is_affirmative(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    return any(t == w or t.startswith(w + " ") or t.startswith(w + ",") for w in _AFFIRMATIVE_WORDS)
+
+
+async def resolve_confirmation(
+    agent: Any,
+    engine: RealtimeVoiceEngine,
+    pending: PendingConfirmation,
+    transcript: str,
+    lang: str,
+    *,
+    on_message: Callable[[str], None] | None = None,
+) -> None:
+    """Resume the turn agent.resume_and_stream() left interrupted, using
+    `transcript` (the user's reply to describe_confirmation's question) as
+    the approve/deny decision. Anything not recognized as affirmative denies
+    -- fail-safe, same default as the CLI text prompt's default="n". The
+    user's own words become the denial guidance the LLM sees, so "no, send
+    it to Alice instead" still carries useful correction, not just a bare no.
+    """
+    decision = "approve" if is_affirmative(transcript) else f"deny:{transcript}"
+
+    chunks: list[str] = []
+
+    async def _collecting():
+        async for token in agent.resume_and_stream(pending.conf_id, decision):
+            chunks.append(token)
+            yield token
+
+    await engine.speak_stream(_collecting(), lang=lang)
+    if on_message and chunks:
+        on_message("".join(chunks))
 
 
 async def _dispose_task(task: "asyncio.Task | None") -> None:

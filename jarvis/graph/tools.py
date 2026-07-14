@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import asyncio
-import concurrent.futures
 
 from langchain_core.tools import tool
 
@@ -48,12 +47,6 @@ from jarvis.subagents.coder import run_coder
 if TYPE_CHECKING:
     from jarvis.config import Settings
     from jarvis.memory import Memory
-
-
-def _run_coro(coro):
-    """Run a coroutine from sync context even inside a running event loop."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
 
 
 def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
@@ -157,25 +150,33 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         event_bus.show_hud()
         return result
 
+    # Faz 4: native async @tool functions -- these run_*() coroutines used to
+    # go through _run_coro(), which spins up a whole second thread + fresh
+    # event loop just to bridge back into async from a sync tool function,
+    # even though ToolNode only ever calls these from inside an already-
+    # running async graph (agent.py's self._graph.ainvoke()/.astream()).
+    # `@tool` on an `async def` dispatches natively on that same loop --
+    # no bridge, no extra thread.
+
     @tool
-    def math_solve(problem: str) -> str:
+    async def math_solve(problem: str) -> str:
         """Delegate to MathAgent for algebra, calculus, ODEs, linear algebra, stats. Returns LaTeX."""
-        return _run_coro(run_math(problem, settings))
+        return await run_math(problem, settings)
 
     @tool
-    def write_content(topic: str, style: str) -> str:
+    async def write_content(topic: str, style: str) -> str:
         """Delegate to WriterAgent for academic prose (abstracts, intros, conclusions). Returns LaTeX."""
-        return _run_coro(run_writer(topic, style, settings))
+        return await run_writer(topic, style, settings)
 
     @tool
-    def research(query: str) -> str:
+    async def research(query: str) -> str:
         """Delegate to ResearchAgent for web-augmented research with citations. Returns LaTeX."""
-        return _run_coro(run_research(query, settings))
+        return await run_research(query, settings)
 
     @tool
-    def generate_code(spec: str) -> str:
+    async def generate_code(spec: str) -> str:
         """Delegate to CoderAgent for Python/scripts/algorithms. Returns LaTeX with code blocks."""
-        return _run_coro(run_coder(spec, settings))
+        return await run_coder(spec, settings)
 
     # ── Faz 4: Data Analysis + Plotting + Report Compose ──────────────────────
 
@@ -625,7 +626,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     # ── Faz 13-D: To-do list ────────────────────────────────────────────────
 
     @tool
-    def todo(
+    async def todo(
         action: str,
         title: str = "",
         description: str = "",
@@ -671,17 +672,17 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             if not title:
                 return "⚠ title gerekli."
             tid = store.add(title, description=description, due_date=due_date, category=category)
-            # Fire-and-forget async analysis
+            # Fire-and-forget async analysis -- todo() is itself a native
+            # async tool now (Faz 4), dispatched by ToolNode on the graph's
+            # already-running loop, so this can just schedule directly; no
+            # loop.is_running() branch / _run_coro thread-bridge fallback
+            # needed (that was only ever there for a sync caller context).
             import asyncio
             async def _bg_analyze():
                 from jarvis.todo_analyzer import analyze_and_save
                 await analyze_and_save(tid, title, description, settings, store)
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(_bg_analyze())
-                else:
-                    _run_coro(_bg_analyze())
+                asyncio.create_task(_bg_analyze())
             except Exception:
                 pass  # Analysis is optional
             return (
@@ -761,12 +762,11 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             count = store.count_open()
             if count == 0:
                 return "Açık görev yok, analiz gerekmez."
-            # Run batch analysis synchronously so user gets feedback
-            async def _do_analyze():
-                from jarvis.todo_analyzer import reanalyze_all
-                return await reanalyze_all(settings, store)
+            # Run batch analysis directly -- await, not _run_coro (see the
+            # module-level note on the other converted sub-agent tools).
             try:
-                updated = _run_coro(_do_analyze())
+                from jarvis.todo_analyzer import reanalyze_all
+                updated = await reanalyze_all(settings, store)
                 return f"🧠 {updated}/{count} görev yeniden önceliklendirildi. `/todo list` ile görebilirsin."
             except Exception as exc:
                 return f"⚠ Analiz hatası: {exc}"
@@ -1012,7 +1012,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     # ── Faz 18: Geo-Math Sub-Agent ────────────────────────────────────────────
 
     @tool
-    def geo_math(
+    async def geo_math(
         action: str,
         expression: str = "",
         variable: str = "",
@@ -1081,7 +1081,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             problem = expression or query or title
             if not problem:
                 return "⚠ expression veya query gerekli (analyze action için)."
-            return _run_coro(run_geomath(problem, settings))
+            return await run_geomath(problem, settings)
 
         _VISUAL_GEO_ACTIONS = {"wave_simulate_2d", "plot_2d", "plot_contour", "plot_3d_surface", "plot_volume"}
         result = geo_math_control(

@@ -16,7 +16,7 @@ that prompt.
 | File | Version | Updated | Note |
 |---|---|---|---|
 | 01_persona.md | 1 | 2026-05-24 | Phase 1 modularization |
-| 02_tool_policy.md | 2 | 2026-07-14 | Faz 2: added procedure_save guidance |
+| 02_tool_policy.md | 3 | 2026-07-14 | Faz 4: removed "never ask for confirmation" directive — gate is now live |
 | 03_voice_policy.md | 1 | 2026-05-24 | Phase 1 modularization |
 | 04_agent_registry.md | 1 | 2026-05-24 | Phase 1 modularization |
 | 05_memory_policy.md | 1 | 2026-05-24 | Phase 1 modularization |

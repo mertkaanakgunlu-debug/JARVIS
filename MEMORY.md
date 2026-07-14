@@ -21,11 +21,22 @@
 - Vertex AI needs `gcloud auth application-default login` once for ADC; without it the app
   falls back to the AI Studio free tier automatically.
 - `marker-pdf`'s first run downloads ~2-3 GB of layout models to `~/.cache/marker` — one-time cost.
-- **No Node.js/npm on PATH** (confirmed 2026-07-14, Faz 3) — neither Bash nor PowerShell can find
-  `node`, and the Electron app's own bundled `node_modules/electron`/`esbuild.cmd` couldn't be
-  coaxed into a standalone interpreter either. Any Electron (`electron/`) JS/JSX change made by a
-  Claude Code session cannot be syntax-checked or run in this environment — it needs the owner's
-  own `npm run dev`/build step before being trusted. `.venv`'s Python is unaffected.
+- **Node.js LTS (v24.18.0) installed 2026-07-15**, user-scope via `winget install
+  OpenJS.NodeJS.LTS --scope user` — the default machine-scope MSI install needs an interactive
+  UAC elevation prompt that a non-interactive session can't click through (confirmed: it failed
+  with exit 1602/user-cancelled); `--scope user` uses winget's zip-based extraction instead, no
+  admin needed, installed to `%LOCALAPPDATA%\Microsoft\WinGet\Packages\
+  OpenJS.NodeJS.LTS_Microsoft.Winget.Source_8wekyb3d8bbwe\node-v24.18.0-win-x64\`, persisted to
+  the user (HKCU) PATH — a **new** terminal window picks it up automatically; a terminal/tool
+  session already running when the install happened does not (Windows snapshots env vars at
+  process start) and needs that directory prepended to `$env:PATH` manually for the rest of that
+  session. `electron/`'s existing `node_modules` (already present on disk from before) installed
+  cleanly with `npm install`, and `npm run build` (electron-vite) succeeded with zero errors
+  across all 32 renderer modules + main + preload — this is a real build-tool verification of
+  every `.jsx`/`.js` file touched by Faz 3, not just careful reading. **Still not done: actually
+  launching `npm run dev`/the Electron GUI window** — a build passing doesn't prove runtime
+  correctness (a logic bug that isn't a syntax/type error survives a build), and popping up a live
+  desktop window wasn't in scope for what was asked. `.venv`'s Python was never affected either way.
 - **Ollama installed 2026-07-14** (during Faz 1's rollout — `winget install Ollama.Ollama`), with
   `qwen2.5:7b-instruct` (4.7 GB) and `nomic-embed-text` (274 MB) pulled. The Windows installer's own
   auto-started service and a manually-launched `ollama.exe serve` raced for port 11434 once and left
@@ -119,9 +130,14 @@ The north-star target came from an owner-commissioned research report
   imported by any live path, and its own prompt-loading logic is independently broken
   (points at a `jarvis/legacy/prompts/system.md` that doesn't exist). Don't resurrect it
   without fixing that path first.
-- The 5 sub-agents (math, writer, research, coder, geomath) are still pydantic-ai, bridged
-  into the LangGraph tool layer via a `_run_coro` helper. Migrating them to native LangGraph
-  sub-graphs is tracked as Phase 8 — not started.
+- The 5 sub-agents (math, writer, research, coder, geomath) are still pydantic-ai, called
+  directly with `await` from native `async def` `@tool` functions in `jarvis/graph/tools.py`
+  (Faz 4, 2026-07-14 — previously bridged through a `_run_coro()` helper that spun up a second
+  thread + fresh event loop even though these tools only ever ran inside an already-async graph;
+  that helper is now dead code and was deleted from `graph/tools.py`. `jarvis/tools/finance.py`
+  has its own separate, untouched `_run_coro`, unrelated to this). Migrating the sub-agents
+  themselves to native LangGraph sub-graphs (not just how they're *called*) is still tracked as
+  Phase 8 — not started.
 - System prompt was modularized (2026-05-24, Phase 1) from one `system.md` into 6 concern
   files under `jarvis/prompts/core/` assembled by `jarvis/prompts/prompt_loader.py`. The old
   `jarvis/prompts/system.md` still exists as a dead pointer file (says so in its own header)
@@ -131,8 +147,10 @@ The north-star target came from an owner-commissioned research report
   06 = the actual memory/entity/todo injection blocks). Known, not yet fixed — check both
   files if you're looking for either topic.
 - ToolSpec risk metadata (`jarvis/tool_registry.py`, Phase 2) and the confirmation gate
-  (`jarvis/graph/nodes.py`, Phase 3) both shipped 2026-05-24 — see [CLAUDE.md](CLAUDE.md)'s
-  safety section for why the gate doesn't yet do what its name implies.
+  (`jarvis/graph/nodes.py`, Phase 3) shipped 2026-05-24 but didn't protect anything end-to-end
+  until Faz 4 (2026-07-14) built `jarvis/policy_guard.py` and wired all three interfaces — see
+  [CLAUDE.md](CLAUDE.md)'s safety section and [docs/SAFETY.md](docs/SAFETY.md) for the current
+  (accurate, not aspirational) picture.
 - `jarvis/providers/get_llm(role, settings, *, tools=, max_output_tokens=)` (Faz 1, 2026-07-14)
   is now the only place that constructs chat models — `graph.py`'s old `make_llm_fast`/
   `make_llm_pro` are gone. Two gotchas worth knowing before touching it: (1) `RunnableWithFallbacks`
@@ -233,6 +251,56 @@ The north-star target came from an owner-commissioned research report
     syntax-checked, let alone run. Run `npm run dev` (or the project's normal Electron dev command)
     before trusting this code — see [ROADMAP.md](ROADMAP.md)'s Faz 3 verify section for the full
     human hand-off checklist.
+
+- **Security kernel (Faz 4, 2026-07-14):** `jarvis/policy_guard.py` is the single place that
+  decides "is this tool call allowed, does it need the user's OK" — design decisions worth
+  knowing before touching any of it:
+  - **Per-action risk lives in a small override table, not on the tool itself.**
+    `policy_guard._READ_ACTIONS` maps `tool_name -> {read action names}` only for the four
+    tools that actually mix risk levels (`google_calendar`/`gmail`/`google_drive`/`itu_mail`).
+    Every other tool's actions all share its `ToolSpec.risk_level` uniformly. Don't add an entry
+    for a tool that doesn't have this split — it's dead weight and implies a distinction that
+    doesn't exist. Same word can mean different things per tool (`todo`'s `"done"` action marks
+    a task complete — a write; `schedule`'s `"done"` action *lists* completed tasks — a read) —
+    this is exactly why the table is keyed by tool name, not a single global read-verb set.
+  - **Kill switch and confirmation gate solve different problems, don't conflate them.** The
+    gate asks; the kill switch (`jarvis/kill_switch.py`) refuses to ask at all and hard-denies,
+    for L3 (external-effect) actions only — it does NOT block L2 (local reversible writes like
+    `file_write`/`todo`/`spotify`). This was a deliberate scope choice (an emergency stop for
+    JARVIS acting on the *outside world*, not a full functionality halt), not an oversight — if
+    asked to make the kill switch block more, that's a real behavior change, not a bug fix.
+  - **Kill switch state is a file (`data/kill_switch.json`), not a `Settings` field, on
+    purpose** — the whole point of an emergency stop is that it stays stopped across a process
+    restart until someone deliberately re-arms it; a `Settings` field would reset to its
+    `.env`/default value on every restart, defeating the mechanism.
+  - **The audit log has two independent write sites recording different things** — don't assume
+    one supersedes the other. `confirmation_node` (`graph/nodes.py`) writes `"decision"` entries
+    (was this call allowed, did it need confirmation, what did the user say) at gate time.
+    `agent.py`'s `_HudEventCallback` (a LangChain callback already attached to every graph
+    invocation for the HUD feed) writes `"execution_start"`/`"execution_end"` at actual-run time,
+    keyed by matching LangChain's `run_id` across the start/end callback pair — this is what
+    makes it genuinely "did the side effect happen," not just "was it authorized."
+  - **A background `TaskExecutor` job cannot answer a confirmation prompt** — there's no
+    interactive channel. `ConfirmationRequired` (an `Exception` subclass) bubbling out of
+    `agent.chat()` inside `TaskExecutor._run()` is caught specifically and turned into an
+    actionable failure message, not silently retried or left to hang.
+  - **Voice confirmation reuses the exact same `chat_stream()` interrupt path text mode's
+    `ConfirmationRequired` exception represents** — `chat_stream()` (unlike `chat()`) never
+    raises for a confirmation interrupt; it yields the `__jarvis_confirm__` JSON marker as one
+    complete delta instead. Any new streaming call site must check for this marker
+    (`jarvis/voice/session.py`'s `parse_confirm_marker`) before treating a delta as real text —
+    forgetting this is exactly BUG-4 (JSON spoken/rendered verbatim).
+  - **`python_run`'s L3 reclassification is an access-control fix, not a sandbox.** If asked to
+    actually sandbox it (subprocess resource/network restriction), that's new work, not something
+    already done — don't imply otherwise.
+  - **The five sub-agent tool bridges are native `async def` now, not `_run_coro()`-wrapped** —
+    `math_solve`/`write_content`/`research`/`generate_code`/`geo_math` (analyze branch) `await`
+    their `run_*()` coroutine directly. Safe specifically because these tools are ONLY ever
+    dispatched by LangGraph's `ToolNode` inside an already-running async graph
+    (`agent.py`'s `self._graph.ainvoke()`/`.astream()`) — if a tool like this is ever needed from
+    a genuinely sync call site outside the graph, it would need its own bridge again; don't
+    assume every tool in `graph/tools.py` can be freely converted the same way without checking
+    it's graph-only first.
 
 ## Known permanently-true gotchas
 

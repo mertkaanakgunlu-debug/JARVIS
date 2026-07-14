@@ -21,20 +21,44 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from jarvis.agent import ConfirmationRequired
+
 if TYPE_CHECKING:
     from jarvis.agent import JarvisAgent
     from jarvis.fcm_sender import FcmSender
 
 logger = logging.getLogger(__name__)
 
-# Keywords that trigger automatic async mode when found in a query
-ASYNC_KEYWORDS = {
+
+def _registry_async_hints() -> set[str]:
+    """Faz 4: derive trigger phrases from ToolSpec.supports_background
+    instead of only a hand-maintained list -- keeps this heuristic connected
+    to the same metadata jarvis/tool_registry.py already tracks, so a tool
+    added/changed there doesn't silently drift out of sync with what
+    actually triggers background execution."""
+    from jarvis.tool_registry import TOOL_SPECS
+    hints: set[str] = set()
+    for spec in TOOL_SPECS.values():
+        if spec.supports_background:
+            hints.add(spec.name)
+            hints.add(spec.name.replace("_", " "))
+    return hints
+
+
+# Natural-language phrases that strongly imply a background-capable tool but
+# don't literally contain its name (kept alongside the registry-derived set
+# below rather than replaced by it, so this stays a strict superset of the
+# pre-Faz-4 behavior).
+_LEGACY_ASYNC_HINTS = {
     "deep_research", "deep research", "araştır", "sentez", "rapor", "report",
     "grafik", "simülasyon", "simulasyon", "3d", "3 boyutlu", "wave_simulate",
     "wave simulate", "finance sync", "finansal", "index_doc", "plot_volume",
     "plot_3d", "plot_surface", "latex", "compile", "seismic", "sismik",
     "subagent", "sub-agent", "alt ajan",
 }
+
+# Keywords that trigger automatic async mode when found in a query
+ASYNC_KEYWORDS = _registry_async_hints() | _LEGACY_ASYNC_HINTS
 
 
 def _should_async(query: str, force: bool = False) -> bool:
@@ -134,11 +158,26 @@ class TaskExecutor:
         _prevent_sleep()
 
         try:
-            response, _ = asyncio.run(self._agent.chat(task.user_query))
+            response, _ = asyncio.run(self._agent.chat(task.user_query, transport="task-async"))
             task.result_text = response
             task.result_artifacts = self._collect_artifacts(response)
             task.status = "done"
             self._emit_ws(task, note="Done.")
+        except ConfirmationRequired as exc:
+            # Faz 4: a background task has no interactive channel to answer a
+            # confirmation prompt -- fail clearly instead of leaving a cryptic
+            # "confirmation_required:<uuid>" error string, naming what needs
+            # a real (interactive) turn to approve.
+            tools = ", ".join(
+                t.get("name", "?") for t in (exc.payload or {}).get("tools", [])
+            ) or "a gated action"
+            logger.info("Task %s needs confirmation for: %s", task.task_id, tools)
+            task.status = "failed"
+            task.error = (
+                f"This needs your approval for {tools}, which isn't possible in the "
+                "background. Ask JARVIS directly (chat/voice) so you can confirm it."
+            )
+            self._emit_ws(task, note="Needs confirmation — retry interactively.")
         except Exception as exc:
             logger.exception("Task %s failed: %s", task.task_id, exc)
             task.status = "failed"

@@ -24,7 +24,7 @@ Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass + `TOOL_SPE
 | `pdf_vision` | L1 | network | — | ✓ | 60s | Analyse a PDF or image visually via Gemini Vision |
 | `excel_read` | L1 | filesystem | — | — | 30s | Read an Excel file — column list + first 50 rows per sheet |
 | `csv_read` | L1 | filesystem | — | — | 10s | Preview a CSV file (shape + first N rows) |
-| `python_run` | L2 | compute | — | ✓ | 120s | Execute a Python script in a subprocess |
+| `python_run` | L3 | compute | ✓ | ✓ | 120s | Execute a Python script in a subprocess |
 | `data_analyze` | L1 | compute | — | ✓ | 60s | Full pandas statistical analysis of a tabular file |
 | `plot_data` | L2 | compute | — | ✓ | 60s | Generate a matplotlib/seaborn PNG and save to workspace |
 | `report_write` | L2 | filesystem | — | — | 30s | Write a LaTeX .tex source file to vault/reports/ |
@@ -53,10 +53,11 @@ Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass + `TOOL_SPE
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
 | `procedure_save` | L2 | memory | — | — | 15s | Save a reusable multi-step workflow to procedural memory (Faz 2) |
 
-> **Phase 3 has shipped** (`jarvis/graph/nodes.py`'s `make_confirmation_node`, commit `7e7e471`):
-> a LangGraph `confirmation` node reads `requires_confirmation`/`risk_level` from
-> `jarvis/tool_registry.py` and interrupts before gated tool calls. It does **not** yet work
-> "across all modes" as originally planned, though — only the FastAPI `/chat/confirm` path
-> resumes an interrupted call; the CLI text/voice loops don't handle the interrupt at all, and
-> the gate is disabled by default (`confirmation_gate_enabled=False`). See
-> [SAFETY.md](SAFETY.md) and [ROADMAP.md](../ROADMAP.md) P0 for the remaining work.
+> **Faz 4 (2026-07-14) finished what Phase 3 started**: `jarvis/graph/nodes.py`'s
+> `make_confirmation_node` now gates through `jarvis/policy_guard.py` — per-*action*, not
+> per-tool, so read actions (list/search/...) on the four `external_api` tools above never
+> interrupt even though the tool itself is L3. The gate is on by default
+> (`confirmation_gate_enabled=True`) and wired into all three interfaces (CLI text, CLI/API
+> voice, API) — see [SAFETY.md](SAFETY.md) for the full picture, including a kill switch,
+> an audit log, and the honest list of what's still not done (no Electron/mobile confirmation
+> UI yet).

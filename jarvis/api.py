@@ -38,7 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from jarvis.config import Settings
-from jarvis.agent import JarvisAgent
+from jarvis.agent import JarvisAgent, ConfirmationRequired
 from jarvis.ws import event_bus, start_metrics_task, start_live_data_task, live_data_snapshot
 from jarvis.voice_api import start_voice_task, trigger_ptt
 
@@ -118,6 +118,7 @@ def _wire_routers(settings: Settings, agent: JarvisAgent) -> None:
     vault_router.init_vault(agent.memory)
     push_router.init_push(push_store, fcm)
     tasks_router.init_tasks(executor)
+    system_router.init_system(settings)
 
     # Attach executor to agent for /chat async-heuristic
     agent._task_executor = executor
@@ -132,14 +133,8 @@ def get_agent() -> JarvisAgent:
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def _check_auth(request: Request) -> None:
-    if not _settings:
-        return
-    api_key = _settings.jarvis_api_key
-    if not api_key:
-        return  # auth disabled
-    provided = request.headers.get("X-API-Key", "")
-    if provided != api_key:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
+    from jarvis.api_auth import check_auth
+    check_auth(request, _settings.jarvis_api_key if _settings else "")
 
 
 # ── Mount mobile routers (all behind auth dependency) ─────────────────────────
@@ -220,6 +215,7 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
     audio_owner_id = f"remote-ws-{id(websocket)}"
     audio_io = None
     audio_task: "asyncio.Task | None" = None
+    pending_confirmation = None  # Faz 4 / BUG-4 — see jarvis/voice/session.py
 
     async def _stop_audio_session(reason: str) -> None:
         nonlocal audio_io, audio_task
@@ -286,7 +282,7 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
 
         from jarvis.voice.io_remote_ws import RemoteWsAudioIO
         from jarvis.voice.engine import RealtimeVoiceEngine, get_shared_voice_models
-        from jarvis.voice.session import drive_voice_session
+        from jarvis.voice.session import drive_voice_session, resolve_confirmation
         from jarvis.voice_api import pause_local_voice, run_one_response
 
         # Electron's main process always spawns the backend with --wakeword
@@ -300,8 +296,23 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
         await engine.load()
         await engine.start()
 
+        def _set_pending(p) -> None:
+            nonlocal pending_confirmation
+            pending_confirmation = p
+
         async def _handle_transcript(text: str, lang: str):
-            return run_one_response(agent, engine, text, lang)
+            nonlocal pending_confirmation
+            # Faz 4 / BUG-4: a pending confirmation always consumes the *next*
+            # utterance as its yes/no answer, not a new command.
+            if pending_confirmation is not None:
+                pending, pending_confirmation = pending_confirmation, None
+                return resolve_confirmation(
+                    agent, engine, pending, text, lang,
+                    on_message=lambda full: event_bus.message("j", full),
+                )
+            return run_one_response(
+                agent, engine, text, lang, transport="voice-remote", set_pending_confirmation=_set_pending,
+            )
 
         async def _run_session() -> None:
             try:
@@ -404,7 +415,15 @@ async def chat(body: ChatRequest, request: Request):
         response, model_label = await agent.chat(
             body.message,
             detected_language=body.language or "en",
+            transport="api",
         )
+    except ConfirmationRequired as cr:
+        # BUG-confirm-payload: this used to fall through to the generic
+        # `except Exception` below and come back as an opaque 500 — the
+        # conf_id/payload a client needs to call /chat/confirm/{conf_id}
+        # was lost entirely. Not an error: a distinct, structured response.
+        event_bus.state("idle")
+        return {"confirmation_required": True, "id": cr.conf_id, "payload": cr.payload}
     except Exception as e:
         event_bus.state("idle")
         raise HTTPException(status_code=500, detail=str(e))
@@ -450,6 +469,7 @@ async def chat_stream(body: ChatRequest, request: Request):
             async for token in agent.chat_stream(
                 body.message,
                 detected_language=body.language or "en",
+                transport="api-stream",
             ):
                 full.append(token)
                 safe = token.replace("\n", "\\n")
@@ -562,6 +582,7 @@ async def chat_upload(
                     detected_language=language or "en",
                     image_bytes=content,
                     image_mime=image_mime,
+                    transport="api-upload",
                 ):
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
@@ -593,6 +614,7 @@ async def chat_upload(
                     full_input,
                     detected_language=language or "en",
                     extra_images=figures or None,
+                    transport="api-upload",
                 ):
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
@@ -615,6 +637,7 @@ async def chat_upload(
             async for token in agent.chat_stream(
                 full_query,
                 detected_language=language or "en",
+                transport="api-upload",
             ):
                 safe = token.replace("\n", "\\n")
                 yield f"data: {safe}\n\n"

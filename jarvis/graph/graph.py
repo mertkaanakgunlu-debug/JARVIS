@@ -155,7 +155,7 @@ def build_graph(
     llm_pro = get_llm("reasoning", settings)                          # bare — critic/planner
     llm_pro_with_tools = get_llm("reasoning", settings, tools=tools)   # Faz 5: reasoning agent for complex queries
 
-    agent_node = make_agent_node(llm_fast_with_tools, llm_pro_with_tools)
+    agent_node = make_agent_node(llm_fast_with_tools, llm_pro_with_tools, settings)
     confirmation_node = make_confirmation_node(settings)
     planner_node = make_planner_node(llm_pro)
     critic_node = make_critic_node(llm_pro)

@@ -8,7 +8,10 @@ Fetch priority:
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
+from urllib.parse import urlparse
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,6 +19,49 @@ if TYPE_CHECKING:
 
 _MAX_CHARS = 8000
 _TIMEOUT = 15
+
+# BUG-6-ssrf (Faz 4): this tool fetches whatever URL the model is told to --
+# including URLs suggested by content it has already read (a prompt-injection
+# vector: a page could tell JARVIS to "now fetch http://169.254.169.254/...").
+# Block requests that would reach this machine itself, other hosts on its
+# LAN, or a cloud metadata endpoint -- an attacker-controlled public domain
+# resolving to one of these via DNS rebinding is exactly why this checks the
+# resolved IP, not just the hostname string.
+_BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
+
+
+def _is_blocked_address(host: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        addr.is_private or addr.is_loopback or addr.is_link_local
+        or addr.is_reserved or addr.is_multicast or addr.is_unspecified
+    )
+
+
+def _is_blocked_url(url: str) -> tuple[bool, str]:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return True, "unparseable URL"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return True, "no host in URL"
+    if host in _BLOCKED_HOSTNAMES:
+        return True, f"blocked host: {host}"
+    if _is_blocked_address(host):
+        return True, f"blocked address: {host}"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False, ""  # let the real fetch surface the DNS failure
+    for info in infos:
+        resolved_ip = info[4][0]
+        if _is_blocked_address(resolved_ip):
+            return True, f"{host} resolves to a private/local address ({resolved_ip})"
+    return False, ""
 
 
 def _firecrawl_fetch(url: str, api_key: str, max_chars: int) -> str | None:
@@ -79,6 +125,10 @@ def fetch_url(url: str, settings: "Settings", max_chars: int = _MAX_CHARS) -> st
     """
     if not url.startswith(("http://", "https://")):
         return f"[ERROR] Invalid URL (must start with http/https): {url}"
+
+    blocked, why = _is_blocked_url(url)
+    if blocked:
+        return f"[ERROR] Refusing to fetch this URL ({why}): {url}"
 
     if settings.firecrawl_api_key:
         result = _firecrawl_fetch(url, settings.firecrawl_api_key, max_chars)

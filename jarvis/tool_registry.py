@@ -86,7 +86,14 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
 
     # ── Compute / data ───────────────────────────────────────────────────────────
     ToolSpec(
-        "python_run", "compute", 2, False, "local_execute",
+        # BUG-1 (Faz 4): was L2/no-confirm -- arbitrary, unsandboxed Python
+        # execution from any absolute path is strictly more powerful than
+        # shell_run (deny-listed L3), so it cannot sit at a lower gate than
+        # shell_run. Reclassified to match; true sandboxing (resource/network
+        # restrictions on the subprocess itself) is not implemented and
+        # stays a deferred hardening item -- this fix is the access gate,
+        # not a sandbox.
+        "python_run", "compute", 3, True, "local_execute",
         timeout_seconds=120, supports_background=True,
         description="Execute a Python script in a subprocess",
     ),

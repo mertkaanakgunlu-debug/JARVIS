@@ -174,7 +174,7 @@ maintained version of this list; updated 2026-07-14)
 
 | Gap | Phase | Status |
 |---|---|---|
-| No tool risk metadata / confirmation gate | Phase 2–3 | ✅ shipped 2026-05-24, but not functionally complete — see [SAFETY.md](SAFETY.md) |
+| No tool risk metadata / confirmation gate | Phase 2–3, completed Faz 4 | ✅ shipped 2026-05-24, made functionally complete 2026-07-14 (`jarvis/policy_guard.py` + all-interface wiring) — see [SAFETY.md](SAFETY.md) |
 | Monolithic `system.md` prompt | Phase 1 | ✅ shipped 2026-05-24 (`jarvis/prompts/core/*.md` + `prompt_loader.py`) |
 | Memory retrieval duplicated in `agent.py` | Phase 4 | ✅ shipped 2026-05-24 (`jarvis/context_builder.py`) |
 | `TaskExecutor` in-memory only (lost on restart) | Phase 5 | ⬜ not started |

@@ -23,8 +23,25 @@ class Settings(BaseSettings):
     jarvis_api_key: str = ""    # set in .env; empty = auth disabled (local-only)
     jarvis_api_port: int = 8000
 
-    # Phase 3: confirmation gate — interrupt before L3 tool calls (opt-in)
-    confirmation_gate_enabled: bool = False
+    # Faz 4: confirmation gate — interrupt before L3 tool calls. Was opt-in
+    # (default False) through Phase 3/Faz 3 while the CLI/voice loops had no
+    # code path to actually resume an interrupted call -- enabling it meant
+    # gated turns silently hung or spoke raw JSON. Faz 4 wired all three
+    # loops (CLI text, CLI/API voice, API) to handle the interrupt, so this
+    # now defaults on -- see docs/SAFETY.md.
+    confirmation_gate_enabled: bool = True
+
+    # Faz 4: hard cap on LangGraph super-step recursion per turn (BUG-recursion)
+    # -- without this, a model stuck in a tool-call loop (e.g. repeatedly
+    # mis-calling a tool and retrying) runs unbounded instead of failing
+    # with a clear error.
+    graph_recursion_limit: int = 30
+
+    # Faz 4: timeout on the agent node's own LLM call (BUG-14) -- distinct
+    # from ToolSpec.timeout_seconds, which only bounds tool execution. A
+    # wedged provider connection previously hung the whole turn (and, in
+    # voice mode, left JARVIS silently listening forever) with no recovery.
+    agent_llm_timeout_sec: float = 90.0
 
     # Faz 1: set by JarvisAgent.switch_model() when the user manually pins a
     # specific cloud model — bypasses the local-first router's Ollama-primary

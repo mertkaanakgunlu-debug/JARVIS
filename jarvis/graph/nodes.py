@@ -13,6 +13,7 @@ Routing:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -131,17 +132,32 @@ def _is_simple_exchange(user_query: str, response_text: str) -> bool:
 
 # ── Nodes ──────────────────────────────────────────────────────────────────────
 
-def make_agent_node(llm_fast_with_tools, llm_pro_with_tools=None):
+def make_agent_node(llm_fast_with_tools, llm_pro_with_tools=None, settings=None):
     """Return an async node that picks Flash or Pro based on state["use_pro_agent"].
 
     Faz 5: if use_pro_agent is True and a Pro model is available, route the agent
     to Gemini Pro for complex queries; otherwise use the fast Flash model.
+
+    BUG-14 (Faz 4): the LLM call is wrapped in a timeout -- previously a
+    wedged provider connection hung the whole turn (and, in voice mode, left
+    JARVIS listening in silence forever) with no way to recover. This is
+    distinct from ToolSpec.timeout_seconds, which only bounds tool execution,
+    not the agent's own reasoning call.
     """
+    timeout_sec = getattr(settings, "agent_llm_timeout_sec", 90.0) if settings is not None else 90.0
 
     async def agent_node(state: JarvisState) -> dict:
         use_pro = state.get("use_pro_agent", False) and llm_pro_with_tools is not None
         llm = llm_pro_with_tools if use_pro else llm_fast_with_tools
-        response = await llm.ainvoke(state["messages"])
+        try:
+            response = await asyncio.wait_for(llm.ainvoke(state["messages"]), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            response = AIMessage(
+                content=(
+                    f"I'm sorry, the model didn't respond within {timeout_sec:.0f} seconds -- "
+                    "the provider may be unreachable or overloaded. Please try again."
+                )
+            )
 
         # Emit tool-call events to the HUD telemetry feed
         bus = _bus()
@@ -314,23 +330,32 @@ def route_from_critic(state: JarvisState) -> str:
 
 
 def make_confirmation_node(settings):
-    """Return a node that gates L3 tool calls behind a user interrupt (Phase 3).
+    """Return a node that gates tool calls behind policy_guard (Faz 4).
 
-    When confirmation_gate_enabled=False (default), the node is a no-op passthrough.
-    When enabled, it interrupts the graph before any tool call that has
-    requires_confirmation=True in TOOL_SPECS.  The resume value must be either
-    "approve" or "deny" / "deny:<optional guidance>".
+    Per-action, not per-tool (BUG-6): policy_guard.evaluate() downgrades pure
+    reads on the mixed-risk external_api tools (list/search/... on
+    google_calendar/gmail/google_drive/itu_mail) back to no-confirm, so only
+    genuinely risky actions ever interrupt.
+
+    Kill switch: policy_guard's allowed=False is a hard veto that skips the
+    interrupt entirely (asking permission is pointless once the operator has
+    already said stop) and denies immediately, same message shape as a user
+    "deny" -- this check runs regardless of confirmation_gate_enabled, since
+    the kill switch is a stronger, unconditional stop.
+
+    When confirmation_gate_enabled=False, non-vetoed calls pass straight
+    through (no interrupt). When enabled, calls requiring confirmation
+    interrupt the graph until resume_and_stream() is called with "approve" or
+    "deny" / "deny:<optional guidance>".
+
+    Every risk_level >= 2 call gets a "decision" audit_log entry regardless
+    of gate state, so the audit trail is complete even with the gate off.
     """
     from langgraph.types import interrupt as _interrupt
     from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
-    from jarvis.tool_registry import get_spec
+    from jarvis import audit_log, policy_guard
 
     async def confirmation_node(state: JarvisState) -> dict:
-        # Gate disabled — immediate passthrough
-        if not settings.confirmation_gate_enabled:
-            return {"confirmation_result": "approved"}
-
-        # Find last AI message with tool calls
         last_ai: AIMessage | None = None
         for msg in reversed(state["messages"]):
             if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
@@ -340,17 +365,61 @@ def make_confirmation_node(settings):
         if last_ai is None:
             return {"confirmation_result": "approved"}
 
-        # Only interrupt for tools explicitly marked requires_confirmation
-        confirmable = [
-            tc for tc in last_ai.tool_calls
-            if (spec := get_spec(tc.get("name", ""))) and spec.requires_confirmation
-        ]
+        transport = state.get("transport") or "unknown"
+        decisions = {
+            tc.get("id"): policy_guard.evaluate(tc.get("name", ""), tc.get("args", {}) or {}, settings)
+            for tc in last_ai.tool_calls
+        }
+
+        for tc in last_ai.tool_calls:
+            d = decisions.get(tc.get("id"))
+            if d is None or d.risk_level < 2:
+                continue
+            if not d.allowed:
+                outcome = "blocked_kill_switch"
+            elif d.requires_confirmation and settings.confirmation_gate_enabled:
+                outcome = "confirm_required"
+            else:
+                outcome = "auto_approved"
+            audit_log.record(
+                "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
+                transport=transport, outcome=outcome, reason=d.reason,
+            )
+
+        # Kill switch veto -- hard stop, no interrupt, no matter what the
+        # gate's own enabled flag says.
+        vetoed = [tc for tc in last_ai.tool_calls if not decisions[tc.get("id")].allowed]
+        if vetoed:
+            veto_reason = decisions[vetoed[0].get("id")].reason
+            stub_msgs = [
+                ToolMessage(
+                    content=f"[BLOCKED: {veto_reason}]",
+                    tool_call_id=tc.get("id", ""),
+                )
+                for tc in last_ai.tool_calls
+            ]
+            ack_msg = HumanMessage(
+                content=(
+                    f"The kill switch is currently off ({veto_reason}), so this action was "
+                    "blocked before it could run. Do NOT retry it. Tell the user the kill "
+                    "switch needs to be re-enabled first."
+                )
+            )
+            return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg]}
+
+        if not settings.confirmation_gate_enabled:
+            return {"confirmation_result": "approved"}
+
+        confirmable = [tc for tc in last_ai.tool_calls if decisions[tc.get("id")].requires_confirmation]
         if not confirmable:
             return {"confirmation_result": "approved"}
 
         # Interrupt — pauses the graph until resume_and_stream() is called
         tools_info = [
-            {"name": tc.get("name"), "args": tc.get("args", {}), "id": tc.get("id")}
+            {
+                "name": tc.get("name"), "args": tc.get("args", {}), "id": tc.get("id"),
+                "description": policy_guard.describe_call(tc.get("name", ""), tc.get("args", {}) or {}),
+            }
             for tc in confirmable
         ]
         decision = _interrupt({"tools": tools_info, "count": len(confirmable)})
@@ -358,6 +427,12 @@ def make_confirmation_node(settings):
         # decision is the value passed to Command(resume=...) on resume
         if isinstance(decision, str) and decision.lower().startswith("deny"):
             guidance = decision[4:].lstrip(":").strip()
+            for tc in confirmable:
+                d = decisions[tc.get("id")]
+                audit_log.record(
+                    "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
+                    transport=transport, outcome="user_denied", reason=guidance,
+                )
             # Inject stub ToolMessages so LangGraph state is valid, then route to agent
             stub_msgs = [
                 ToolMessage(
@@ -378,6 +453,12 @@ def make_confirmation_node(settings):
                 "messages": stub_msgs + [ack_msg],
             }
 
+        for tc in confirmable:
+            d = decisions[tc.get("id")]
+            audit_log.record(
+                "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
+                transport=transport, outcome="user_approved",
+            )
         return {"confirmation_result": "approved"}
 
     confirmation_node.__name__ = "confirmation_node"

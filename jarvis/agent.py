@@ -43,6 +43,8 @@ from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
+from jarvis import audit_log               # Faz 4
+from jarvis.tool_registry import get_spec  # Faz 4
 
 
 # ── Phase 3: confirmation gate ────────────────────────────────────────────────
@@ -58,7 +60,19 @@ class ConfirmationRequired(Exception):
 # ── HUD activity feed callback ────────────────────────────────────────────────
 
 class _HudEventCallback(BaseCallbackHandler):
-    """Non-blocking LangChain callback → pushes tool/LLM events to the HUD feed."""
+    """Non-blocking LangChain callback → pushes tool/LLM events to the HUD feed.
+
+    Faz 4: also the execution-time half of the audit trail (the other half is
+    policy_guard's decision-time record in confirmation_node) -- on_tool_start
+    /on_tool_end/on_tool_error fire for every tool call regardless of which
+    loop invoked the graph (config["callbacks"] is built the same way in
+    chat()/chat_stream()/resume_and_stream()), so this is genuinely
+    transport-agnostic "it happened" coverage, not just HUD telemetry.
+    """
+
+    def __init__(self, transport: str = "unknown") -> None:
+        self._transport = transport
+        self._audit_pending: dict[str, tuple[str, int]] = {}  # run_id -> (tool_name, risk_level)
 
     def on_tool_start(self, serialized: dict, input_str: Any, **kwargs: Any) -> None:
         name = serialized.get("name", "tool")
@@ -68,10 +82,38 @@ class _HudEventCallback(BaseCallbackHandler):
             args = str(input_str)[:120]
         event_bus.tool_call(f"{name} → {args}", kind="tool")
 
+        run_id = kwargs.get("run_id")
+        spec = get_spec(name)
+        if spec is not None and spec.risk_level >= 2 and run_id is not None:
+            self._audit_pending[str(run_id)] = (name, spec.risk_level)
+            audit_log.record(
+                "execution_start", tool=name, risk_level=spec.risk_level,
+                transport=self._transport, args_preview=str(input_str)[:200],
+            )
+
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         s = str(output)[:160]
         if any(kw in s.lower() for kw in ("chroma", "vector", "recall", "memory", "retrieved")):
             event_bus.tool_call(s, kind="note")
+        self._record_execution_end(output, kwargs.get("run_id"))
+
+    def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
+        self._record_execution_end(error, kwargs.get("run_id"), ok=False)
+
+    def _record_execution_end(self, output: Any, run_id: Any, ok: bool | None = None) -> None:
+        if run_id is None:
+            return
+        pending = self._audit_pending.pop(str(run_id), None)
+        if pending is None:
+            return
+        name, risk_level = pending
+        out_s = str(output)
+        if ok is None:
+            ok = not (out_s.startswith("[ERROR]") or out_s.startswith("⚠") or "[BLOCKED" in out_s)
+        audit_log.record(
+            "execution_end", tool=name, risk_level=risk_level,
+            transport=self._transport, ok=ok, result_preview=out_s[:200],
+        )
 
     def on_llm_start(self, serialized: dict, prompts: list, **kwargs: Any) -> None:
         model = (
@@ -603,12 +645,15 @@ class JarvisAgent:
         image_bytes: bytes | None = None,
         image_mime: str = "image/png",
         extra_images: list[bytes] | None = None,
+        transport: str = "unknown",
     ) -> tuple[str, str]:
         """Run one turn. Returns (response_text, model_label).
 
         image_bytes   — single uploaded image (PNG/JPG); sent as multimodal block.
         extra_images  — list of PNG bytes extracted from a PDF by marker-pdf;
                         appended after the text block.
+        transport     — Faz 4: caller identity tag ("cli-text" | "api" | ...),
+                        threaded into state["transport"] for the audit log.
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
@@ -652,10 +697,15 @@ class JarvisAgent:
                 "revise_count": 0,
                 "critic_verdict": "",
                 "critique": "",
+                "transport": transport,
             }
             config = {
                 "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
-                "callbacks": [_HudEventCallback()],
+                "callbacks": [_HudEventCallback(transport)],
+                # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
+                # model stuck retrying a tool call fails clearly instead of
+                # looping unbounded.
+                "recursion_limit": self.settings.graph_recursion_limit,
             }
 
             event_bus.state("thinking")
@@ -750,12 +800,15 @@ class JarvisAgent:
         image_bytes: bytes | None = None,
         image_mime: str = "image/png",
         extra_images: list[bytes] | None = None,
+        transport: str = "unknown",
     ) -> AsyncGenerator[str, None]:
         """Stream one turn token-by-token. Yields text deltas for voice.speak_stream().
 
         image_bytes   — single uploaded image (PNG/JPG); sent as multimodal block.
         extra_images  — list of PNG bytes extracted from a PDF by marker-pdf;
                         appended after the text block.
+        transport     — Faz 4: caller identity tag ("voice-cli" | "api-stream" | ...),
+                        threaded into state["transport"] for the audit log.
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
@@ -798,10 +851,15 @@ class JarvisAgent:
                 "revise_count": 0,
                 "critic_verdict": "",
                 "critique": "",
+                "transport": transport,
             }
             config = {
                 "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
-                "callbacks": [_HudEventCallback()],
+                "callbacks": [_HudEventCallback(transport)],
+                # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
+                # model stuck retrying a tool call fails clearly instead of
+                # looping unbounded.
+                "recursion_limit": self.settings.graph_recursion_limit,
             }
 
             event_bus.state("thinking")

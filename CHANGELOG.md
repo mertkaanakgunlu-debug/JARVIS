@@ -6,6 +6,67 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Faz 4] — 2026-07-14 — Security kernel + async tools
+
+- **New `jarvis/policy_guard.py`** — transport-agnostic safety kernel (no LangGraph/LangChain
+  imports). Single choke point for "is this tool call allowed, does it need the user's OK" —
+  `jarvis/graph/nodes.py`'s `confirmation_node` calls it instead of inlining risk checks, so any
+  future direct tool dispatcher (MCP, Faz 5) can reuse the same logic rather than reimplementing it.
+  **Per-action, not per-tool (BUG-6):** the four mixed-risk `external_api` tools
+  (`google_calendar`/`gmail`/`google_drive`/`itu_mail`) have their documented read actions
+  (list/search/read/download) downgraded back to L1/no-confirm — only genuinely risky actions
+  (send/create/delete/upload/share/...) interrupt.
+- **Confirmation gate now defaults on** (`confirmation_gate_enabled=True`, was `False`) and is
+  wired into every interface, not just `/chat/confirm` (BUG-3/4): the CLI text REPL catches
+  `ConfirmationRequired` and prompts y/n + optional reason; all three voice loops (CLI `--voice`,
+  the API wakeword/PTT loop, and the `/ws` remote-audio session) detect `chat_stream()`'s
+  `__jarvis_confirm__` JSON marker via new shared helpers in `jarvis/voice/session.py` instead of
+  speaking it verbatim, speak a natural question instead, and treat the next utterance as the
+  yes/no answer (anything not recognized as affirmative denies, fail-safe). `POST /chat` now
+  catches `ConfirmationRequired` before the generic exception handler and returns a structured
+  `{"confirmation_required": true, ...}` response instead of an opaque 500
+  (BUG-confirm-payload). The system prompt (`prompts/core/02_tool_policy.md`) no longer tells the
+  model it never needs to ask (BUG-5) — it now describes the real approve/deny round-trip.
+- **Kill switch** — new `jarvis/kill_switch.py`, persisted to `data/kill_switch.json` so a trip
+  survives a restart. Scoped to L3 (external-effect) actions; vetoes inside `confirmation_node`
+  before the gate would otherwise prompt, skipping the prompt entirely since asking is pointless
+  once the operator already said stop. `/killswitch [status|on|off <reason>]` in the CLI.
+- **Append-only audit log** — new `jarvis/audit_log.py`, `data/audit_log.jsonl`. Two event kinds
+  for every risk_level ≥ 2 tool call: `decision` (policy_guard's ruling, from `confirmation_node`)
+  and `execution_start`/`execution_end` (the call actually ran + outcome, from `agent.py`'s
+  `_HudEventCallback` — the same LangChain callback attached for every transport).
+- **`python_run` reclassified L2→L3 + confirm-required (BUG-1)** — was more powerful than
+  `shell_run` (arbitrary unsandboxed Python from any absolute path) while sitting at a lower gate.
+  This is the access-control fix; true sandboxing of the subprocess itself is a deferred, not
+  claimed, hardening item.
+- **SSRF guard for `webfetch.py` (BUG-6-ssrf)** — `url_read`/`deep_web_research` now refuse
+  localhost/private/link-local/reserved ranges and cloud metadata endpoints, checked against the
+  *resolved* IP so a DNS-rebinding domain can't bypass a hostname-string check.
+- **Auth on `/system/wake` (BUG-2)** — new shared `jarvis/api_auth.py` so `api_routers/system.py`
+  can require `X-API-Key` without importing `api.py` (avoids a circular import); `/system/ping`
+  stays auth-free by design.
+- **Recursion cap + agent-node timeout (BUG-recursion, BUG-14)** — new `Settings.
+  graph_recursion_limit` (30) passed as LangGraph's `recursion_limit`; `agent_node`'s LLM call
+  wrapped in `asyncio.wait_for(timeout=Settings.agent_llm_timeout_sec)` (90s) so a wedged provider
+  surfaces a clear error instead of hanging the turn (and, in voice mode, the mic) forever.
+- **Async scheduler** — `task_executor.py`'s `ASYNC_KEYWORDS` now genuinely derives from
+  `TOOL_SPECS[...].supports_background` instead of only a hand-maintained phrase list (superset of
+  the old behavior, no regression). The five sub-agent tool bridges (`math_solve`, `write_content`,
+  `research`, `generate_code`, `geo_math`'s analyze branch) plus `todo` converted from sync
+  `@tool def` + the `_run_coro()` thread-and-fresh-event-loop bridge to native `async def` `@tool`s
+  — `_run_coro()` was dead code afterward and is deleted. Voice loops (API-mode only — the
+  standalone CLI `--voice` has no `TaskExecutor`) now hand a flagged query to `TaskExecutor` with a
+  spoken acknowledgement instead of blocking the turn in silence for up to minutes; completion adds
+  a Windows toast alongside the pre-existing FCM push.
+- **Bonus fix found live:** `TaskExecutor._run()`'s background `agent.chat()` call could raise
+  `ConfirmationRequired` (it's an `Exception` subclass) with no channel to answer it — previously
+  surfaced as a cryptic `"confirmation_required:<uuid>"` failure. Now caught specifically and
+  reworded to name the blocked action and point the user at an interactive retry.
+- **Explicitly deferred, not this phase:** no Electron/mobile UI renders a confirmation prompt from
+  the API's structured response yet (this dev machine still has no Node.js/npm on PATH — same
+  constraint as Faz 3's Electron work); `python_run` is gated, not sandboxed; voice confirmation's
+  per-call description stays in English technical form even in a Turkish session.
+
 ## [Faz 3] — 2026-07-14 — Real-time local voice + remote `/ws` audio transport
 
 - **Local voice pipeline rebuilt on `jarvis/voice/`** (new package, replaces the flat

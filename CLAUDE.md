@@ -43,24 +43,27 @@ python -m jarvis --monitor           # Background watcher only
 
 ## Safety model — read before touching tool-calling code
 
-A "Phase 3 confirmation gate" exists in `jarvis/graph/nodes.py` and is documented in
-`docs/SAFETY.md` / `docs/TOOLS.md` — **but a full review (2026-07-14) found it does not
-currently protect anything in practice**:
+**Faz 4 (2026-07-14) built the real safety kernel** — `jarvis/policy_guard.py`, gating through
+`jarvis/graph/nodes.py`'s `make_confirmation_node`, wired into all three interfaces (CLI text,
+CLI/API voice, API). Practical implication, inverted from before: **you CAN now tell the user a
+risky action (email send, calendar create/delete, shell exec, `python_run`, Drive
+upload/share/delete) will pause and ask for confirmation first — it actually does**, in every
+mode, by default (`confirmation_gate_enabled=True`). Read-only actions (list/search/...) on the
+gated tools do not interrupt (per-action, not per-tool). There's also a kill switch
+(`jarvis/kill_switch.py`, `/killswitch` in the CLI) that hard-blocks L3 actions with no prompt at
+all when tripped, and an append-only audit log (`jarvis/audit_log.py`,
+`data/audit_log.jsonl`) recording every risk_level ≥ 2 call's decision and outcome.
 
-- `confirmation_gate_enabled` defaults to `False` in `jarvis/config.py`.
-- Even when enabled, the CLI text REPL and voice loop (`jarvis/cli.py`, `jarvis/voice_api.py`)
-  never handle the `ConfirmationRequired` exception / `__jarvis_confirm__` stream marker —
-  only the FastAPI `/chat/confirm` path actually resumes a gated call.
-- The system prompt (`jarvis/prompts/core/02_tool_policy.md`) explicitly tells the model
-  "you do NOT need to ask" before any tool call, on the assumption the graph-level gate
-  covers it.
-- `python_run` executes arbitrary absolute-path Python with no sandboxing, but is classified
-  low-risk (L2, no confirmation) — more powerful than `shell_run` (L3, deny-listed, gated).
+**What's still genuinely not done** (see `docs/SAFETY.md`'s "Known limits" for the full honest
+list — don't oversell past this):
+- No Electron/mobile UI renders a confirmation prompt from the API's structured response yet —
+  only CLI text and voice actually complete the approve/deny round-trip end-to-end today.
+- `python_run`'s L2→L3 reclassification is an access-control fix, not a sandbox — the subprocess
+  itself still has no resource/network restrictions.
+- A background `TaskExecutor` job that hits a confirmable action fails with a clear message
+  (there's no channel for it to ask) rather than actually resolving the confirmation.
 
-**Practical implication:** don't tell the user (or assume) that a risky action "will ask for
-confirmation first" — today, in the CLI/voice modes, it won't; it will either silently
-execute or silently hang. See [ROADMAP.md](ROADMAP.md) P0 items before relying on this gate,
-and see the full bug list from the 2026-07-14 review for exact file/line citations.
+See `docs/SAFETY.md` for the full mechanism list and `docs/TOOLS.md` for per-tool risk levels.
 
 ## Docs map
 
