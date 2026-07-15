@@ -39,10 +39,20 @@ python -m jarvis --monitor           # Background watcher only
 
 ## Branch / source-of-truth conventions
 
-- Active development branch: **`langgraph-migration`** (not yet merged to `main`).
+- Active development branch: **`langgraph-migration`** — merged into `main` 2026-07-15 (pure
+  fast-forward; `main` had no commits of its own), and `main` is pushed to
+  `github.com/mertkaanakgunlu-debug/JARVIS`. Both branches point at the same commit; keep working
+  on `langgraph-migration` unless told otherwise.
 - `.claude/worktrees/*` are scratch branches from past Claude Code sessions — **never**
-  treat them as canonical source. There are currently 21 of them sitting on disk
-  (see [HANDOFF.md](HANDOFF.md) — cleanup needs your explicit go-ahead, not done automatically).
+  treat them as canonical source. 17 of the original 21 were confirmed fully-merged into
+  `langgraph-migration` (zero unique content) and deleted 2026-07-15. **4 remain**
+  (`claude/eager-noether-46af01`, `claude/gifted-wilbur-e021ea`, `claude/stoic-spence-2c5246`,
+  `claude/thirsty-mclean-f67665`) because they contain commits not reachable from
+  `langgraph-migration` — two look superseded (an alternate subagent migration, an alternate
+  Calendar integration) but two (`gifted-wilbur`'s eval regression suite, `stoic-spence`'s
+  rolling/hierarchical summarization) don't have an obvious equivalent in the current codebase and
+  may be worth recovering rather than deleting — see [HANDOFF.md](HANDOFF.md). Don't delete these
+  four without another explicit go-ahead.
 - `jarvis/legacy/` (the old pydantic-ai orchestrator) was retired in Faz 8 (2026-07-15) — deleted
   outright, not archived. LangGraph (`jarvis/graph/`) has been the only orchestrator since Faz 1
   of the refactor (2026-05-09); if you need the old implementation for reference, it's in git

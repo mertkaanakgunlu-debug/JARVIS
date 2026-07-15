@@ -784,12 +784,20 @@ needed a Flutter SDK not installed at the time.
   account's already-documented, pre-existing billing state — see MEMORY.md — not a code bug),
   proving the model id itself is now correct even though this account can't currently complete a
   real embed call to prove the full round-trip end to end.
-- **11 new regression tests** (`test_finance_tool.py`, `test_gcp_quota.py`,
-  `test_memory_embedding.py`, `test_todo_bg_analysis.py`) — full suite now **103/103 passing**.
-- **Still deferred, unchanged**: the 21 stray `.claude/worktrees/*`/`claude/*` scratch branches
-  (destructive, needs explicit owner go-ahead); Faz 6 (hardware-gated); Android SDK (not installed,
-  see above); BUG-25's appendix-table checkmark (the fix itself shipped in Faz 2 — this is a stale
-  table row, not an open bug, see the bug backlog appendix below).
+- **12 new regression tests** (`test_finance_tool.py`, `test_gcp_quota.py`,
+  `test_memory_embedding.py`, `test_todo_bg_analysis.py`) — full suite now **104/104 passing**.
+- **Worktree cleanup, partial**: of the 21 stray `.claude/worktrees/*`/`claude/*` scratch branches,
+  17 were confirmed via `git merge-base --is-ancestor` to be fully contained in
+  `langgraph-migration` (zero unique content) and deleted. **4 kept** — they hold commits not on
+  `langgraph-migration`: `claude/eager-noether-46af01` (5, subagent migration) and
+  `claude/thirsty-mclean-f67665` (1, Calendar integration) look superseded by different
+  implementations but weren't confirmed; `claude/gifted-wilbur-e021ea` (1, "eval regression suite —
+  85 smoke tests, 25 golden scenarios") and `claude/stoic-spence-2c5246` (7, "rolling/hierarchical
+  summarization") have no obvious equivalent in the current codebase and may be worth recovering —
+  see [HANDOFF.md](HANDOFF.md). Don't delete these four without a separate explicit go-ahead.
+- **Still deferred, unchanged**: Faz 6 (hardware-gated); Android SDK (not installed, see above);
+  BUG-25's appendix-table checkmark (the fix itself shipped in Faz 2 — this is a stale table row,
+  not an open bug, see the bug backlog appendix below).
 
 ---
 

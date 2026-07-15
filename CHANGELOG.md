@@ -38,7 +38,12 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
   anında bir smoke-test embed çağrısı eklendi (Ollama'nın reachability probe'una benzer) — gelecekte
   Google bir modeli tekrar emekliye ayırırsa bu katman artık her gerçek recall'da çökmek yerine
   hızlıca default ONNX EF'e düşecek.
-- **11 yeni regresyon testi**, toplam **103/103 test geçiyor**.
+- **21 scratch worktree branch'inden 17'si silindi** — her biri `git merge-base --is-ancestor` ile
+  `langgraph-migration`'a tamamen dahil olduğu doğrulandıktan sonra. 4 tanesi (mainline'da olmayan
+  commit'ler içerdiği için) silinmedi — ikisi muhtemelen artık gereksiz, ikisi (eval regression
+  suite, rolling/hierarchical summarization) mevcut kodda karşılığı görülmediği için ayrıca
+  incelenmeyi bekliyor.
+- **12 yeni regresyon testi**, toplam **104/104 test geçiyor**.
 
 ---
 

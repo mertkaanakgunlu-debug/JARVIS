@@ -513,7 +513,7 @@ The north-star target came from an owner-commissioned research report
 - `vault/conversations/*.md` (daily transcripts) are gitignored for privacy; the vault
   directory structure itself is tracked via `.gitkeep`.
 - `tests/` (pytest, added Faz 8, extended in the 2026-07-15 follow-up session) is the automated
-  test suite — 103 tests as of 2026-07-15, run with `pytest` from the repo root. Not exhaustive
+  test suite — 104 tests as of 2026-07-15, run with `pytest` from the repo root. Not exhaustive
   (most tool modules still have zero coverage) — extend incrementally rather than reintroducing
   throwaway scratch scripts for anything touching shared logic.
 - **`asyncio.create_task()` only holds a *weak* reference to the returned task** — a task with no
