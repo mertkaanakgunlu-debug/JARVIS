@@ -337,9 +337,16 @@ def quota_forecast(settings: "Settings") -> str:
     return "\n".join(lines)
 
 
-def quota_alert_check(settings: "Settings") -> list[str]:
-    """Return a list of alert messages for over-threshold conditions. Empty = all OK."""
-    alerts: list[str] = []
+def quota_alert_check(settings: "Settings") -> list[tuple[str, str]]:
+    """Return a list of (alert_key, message) for over-threshold conditions. Empty = all OK.
+
+    alert_key is a small, stable identity for the alert *type* (independent of
+    the live numbers embedded in message, which change every call) -- Faz 7 /
+    BUG-19: monitor.py dedups on this key, not on the message text, since the
+    exact percentage/amount fluctuates call to call and would defeat a
+    text-based dedup.
+    """
+    alerts: list[tuple[str, str]] = []
     cloud = _try_fetch_cloud_quotas(settings)
     usage = _today_cost_estimate(settings)
 
@@ -353,26 +360,29 @@ def quota_alert_check(settings: "Settings") -> list[str]:
         limit = cloud.get("rpm_flash_limit", 400)
         pct = cloud["rpm_flash_used"] / max(1, limit)
         if pct >= rpm_alert:
-            alerts.append(
+            alerts.append((
+                "rpm_flash",
                 f"⚠ Gemini Flash RPM %{pct*100:.0f} "
-                f"({int(cloud['rpm_flash_used'])}/{limit})"
-            )
+                f"({int(cloud['rpm_flash_used'])}/{limit})",
+            ))
     if cloud.get("rpm_pro_used") is not None:
         limit = cloud.get("rpm_pro_limit", 100)
         pct = cloud["rpm_pro_used"] / max(1, limit)
         if pct >= rpm_alert:
-            alerts.append(
+            alerts.append((
+                "rpm_pro",
                 f"⚠ Gemini Pro RPM %{pct*100:.0f} "
-                f"({int(cloud['rpm_pro_used'])}/{limit})"
-            )
+                f"({int(cloud['rpm_pro_used'])}/{limit})",
+            ))
 
     # Credit low alert
     if usage["credit_usd"] > 0:
         remaining_tl = usage["remaining_usd"] * tl_rate
         if remaining_tl < credit_low_tl:
-            alerts.append(
+            alerts.append((
+                "credit_low",
                 f"⚠ Vertex kredi azalıyor: ~₺{remaining_tl:,.0f} kaldı "
-                f"(eşik ₺{credit_low_tl:,.0f})"
-            )
+                f"(eşik ₺{credit_low_tl:,.0f})",
+            ))
 
     return alerts

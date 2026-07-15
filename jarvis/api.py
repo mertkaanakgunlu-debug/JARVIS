@@ -57,10 +57,13 @@ from jarvis.api_routers import system as system_router
 
 _voice_enabled: bool = False    # set by run_server() before uvicorn starts — True for --voice or --wakeword
 _voice_wakeword: bool = False   # set by run_server() before uvicorn starts
+_monitor_enabled: bool = False  # set by run_server() before uvicorn starts — True for --monitor
+_monitor_instance = None        # JarvisMonitor | None — set in lifespan() when _monitor_enabled
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _monitor_instance
     start_metrics_task()
     if _agent is not None:
         # Faz 5: connect MCP servers (Playwright, etc.) now, on uvicorn's own
@@ -73,8 +76,24 @@ async def lifespan(app: FastAPI):
         start_live_data_task(_agent, _settings)
         if _voice_enabled or _voice_wakeword:
             start_voice_task(_agent, _settings, wakeword=_voice_wakeword)
+        if _monitor_enabled:
+            # Faz 7 ("monitor-in-api", subsumed from the old refactor backlog):
+            # previously --monitor was silently ignored in --api mode (only the
+            # CLI branch in cli.py ever constructed a JarvisMonitor) -- the
+            # always-on API server is where proactive monitoring matters most,
+            # not just an interactive CLI session. agent=_agent gives it a real
+            # path into agent.chat() (via proactive_turn()) subject to
+            # settings.monitor_proactive_enabled, same as the CLI wiring.
+            from jarvis.monitor import JarvisMonitor
+            _monitor_instance = JarvisMonitor(
+                _settings, scheduler=_agent.scheduler, todo_store=_agent.todo_store, agent=_agent,
+            )
+            _monitor_instance.start()
     yield
     # ── Shutdown: archive current session so next startup begins clean ──────────
+    if _monitor_instance is not None:
+        _monitor_instance.stop()
+        _monitor_instance = None
     if _agent is not None:
         try:
             await _agent.close_mcp_tools()  # Faz 5: don't leave a launched browser process behind
@@ -689,11 +708,12 @@ async def reset(request: Request):
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-def run_server(settings: Settings, port: int = 8000, voice: bool = False, wakeword: bool = False) -> None:
+def run_server(settings: Settings, port: int = 8000, voice: bool = False, wakeword: bool = False, monitor: bool = False) -> None:
     """Start the Uvicorn server (blocking)."""
-    global _voice_enabled, _voice_wakeword
+    global _voice_enabled, _voice_wakeword, _monitor_enabled
     _voice_enabled = voice
     _voice_wakeword = wakeword
+    _monitor_enabled = monitor
 
     try:
         import uvicorn
@@ -708,6 +728,9 @@ def run_server(settings: Settings, port: int = 8000, voice: bool = False, wakewo
     print(f"\n  JARVIS API  —  http://0.0.0.0:{port}")
     print(f"  Docs        —  http://127.0.0.1:{port}/docs")
     print(f"  Auth        —  {key_status}")
-    print(f"  Model       —  {settings.vertex_model_fast if settings.use_vertex else settings.effective_cloud_model}\n")
+    print(f"  Model       —  {settings.vertex_model_fast if settings.use_vertex else settings.effective_cloud_model}")
+    if monitor:
+        print(f"  Monitor     —  proactive: {'on' if settings.monitor_proactive_enabled else 'toast/FCM only'}")
+    print()
 
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

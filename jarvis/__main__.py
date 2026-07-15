@@ -53,7 +53,7 @@ def main() -> None:
         from jarvis.api import run_server
         settings = Settings()
         port = args.port or settings.jarvis_api_port
-        run_server(settings, port=port, voice=args.voice, wakeword=args.wakeword)
+        run_server(settings, port=port, voice=args.voice, wakeword=args.wakeword, monitor=args.monitor)
     elif args.monitor and not args.voice and not args.wakeword:
         # Standalone monitor: no chat interface, just watch + notify
         from jarvis.config import Settings

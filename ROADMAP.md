@@ -29,7 +29,7 @@
 | 4 | Güvenlik çekirdeği + async araç | Otonomi/MCP/IoT ön koşulu | L | ✅ done (2026-07-14) |
 | 5 | MCP katmanı | IoT yazılım ön koşulu | M | ✅ done (2026-07-15) |
 | 6 | Fiziksel dünya / IoT | ⛔ Donanıma bağlı (Faz 0+4+5) | L + HW | ⬜ deferred |
-| 7 | Proaktiflik | Capstone; kısmen donanıma bağlı | L | ⬜ deferred |
+| 7 | Proaktiflik | Capstone; kısmen donanıma bağlı | L | 🟡 software half done (2026-07-15), sensor half deferred (Faz 6) |
 | 8 | Temizlik & konsolidasyon | — | M | ⬜ |
 
 Faz 1+2 = "hafıza + zeka" ilk bloğu (ikisi de yerel).
@@ -528,19 +528,71 @@ Needs Faz 4 (safety) + Faz 5 (ha-mcp). Owner has only an RP2040 today.
 - [ ] RP2040 (if Pico W) could become an MQTT sensor node later.
 - Matter/Thread deferred (border-router dependency); Zigbee2MQTT is enough to start.
 
-## Faz 7 — Proaktiflik (event-driven self-initiation)  ⛔ partly deferred, highest risk
+## Faz 7 — Proaktiflik (event-driven self-initiation)  🟡 software half done (2026-07-15), sensor half deferred
 
 Needs the thread-safe agent (Faz 0), durable facts (Faz 2), and — for sensor events — MQTT (Faz 6).
 
-- [ ] Give `monitor.py` a path INTO `agent.chat()` (today toast/FCM only) via the Faz 0 serialized queue.
-- [ ] Software-proactivity (calendar/email self-initiation) can start without hardware; sensor
-      proactivity waits for Faz 6.
-- [ ] MQTT event subscriber → event bus → policy-gated autonomous action; rate-limit + dedup
-      (reuse the `_notified_*` pattern in `monitor.py:41-43`) to prevent runaway loops.
-- [ ] **[BUG-19]** budget/GCP alerts have no dedup and re-fire every poll cycle (`monitor.py:390`)
-      — fold into the same dedup work.
-- All autonomous side-effects pass `policy_guard` + audit + kill-switch; physical actions default
-      to confirm-or-notify, not silent execution.
+- [x] Give `monitor.py` a path INTO `agent.chat()` (today toast/FCM only) via the Faz 0 serialized
+      queue. New `JarvisAgent.proactive_turn()` (`jarvis/agent.py`) — takes `_state_lock` exactly
+      like `chat()`/`chat_stream()`, runs the same compiled graph (same tools, same
+      `policy_guard`/kill-switch/audit_log gate, zero new gating code), but on an isolated message
+      list + dedicated LangGraph thread_id — never touches `self._history`/`_turn`/
+      `session_store.save_turn` or episodic memory, so JARVIS's internal "should I say anything?"
+      self-talk never leaks into the user's real conversation history. `JarvisMonitor` takes an
+      optional `agent=` reference (wired from both `cli.py` and, new this phase, `api.py`'s
+      `lifespan()` — see the "monitor-in-api" bullet below) and calls it via `asyncio.run()` from
+      its own daemon thread, the same bridging pattern `TaskExecutor._run()` already uses.
+- [x] Software-proactivity (calendar/email self-initiation) — new `monitor.py`'s `_maybe_proactive()`,
+      called from `_check_email()`/`_check_calendar()` alongside the existing unconditional toast.
+      Off by default (`Settings.monitor_proactive_enabled=False`) — existing toast/FCM-only behavior
+      is completely unaffected until explicitly enabled. Throttled
+      (`monitor_proactive_min_gap_sec`, default 600s) across all sources combined, so a burst of
+      unread emails after being offline can't queue a pile of LLM calls. Sensor proactivity still
+      waits for Faz 6 (no hardware).
+- [x] **Confirm-or-notify, not silent execution**: `proactive_turn()` never raises
+      `ConfirmationRequired` (no interactive channel exists for a background thread to answer it —
+      same constraint `TaskExecutor` already hits). If the graph interrupts for an L3 action, the
+      pending confirmation is discarded (never resumed, never silently executed) and reported back
+      as `kind="needs_confirmation"`; `monitor.py` turns that into a toast/push naming the gated
+      tool(s) and telling the user to ask JARVIS directly. This was a deliberate scope decision, not
+      a shortcut: the WS `confirmation_required` event + `POST /chat/confirm/{conf_id}` plumbing
+      exists, but per `docs/SAFETY.md`'s Known limits, no UI actually consumes it yet — leaving a
+      proactively-raised confirmation "pending forever" behind that dead end would be worse than
+      naming it and pointing the user at the interactive path that does work.
+- [x] **[monitor-in-api]** `--monitor` was previously silently ignored in `--api` mode (only
+      `cli.py`'s branch ever constructed a `JarvisMonitor` — see `docs/ARCHITECTURE.md`'s old "Known
+      gaps" table). `api.py`'s `lifespan()` now starts one when `run_server(..., monitor=True)`,
+      matching the `--voice`/`--wakeword` wiring shape; `__main__.py`'s `--api` branch now threads
+      `args.monitor` through. This is where proactive monitoring matters most in practice — an
+      always-on backend, not just an interactive CLI session left open.
+- [ ] MQTT event subscriber → event bus → policy-gated autonomous action — still blocked on Faz 6
+      hardware (no Zigbee coordinator dongle, no Home Assistant instance).
+- [x] **[BUG-19]** budget/GCP alerts had no dedup and re-fired every poll cycle (`monitor.py:390`).
+      Fixed: `gcp_quota.quota_alert_check()` now returns `(alert_key, message)` pairs (the message
+      text embeds live numbers that change every call, so text-based dedup wouldn't work);
+      `_check_gcp_quota()` dedups per day (a recurring daily signal — permanently suppressing after
+      the first alert would hide a real problem on day 2), `_check_finance()`'s budget-threshold
+      loop dedups per `(year, month, category)` (naturally self-clears at the start of each new
+      month, matching how a monthly budget actually resets).
+- [x] All autonomous side-effects pass `policy_guard` + audit + kill-switch (for free — `
+      proactive_turn()` runs the exact same compiled graph `chat()` does); physical actions default
+      to confirm-or-notify, not silent execution (see above). No physical/MQTT actions exist yet to
+      actually exercise this end of the constraint — enforced today for the email/calendar triggers
+      this phase actually ships.
+
+**Verify:** see [HANDOFF.md](HANDOFF.md) for the full write-up. Isolated stub-agent tier (15/15
+checks): agent=None and `monitor_proactive_enabled=False` are both true no-ops (zero behavior
+change to existing toast-only monitoring); enabled+`kind=none` calls the agent but stays silent;
+enabled+`kind=response`/`needs_confirmation` fire the correct distinct toast; throttle blocks a
+second call inside the gap window and allows one after it elapses; GCP/budget dedup each collapse
+3 synthetic poll cycles into exactly 1 toast. Real-`JarvisAgent` tier (isolated temp cwd, per
+MEMORY.md's isolate-test-data-paths lesson): a deterministically-mocked `GraphInterrupt` is caught
+and reported as `needs_confirmation` with the pending tool name, the pending confirmation is NOT
+left in `_pending_confirmations` (nothing will ever resume it), and `_state_lock` is released, not
+deadlocked; a real local-LLM (`qwen2.5:7b-instruct` via Ollama) proactive turn against a mundane
+calendar trigger completes without touching `self._history`/`_turn`/`session_store`'s saved turn
+index; a real local-LLM turn given an explicit gated-action instruction was observed to correctly
+interrupt via the real graph + real `policy_guard`, not just a mocked path.
 
 ## Faz 8 — Temizlik & Konsolidasyon
 

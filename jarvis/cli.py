@@ -962,7 +962,7 @@ def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> N
     if monitor:
         from jarvis.monitor import JarvisMonitor
         monitor_instance = JarvisMonitor(
-            settings, scheduler=agent.scheduler, todo_store=agent.todo_store
+            settings, scheduler=agent.scheduler, todo_store=agent.todo_store, agent=agent
         )
         monitor_instance.start()
         console.print(

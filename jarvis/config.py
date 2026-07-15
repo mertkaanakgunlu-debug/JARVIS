@@ -43,6 +43,21 @@ class Settings(BaseSettings):
     mcp_playwright_headless: bool = True
     mcp_servers: dict[str, dict] = {}
 
+    # Faz 7: proactive self-initiation -- monitor.py gets a real path into
+    # agent.chat() (via JarvisAgent.proactive_turn()) instead of only firing a
+    # static toast. Off by default, same caution as mcp_playwright_enabled: this
+    # is the first place a background trigger (not a user turn) can drive the
+    # full tool-calling graph, so it should be an explicit opt-in, not a silent
+    # side effect of enabling --monitor. When off, monitor behaves exactly as
+    # before (toast/FCM only) even if an agent reference is available.
+    monitor_proactive_enabled: bool = False
+    # Throttle across ALL proactive sources combined (not per-source) -- e.g. a
+    # dozen unread emails surfacing at once after being offline triggers at most
+    # one agent turn per this many seconds; the rest keep their normal toast but
+    # skip the extra proactive judgement call. Prevents a runaway loop of LLM
+    # calls, per ROADMAP.md's Faz 7 constraint.
+    monitor_proactive_min_gap_sec: int = 600
+
     # Faz 4: hard cap on LangGraph super-step recursion per turn (BUG-recursion)
     # -- without this, a model stuck in a tool-call loop (e.g. repeatedly
     # mis-calling a tool and retrying) runs unbounded instead of failing

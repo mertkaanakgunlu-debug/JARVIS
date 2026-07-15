@@ -19,6 +19,7 @@ Standalone mode (no chat):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -27,12 +28,13 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
+    from jarvis.agent import JarvisAgent
 
 logger = logging.getLogger(__name__)
 
 
 class JarvisMonitor:
-    def __init__(self, settings: "Settings", scheduler=None, todo_store=None) -> None:
+    def __init__(self, settings: "Settings", scheduler=None, todo_store=None, agent: "JarvisAgent | None" = None) -> None:
         self.settings = settings
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -41,6 +43,12 @@ class JarvisMonitor:
         self._notified_email_ids: set[str] = set()
         self._notified_event_ids: set[str] = set()
         self._notified_itu_ids: set[str] = set()   # Faz 15: ITU mail UIDs
+        # BUG-19 (Faz 7): budget/GCP alerts previously had no dedup at all and
+        # re-fired every poll cycle for as long as the condition stayed
+        # over-threshold. Keyed per-period (not permanently, unlike the sets
+        # above) — see _check_finance()/_check_gcp_quota() for why.
+        self._notified_budget_categories: set[str] = set()  # "{year}-{month:02d}:{category}"
+        self._notified_gcp_alerts: set[str] = set()          # "{YYYY-MM-DD}:{alert_key}"
 
         self._email_ok = False   # True after first successful Gmail call
         self._cal_ok = False     # True after first successful Calendar call
@@ -55,6 +63,15 @@ class JarvisMonitor:
         # Faz 13-D: TodoStore instance (injected alongside scheduler)
         self._todo_store = todo_store
         self._todo_morning_fired_date: str = ""   # YYYY-MM-DD of last morning summary
+
+        # Faz 7: optional JarvisAgent reference — gives this monitor a real path
+        # into agent.chat() (via agent.proactive_turn()) instead of only firing
+        # a static toast. None in the standalone `python -m jarvis --monitor`
+        # (no --voice/--api) mode, which is deliberately agent-less — every
+        # proactive-check call site below no-ops when this is None, so that
+        # mode's behavior is completely unchanged.
+        self._agent = agent
+        self._last_proactive_ts: float = 0.0  # time.monotonic() of the last proactive_turn() call
 
         # Faz 19A-0: FCM push (lazily initialised on first notification)
         self._fcm = None
@@ -222,6 +239,10 @@ class JarvisMonitor:
                         f"Kimden: {sender} — {subject}",
                         {"category": "email", "message_id": mid},
                     )
+                    self._maybe_proactive(
+                        f"Yeni bir okunmamış e-posta geldi.\nKimden: {sender}\nKonu: {subject}",
+                        source="email",
+                    )
                 except Exception:
                     toast("📧 Yeni E-posta", "Okunmamış bir mesajınız var.")
                     self._dispatch_push(
@@ -287,10 +308,62 @@ class JarvisMonitor:
                         {"category": "calendar", "event_id": eid},
                     )
 
+                self._maybe_proactive(
+                    f'Takvimde yaklaşan bir etkinlik var: "{title}".', source="calendar"
+                )
                 self._notified_event_ids.add(eid)
 
         except Exception as exc:
             logger.debug("Monitor calendar check error: %s", exc)
+
+    # ── Faz 7: proactive self-initiation ───────────────────────────────────────
+
+    def _maybe_proactive(self, prompt: str, source: str) -> None:
+        """Best-effort self-initiation: ask the agent whether this event is
+        worth proactively surfacing, on top of the toast that already fired
+        unconditionally above. Never raises — a slow or broken LLM call must
+        never take the monitor thread down.
+
+        No-ops unless both an agent is attached AND monitor_proactive_enabled
+        is set (off by default) — existing toast-only behavior is completely
+        unaffected until this is explicitly turned on.
+
+        Rate-limited (monitor_proactive_min_gap_sec, default 600s) across ALL
+        proactive sources combined, not per-source — deliberately coarse: the
+        goal (ROADMAP.md's own words) is "prevent runaway loops", e.g. a dozen
+        unread emails surfacing in one poll cycle after being offline, not to
+        guarantee every single item gets an LLM look. A throttled item still
+        gets its normal toast/push above; only the extra proactive judgement
+        call is skipped this cycle.
+        """
+        if self._agent is None or not getattr(self.settings, "monitor_proactive_enabled", False):
+            return
+        min_gap = getattr(self.settings, "monitor_proactive_min_gap_sec", 600)
+        now = time.monotonic()
+        if now - self._last_proactive_ts < min_gap:
+            logger.debug("Proactive check (%s) throttled", source)
+            return
+        self._last_proactive_ts = now
+        try:
+            from jarvis.notify import toast
+            outcome = asyncio.run(self._agent.proactive_turn(prompt, source=source))
+            if outcome.kind == "response":
+                toast("🤖 JARVIS'ten öneri", outcome.text[:200])
+                self._dispatch_push(
+                    "🤖 JARVIS'ten öneri", outcome.text[:200],
+                    {"category": "proactive", "source": source},
+                )
+            elif outcome.kind == "needs_confirmation":
+                tools = ", ".join(outcome.tools)
+                msg = f"Onayınız gerekiyor ({tools}) — JARVIS'e doğrudan sorun."
+                toast("🤖 JARVIS onay bekliyor", msg)
+                self._dispatch_push(
+                    "🤖 JARVIS onay bekliyor", msg,
+                    {"category": "proactive_confirm", "source": source},
+                )
+            # kind == "none": nothing worth surfacing — stay silent, by design.
+        except Exception as exc:
+            logger.debug("Proactive check (%s) error: %s", source, exc)
 
     # ── Faz 13-D: To-do reminders ──────────────────────────────────────────────
 
@@ -358,12 +431,25 @@ class JarvisMonitor:
     # ── Faz 17: GCP quota alerts ──────────────────────────────────────────────
 
     def _check_gcp_quota(self) -> None:
-        """Fire toast notifications for over-threshold GCP quota conditions."""
+        """Fire toast notifications for over-threshold GCP quota conditions.
+
+        BUG-19: previously had no dedup at all and re-fired the exact same
+        alert every poll cycle (monitor_gcp_interval_min, default 30 min) for
+        as long as the condition stayed over-threshold. Deduped per-day (not
+        permanently, unlike _notified_email_ids/_notified_event_ids) — an RPM
+        or low-credit condition is a recurring daily signal, not a one-off
+        item, so suppressing it forever after the first alert would hide a
+        real, recurring problem on day 2.
+        """
         try:
             from jarvis.notify import toast
             from jarvis.gcp_quota import quota_alert_check
-            alerts = quota_alert_check(self.settings)
-            for msg in alerts:
+            today = datetime.now().strftime("%Y-%m-%d")
+            for key, msg in quota_alert_check(self.settings):
+                dedup_key = f"{today}:{key}"
+                if dedup_key in self._notified_gcp_alerts:
+                    continue
+                self._notified_gcp_alerts.add(dedup_key)
                 toast("⚡ GCP Kota Uyarısı", msg)
                 self._dispatch_push(
                     "⚡ GCP Kota Uyarısı", msg, {"category": "gcp_quota"}
@@ -375,7 +461,15 @@ class JarvisMonitor:
     # ── Faz 16: Finance sync + budget alerts ──────────────────────────────────
 
     def _check_finance(self) -> None:
-        """Auto-sync Burgan transactions and fire budget-threshold toasts."""
+        """Auto-sync Burgan transactions and fire budget-threshold toasts.
+
+        BUG-19: the budget-threshold loop previously had no dedup and re-fired
+        the same toast every poll cycle (monitor_finance_interval_min, default
+        30 min) for the rest of the month once a category crossed its
+        threshold. Deduped per (year, month, category) — naturally self-clears
+        at the start of each new month (a fresh key), matching how a monthly
+        budget actually resets, unlike the per-day GCP alert dedup above.
+        """
         try:
             from jarvis.notify import toast
             from pathlib import Path
@@ -389,6 +483,10 @@ class JarvisMonitor:
             statuses = store.budget_status(year=now.year, month=now.month)
             for s in statuses:
                 if s["over_threshold"]:
+                    dedup_key = f"{now.year}-{now.month:02d}:{s['category']}"
+                    if dedup_key in self._notified_budget_categories:
+                        continue
+                    self._notified_budget_categories.add(dedup_key)
                     from jarvis.finance_reporter import CATEGORY_LABELS
                     label = CATEGORY_LABELS.get(s["category"], s["category"].title())
                     pct_str = f"%{s['pct']*100:.0f}"

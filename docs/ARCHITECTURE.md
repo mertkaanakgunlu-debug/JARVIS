@@ -115,6 +115,47 @@ interactive approve/deny prompt itself wasn't cleanly confirmed over piped stdin
 hand-off) — the classification/audit trail is proven live; the terminal UI round-trip needs a real
 interactive session to finish confirming.
 
+## Proactive monitoring (Faz 7 — `jarvis/monitor.py` + `JarvisAgent.proactive_turn()`)
+
+`JarvisMonitor` polls Gmail/Calendar/scheduled tasks/todos/finance/GCP quota on a background daemon
+thread and has always fired Windows toast + FCM push notifications for new items. Faz 7 gives it a
+second, opt-in capability: a real path into the tool-calling graph, so JARVIS can look at a new
+email/event and decide for itself whether it's worth proactively surfacing, instead of only a
+static "you have mail" toast.
+
+- **Entry point:** `JarvisAgent.proactive_turn(prompt, source=...)` — runs the exact same compiled
+  graph `chat()` does (same tools, same `policy_guard`/kill-switch/audit_log gate; zero new gating
+  code, same principle as the MCP layer above), on its own isolated message list + LangGraph
+  thread_id. Deliberately does **not** touch `self._history`/`_turn`/`session_store.save_turn` or
+  episodic memory — a background self-check must never leak into the user's real conversation
+  history or get replayed as prior context on their next real turn. Still takes `_state_lock`
+  (Faz 0 / BUG-8) like every other entry point, so it can never interleave with a real turn's
+  read-modify-write of shared agent state.
+- **Wiring:** `JarvisMonitor.__init__` takes an optional `agent=` reference (`None` in the
+  standalone `python -m jarvis --monitor`-only mode, which stays deliberately agent-less and
+  therefore behaviorally unchanged). `_maybe_proactive()` bridges from the monitor's own daemon
+  thread via `asyncio.run(agent.proactive_turn(...))` — the same synchronous-thread-to-fresh-loop
+  pattern `TaskExecutor._run()` already uses, not a new concurrency primitive. Called from
+  `_check_email()`/`_check_calendar()` alongside (not instead of) the existing unconditional toast.
+- **Off by default, throttled:** `Settings.monitor_proactive_enabled` (default `False`) — with it
+  off, monitor behaves exactly as before regardless of whether an agent is attached.
+  `monitor_proactive_min_gap_sec` (default 600s) rate-limits actual agent turns across all sources
+  combined, so a burst of unread emails after being offline can't queue many LLM calls at once — a
+  throttled item still gets its normal toast, just not the extra proactive judgement call.
+- **Confirm-or-notify, never silent execution:** `proactive_turn()` can never raise
+  `ConfirmationRequired` — there's no interactive channel for a background thread to answer it
+  (same constraint `TaskExecutor` already has). If the graph interrupts for an L3 action, the
+  pending confirmation is discarded — never resumed, never silently executed — and reported back as
+  `kind="needs_confirmation"`; the monitor turns that into a toast naming the gated tool(s) and
+  pointing the user at asking JARVIS directly, rather than leaving a confirmation "pending" behind
+  a WS event + `/chat/confirm/{conf_id}` round-trip that (per `docs/SAFETY.md`) no UI actually
+  consumes yet.
+- **Monitor now also runs in `--api` mode** (`api.py`'s `lifespan()`, gated by
+  `run_server(..., monitor=True)`) — previously `--monitor` was silently ignored under `--api`; only
+  the CLI branch ever constructed a `JarvisMonitor`. This closes that gap (see the Known gaps table
+  above) and matters more than the CLI case in practice, since the API server is the long-running
+  process a phone/HUD actually talks to.
+
 ## Sub-agents (pydantic-ai, bridged via `_run_coro`)
 
 | Tool name | Agent | File |
@@ -235,6 +276,6 @@ maintained version of this list; updated 2026-07-14)
 | Monolithic `system.md` prompt | Phase 1 | ✅ shipped 2026-05-24 (`jarvis/prompts/core/*.md` + `prompt_loader.py`) |
 | Memory retrieval duplicated in `agent.py` | Phase 4 | ✅ shipped 2026-05-24 (`jarvis/context_builder.py`) |
 | `TaskExecutor` in-memory only (lost on restart) | Phase 5 | ⬜ not started |
-| `JarvisMonitor` not started in `--api` mode | Phase 6 | ⬜ not started |
+| `JarvisMonitor` not started in `--api` mode | Phase 6 | ✅ shipped 2026-07-15 (new-plan Faz 7 — `api.py`'s `lifespan()` now starts one when `run_server(..., monitor=True)`) |
 | No voice barge-in / TTS interruption | Phase 7 | ✅ shipped 2026-07-14 (new-plan Faz 3 — `jarvis/voice/engine.py`) |
 | Sub-agents still on pydantic-ai | Phase 8 | ⬜ not started |

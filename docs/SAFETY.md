@@ -1,10 +1,12 @@
 # J.A.R.V.I.S. — Safety & Confirmation Model
 
-> Updated 2026-07-15 (Faz 5). Phase 2 (ToolSpec metadata, commit `166a205`) and Phase 3
+> Updated 2026-07-15 (Faz 7). Phase 2 (ToolSpec metadata, commit `166a205`) and Phase 3
 > (confirmation gate node, commit `7e7e471`) shipped 2026-05-24 but, per the 2026-07-14 review,
 > didn't protect anything end-to-end. **Faz 4 closed that gap** — see "What Faz 4 changed" below.
 > **Faz 5 extended it to a second, dynamically-discovered tool source (MCP)** without changing the
-> gate itself at all — see "What Faz 5 changed" below.
+> gate itself at all — see "What Faz 5 changed" below. **Faz 7 added a second entry point into the
+> graph (background-initiated, not user-typed turns) through the same gate, and surfaced a real
+> (partially, not fully, mitigated) gap at the L2 level** — see "What Faz 7 changed" below.
 > Treat this file as current; if it and the code disagree, trust the code and fix this file.
 
 ## Current safety mechanisms
@@ -92,6 +94,46 @@ exact action tables.
   of what was about to be clicked, undermining the informed-consent point of asking at all.
 - No change to the gate's mechanics, the kill switch, or the audit log — see the `policy_guard`
   kernel row above for why none of those needed to change.
+
+## What Faz 7 changed
+
+- New `JarvisAgent.proactive_turn()` — a second entry point into the compiled graph, alongside
+  `chat()`/`chat_stream()`, for **background-initiated** turns (`jarvis/monitor.py` deciding "is
+  this new email/event worth surfacing?"), not user-typed ones. Runs the exact same graph, same
+  `policy_guard`/kill-switch/audit_log gate — **zero changes to any of them**, same principle as
+  the MCP layer (Faz 5): a new tool/transport source is just more traffic through one existing
+  choke point, not a reason to add a second one. Off by default
+  (`Settings.monitor_proactive_enabled=False`).
+- **Confirm-or-notify, not silent execution, for L3**: `proactive_turn()` can never raise
+  `ConfirmationRequired` the way `chat()` does — there's no interactive channel for a background
+  thread to answer it (same constraint `TaskExecutor` already has, see above). If the graph
+  interrupts for an L3 action, the pending confirmation is discarded (never resumed, never silently
+  executed) and reported back as `kind="needs_confirmation"`; `monitor.py` turns that into a toast
+  naming the gated tool(s) and telling the user to ask JARVIS directly, instead of leaving a
+  confirmation dangling behind a `POST /chat/confirm/{conf_id}` round-trip that (see Known limits
+  below) no UI actually completes yet.
+- **Live finding, not theoretical — a real gap at L2, honestly documented, not fully closed**: a
+  real verification run against local `qwen2.5:7b-instruct` gave `proactive_turn()` a mundane
+  calendar-event trigger and the model hallucinated an unrelated `procedure_save` call. That tool is
+  `risk_level=2` (`local_write`, `requires_confirmation=False`) — by this document's own existing,
+  deliberate design ("kill switch is L3-only"), L2 writes bypass the gate for a normal, human-driven
+  turn, where a person is present to notice and course-correct. A background self-check has nobody
+  watching, so this is a real behavioral gap Faz 7 newly exposes (not introduces — the L2 no-gate
+  design already existed): a misjudging or hallucinating model can cause a silent local side effect
+  (`procedure_save`, `todo`, `file_write`, `spotify`, ...) with no confirmation and no one present to
+  catch it. **Mitigated, not eliminated**: `_proactive_system_prompt()` (`jarvis/agent.py`) now
+  explicitly forbids calling any creating/saving/sending/modifying tool during a proactive check —
+  investigation must stay read-only, a suggested action belongs in the reply text, not a live tool
+  call — and a re-run against the same model with the same trigger no longer reproduced the
+  hallucinated call. This is a prompt-level mitigation on a non-deterministic model, not a structural
+  guarantee the way the L3 gate is a structural guarantee — it narrows the risk, it doesn't
+  close it the way policy_guard closes the L3 case. A structural fix (e.g. a reduced,
+  read-only-only tool set specifically for proactive turns) would close it properly but wasn't
+  built this phase — flagged here rather than left undiscovered.
+- **`--monitor` now actually starts in `--api` mode** (`api.py`'s `lifespan()`) — previously silently
+  ignored there; only the CLI branch ever constructed a `JarvisMonitor`. Matters here because the API
+  server, not an interactive CLI session, is where this new autonomous entry point runs continuously
+  in practice.
 
 ## Known limits (honest, not aspirational)
 

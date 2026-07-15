@@ -371,6 +371,58 @@ The north-star target came from an owner-commissioned research report
     pydantic-settings automatically) for anything else — e.g. Faz 6's ha-mcp should need a
     `MCP_SERVERS` entry, not new Python code.
 
+- **Proactive self-initiation (Faz 7, 2026-07-15):** `JarvisAgent.proactive_turn()` gives
+  `jarvis/monitor.py` a real path into the tool-calling graph — design decisions worth knowing
+  before touching any of it:
+  - **Isolated from the real conversation on purpose.** `proactive_turn()` runs its own message
+    list (`[SystemMessage(_proactive_system_prompt(...)), HumanMessage(prompt)]`) and its own
+    LangGraph thread_id, and deliberately never touches `self._history`/`_turn`/
+    `session_store.save_turn` or episodic memory (`self.memory.store()`). Reusing `chat()` itself
+    (or feeding `self._history` in) was considered and rejected — a background "should I say
+    anything?" self-check becoming a visible, persisted turn in the user's actual session history
+    would confuse every subsequent turn's context and get replayed as prior conversation on
+    session resume. It still takes `_state_lock` (BUG-8) like every real entry point, so it can't
+    interleave with a real turn's read-modify-write of shared agent state.
+  - **Never raises `ConfirmationRequired` — by design, not an oversight.** There is no interactive
+    channel for a background thread to answer one (same constraint `TaskExecutor._run()` already
+    documented for user-initiated async tasks). A `GraphInterrupt` is caught, the pending
+    confirmation is discarded (never stored in `self._pending_confirmations`, never resumable), and
+    reported back as `ProactiveOutcome(kind="needs_confirmation", tools=[...])` so `monitor.py` can
+    notify instead. Deliberately does NOT use the `POST /chat/confirm/{conf_id}` +
+    `event_bus.confirmation_required` plumbing that already exists for this — per docs/SAFETY.md,
+    no UI actually consumes that event yet, so a resumable-but-nothing-resumes-it confirmation would
+    just leak forever; naming the gated action in a notification and pointing at the interactive
+    path (which *does* work end-to-end) is more honest than pretending a dead-end round-trip is a
+    real feature.
+  - **A live verification run found a real gap the design didn't originally account for**: local
+    `qwen2.5:7b-instruct`, given a mundane calendar-event trigger, hallucinated an unrelated
+    `procedure_save` tool call. `procedure_save` is `risk_level=2` (`local_write`,
+    `requires_confirmation=False`) — by policy_guard's own pre-existing, deliberate design ("kill
+    switch is L3-only"), L2 writes execute without confirmation for a normal human-driven turn,
+    where a person is present to notice. A background self-check has nobody watching, so this is a
+    real gap Faz 7 newly *exposes* (the L2-no-gate design isn't new; being reachable with nobody
+    watching is). Mitigated by tightening `_proactive_system_prompt()` to explicitly forbid any
+    creating/saving/sending/modifying tool call during a proactive check (investigation must stay
+    read-only; a suggested action goes in the reply text, not a live tool call) — this is a
+    prompt-level mitigation on a non-deterministic model, NOT a structural guarantee the way the L3
+    gate is one. Don't describe this as "fixed" if asked — it's narrowed, not closed. A real
+    structural fix (a separate, read-only-only tool set for proactive turns, built via its own
+    `build_graph()`/`get_llm(..., tools=...)` call) would close it properly; not built this phase —
+    real added complexity (a second compiled graph to keep in sync with the main one on every
+    model-switch/MCP-connect) for a feature that ships fully off by default
+    (`monitor_proactive_enabled=False`).
+  - **Rate-limited across ALL proactive sources combined, not per-source, and deliberately coarse.**
+    `monitor_proactive_min_gap_sec` (default 600s) throttles actual `proactive_turn()` calls; a
+    throttled item still gets its normal toast, just skips the extra LLM judgement call. A burst of
+    e.g. a dozen unread emails after being offline will only get ONE of them looked at per gap
+    window — accepted trade-off (ROADMAP.md's own words: "prevent runaway loops" is the goal, not
+    "guarantee every item gets reviewed").
+  - **`--monitor` now actually starts under `--api`** (`api.py`'s `lifespan()`, gated by
+    `run_server(..., monitor=True)`) — previously silently ignored there (`docs/ARCHITECTURE.md`'s
+    Known-gaps table had this tracked as unstarted since the original refactor backlog). This
+    matters more than the CLI case: the API server is the long-running process a phone/HUD actually
+    talks to, so it's where proactive monitoring needs to run to be useful in practice.
+
 ## Known permanently-true gotchas
 
 - `.env` is never committed (gitignored); `.env.example` is the template.

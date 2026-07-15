@@ -6,6 +6,43 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Faz 7] — 2026-07-15 — Proaktiflik (software half)
+
+- **New `JarvisAgent.proactive_turn()`** — gives `jarvis/monitor.py` a real path into the
+  tool-calling graph (previously toast/FCM notifications only). Runs the exact same compiled graph
+  `chat()` does (same tools, same `policy_guard`/kill-switch/audit_log gate — zero changes to any of
+  them), on an isolated message list + dedicated LangGraph thread_id that never touches
+  `self._history`/`_turn`/`session_store.save_turn` or episodic memory, so JARVIS's background
+  self-talk never leaks into the user's real conversation. Serialized via the Faz 0 `_state_lock`
+  like every other entry point.
+- **Calendar/email self-initiation**: `monitor.py`'s `_check_email()`/`_check_calendar()` now also
+  call `_maybe_proactive()` alongside their existing unconditional toast — off by default
+  (`MONITOR_PROACTIVE_ENABLED=False`), throttled across all sources combined
+  (`MONITOR_PROACTIVE_MIN_GAP_SEC`, default 600s) so a burst of unread emails can't queue many LLM
+  calls at once.
+- **Confirm-or-notify, not silent execution**: `proactive_turn()` never raises
+  `ConfirmationRequired` — no interactive channel exists for a background thread to answer it (same
+  constraint `TaskExecutor` already has). A graph interrupt for an L3 action is discarded (never
+  resumed, never executed) and reported back so `monitor.py` can notify instead of leaving a
+  confirmation pending behind a round-trip nothing consumes yet.
+- **`--monitor` now actually works under `--api`** — previously silently ignored (only `cli.py`'s
+  branch ever started a `JarvisMonitor`). `api.py`'s `lifespan()` starts one when
+  `run_server(..., monitor=True)`; `__main__.py` threads `args.monitor` through.
+- **[BUG-19] fixed** — budget/GCP quota alerts had no dedup and re-fired every poll cycle for as
+  long as the condition stayed over-threshold. `gcp_quota.quota_alert_check()` now returns
+  `(alert_key, message)` pairs; GCP alerts dedup per day, budget alerts dedup per
+  `(year, month, category)` — each self-clears on its own natural period rather than needing manual
+  reset logic.
+- **Live finding, honestly documented, not fully closed**: a real proactive turn against local
+  `qwen2.5:7b-instruct` hallucinated an unrelated `procedure_save` call (L2, no-confirm by existing
+  design) for a mundane calendar trigger. `_proactive_system_prompt()` now explicitly forbids any
+  creating/saving/sending/modifying tool call during a proactive check — investigation stays
+  read-only, a suggested action goes in the reply text instead. A prompt-level mitigation on a
+  non-deterministic model, not a structural guarantee like the L3 gate — see `docs/SAFETY.md`'s
+  "What Faz 7 changed" for the honest residual-risk writeup.
+- **Sensor/MQTT proactivity stays deferred** — still blocked on Faz 6 hardware (no Zigbee
+  coordinator dongle, no Home Assistant instance).
+
 ## [Faz 5] — 2026-07-15 — MCP client layer
 
 - **New `jarvis/mcp_integration.py`** (`McpToolManager`, built on the official
