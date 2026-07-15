@@ -50,23 +50,35 @@ def _get_models():
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
-def _cache_path(pdf_path: Path, cache_dir: Path) -> Path:
-    key = hashlib.sha256(str(pdf_path.resolve()).encode()).hexdigest()[:8]
-    return cache_dir / f"{pdf_path.stem}_{key}.md"
+def _content_key(pdf_path: Path) -> str:
+    """Content-derived cache key.
+
+    Keying on the resolved path string (the original approach) relies on file
+    mtime to detect a changed file at the same path — but mtime is not reliable
+    (restoring a backup, `cp -p`, extracting an archive, or a browser download
+    that preserves the source's Last-Modified header can all leave a *newer*
+    file with an *older* mtime than the stale cached conversion, so the cache
+    would silently keep serving the wrong PDF's content forever). Hashing the
+    actual bytes makes a changed file get a different key regardless of mtime.
+    """
+    h = hashlib.sha256()
+    with open(pdf_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:8]
 
 
-def _is_cache_fresh(pdf_path: Path, cached: Path) -> bool:
-    return cached.exists() and cached.stat().st_mtime >= pdf_path.stat().st_mtime
+def _cache_path(pdf_path: Path, cache_dir: Path, content_key: str) -> Path:
+    return cache_dir / f"{pdf_path.stem}_{content_key}.md"
+
+
+def _img_cache_dir(pdf_path: Path, cache_dir: Path, content_key: str) -> Path:
+    return cache_dir / f"{pdf_path.stem}_{content_key}_images"
 
 
 # ── Conversion backends ────────────────────────────────────────────────────────
 
-def _img_cache_dir(pdf_path: Path, cache_dir: Path) -> Path:
-    key = hashlib.sha256(str(pdf_path.resolve()).encode()).hexdigest()[:8]
-    return cache_dir / f"{pdf_path.stem}_{key}_images"
-
-
-def _convert_marker(pdf_path: Path, cache_dir: Path) -> tuple[str, list[bytes]]:
+def _convert_marker(pdf_path: Path, cache_dir: Path, content_key: str) -> tuple[str, list[bytes]]:
     """Convert PDF to markdown + figure PNGs via marker-pdf, write to cache.
 
     Returns (markdown_text, [png_bytes, ...]).
@@ -85,13 +97,13 @@ def _convert_marker(pdf_path: Path, cache_dir: Path) -> tuple[str, list[bytes]]:
         md = text_from_rendered(rendered)
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    _cache_path(pdf_path, cache_dir).write_text(md, encoding="utf-8")
+    _cache_path(pdf_path, cache_dir, content_key).write_text(md, encoding="utf-8")
 
     # Extract and cache figure images
     img_bytes_list: list[bytes] = []
     raw_images = getattr(rendered, "images", None) or {}
     if raw_images:
-        idir = _img_cache_dir(pdf_path, cache_dir)
+        idir = _img_cache_dir(pdf_path, cache_dir, content_key)
         idir.mkdir(parents=True, exist_ok=True)
         for i, (name, pil_img) in enumerate(raw_images.items()):
             buf = io.BytesIO()
@@ -164,11 +176,14 @@ def read_pdf_multimodal(
     if cache_dir is None:
         cache_dir = Path("data") / "pdf_cache"
 
-    cached_md = _cache_path(p, cache_dir)
-    idir = _img_cache_dir(p, cache_dir)
+    content_key = _content_key(p)
+    cached_md = _cache_path(p, cache_dir, content_key)
+    idir = _img_cache_dir(p, cache_dir, content_key)
 
     # ── Cache hit ──────────────────────────────────────────────────────────────
-    if _is_cache_fresh(p, cached_md):
+    # content_key is derived from the PDF's actual bytes, so a cache-file hit
+    # here is inherently fresh — no mtime comparison needed (see _content_key).
+    if cached_md.exists():
         content = cached_md.read_text(encoding="utf-8")
         header = f"[PDF→MD cache hit: {p.name}]\n\n"
         if len(content) > MAX_CHARS:
@@ -184,7 +199,7 @@ def read_pdf_multimodal(
     if _marker_available():
         try:
             log.info(f"Converting {p.name} with marker-pdf...")
-            md, images = _convert_marker(p, cache_dir)
+            md, images = _convert_marker(p, cache_dir, content_key)
             header = f"[marker-pdf conversion: {p.name}]\n\n"
             if len(md) > MAX_CHARS:
                 md = md[:MAX_CHARS] + f"\n\n[TRUNCATED — {len(md):,} chars total, showing first {MAX_CHARS:,}]"

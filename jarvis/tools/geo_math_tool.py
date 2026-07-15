@@ -195,7 +195,7 @@ def _wave_simulate_2d_devito(velocity_grid, source_pos, receivers, duration, nz,
     except Exception as exc:
         logger.debug("Devito simulation failed: %s — falling back to NumPy FDM", exc)
         return _wave_simulate_2d_numpy(velocity_grid, [source_pos[0], source_pos[1]],
-                                        nz, nx, dz, dx, dt, 0.5)
+                                        nz, nx, dz, dx, dt, duration)
 
 
 def _wave_simulate_2d_numpy(velocity_grid, source_pos, nz, nx, dz, dx, dt, duration) -> str:

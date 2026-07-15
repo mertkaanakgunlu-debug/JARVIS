@@ -3,219 +3,227 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-15 — Faz 7 (Proaktiflik — software half)
+## Last session: 2026-07-15 — Faz 8 (Temizlik & Konsolidasyon, non-destructive scope)
 
-**Context:** Owner said "Faz 6 ile devam et" (continue with Faz 6). ROADMAP.md marks Faz 6 (Fiziksel
-Dünya / IoT) `⛔ deferred` — hardware-gated (Zigbee coordinator dongle + a Home Assistant instance,
-owner has only an RP2040) — and the prior session's own HANDOFF explicitly recommended Faz 7 as the
-legitimate next candidate if Faz 6 stayed blocked. Asked and confirmed: owner picked Faz 7 (not
-"I have the hardware now," not "do the HA-container prep anyway"). Second question — Faz 5 was
-still fully uncommitted from the prior session (19 files) — owner picked "commit Faz 5 first,"
-matching the established one-phase-per-commit pattern, so it was committed (`eaa9c25`) before any
-Faz 7 diff started.
+**Context:** Owner said "sıradaki faz ile devam et" (continue with the next phase). Two things
+needed resolving before starting: (1) Faz 7 was still fully uncommitted from the prior session —
+asked and confirmed "commit Faz 7 first," matching the established one-phase-per-commit pattern,
+so it was committed (`1039a1b`) before any Faz 8 diff began. (2) Per the phase overview table, Faz
+8 is the only remaining phase that isn't hardware-gated (Faz 6) — but it bundles several
+sub-tasks, two of which (merge `langgraph-migration` → `main`, delete the 21 stray
+`.claude/worktrees/*` branches) are pre-flagged in this repo's own docs as needing explicit owner
+go-ahead. Asked and confirmed: full non-destructive scope (legacy retirement + minimal test suite
++ all 9 remaining P2 bugs + electron/mobile hygiene), explicitly excluding the merge and worktree
+cleanup.
 
 ## What happened this session
 
-Faz 7's own ROADMAP text splits cleanly into a software half (no hardware needed) and a sensor half
-(needs Faz 6's MQTT). Only the software half was in scope this session — MQTT stays untouched.
-
-1. **New `JarvisAgent.proactive_turn()`** (`jarvis/agent.py`) — the actual "give monitor.py a path
-   into agent.chat()" deliverable. Runs the exact same compiled graph `chat()`/`chat_stream()` do
-   (same tools, same `policy_guard`/kill-switch/audit_log gate — **zero changes to any of them**,
-   same principle Faz 5's MCP layer already established: a new traffic source into one existing
-   choke point, not a reason to add a second one), but on an **isolated** message list
-   (`[SystemMessage(_proactive_system_prompt(...)), HumanMessage(prompt)]`) and a dedicated
-   LangGraph thread_id — deliberately never touches `self._history`/`_turn`/
-   `session_store.save_turn` or episodic memory, so JARVIS's background "should I say anything?"
-   self-talk can never leak into the user's real conversation history or get replayed as prior
-   context on their next real turn. Still takes `_state_lock` (Faz 0 / BUG-8) like every other entry
-   point. Returns a new `ProactiveOutcome(kind="none"|"response"|"needs_confirmation", text=, tools=)`
-   dataclass rather than raising/returning text directly, so `monitor.py` can react to each case
-   distinctly without string-sniffing.
-2. **Never raises `ConfirmationRequired`** — there's no interactive channel for a background thread
-   to answer one (same constraint `TaskExecutor._run()` already documented). A `GraphInterrupt` is
-   caught, the pending confirmation is **discarded** (never stored in `self._pending_confirmations`,
-   never resumable — deliberately not reusing the `POST /chat/confirm/{conf_id}` + `event_bus`
-   plumbing, since per `docs/SAFETY.md` no UI actually consumes that event yet; a "resumable but
-   nothing resumes it" confirmation would just leak forever) and reported back as
-   `kind="needs_confirmation"`. This is the concrete "confirm-or-notify, not silent execution"
-   mechanism the ROADMAP's Faz 7 text asked for.
-3. **`monitor.py` wiring**: `JarvisMonitor.__init__` gained an optional `agent: JarvisAgent | None`
-   param (`None` in the standalone `python -m jarvis --monitor`-only mode, which stays deliberately
-   agent-less — confirmed unchanged behavior there). New `_maybe_proactive(prompt, source)` bridges
-   from the monitor's own daemon thread to `agent.proactive_turn()` via `asyncio.run(...)` — the
-   same synchronous-thread-to-fresh-loop pattern `TaskExecutor._run()` already uses, not a new
-   concurrency primitive. Called from `_check_email()`/`_check_calendar()` **alongside** (not
-   instead of) the existing unconditional toast. Off by default
-   (`Settings.monitor_proactive_enabled=False` — existing toast-only behavior is completely
-   unaffected until explicitly turned on) and throttled across all sources combined
-   (`monitor_proactive_min_gap_sec`, default 600s) so a burst of unread emails after being offline
-   can't queue many LLM calls at once.
-4. **`[monitor-in-api]`** — `--monitor` was previously silently ignored under `--api` (only
-   `cli.py`'s branch ever constructed a `JarvisMonitor`; tracked as an explicit "Known gap" in
-   `docs/ARCHITECTURE.md` since the original refactor backlog, and literally named
-   "monitor-in-api...subsumed...into Faz 7" in ROADMAP.md's closing note). `api.py`'s `lifespan()`
-   now starts one (with `agent=_agent`) when `run_server(..., monitor=True)`; `__main__.py`'s
-   `--api` branch now threads `args.monitor` through. This matters more than the CLI case in
-   practice — the API server is the long-running process a phone/HUD actually talks to.
-5. **[BUG-19] fixed** — budget/GCP quota alerts had no dedup at all and re-fired the identical toast
-   every poll cycle for as long as a condition stayed over-threshold.
-   `gcp_quota.quota_alert_check()` now returns `(alert_key, message)` pairs instead of bare strings
-   (the message text embeds live numbers that change every call — e.g. a fluctuating RPM percentage
-   — so a text-based dedup wouldn't actually dedup). `_check_gcp_quota()` dedups per day (RPM/credit
-   conditions are a recurring daily signal — permanently suppressing after the first alert would
-   hide a real problem on day 2); `_check_finance()`'s budget-threshold loop dedups per
-   `(year, month, category)` (naturally self-clears at the start of each new month, matching how a
-   monthly budget actually resets — no explicit reset code needed).
-6. **A real, live finding during verification — caught, mitigated, honestly documented, NOT fully
-   closed:** a real `proactive_turn()` call against local `qwen2.5:7b-instruct`, given a mundane
-   calendar-event trigger, hallucinated an unrelated `procedure_save` tool call (fabricated a
-   "budget_chart_report" procedure that had nothing to do with the prompt). `procedure_save` is
-   `risk_level=2` (`local_write`, `requires_confirmation=False`) — by `policy_guard`'s own
-   pre-existing, deliberate design ("kill switch is L3-only"), L2 writes execute without
-   confirmation for a normal human-driven turn, where a person is present to notice and
-   course-correct. A background self-check has nobody watching, so this is a real gap Faz 7 newly
-   *exposes* (the L2-no-gate design isn't new; being reachable with nobody watching is).
-   **Mitigated**: `_proactive_system_prompt()` now explicitly forbids calling any
-   creating/saving/sending/modifying tool during a proactive check — investigation must stay
-   read-only, a suggested action belongs in the reply text, not a live tool call. Re-ran the
-   identical trigger against the same model after the prompt change: the hallucinated tool call did
-   not reproduce (the model gave a text-only, if slightly awkward, response instead — see
-   Verification below). **This is a prompt-level mitigation on a non-deterministic model, not a
-   structural guarantee the way the L3 gate is one** — narrowed, not closed. A real structural fix
-   (a separate, read-only-only tool set for proactive turns, via its own `build_graph()` call) would
-   close it properly; not built this session — real added complexity (a second compiled graph to
-   keep in sync with the main one on every model-switch/MCP-connect) for a feature that ships fully
-   off by default. Documented in `docs/SAFETY.md`'s new "What Faz 7 changed" section, `MEMORY.md`,
-   and `CLAUDE.md`'s safety paragraph — **read `docs/SAFETY.md` before assuming proactive turns are
-   as safe as interactive ones.**
-7. **Docs brought fully in sync**: `ROADMAP.md`'s Faz 7 section (bullets checked off, full verify
-   writeup, phase-overview table row), `docs/ARCHITECTURE.md` (new "Proactive monitoring" section +
-   the `JarvisMonitor`-in-`--api` Known-gaps row flipped to done), `docs/SAFETY.md` (new "What Faz 7
-   changed" section with the honest L2 residual-risk writeup), `MEMORY.md` (design-decisions section
-   mirroring the Faz 4/5 ones, same residual-risk detail), `CLAUDE.md` (safety-model paragraph +
-   "what's still genuinely not done" bullet), `CHANGELOG.md` (new entry), `.env.example` (new
-   `MONITOR_PROACTIVE_ENABLED`/`MONITOR_PROACTIVE_MIN_GAP_SEC`, documented — note: no other
-   pre-existing `monitor_*` setting was previously documented in `.env.example` either; only the two
-   new ones were added, not a retroactive full pass).
+1. **Retired `jarvis/legacy/`** — confirmed via grep first (nothing outside the directory itself
+   imported it) then `git rm -r`'d the old pydantic-ai orchestrator and the dead
+   `jarvis/prompts/system.md` pointer file outright, not archived. Updated every doc that
+   referenced either path (`CLAUDE.md`, `ROADMAP.md`, `MEMORY.md`, `ProjectState.md`,
+   `docs/SAFETY.md`, `README.md`) to reflect the deletion; both are recoverable from git history
+   before this commit if ever needed for reference.
+2. **New minimal test suite** — `tests/` (pytest + pytest-asyncio, added to `requirements.txt`;
+   neither was previously installed). 92 tests across 10 files:
+   - `test_policy_guard.py` (20) — risk classification, the BUG-6 per-action read/write downgrade
+     for the four mixed-risk external_api tools, kill-switch veto scoping (L3-only, never blocks
+     local writes or downgraded reads), the unregistered-tool fail-safe.
+   - `test_session_store.py` (9) — no-duplication across turn buckets and `last_turn_idx`
+     resumption (the Faz 0 bonus fixes, never previously left a persisted test), a rollback-on-
+     failure atomicity test (via a connection proxy — `sqlite3.Connection` methods can't be
+     monkeypatched directly on an instance, confirmed live), a concurrent 3-writers×3-readers
+     stress test.
+   - `test_provider_router.py` (8) — **the offline-failover proof**: with zero cloud credentials
+     configured, both `fast` and `reasoning` roles resolve to bare local Ollama, not a fallback
+     wrapper around nothing; with cloud configured, local Ollama is confirmed always last in the
+     `reasoning` fallback chain. No network access needed — constructing a `ChatOpenAI`/
+     `ChatGoogleGenerativeAI` client doesn't itself call out to Ollama or Google.
+   - `test_kill_switch.py` (6), `test_usage_tracker.py` (7) — see bug fixes below; these are the
+     regression tests for the two cross-process fixes.
+   - One regression test file per remaining bug fix (`test_files_tool.py`, `test_calendar_tool.py`,
+     `test_pdf_tool.py`, `test_geo_math_tool.py`, `test_cli_model_switch.py`,
+     `test_graph_critic_node.py`, `test_api_upload.py`).
+   - New `tests/conftest.py`'s `isolated_cwd` fixture is the enforcement point for this repo's own
+     isolate-test-data-paths lesson (MEMORY.md) — chdir's into a fresh `tmp_path` AND resets
+     `kill_switch`'s module-level `_cache`, since that cache is keyed off cwd-relative state and
+     would otherwise leak between tests. Config: `[tool.pytest.ini_options]` in `pyproject.toml`
+     (`testpaths = ["tests"]`, `asyncio_mode = "auto"`). Run with `pytest` from repo root.
+3. **9 P2 bugs fixed**, each verified live (not just read-and-assumed) before being formalized into
+   a test — see `ROADMAP.md`'s Faz 8 section for the full per-bug writeup:
+   - **BUG-20** `file_write` ValueError on home paths (`tools/files.py`) — new `_display_path()`
+     helper.
+   - **BUG-21** calendar dedup hardcoded `+03:00` (`tools/calendar.py`) — now `zoneinfo`-based,
+     DST-correct for any configured timezone, not just coincidentally-correct Istanbul.
+   - **BUG-itu** IMAP connection leak on login failure (`tools/itu_mail.py`) — `MailBox(host,
+     port)` opens the socket in `__init__`; now closed via `.logout()` if `.login()` raises.
+   - **BUG-pdf** cache keyed on path not content (`tools/pdf.py`) — new `_content_key()` hashes
+     file bytes; a same-path content swap with an *older* mtime (restored backup, archive
+     extraction) no longer serves stale cached text forever.
+   - **BUG-geomath** Devito fallback hardcodes `duration=0.5` (`tools/geo_math_tool.py`) — the
+     runtime-failure fallback (not just "Devito not installed") now passes through the actual
+     requested duration.
+   - **BUG-modelswitch** unanchored `"pro" in text` substring hijack (`cli.py`) — ordinary
+     messages containing "proje"/"problem"/"program"/etc. were silently swallowed into a model
+     switch (the CLI `continue`s after a detected switch, dropping the user's real message
+     entirely). Fixed with `\b`-anchored word-boundary regex per keyword; Turkish
+     apostrophe-suffixed forms ("Pro'ya") still match correctly.
+   - **BUG-emptyresp** empty LLM response saved as success (`graph/nodes.py`) — `critic_node`'s
+     fast-path used to accept an empty response unconditionally regardless of revision budget; now
+     redirects for a retry when budget remains, substitutes a visible message only once budget is
+     truly exhausted.
+   - **BUG-upload** `/chat/upload` no size cap + no cleanup (`api.py`) — chunked read with a
+     50 MB cap (413 before buffering an oversized file), cleanup wired into both the PDF branch
+     (immediate, after synchronous extraction) and the Excel/CSV/Word branch (in the SSE
+     generator's `finally`, since the agent may read the file at any point while streaming).
+   - **BUG-usage** `UsageTracker` clobbers across processes (`usage.py`) — `record()` now re-reads
+     the on-disk total fresh immediately before merging its delta in, under a new lock. Narrows the
+     failure window to a brief TOCTOU race rather than "guaranteed loss whenever two processes are
+     alive together" — does not eliminate it (would need a real cross-process file lock, which
+     nothing else in this codebase uses either).
+4. **Bonus fix, found live while fixing BUG-usage** (same root cause, safety-relevant, not in the
+   original backlog): `kill_switch.py`'s `_load()` cached the first successful read for the rest
+   of the process's life. Since `policy_guard.evaluate()` checks `is_enabled()` on every L3 call
+   specifically so a trip takes effect immediately, the load-once cache meant a trip from one
+   process (e.g. the CLI's `/killswitch`) was invisible to an already-running `--api --monitor`
+   server until it restarted — silently defeating the "hard stop, no prompt" guarantee in exactly
+   this project's targeted always-on deployment shape. Now always re-reads from disk (the file is
+   a few bytes; the only caller is already about to do far more expensive work).
+5. **Electron/mobile client hygiene**:
+   - **BUG-elec**: neither of Electron's two REST calls (`App.jsx`'s file-drop → `/chat/upload`,
+     `HudPanels.jsx`'s `BottomBar` chat input → `/chat/stream`) ever sent `X-API-Key` — both would
+     401 the moment `JARVIS_API_KEY` is configured. `BottomBar` didn't even accept an `apiKey`
+     prop; now threaded through. `npm run build` confirmed clean after the fix.
+   - **BUG-mob-tls**: the mobile client's `/ws` token traveled as a `?token=` query param.
+     Switched to `IOWebSocketChannel` (Android-only, fine — no Flutter Web target) so it goes in an
+     `X-API-Key` header instead; `jarvis/api.py`'s `ws_endpoint` checks the header first, falling
+     back to the query param only for Electron (browser `WebSocket` API genuinely can't set custom
+     headers — not client-fixable). **Honest scope**: this closes URL-logging exposure, not
+     wire-level cleartext — no TLS termination exists on this server, so confidentiality on an
+     untrusted network still depends on tunneling through Tailscale, same as before.
+   - **BUG-reconnect**: WS reconnect now backs off exponentially (3s → doubling → 60s cap, reset
+     on a successful `channel.ready`) instead of retrying every 3s forever.
+   - **Not fixed, flagged separately**: `WsClient.reconnect(host, apiKey)` accepts new host/key
+     params but never applies them (`_host`/`_apiKey` are `final`) — found in passing, currently
+     dead code (zero call sites), spawned as a follow-up task rather than fixed inline (out of
+     scope for this bundle, and touching `final`-field semantics deserved its own focused pass).
+6. **Docs synced**: `ROADMAP.md` (Faz 8 section fully written up + phase table + bug backlog
+   appendix rows checked off), `CHANGELOG.md` (new entry), `MEMORY.md` (legacy-retirement note +
+   a new Faz 8 design-decisions entry covering the cross-process staleness pattern and the
+   BUG-mob-tls partial-mitigation caveat), `CLAUDE.md` (legacy paragraph rewritten, test-suite
+   section added), `CONTRIBUTING.md` (new Testing section), `ProjectState.md`/`docs/SAFETY.md`/
+   `README.md` (dead-file table rows fixed).
 
 ## Verification performed
 
-**Isolated, stub-agent tier (15/15 checks, no real LLM, no real `data/` access)**: `agent=None` and
-`monitor_proactive_enabled=False` are both true no-ops (zero behavior change to existing
-toast-only monitoring, confirmed by call-count assertions on a stub `proactive_turn`); enabled +
-`kind="none"` calls the agent but stays silent; enabled + `kind="response"`/`"needs_confirmation"`
-fire the correct, distinct toast (and the confirm-needed toast correctly names the gated tool,
-proving it did NOT silently execute); the cross-source throttle blocks a second call inside the gap
-window and allows one through once the gap has elapsed (simulated via rewinding the internal
-timestamp, not a real sleep); GCP-alert and budget-alert dedup each collapse 3 synthetic poll
-cycles (with intentionally *changing* message text, mimicking real fluctuating percentages) into
-exactly 1 toast.
+**Every bug fix was verified live before being formalized into a test** — not just read-and-
+assumed correct. Ad-hoc scratch scripts (not committed) reproduced each bug's exact failure
+scenario against the fixed code: BUG-20 (a real write to a Desktop-relative path outside
+workspace), BUG-21 (offset computation for both Europe/Istanbul and DST-observing Europe/Berlin),
+BUG-pdf (same-path content swap with a deliberately older mtime), BUG-geomath (forced the exact
+except-branch via Devito's absent import), BUG-modelswitch (a battery of Turkish/English false-
+positive and true-positive phrases), BUG-emptyresp (all three critic-node branches: retry-with-
+budget, exhausted-budget-substitutes-message, normal-exchange-unaffected), BUG-upload (chunked-
+read boundary math: under-cap/at-cap/one-byte-over/500MB-aborts-early), BUG-usage and the
+kill_switch bonus fix (two-instances-sharing-one-file cross-process simulations, and a
+warm-cache-then-external-write staleness simulation for kill_switch specifically). All of these
+were then rewritten as the corresponding `tests/` file — **92/92 pass**, confirmed via a full
+`pytest` run from repo root (not just per-file), 9 seconds, no cross-test pollution. `jarvis`
+package import confirmed clean after the `jarvis/legacy/` deletion
+(`python -c "import jarvis; import jarvis.agent"`). Electron `npm run build` confirmed clean
+(32 modules transformed) after the `App.jsx`/`HudPanels.jsx` edits. Confirmed via `git status`/
+`ls -la data/` that no test run touched the real project `data/` directory. **Real product, real
+data** (matching every prior phase's own verification tier): plain `python -m jarvis` starts
+clean (banner renders, no exceptions from any Faz 8 code path) and exits cleanly on EOF —
+surfaced one pre-existing, unrelated issue during this run (`_OllamaEF` missing `embed_query()`,
+non-fatal, flagged separately below, not caused by this session's diff). `python -m jarvis --api`
+started clean and answered `GET /health` with `200 {"status":"ok",...}` ~18s after startup, clean
+process shutdown after.
 
-**Real-`JarvisAgent` tier, isolated temp cwd** (per MEMORY.md's isolate-test-data-paths lesson —
-loaded the real `.env` first via an absolute path, *then* `os.chdir()`'d into a fresh temp dir
-before constructing anything, so pydantic-settings' env-vars-beat-dotenv resolution order survives
-the chdir): a deterministically-mocked `GraphInterrupt` (constructed via real
-`langgraph.errors.GraphInterrupt`/`langgraph.types.Interrupt`, not a hand-rolled stand-in) is caught
-by `proactive_turn()` and reported as `kind="needs_confirmation"` with the correct pending tool
-name; the pending confirmation is confirmed **absent** from `agent._pending_confirmations` (nothing
-will ever resume it — matches the design); `_state_lock` is confirmed released, not deadlocked. A
-**real local-LLM** (`qwen2.5:7b-instruct` via Ollama, started fresh this session — was not running
-at session start) proactive turn against a mundane calendar trigger completes without touching
-`self._history`/`_turn`/the session store's saved turn index (checked before/after via direct
-equality/`last_turn_idx()` comparison) — this is what caught finding #6 above on the first run (the
-hallucinated `procedure_save`, isolated to the temp dir, never touched real data) and confirmed the
-fix on a second run (no hallucinated tool call; the model instead replied with a text-only, somewhat
-clarifying-question-shaped response rather than a crisp "nothing to do"/suggestion — a genuine,
-if minor, response-*quality* observation for local 7B on this meta-task, separate from the
-tool-call-safety finding, and part of why this feature ships off by default). A real local-LLM turn
-given an explicit "call gmail with action=send" instruction did not attempt the gated tool call this
-particular run (observational, not a pass/fail — depends on the model's own judgment call) — the
-mechanism itself (deterministic `GraphInterrupt` handling) was already proven by the mocked test
-above.
-
-**Real product, real data, both entry points** (`python -m jarvis`, real `data/` — not isolated,
-since these are the actual daily-use commands, matching Faz 4/5's own established verification
-tier): plain CLI (no `--monitor`) starts and exits cleanly on EOF, no exceptions from any Faz 7 code
-path. Standalone `python -m jarvis --monitor` (agent-less path — `__main__.py`'s separate branch,
-confirmed still unaffected since it never passes `agent=`) starts cleanly, runs, shuts down on
-timeout with no traceback. `python -m jarvis --api` starts and answers `/health` correctly both
-**without** `--monitor` (regression check on `lifespan()`'s new branch being correctly skipped) and
-**with** `--monitor` (the new path — `JarvisMonitor` construction + `.start()` inside `lifespan()`
-against the real agent/scheduler/todo_store, confirmed alive and healthy ~19s after startup, clean
-process shutdown, no leftover processes). Confirmed the real `.env` was never modified and
-`MONITOR_PROACTIVE_ENABLED` is unset there (defaults to `False` in code) — none of these real-data
-runs made any autonomous LLM call or touched anything beyond the pre-existing read-only Gmail/
-Calendar state-init calls monitor.py has always made.
-
-**Not exercised live this session**: the `cli.py` `run()` code path's specific `agent=agent`
-addition (only reached when `--monitor` is combined with `--voice`/`--wakeword`, or when
-`--monitor` is absent — the latter was smoke-tested, the former wasn't, since it requires a live
-voice session). Low risk — it's a one-line keyword-argument addition to an already-tested
-constructor call, and the constructor itself is covered by the stub-agent tier above.
+**Not verifiable in this environment**: the mobile Dart client (`ws_client.dart`) changes —
+no Flutter/Dart SDK installed on this machine (`flutter`/`dart` both absent from PATH), so
+`IOWebSocketChannel`'s header-based auth and the exponential-backoff reconnect logic could only be
+reviewed by hand against the `web_socket_channel: ^3.0.1` public API (confirmed via its pubspec
+entry), not compiled or run. Hand-off: run `flutter analyze`/`flutter build` on a machine with the
+SDK installed before trusting this compiles, and a real device test for the header-based `/ws`
+auth actually connecting.
 
 ## Explicitly deferred / not this session's scope
 
-- **MQTT event subscriber → event bus → policy-gated autonomous action** — still hard-blocked on
-  Faz 6 hardware (no Zigbee coordinator dongle, no Home Assistant instance). Nothing to do here
-  until hardware is acquired — same conclusion as last session, unchanged.
-- **A structural (not prompt-only) fix for the L2 residual risk** (finding #6) — flagged, not built.
-  Candidate: a separate, read-only-only tool set for `proactive_turn()` via its own `build_graph()`/
-  `get_llm(..., tools=...)` call, rather than sharing `self._graph`'s full tool set. Real added
-  complexity (a second compiled graph, kept in sync with the main one on every model-switch/
-  MCP-connect) — didn't feel proportionate to build blind for a feature that ships off by default;
-  worth reconsidering if `monitor_proactive_enabled` ever becomes the recommended default.
-- **No Electron/mobile UI for the `needs_confirmation` notification path** — same pre-existing gap
-  as the interactive confirmation flow (`docs/SAFETY.md`'s Known limits); `proactive_turn()`
-  deliberately routes around it (toast/push naming the gated tool, not a dangling WS event) rather
-  than pretending a UI exists to complete that round-trip.
-- **21 stray `.claude/worktrees/*` scratch branches** — still deferred, still needs owner go-ahead
-  (destructive, unrelated to this session).
+- **Merge `langgraph-migration` → `main`** — explicit owner go-ahead required (shared branch
+  state), scoped out up front alongside the worktree cleanup, not assumed as part of "the next
+  phase."
+- **21 stray `.claude/worktrees/*` scratch branches** — still deferred, still needs owner
+  go-ahead (destructive, unchanged from every prior session's note).
+- **`WsClient.reconnect(host, apiKey)` ignoring its own parameters** (`mobile/lib/core/
+  ws_client.dart`) — spawned as a follow-up task (`task_a9cee697`) rather than fixed inline; found
+  in passing while fixing BUG-mob-tls/BUG-reconnect in the same file, currently dead code (no call
+  sites), not safety-relevant enough to justify scope-creeping into the client-hygiene bundle.
+- **`_OllamaEF` missing `embed_query()`** (`jarvis/memory.py`) — spawned as a follow-up task
+  (`task_3b9a631d`); surfaced live during this session's `python -m jarvis` smoke test but
+  pre-existing and unrelated to anything in this session's diff (`memory.py` was never touched).
+  Non-fatal (a memory-recall path logs the error and the process keeps running), but a real,
+  reproducible interface mismatch between the local Ollama embedding function and whatever calls
+  `.embed_query()` on it.
+- **Real TLS termination for `/ws`** — would fully close BUG-mob-tls's wire-level cleartext gap
+  (the header-based fix only closes URL-logging exposure). Not built: genuinely new infrastructure
+  (a cert, uvicorn `ssl_certfile`/`ssl_keyfile` config), out of proportion for a client-hygiene bug
+  fix. Confidentiality on an untrusted network still depends on Tailscale.
+- **Faz 6 — Fiziksel Dünya / IoT** stays hardware-gated (Zigbee coordinator dongle + Home
+  Assistant instance; owner has only an RP2040 today). Unchanged from every prior session.
+- **Test suite is "minimal," not comprehensive** — most tool modules (spotify, finance, todo,
+  scheduler, gmail/drive actions beyond the calendar dedup-guard fix, the sub-agent bridges, voice)
+  still have zero test coverage. Extend `tests/` incrementally rather than reverting to throwaway
+  scratch scripts.
 
 ## Git state as of this session
 
 - Branch: `langgraph-migration`, **not merged to `main`**.
-- **Faz 5 was committed this session** (`eaa9c25`, 19 files, +843/-224) — see git log. This session
-  started with Faz 5 fully uncommitted (per the prior session's own note); owner confirmed
-  committing it first before any Faz 7 diff began, so the two phases' diffs don't mix.
-- **Everything from Faz 7 is uncommitted** (per this project's standing instruction: only commit
-  when explicitly asked; this session wasn't asked to commit Faz 7). `git status`: 8 modified
-  source files (`jarvis/agent.py`, `jarvis/monitor.py`, `jarvis/config.py`, `jarvis/gcp_quota.py`,
-  `jarvis/cli.py`, `jarvis/api.py`, `jarvis/__main__.py`, `.env.example`) plus this doc sync
-  (`ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/SAFETY.md`, `MEMORY.md`, `CLAUDE.md`, `CHANGELOG.md`,
-  this file). No new files this phase (unlike Faz 5's new `mcp_integration.py` — Faz 7 extended
-  existing modules only).
+- **Faz 7 was committed this session** (`1039a1b`) — this session started with Faz 7 fully
+  uncommitted (per the prior session's own note); owner confirmed committing it first before any
+  Faz 8 diff began.
+- **Everything from Faz 8 is uncommitted** (per this project's standing instruction: only commit
+  when explicitly asked; this session wasn't asked to commit Faz 8). `git status`: ~19 modified
+  source/doc files, 3 deleted files (`jarvis/legacy/__init__.py`, `jarvis/legacy/agent_pydantic.py`,
+  `jarvis/prompts/system.md`), one new untracked directory (`tests/`, 10 files + `conftest.py`).
 
 ## Recommended next steps (pick up here)
 
-1. **Decide on commit strategy for Faz 7** — one coherent phase, same shape as Faz 4/5/6-skip; the
-   owner's call, not assumed.
-2. **Faz 6 — Fiziksel Dünya / IoT** stays `⛔ deferred` — hardware-gated (Zigbee coordinator dongle +
-   a Home Assistant instance; owner has only an RP2040 today). Nothing to do here until hardware is
+1. **Decide on commit strategy for Faz 8** — one coherent phase, same shape as every prior
+   phase; the owner's call, not assumed. Given this phase bundles several genuinely separate
+   concerns (legacy retirement, a new test suite, 9 unrelated bug fixes, client hygiene), a single
+   session did all of it, but a single *commit* vs. several smaller ones is worth asking about
+   explicitly rather than defaulting to the one-phase-per-commit pattern without checking — this
+   phase's diff is broader than usual.
+2. **Ask about the two explicitly-deferred destructive items** if there's appetite to unblock
+   them: merging to `main` (this branch has been ahead of `main` since Faz 0) and the 21 stray
+   worktree branches.
+3. **`WsClient.reconnect()` follow-up** (`task_a9cee697`) is sitting as a spawned suggestion —
+   pick it up if/when mobile settings-switching (change server/API key without restarting the app)
+   becomes a real feature; currently dead code with no live impact.
+4. **Run `flutter analyze`/`flutter build`** on a machine with the Flutter SDK to confirm the
+   `ws_client.dart` changes actually compile — not verified in this environment (see above).
+5. **Faz 6 — Fiziksel Dünya / IoT** stays hardware-gated. Nothing to do here until hardware is
    actually acquired.
-3. **If `monitor_proactive_enabled` gets turned on for real daily use**, watch `data/audit_log.jsonl`
-   for `monitor-email`/`monitor-calendar`-transport entries for a while before trusting it
-   unattended — the L2 residual risk (finding #6 above) is mitigated, not eliminated, and this
-   feature has had exactly one local-model owner-facing trial run (this session's verification).
-4. **Faz 8 — Temizlik & Konsolidasyon** is the only remaining unstarted phase that isn't
-   hardware-gated (retire `jarvis/legacy/`, clean up stray worktrees, merge to `main`, add a minimal
-   test suite) — a legitimate next-session candidate alongside/after Faz 6 staying blocked.
-5. Confirm whether the 21 stray worktrees/branches should be cleaned up (still deferred, still needs
-   owner go-ahead — destructive, unrelated to this session).
+6. Consider extending `tests/` coverage to another tool module or two per future session touching
+   that area, rather than a dedicated "more tests" phase — the infrastructure (`conftest.py`,
+   pytest config) is now in place, so incremental addition is cheap.
 
 ## Environment checklist to resume work
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-ollama serve                          # confirm it's up: curl http://localhost:11434/api/tags —
-                                       # started fresh this session, not left running between
-                                       # sessions (confirmed, same as every prior session's note)
-python -m jarvis --monitor            # toast/FCM-only unless MONITOR_PROACTIVE_ENABLED=True in
-                                       # .env — try that + a real new calendar event/email to watch
-                                       # a live proactive suggestion end-to-end (not done this
-                                       # session — only synthetic/short-lived triggers were tested)
-python -m jarvis --api --monitor      # same, but the always-on path — this is where it matters
+pytest                                # new this session -- 92 tests, ~9s, fully offline
+ollama serve                          # confirm it's up: curl http://localhost:11434/api/tags --
+                                       # not needed for the test suite (provider-router tests never
+                                       # invoke a real model), only for actually running the agent
+python -m jarvis                      # CLI -- retired jarvis/legacy/ import confirmed clean
+python -m jarvis --api --monitor      # long-running path -- kill_switch cross-process fix matters
+                                       # most here; try `/killswitch off` from a separate CLI
+                                       # session and confirm this process's next L3 call is vetoed
+                                       # without restarting it (not done live this session --
+                                       # covered by tests/test_kill_switch.py's simulation instead)
 ```
 
-New `.env` vars this session: `MONITOR_PROACTIVE_ENABLED` (default `False`),
-`MONITOR_PROACTIVE_MIN_GAP_SEC` (default `600`) — see `.env.example`. No new Python dependencies.
+No new required `.env` vars this session. New dev-only dependencies: `pytest>=8.0`,
+`pytest-asyncio>=0.24` (added to `requirements.txt`, already installed in `.venv`).

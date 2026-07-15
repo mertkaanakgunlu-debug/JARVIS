@@ -35,11 +35,18 @@ PCM audio frames are multiplexed on one `/ws` connection, using WebSocket's own 
 
 ## Authentication
 
-Same as the connection itself — `?token=<JARVIS_API_KEY>` query param on the `/ws` URL. **On top
-of that**, starting an audio session additionally requires `JARVIS_API_KEY` to be configured at
-all server-side; `audio_session_start` gets `nack: "unauthenticated"` if it's empty. Once this
-socket can carry live mic audio and synthesized speech, an unauthenticated connection is a
-materially bigger deal than the read-only telemetry it carried before Faz 3 — remote audio is
+Same as the connection itself — an `X-API-Key` header on the `/ws` upgrade request (preferred;
+mobile uses this — see `mobile/lib/core/ws_client.dart`) or a `?token=<JARVIS_API_KEY>` query param
+(kept for Electron, whose renderer uses the browser `WebSocket` API and cannot set custom headers
+on the upgrade request; the header wins if both are present — see `jarvis/api.py`'s `ws_endpoint`).
+A query-string token is visible to anything that logs URLs (proxies, access logs, OS/browser
+connection history) even though the header option isn't itself encryption — this server has no TLS
+termination, so wire-level confidentiality on an untrusted network still depends on tunneling
+through Tailscale rather than exposing this port directly (Faz 8, BUG-mob-tls). **On top of that**,
+starting an audio session additionally requires `JARVIS_API_KEY` to be configured at all
+server-side; `audio_session_start` gets `nack: "unauthenticated"` if it's empty. Once this socket
+can carry live mic audio and synthesized speech, an unauthenticated connection is a materially
+bigger deal than the read-only telemetry it carried before Faz 3 — remote audio is
 opt-in-by-configuration, not available with zero setup.
 
 ## Control messages

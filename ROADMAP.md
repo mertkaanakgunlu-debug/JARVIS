@@ -30,7 +30,7 @@
 | 5 | MCP katmanı | IoT yazılım ön koşulu | M | ✅ done (2026-07-15) |
 | 6 | Fiziksel dünya / IoT | ⛔ Donanıma bağlı (Faz 0+4+5) | L + HW | ⬜ deferred |
 | 7 | Proaktiflik | Capstone; kısmen donanıma bağlı | L | 🟡 software half done (2026-07-15), sensor half deferred (Faz 6) |
-| 8 | Temizlik & konsolidasyon | — | M | ⬜ |
+| 8 | Temizlik & konsolidasyon | — | M | 🟡 non-destructive scope done (2026-07-15), merge/worktree-cleanup deferred |
 
 Faz 1+2 = "hafıza + zeka" ilk bloğu (ikisi de yerel).
 
@@ -594,22 +594,124 @@ calendar trigger completes without touching `self._history`/`_turn`/`session_sto
 index; a real local-LLM turn given an explicit gated-action instruction was observed to correctly
 interrupt via the real graph + real `policy_guard`, not just a mocked path.
 
-## Faz 8 — Temizlik & Konsolidasyon
+## Faz 8 — Temizlik & Konsolidasyon 🟡 non-destructive scope done (2026-07-15), merge/worktree-cleanup deferred
 
-- [ ] Retire `jarvis/legacy/`; delete the dead `jarvis/prompts/system.md` pointer file.
+- [x] Retire `jarvis/legacy/`; delete the dead `jarvis/prompts/system.md` pointer file.
+      Done (2026-07-15) — confirmed via grep first (per `CLAUDE.md`'s standing warning) that
+      nothing outside `jarvis/legacy/` itself imported it; both `git rm -r`'d outright, not
+      archived. Old pydantic-ai orchestrator is recoverable from git history before this commit
+      if ever needed for reference.
 - [ ] Clean up the 21 `.claude/worktrees/*` scratch branches (owner go-ahead — destructive).
-- [ ] Merge `langgraph-migration` → `main`; add a minimal test suite (none exists today);
-      offline-failover tests.
-- Note: offline resilience is largely already achieved by the local-first Faz 1-3 work.
-- Remaining P2 polish bugs not yet slotted: **[BUG-20]** `file_write` ValueError on home paths
-      (`tools/files.py:56`); **[BUG-21]** calendar dedup hardcoded `+03:00` (`tools/calendar.py:261`);
-      **[BUG-itu]** IMAP connection leak on login failure (`tools/itu_mail.py:61`); **[BUG-pdf]**
-      pdf cache keyed on path not content (`tools/pdf.py:54`); **[BUG-geomath]** Devito fallback
-      hardcodes `duration=0.5` (`geo_math_tool.py:197`); **[BUG-modelswitch]** unanchored "pro"
-      substring hijack (`cli.py:116`); **[BUG-emptyresp]** empty LLM response saved as success
-      (`nodes.py:215`); **[BUG-upload]** `/chat/upload` no size cap + no cleanup (`api.py:391`);
-      **[BUG-usage]** `UsageTracker` clobbers across processes (`usage.py:63`); electron/mobile
-      client hygiene (no API-key header, cleartext ws token, no reconnect backoff).
+      Still deferred, unchanged from prior sessions.
+- [ ] Merge `langgraph-migration` → `main` — deliberately **not done this session**: explicit
+      owner go-ahead required (shared branch state), scoped out up front alongside the worktree
+      cleanup rather than assumed as part of "the next phase."
+- [x] Add a minimal test suite (none existed before this phase) + offline-failover tests.
+      New `tests/` — pytest + pytest-asyncio (added to `requirements.txt`), configured via
+      `[tool.pytest.ini_options]` in `pyproject.toml` (`testpaths = ["tests"]`,
+      `asyncio_mode = "auto"`). 92 tests across 10 files: `policy_guard` (risk classification,
+      the BUG-6 per-action read/write downgrade, kill-switch veto scoping), `session_store`
+      (no-duplication across turn buckets, `last_turn_idx` resumption, rollback-on-failure
+      atomicity, a concurrent-writers-and-readers stress test), `kill_switch`/`usage.py` (the two
+      cross-process bugs fixed this session — see below), the provider router
+      (`jarvis/providers/get_llm()` — **this is the offline-failover coverage**: with no cloud
+      credentials configured at all, both the `fast` and `reasoning` roles resolve to a bare
+      local Ollama model, not a fallback wrapper around nothing; with cloud configured, local
+      Ollama is confirmed always last in the `reasoning` chain), and one regression test file per
+      bug fixed below. New `tests/conftest.py`'s `isolated_cwd` fixture is the enforcement point
+      for MEMORY.md's isolate-test-data-paths lesson — see its docstring. Not exhaustive (most
+      tool modules still have zero coverage) — "minimal," per the phase's own scope, not a full
+      suite. See `CLAUDE.md`/`CONTRIBUTING.md` for how to run it (`pytest` from repo root).
+- [x] **[BUG-20]** `file_write` ValueError on home paths (`tools/files.py`) — the return message
+      unconditionally did `p.relative_to(workspace)`, which raises for any path `_resolve()`
+      legitimately allowed under the home directory but outside `workspace`. New `_display_path()`
+      helper falls back to home-relative, then absolute.
+- [x] **[BUG-21]** calendar dedup hardcoded `+03:00` (`tools/calendar.py`) — the create-event dedup
+      window built its `timeMin`/`timeMax` by string-appending a literal `+03:00` instead of using
+      `settings.calendar_timezone`. Correct only by coincidence for the default Europe/Istanbul
+      (no DST since 2016); silently wrong for any other configured zone. Now uses `zoneinfo` to
+      reinterpret the naive wall-clock values with the actual configured tz (DST-correct).
+- [x] **[BUG-itu]** IMAP connection leak on login failure (`tools/itu_mail.py`) — `MailBox(host,
+      port)`'s constructor opens the socket/SSL handshake immediately; if the subsequent
+      `.login()` raised, that connection was never closed (the `with` statement in every call site
+      never got a chance to start). Now wraps `.login()` in try/except and calls `.logout()` on
+      failure before re-raising.
+- [x] **[BUG-pdf]** pdf cache keyed on path not content (`tools/pdf.py`) — the cache key hashed the
+      resolved path string, relying entirely on mtime to detect a changed file at the same path.
+      mtime is not reliable (a restored backup, `cp -p`, or an archive extraction can leave newer
+      content with an *older* mtime than a stale cached conversion). New `_content_key()` hashes
+      the file's actual bytes; a changed file gets a different cache key regardless of mtime, and
+      the mtime-based freshness check (`_is_cache_fresh`) is gone entirely — no longer needed once
+      the key itself is content-derived.
+- [x] **[BUG-geomath]** Devito fallback hardcodes `duration=0.5` (`tools/geo_math_tool.py`) — when
+      Devito is installed but fails at *runtime* (not just "not installed"), the except-branch's
+      call into the NumPy FDM fallback hardcoded `duration=0.5` instead of passing through the
+      caller's actual requested duration, silently truncating any simulation the user asked for.
+- [x] **[BUG-modelswitch]** unanchored "pro" substring hijack (`cli.py`) — `_resolve_model_keyword`
+      used a raw `"pro" in text` substring test, so any short message containing "pro" as a
+      substring of an unrelated word ("proje", "problem", "program", "profesyonel", "approve",
+      "provide", ...) silently hijacked the turn into a model switch instead of being answered —
+      the CLI `continue`s after a detected switch, so the user's actual message was dropped
+      entirely, not just misrouted. Fixed with `\b`-anchored word-boundary regex matching per
+      keyword; still correctly matches Turkish apostrophe-suffixed forms ("Pro'ya") since `\b`
+      treats the apostrophe as a boundary.
+- [x] **[BUG-emptyresp]** empty LLM response saved as success (`graph/nodes.py`) — `critic_node`'s
+      fast-path fired on `not response_text OR revise_count >= 2`, so an empty final response was
+      unconditionally accepted as "success" and the graph routed straight to END, even with
+      revision budget remaining. Split into two cases: budget exhausted → accept, but substitute a
+      visible fallback message instead of silence; budget remaining → `redirect` verdict, giving
+      the agent an actual retry instead of ending the turn on nothing.
+- [x] **[BUG-upload]** `/chat/upload` no size cap + no cleanup (`api.py`) — `await file.read()` was
+      fully unbounded, and every non-image upload's raw copy under `data/uploads/` was never
+      deleted, accumulating forever. Now reads in 1 MB chunks with a running total, aborting with
+      413 as soon as `MAX_UPLOAD_BYTES` (50 MB) is crossed rather than buffering an oversized file
+      first; the PDF branch deletes its raw copy immediately after extraction (nothing later needs
+      it), the Excel/CSV/Word tool-hint branch deletes it in the SSE generator's `finally` (must
+      wait — the agent may call `file_read`/`excel_read`/`csv_read` on it at any point while
+      streaming).
+- [x] **[BUG-usage]** `UsageTracker` clobbers across processes (`usage.py`) — `self._total` was
+      loaded once at construction and mutated in place for the process's whole life; every save
+      overwrote `data/usage.json` with a snapshot that got staler with every turn, so across two
+      live processes (the CLI plus a long-running `--api` server) whichever saved last silently
+      erased the other's recorded spend. `record()` now re-reads `_load_total()` fresh from disk
+      immediately before merging its delta in and saving, under a new `threading.Lock` — narrows
+      the failure window to a brief TOCTOU race rather than "guaranteed loss whenever two
+      processes are alive together"; a real fix needs a cross-process file lock, which nothing
+      else in this codebase uses either (see the docstring for the explicit tradeoff).
+- [x] **Bonus fix, found live while fixing BUG-usage** (same root cause, safety-relevant, not in
+      the original backlog): `kill_switch.py`'s `_load()` cached the first successful read for the
+      rest of the process's life. `policy_guard.evaluate()` checks `kill_switch.is_enabled()` on
+      every L3 call specifically so a trip takes effect immediately — but the load-once cache meant
+      a trip from one process (e.g. the CLI's `/killswitch`) was invisible to any other
+      already-running process (e.g. a long-lived `--api --monitor` server) until it restarted,
+      silently defeating the "hard stop, no prompt" guarantee in exactly this project's targeted
+      deployment shape. Now always re-reads from disk (the file is a few bytes; the only caller is
+      already about to do far more expensive work) — `_cache` is kept only as a last-resort
+      fallback for a transient read failure, not a steady-state optimization.
+- [x] Electron/mobile client hygiene:
+      **[BUG-elec]** neither of the Electron HUD's two REST calls (`App.jsx`'s file-drop-to-analyze
+      → `/chat/upload`, `HudPanels.jsx`'s `BottomBar` chat input → `/chat/stream`) ever sent the
+      `X-API-Key` header — both would 401 the moment `JARVIS_API_KEY` is actually configured.
+      `BottomBar` didn't even accept an `apiKey` prop; now threaded through from `App.jsx`.
+      **[BUG-mob-tls]** the mobile client's `/ws` token traveled as a `?token=` query param —
+      visible to anything that logs URLs (proxies, access logs, OS/browser connection history).
+      Switched to `IOWebSocketChannel` (Android-only via `dart:io`, fine — no Flutter Web target)
+      so the token goes in an `X-API-Key` header instead; `jarvis/api.py`'s `ws_endpoint` now
+      checks the header first, falling back to the query param only for Electron (whose browser
+      `WebSocket` API genuinely cannot set custom headers on the upgrade request — not fixable
+      client-side). This closes the URL-logging exposure, **not wire-level cleartext** — this
+      server has no TLS termination, so confidentiality on an untrusted network still depends on
+      tunneling through Tailscale, same as before; documented honestly in `docs/VOICE_PROTOCOL.md`
+      rather than implied as fully closed. **[BUG-reconnect]** the WS reconnect loop retried every
+      3s forever with no backoff — if the PC is off for hours, that's a reconnect attempt every 3s
+      the whole time. Now exponential backoff (3s → doubling → capped at 60s), reset to 3s on a
+      successful `channel.ready`.
+      **Not fixed, flagged separately** (found in passing, out of scope, currently dead/unreachable
+      code — no call sites): `WsClient.reconnect(host, apiKey)` accepts new host/key parameters but
+      never applies them (`_host`/`_apiKey` are `final`) — see the spawned follow-up task.
+- Note: offline resilience is largely already achieved by the local-first Faz 1-3 work; this
+      phase's provider-router tests (above) are the first *persisted* proof of that claim rather
+      than a one-off manual verification.
 
 ---
 
@@ -643,22 +745,22 @@ also reported via this session's code-review tooling.
 | BUG-17 | gcp_quota.py:106 | quota cache key never hits | 0 |
 | BUG-18 | gcp_quota.py:307 | forecast daily-rate math wrong → false alarms | 0 |
 | BUG-19 | monitor.py:390 | budget/quota alerts no dedup, re-fire every cycle | 7 |
-| BUG-20 | tools/files.py:56 | file_write uncaught ValueError on home paths | 8 |
-| BUG-21 | tools/calendar.py:261 | dedup guard hardcodes +03:00 | 8 |
-| BUG-itu | tools/itu_mail.py:61 | IMAP connection leak on login failure | 8 |
-| BUG-pdf | tools/pdf.py:54 | pdf cache keyed on path not content | 8 |
-| BUG-geomath | tools/geo_math_tool.py:197 | Devito fallback hardcodes duration=0.5 | 8 |
-| BUG-modelswitch | cli.py:116 | unanchored "pro" substring hijacks messages | 8 |
+| BUG-20 | tools/files.py:56 | file_write uncaught ValueError on home paths | 8 ✅ |
+| BUG-21 | tools/calendar.py:261 | dedup guard hardcodes +03:00 | 8 ✅ |
+| BUG-itu | tools/itu_mail.py:61 | IMAP connection leak on login failure | 8 ✅ |
+| BUG-pdf | tools/pdf.py:54 | pdf cache keyed on path not content | 8 ✅ |
+| BUG-geomath | tools/geo_math_tool.py:197 | Devito fallback hardcodes duration=0.5 | 8 ✅ |
+| BUG-modelswitch | cli.py:116 | unanchored "pro" substring hijacks messages | 8 ✅ |
 | BUG-22 | agent.py:514 | quota fallback ignores switch_model, stale label | 1 ✅ |
-| BUG-emptyresp | graph/nodes.py:215 | empty LLM response saved as success | 8 |
+| BUG-emptyresp | graph/nodes.py:215 | empty LLM response saved as success | 8 ✅ |
 | BUG-24 | config.py:125 | effective_cloud_model "pro" branch dead code | 1 ✅ |
-| BUG-upload | api.py:391 | /chat/upload no size cap, no cleanup | 8 |
+| BUG-upload | api.py:391 | /chat/upload no size cap, no cleanup | 8 ✅ |
 | BUG-23 | voice.py:138 | openwakeword buffer never reset between sessions | 3 ✅ |
-| BUG-usage | usage.py:63 | UsageTracker clobbers across concurrent processes | 8 |
+| BUG-usage | usage.py:63 | UsageTracker clobbers across concurrent processes | 8 ✅ |
 | BUG-25 | agent.py:552 | entity extraction fires every trivial turn | 2 |
-| BUG-elec | electron/App.jsx | HUD never sends API-key header | 8 |
-| BUG-mob-tls | mobile/ws_client.dart:22 | cleartext ws token in query string | 8 |
-| BUG-reconnect | ws_client.dart:42 | 3s reconnect forever, no backoff cap | 8 |
+| BUG-elec | electron/App.jsx | HUD never sends API-key header | 8 ✅ |
+| BUG-mob-tls | mobile/ws_client.dart:22 | cleartext ws token in query string | 8 ✅ (query-param exposure closed; wire-level cleartext remains -- no TLS termination exists) |
+| BUG-reconnect | ws_client.dart:42 | 3s reconnect forever, no backoff cap | 8 ✅ |
 
 ## Previously-completed refactor phases (context)
 

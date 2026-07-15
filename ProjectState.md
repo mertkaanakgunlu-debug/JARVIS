@@ -25,7 +25,8 @@
 - [x] Replaced pydantic-ai orchestrator with LangGraph `StateGraph`
 - [x] `JarvisAgent` public API preserved (`chat`, `chat_stream`, `switch_model`, `reset`)
 - [x] `SqliteSaver` checkpointer → per-session cross-turn memory
-- [x] Legacy pydantic-ai code retained under `jarvis/legacy/`
+- [x] Legacy pydantic-ai code retained under `jarvis/legacy/` (superseded 2026-07-15: deleted
+      outright in the new plan's Faz 8 cleanup — see [ROADMAP.md](ROADMAP.md))
 
 #### Faz 2 — Graph Topology (2026-05-09)
 - [x] `START → route_from_start → [planner →] agent ↔ tools → critic → END`
@@ -323,8 +324,7 @@ Mobile (mobile/ — Flutter/Android):
 | `jarvis/fcm_sender.py` | Firebase Cloud Messaging |
 | `jarvis/push_store.py` | FCM device token registry |
 | `jarvis/notify.py` | Windows toast |
-| `jarvis/legacy/` | Old pydantic-ai code (kept for reference) |
-| `jarvis/prompts/system.md` | Main system prompt |
+| `jarvis/prompts/core/*.md` | Modular system prompt (superseded `jarvis/prompts/system.md`, deleted Faz 8) |
 | `mobile/` | Flutter Android app |
 | `vault/` | Obsidian-compatible markdown vault |
 | `data/` | ChromaDB, SQLite DBs, pdf_cache, uploads (gitignored) |

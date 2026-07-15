@@ -126,10 +126,11 @@ The north-star target came from an owner-commissioned research report
 ## Architecture decisions worth remembering
 
 - LangGraph replaced the original pydantic-ai orchestrator (Faz 1-2, 2026-05-09). The old
-  orchestrator is kept at `jarvis/legacy/agent_pydantic.py` for reference only — it is not
-  imported by any live path, and its own prompt-loading logic is independently broken
-  (points at a `jarvis/legacy/prompts/system.md` that doesn't exist). Don't resurrect it
-  without fixing that path first.
+  orchestrator lived at `jarvis/legacy/agent_pydantic.py` for reference only, unimported by any
+  live path — **deleted outright in Faz 8 (2026-07-15)**, not archived; recoverable from git
+  history before that commit if ever needed. `jarvis/prompts/system.md` (the dead pre-modularization
+  system prompt pointer, superseded by `jarvis/prompts/core/*.md` since the original refactor) was
+  deleted in the same pass.
 - The 5 sub-agents (math, writer, research, coder, geomath) are still pydantic-ai, called
   directly with `await` from native `async def` `@tool` functions in `jarvis/graph/tools.py`
   (Faz 4, 2026-07-14 — previously bridged through a `_run_coro()` helper that spun up a second
@@ -422,6 +423,52 @@ The north-star target came from an owner-commissioned research report
     Known-gaps table had this tracked as unstarted since the original refactor backlog). This
     matters more than the CLI case: the API server is the long-running process a phone/HUD actually
     talks to, so it's where proactive monitoring needs to run to be useful in practice.
+
+- **Cleanup & consolidation (Faz 8, 2026-07-15):** retired `jarvis/legacy/` (see the entry near the
+  top of this section), added the first real test suite (`tests/`), and fixed 9 P2 bugs + 3
+  client-hygiene items from the 59-finding backlog. Design decisions worth knowing before touching
+  any of it:
+  - **Cross-process shared-file staleness is a recurring bug shape in this codebase — check for it
+    whenever you touch a module with a `_cache`/loaded-once pattern over a `Path("data")/...` file.**
+    BUG-usage (`usage.py`) and a bonus find in `kill_switch.py` were the same root cause: a value
+    loaded once (at construction, or into a module-level cache on first read) and never refreshed,
+    so a second live process's write to the same file was either silently lost (usage.py's
+    `_total` got overwritten by whichever process saved last) or silently ignored (kill_switch's
+    `_cache` never noticed another process's trip). The fix pattern both share: re-read fresh from
+    disk immediately before the next read-modify-write, rather than trusting an in-memory snapshot.
+    This narrows the failure window to a brief TOCTOU race, it doesn't eliminate it — a real fix
+    needs a cross-process file lock, which nothing in this codebase uses (not even `audit_log.py`,
+    which sidesteps the whole class of bug by being append-only instead of read-modify-write).
+    Don't reach for a new locking library to close that residual gap without discussing it first —
+    it wasn't judged worth the dependency for a single-user local assistant where the race window is
+    milliseconds, but that's a judgment call, not a settled fact.
+  - **`kill_switch.py`'s `_load()` intentionally does NOT cache across calls anymore** (it did
+    before this phase) — see the file:line entry in ROADMAP.md's Faz 8 section for the full
+    incident. If you're tempted to add caching back for performance, don't: the only caller
+    (`policy_guard.evaluate()`) is already about to do far more expensive work (an LLM-gated tool
+    call), and the whole point of checking live is that a kill-switch trip must be visible on the
+    *next* call from a different, already-running process — that's the property caching broke.
+  - **New `tests/` suite is deliberately "minimal," not comprehensive** — 92 tests covering
+    `policy_guard`, `session_store` concurrency, the provider router (this is where the
+    "offline-failover" claim now has a persisted test, not just a manual verification write-up),
+    and one regression test per bug fixed this phase. Most tool modules (calendar/gmail/drive
+    actions beyond the dedup-guard fix, spotify, finance, todo, scheduler, ...) still have zero
+    coverage — extend `tests/` incrementally as you touch those areas, rather than writing a
+    throwaway verification script the way every prior phase did (see this file's own
+    isolate-test-data-paths lesson, which motivated `tests/conftest.py`'s `isolated_cwd` fixture —
+    read its docstring before writing a test that constructs `SessionStore`/`UsageTracker`/
+    `kill_switch`/anything else resolving `Path("data")/...` relative to cwd).
+  - **BUG-mob-tls's fix is a real, but partial, mitigation — don't describe it as "encrypted."**
+    Moving the mobile client's auth token from a `?token=` query string to an `X-API-Key` header
+    (`IOWebSocketChannel` supports custom headers; Electron's browser `WebSocket` API cannot, so it
+    still uses the query param) stops the token from being written into anything that logs URLs
+    (proxies, access logs, OS/browser history). It does NOT add transport encryption — this server
+    has no TLS termination at all, so a packet sniffer on the same unencrypted network segment still
+    sees the header in plaintext exactly like it would the query param. Confidentiality on an
+    untrusted network still depends entirely on the phone reaching the host via Tailscale (already
+    the documented deployment path in CLAUDE.md), not on this fix. Standing up real TLS termination
+    would close this properly; not built this phase — genuinely new infrastructure (a cert, uvicorn
+    `ssl_certfile`/`ssl_keyfile` config), out of proportion for a client-hygiene bug fix.
 
 ## Known permanently-true gotchas
 

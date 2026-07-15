@@ -223,8 +223,16 @@ async def health():
 async def ws_endpoint(websocket: WebSocket, token: str | None = None):
     """Real-time event stream for JARVIS HUD (Electron) and mobile app.
 
-    Authentication: ?token=<JARVIS_API_KEY> query param.
-    If API key is set and token is wrong, connection is closed with code 4401.
+    Authentication: X-API-Key header (preferred — never appears in a URL, so
+    it can't leak into proxy/access logs or connection history the way a query
+    param does) or ?token=<JARVIS_API_KEY> query param (kept for Electron,
+    whose renderer uses the browser WebSocket API and cannot set custom
+    headers on the upgrade request; mobile uses the header — see
+    mobile/lib/core/ws_client.dart / BUG-mob-tls). If API key is set and
+    neither matches, connection is closed with code 4401. Note this closes the
+    URL-logging exposure, not wire-level cleartext -- this server has no TLS
+    termination, so confidentiality on an untrusted network still depends on
+    tunneling through Tailscale rather than exposing this port directly.
 
     Faz 3: this same connection can also carry a remote-audio session — binary
     PCM mic/TTS frames multiplexed alongside the existing JSON event stream via
@@ -232,7 +240,8 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
     the full wire format.
     """
     if _settings and _settings.jarvis_api_key:
-        if token != _settings.jarvis_api_key:
+        provided = websocket.headers.get("X-API-Key") or token
+        if provided != _settings.jarvis_api_key:
             await websocket.close(code=4401)
             return
 
@@ -545,6 +554,7 @@ async def chat_confirm(conf_id: str, body: ConfirmRequest, request: Request):
 
 
 _UPLOAD_DIR = Path("data/uploads")
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — mirrors files.py's MAX_READ_BYTES convention
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
 _PDF_EXTS   = {".pdf"}
@@ -597,7 +607,23 @@ async def chat_upload(
     _check_auth(request)
     agent = get_agent()
 
-    content = await file.read()
+    # Read in bounded chunks rather than one file.read() -- an unbounded read lets
+    # a single upload exhaust memory/disk (BUG-upload). Chunked so we bail out as
+    # soon as the cap is crossed instead of buffering the whole oversized file first.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1 << 20)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
     suffix = Path(file.filename or "upload").suffix.lower()
     user_query = query.strip() or "Please analyze this file."
 
@@ -638,6 +664,15 @@ async def chat_upload(
         md_text, figures = read_pdf_multimodal(saved_path)
         full_input = f"[PDF: {file.filename or saved_path.name}]\n\n{md_text}\n\n{user_query}"
 
+        # read_pdf_multimodal already extracted everything into md_text/figures
+        # (and its own content-hash cache) -- the raw upload copy under
+        # _UPLOAD_DIR is never touched again, so it can be cleaned up now
+        # instead of accumulating on disk forever (BUG-upload).
+        try:
+            saved_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not clean up uploaded file %s", saved_path, exc_info=True)
+
         async def _sse_pdf() -> AsyncGenerator[str, None]:
             try:
                 async for token in agent.chat_stream(
@@ -664,16 +699,25 @@ async def chat_upload(
 
     async def _sse() -> AsyncGenerator[str, None]:
         try:
-            async for token in agent.chat_stream(
-                full_query,
-                detected_language=language or "en",
-                transport="api-upload",
-            ):
-                safe = token.replace("\n", "\\n")
-                yield f"data: {safe}\n\n"
-        except Exception as e:
-            yield f"data: [ERROR] {e}\n\n"
-        yield "data: [DONE]\n\n"
+            try:
+                async for token in agent.chat_stream(
+                    full_query,
+                    detected_language=language or "en",
+                    transport="api-upload",
+                ):
+                    safe = token.replace("\n", "\\n")
+                    yield f"data: {safe}\n\n"
+            except Exception as e:
+                yield f"data: [ERROR] {e}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            # Only safe to clean up once the stream is fully drained -- the
+            # agent may call file_read/excel_read/csv_read on saved_path at any
+            # point while this generator is iterating (BUG-upload).
+            try:
+                saved_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not clean up uploaded file %s", saved_path, exc_info=True)
 
     return StreamingResponse(
         _sse(),

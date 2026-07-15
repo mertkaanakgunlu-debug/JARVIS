@@ -431,7 +431,7 @@ export function TopBar({ state, clock, panelVis = {}, onTogglePanel, onSetAllPan
 // ── Bottom Bar ────────────────────────────────────────────────────────────────
 export function BottomBar({
   state, micLevel, latency, vaultCount = 0, uptime = '00:00:00',
-  apiUrl, onMessage, busy = false, onBusy, onPickFile,
+  apiUrl, apiKey, onMessage, busy = false, onBusy, onPickFile,
 }) {
   const [value, setValue] = useState('')
   const fileInputRef = useRef(null)
@@ -447,7 +447,10 @@ export function BottomBar({
     try {
       const resp = await fetch(`${apiUrl}/chat/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+        },
         body: JSON.stringify({ message: msg, language: '' }),
       })
       const reader = resp.body.getReader()
@@ -472,7 +475,7 @@ export function BottomBar({
     }
     if (full) onMessage?.({ who: 'j', text: full })
     onBusy?.(false)
-  }, [value, busy, apiUrl, onMessage, onBusy])
+  }, [value, busy, apiUrl, apiKey, onMessage, onBusy])
 
   return (
     <div className="bar bot slot-bot">

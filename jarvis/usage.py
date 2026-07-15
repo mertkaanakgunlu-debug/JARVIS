@@ -11,6 +11,7 @@ Pro input $1.25/1M, output $10.00/1M.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,7 @@ class UsageTracker:
 
     def __init__(self, persist_path: Path) -> None:
         self._path = persist_path
+        self._lock = threading.Lock()
         self._session: dict = {
             "tokens_in": 0,
             "tokens_out": 0,
@@ -72,21 +74,42 @@ class UsageTracker:
     # ── public API ─────────────────────────────────────────────────────────────
 
     def record(self, model_id: str, tokens_in: int, tokens_out: int) -> None:
-        """Record one turn's token usage and update persistent totals."""
+        """Record one turn's token usage and update persistent totals.
+
+        BUG-usage: self._total used to be loaded once at construction and
+        mutated in place for the life of the process, so _save_total() always
+        overwrote data/usage.json with a snapshot that got staler with every
+        turn -- across two live processes (e.g. the CLI plus a long-running
+        `--api` server), whichever one saved last silently erased the other's
+        recorded spend. Re-reading fresh from disk right before merging this
+        call's delta in means a clobber requires another process's write to
+        land inside this exact read-then-write window, not "any time two
+        processes are alive together" -- narrowed to a brief TOCTOU race, not
+        eliminated outright (would need a real cross-process file lock for
+        that, which nothing else in this codebase uses either, e.g.
+        kill_switch.py/audit_log.py both accept the same tradeoff).
+        """
         if not (tokens_in or tokens_out):
             return
         tier = _model_tier(model_id)
         rates = _PRICING[tier]
         cost = tokens_in * rates["in"] + tokens_out * rates["out"]
-
         turn_key = f"{tier}_turns"
-        for bucket in (self._session, self._total):
-            bucket["tokens_in"] += tokens_in
-            bucket["tokens_out"] += tokens_out
-            bucket["cost_usd"] += cost
-            bucket[turn_key] = bucket.get(turn_key, 0) + 1
 
-        self._save_total()
+        # Session counters are process-local by design (reset per JarvisAgent
+        # instantiation) -- no cross-process sharing, safe to mutate directly.
+        self._session["tokens_in"] += tokens_in
+        self._session["tokens_out"] += tokens_out
+        self._session["cost_usd"] += cost
+        self._session[turn_key] = self._session.get(turn_key, 0) + 1
+
+        with self._lock:
+            self._total = self._load_total()
+            self._total["tokens_in"] += tokens_in
+            self._total["tokens_out"] += tokens_out
+            self._total["cost_usd"] += cost
+            self._total[turn_key] = self._total.get(turn_key, 0) + 1
+            self._save_total()
 
     @property
     def session_cost(self) -> float:

@@ -17,8 +17,15 @@ owner's Windows PC, phone talks to it over the home network / Tailscale.
 - Python 3.13+, venv at `.venv/` (already populated — `.\.venv\Scripts\Activate.ps1`).
 - Canonical install is `pip install -r requirements.txt` — `pyproject.toml` has no dependency list.
 - Shell: this project's own scripts assume **PowerShell**, not bash.
-- No test suite exists anywhere in `jarvis/` (`CONTRIBUTING.md` implies one should be run
-  before committing — there's nothing to run yet).
+- A minimal pytest suite exists under `tests/` (added Faz 8, 2026-07-15) — run with `pytest`
+  from the repo root. Covers `policy_guard`, `session_store` concurrency, the provider
+  router's offline-failover behavior, and a regression test per Faz 8 bug fix. Not
+  exhaustive — most tool modules still have no coverage; extend `tests/` rather than
+  reintroducing ad-hoc throwaway scripts for anything that touches shared logic (safety
+  kernel, stores, routing). **Before writing a test that constructs `SessionStore`,
+  `UsageTracker`, `kill_switch`, or anything else that resolves paths as `Path("data")/...`
+  relative to cwd, use the `isolated_cwd` fixture in `tests/conftest.py`** — see its
+  docstring for why (MEMORY.md's isolate-test-data-paths incident).
 
 ## Running it
 
@@ -36,10 +43,10 @@ python -m jarvis --monitor           # Background watcher only
 - `.claude/worktrees/*` are scratch branches from past Claude Code sessions — **never**
   treat them as canonical source. There are currently 21 of them sitting on disk
   (see [HANDOFF.md](HANDOFF.md) — cleanup needs your explicit go-ahead, not done automatically).
-- `jarvis/legacy/` is the old pydantic-ai orchestrator, kept for reference only. It is not
-  imported by any live code path today — verify with a grep before assuming otherwise if
-  you touch anything sub-agent-related (Phase 8 in [ROADMAP.md](ROADMAP.md) is the plan to
-  finally retire it).
+- `jarvis/legacy/` (the old pydantic-ai orchestrator) was retired in Faz 8 (2026-07-15) — deleted
+  outright, not archived. LangGraph (`jarvis/graph/`) has been the only orchestrator since Faz 1
+  of the refactor (2026-05-09); if you need the old implementation for reference, it's in git
+  history before that commit, not on disk.
 
 ## Safety model — read before touching tool-calling code
 

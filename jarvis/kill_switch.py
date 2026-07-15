@@ -26,9 +26,22 @@ _cache: dict[str, Any] | None = None
 
 
 def _load() -> dict[str, Any]:
+    """Always re-read from disk -- deliberately not cached across calls.
+
+    The original design cached the first successful read for the rest of the
+    process's life. is_enabled() is checked on every L3 tool call specifically
+    so a trip takes effect immediately -- but a load-once cache meant a trip
+    from one process (e.g. the CLI's /killswitch) was invisible to any other
+    already-running process (e.g. a long-lived `--api --monitor` server)
+    until that process restarted, silently defeating the "hard stop, no
+    prompt" guarantee in exactly the deployment shape this project targets.
+    The file is a few bytes and the only caller (policy_guard, gated behind
+    an L3 tool call) is already about to do far more expensive work, so
+    re-reading it every time costs nothing worth caching against. _cache is
+    kept only as a last-resort fallback for a transient read failure, not as
+    a steady-state optimization.
+    """
     global _cache
-    if _cache is not None:
-        return _cache
     if _PATH.exists():
         try:
             loaded = json.loads(_PATH.read_text(encoding="utf-8"))
@@ -37,6 +50,8 @@ def _load() -> dict[str, Any]:
                 return _cache
         except Exception:
             pass
+    if _cache is not None:
+        return _cache
     _cache = {"enabled": True, "reason": "", "changed_at": ""}
     return _cache
 

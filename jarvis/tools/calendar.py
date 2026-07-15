@@ -16,6 +16,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
@@ -253,13 +254,18 @@ def calendar_control(
             # Check for an existing event with the same title at the same time.
             # Prevents duplicate creation when the agent loops or retries a call.
             try:
-                win_start = (start_dt - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
-                win_end   = (start_dt + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+                # start_dt's wall-clock numbers represent local time in tz_name (see the
+                # naive-strftime + explicit timeZone trick below) — reinterpret with the
+                # user's actual configured zone, not a hardcoded +03:00, so this stays
+                # correct if calendar_timezone is ever set to anything but Europe/Istanbul.
+                tz = ZoneInfo(tz_name)
+                win_start = (start_dt - timedelta(minutes=5)).replace(tzinfo=tz)
+                win_end   = (start_dt + timedelta(minutes=5)).replace(tzinfo=tz)
                 existing = service.events().list(
                     calendarId="primary",
                     q=title,
-                    timeMin=f"{win_start}+03:00",
-                    timeMax=f"{win_end}+03:00",
+                    timeMin=win_start.isoformat(),
+                    timeMax=win_end.isoformat(),
                     singleEvents=True,
                     maxResults=5,
                 ).execute()

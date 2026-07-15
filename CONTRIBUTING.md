@@ -18,6 +18,18 @@ Development happens on `langgraph-migration`.
 
 See [README.md](README.md) for entry-point modes (`--voice`, `--api`, `--monitor`, `--wakeword`).
 
+## Testing
+
+```powershell
+pytest
+```
+
+Runs the suite under `tests/` (pytest + pytest-asyncio, configured in `pyproject.toml`). It's
+minimal, not exhaustive — see `CLAUDE.md` for what it covers. Any test that touches
+`SessionStore`/`UsageTracker`/`kill_switch`/anything resolving `Path("data")/...` relative to
+cwd must use the `isolated_cwd` fixture from `tests/conftest.py`; never let a test run against
+the real project `data/` directory.
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a current map of every major subsystem.

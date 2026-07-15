@@ -59,7 +59,18 @@ def _get_imap(settings: "Settings"):
             "  ITU_PASSWORD=your_password"
         )
     mb = MailBox(host, port)
-    mb.login(user, pwd, initial_folder="INBOX")
+    try:
+        mb.login(user, pwd, initial_folder="INBOX")
+    except Exception:
+        # MailBox(host, port) already opened the socket/SSL handshake in __init__ —
+        # if login fails, that connection is never handed back via `with`'s __exit__
+        # (the with-statement never got a chance to start), so close it explicitly
+        # or it leaks until GC/server-side timeout.
+        try:
+            mb.logout()
+        except Exception:
+            pass
+        raise
     return mb
 
 

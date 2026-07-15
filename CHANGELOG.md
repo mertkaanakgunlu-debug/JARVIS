@@ -6,6 +6,44 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Faz 8] — 2026-07-15 — Temizlik & konsolidasyon (non-destructive scope)
+
+- **`jarvis/legacy/` retired** — the old pydantic-ai orchestrator (unimported by any live path,
+  confirmed via grep) and the dead `jarvis/prompts/system.md` pointer file are deleted outright,
+  not archived. Recoverable from git history before this commit if ever needed for reference.
+- **New minimal test suite** — `tests/` (pytest + pytest-asyncio), 92 tests across 10 files. Covers
+  the safety kernel (`policy_guard`'s risk classification, per-action downgrade, kill-switch veto
+  scoping), `session_store` concurrency/atomicity, and — the concrete "offline-failover" proof —
+  `jarvis/providers/get_llm()`: with no cloud credentials configured at all, both the `fast` and
+  `reasoning` roles resolve to bare local Ollama, never a fallback wrapper around nothing. One
+  regression test per bug fixed below. New `tests/conftest.py`'s `isolated_cwd` fixture enforces
+  MEMORY.md's isolate-test-data-paths lesson for every test that touches cwd-relative storage.
+- **9 P2 bugs fixed**: `file_write` ValueError on home paths (BUG-20); calendar dedup hardcoded
+  `+03:00` instead of the configured timezone, now DST-correct via `zoneinfo` (BUG-21); IMAP
+  connection leak on login failure (BUG-itu); pdf cache keyed on path+mtime instead of content
+  hash, so a restored/extracted file with an older mtime could serve stale cached text forever
+  (BUG-pdf); Devito-failure fallback hardcoded `duration=0.5` instead of the caller's requested
+  duration (BUG-geomath); unanchored `"pro" in text` substring match hijacked ordinary messages
+  containing "proje"/"problem"/"program"/etc. into a silent model switch that dropped the user's
+  real message (BUG-modelswitch); an empty LLM response was unconditionally accepted as a
+  successful turn instead of retried (BUG-emptyresp); `/chat/upload` had no size cap and never
+  cleaned up saved files (BUG-upload); `UsageTracker` silently clobbered another live process's
+  recorded spend on every save (BUG-usage).
+- **Bonus fix, same root cause as BUG-usage, found live**: `kill_switch.py` cached its first
+  successful read for the rest of the process's life — a trip from one process (e.g. the CLI's
+  `/killswitch`) was invisible to an already-running `--api --monitor` server until restart,
+  silently defeating the "hard stop, no prompt" guarantee. Now always re-reads from disk.
+- **Electron/mobile client hygiene**: neither Electron REST call (`/chat/upload`, `/chat/stream`)
+  sent the `X-API-Key` header — both would 401 once `JARVIS_API_KEY` is configured (BUG-elec).
+  Mobile's `/ws` token moved from a `?token=` query param (visible to anything that logs URLs) to
+  an `X-API-Key` header via `IOWebSocketChannel`; the server checks the header first, falling back
+  to the query param only for Electron, whose browser `WebSocket` API can't set custom headers
+  (BUG-mob-tls — closes URL-logging exposure, not wire-level cleartext; this server still has no
+  TLS termination). WS reconnect now backs off exponentially (3s → 60s cap) instead of retrying
+  every 3s forever (BUG-reconnect).
+- **Explicitly out of scope this session** (owner go-ahead required, not assumed): merging
+  `langgraph-migration` → `main`; cleaning up the 21 stray `.claude/worktrees/*` scratch branches.
+
 ## [Faz 7] — 2026-07-15 — Proaktiflik (software half)
 
 - **New `JarvisAgent.proactive_turn()`** — gives `jarvis/monitor.py` a real path into the

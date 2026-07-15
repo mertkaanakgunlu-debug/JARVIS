@@ -55,6 +55,22 @@ def read(path_str: str, workspace: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _display_path(p: Path, workspace: Path) -> Path:
+    """Best-effort relative path for user-facing messages.
+
+    `write()` accepts any path under the home directory, not just under
+    `workspace` (see `_resolve`), so `p.relative_to(workspace)` alone raises
+    ValueError for e.g. a Desktop/Documents target — fall back to home-relative,
+    then to the absolute path.
+    """
+    for base in (workspace, _HOME):
+        try:
+            return p.relative_to(base)
+        except ValueError:
+            continue
+    return p
+
+
 def write(path_str: str, content: str, workspace: Path) -> str:
     """Write content to a file, creating parent directories if needed."""
     p = _resolve(path_str, workspace)
@@ -66,7 +82,7 @@ def write(path_str: str, content: str, workspace: Path) -> str:
             )
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-    return f"Written {len(content)} chars to {p.relative_to(workspace)}"
+    return f"Written {len(content)} chars to {_display_path(p, workspace)}"
 
 
 def list_dir(path_str: str, workspace: Path) -> str:

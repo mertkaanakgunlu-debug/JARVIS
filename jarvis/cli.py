@@ -118,10 +118,18 @@ _SWITCH_PATTERNS = [
 
 
 def _resolve_model_keyword(text: str) -> str | None:
-    """Return model_id if ``text`` matches any known model keyword, else None."""
+    """Return model_id if ``text`` matches any known model keyword, else None.
+
+    Word-boundary matched, not a raw substring test — an unanchored `"pro" in t`
+    previously matched inside unrelated words ("proje", "problem", "program",
+    "profesyonel", ...), hijacking ordinary messages into a model switch instead
+    of answering them (BUG-modelswitch). `\\b` treats Turkish suffix apostrophes
+    ("pro'ya") as a boundary but not letters glued directly onto the keyword, so
+    "proje" still correctly fails to match "pro".
+    """
     t = text.lower().strip()
     for keywords, model_id in _MODEL_KEYWORDS:
-        if any(kw in t for kw in keywords):
+        if any(re.search(rf"\b{re.escape(kw)}\b", t) for kw in keywords):
             return model_id
     return None
 

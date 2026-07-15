@@ -231,13 +231,42 @@ def make_critic_node(llm_pro):
         response_text = _extract_ai_text(state)
         revise_count = state.get("revise_count", 0)
 
-        # Fast-path: no response or revision budget exhausted
-        if not response_text or revise_count >= 2:
+        # Revision budget exhausted: stop retrying regardless of quality (BUG-emptyresp:
+        # this used to also fire whenever response_text was empty, on ANY revise_count --
+        # silently accepting a blank turn as "success" with no retry). If the response
+        # is still empty once the budget is exhausted, substitute a visible message
+        # instead of ending the turn on nothing.
+        if revise_count >= 2:
             return {
                 "critic_verdict": "accept",
                 "critique": "",
-                "response": response_text,
+                "response": response_text or (
+                    "I wasn't able to generate a response to that. "
+                    "Could you rephrase, or try again?"
+                ),
                 "revise_count": revise_count,
+            }
+
+        # Empty response with revision budget remaining: give the agent another
+        # attempt instead of accepting nothing. route_from_agent already routed
+        # here (not to tools), so an empty AIMessage.content is a genuinely blank
+        # final answer, not a legitimate mid-loop state.
+        if not response_text:
+            new_revise_count = revise_count + 1
+            return {
+                "critic_verdict": "redirect",
+                "critique": "Response was empty.",
+                "response": response_text,
+                "revise_count": new_revise_count,
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            f"[Quality Critic — Redirect {new_revise_count}/2]\n"
+                            "Your previous response was empty. Please provide an actual "
+                            "answer to the user's query."
+                        )
+                    )
+                ],
             }
 
         user_query = state.get("user_query", "")

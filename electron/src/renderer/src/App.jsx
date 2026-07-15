@@ -409,6 +409,7 @@ export default function App() {
     try {
       const resp = await fetch(`${apiUrl}/chat/upload`, {
         method: 'POST',
+        headers: apiKey ? { 'X-API-Key': apiKey } : undefined,
         body: formData,
       })
       const reader = resp.body.getReader()
@@ -432,7 +433,7 @@ export default function App() {
     } catch (e) {
       setDropResponse({ text: `Hata: ${e.message}`, done: true })
     }
-  }, [dropFile, dropQuery, apiUrl])
+  }, [dropFile, dropQuery, apiUrl, apiKey])
 
   // Fake data fallback (active when disconnected)
   const fakeMic      = useFakeMic(state)
@@ -584,7 +585,7 @@ export default function App() {
         <BottomBar
           state={state} micLevel={micLevel} latency={met.latency}
           vaultCount={vaultCount} uptime={uptime}
-          apiUrl={apiUrl}
+          apiUrl={apiUrl} apiKey={apiKey}
           onMessage={addLocalMessage}
           busy={chatBusy}
           onBusy={setChatBusy}
