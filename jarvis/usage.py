@@ -65,7 +65,13 @@ class UsageTracker:
     def _save_total(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = dict(self._total)
-        data["last_updated"] = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # BUG-18: last_updated refreshes every save (effectively "now"), so it's
+        # useless as a tracking-start anchor for gcp_quota.py's daily-rate
+        # forecast. first_seen is set once (setdefault) and round-trips through
+        # every subsequent load/save, giving a genuine elapsed-days baseline.
+        data.setdefault("first_seen", now_iso)
+        data["last_updated"] = now_iso
         try:
             self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:

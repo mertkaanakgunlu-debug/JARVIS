@@ -103,8 +103,8 @@ def _try_fetch_cloud_quotas(settings: "Settings") -> dict:
         gcloud services enable monitoring.googleapis.com
     """
     cached = _load_cache()
-    if cached.get("rpm_pro") is not None:
-        return cached  # fresh cache hit
+    if cached:
+        return cached  # fresh cache hit -- _load_cache() already filters by TTL
 
     try:
         from google.cloud import monitoring_v3
@@ -302,12 +302,15 @@ def quota_forecast(settings: "Settings") -> str:
     day_of_month = today.day
     # Estimate months of operation from usage.json timestamp or day of month
     usage_data = _load_usage_json()
-    # If we have last_updated, compute daily rate
+    # If we have first_seen, compute daily rate since tracking actually began.
+    # BUG-18: this used to read "last_updated", which usage.py refreshes on
+    # every save (effectively always ~now) -- days_elapsed collapsed to 1 every
+    # time, so daily_rate became the entire all-time total, not a real rate.
     daily_rate = 0.0
-    last_updated = usage_data.get("last_updated", "")
-    if last_updated:
+    first_seen = usage_data.get("first_seen", "")
+    if first_seen:
         try:
-            start_ts = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+            start_ts = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
             days_elapsed = max(1, (datetime.now(timezone.utc) - start_ts).days + 1)
             daily_rate = total_usd / days_elapsed
         except Exception:

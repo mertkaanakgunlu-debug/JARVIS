@@ -30,7 +30,7 @@
 | 5 | MCP katmanı | IoT yazılım ön koşulu | M | ✅ done (2026-07-15) |
 | 6 | Fiziksel dünya / IoT | ⛔ Donanıma bağlı (Faz 0+4+5) | L + HW | ⬜ deferred |
 | 7 | Proaktiflik | Capstone; kısmen donanıma bağlı | L | 🟡 software half done (2026-07-15), sensor half deferred (Faz 6) |
-| 8 | Temizlik & konsolidasyon | — | M | 🟡 non-destructive scope done (2026-07-15), merge/worktree-cleanup deferred |
+| 8 | Temizlik & konsolidasyon | — | M | 🟡 non-destructive scope + merge to main done (2026-07-15), only worktree-cleanup deferred |
 
 Faz 1+2 = "hafıza + zeka" ilk bloğu (ikisi de yerel).
 
@@ -594,7 +594,7 @@ calendar trigger completes without touching `self._history`/`_turn`/`session_sto
 index; a real local-LLM turn given an explicit gated-action instruction was observed to correctly
 interrupt via the real graph + real `policy_guard`, not just a mocked path.
 
-## Faz 8 — Temizlik & Konsolidasyon 🟡 non-destructive scope done (2026-07-15), merge/worktree-cleanup deferred
+## Faz 8 — Temizlik & Konsolidasyon 🟡 non-destructive scope + merge to main done (2026-07-15), only worktree-cleanup deferred
 
 - [x] Retire `jarvis/legacy/`; delete the dead `jarvis/prompts/system.md` pointer file.
       Done (2026-07-15) — confirmed via grep first (per `CLAUDE.md`'s standing warning) that
@@ -603,9 +603,10 @@ interrupt via the real graph + real `policy_guard`, not just a mocked path.
       if ever needed for reference.
 - [ ] Clean up the 21 `.claude/worktrees/*` scratch branches (owner go-ahead — destructive).
       Still deferred, unchanged from prior sessions.
-- [ ] Merge `langgraph-migration` → `main` — deliberately **not done this session**: explicit
-      owner go-ahead required (shared branch state), scoped out up front alongside the worktree
-      cleanup rather than assumed as part of "the next phase."
+- [x] Merge `langgraph-migration` → `main` — done 2026-07-15, same-day follow-up session, after
+      explicit owner go-ahead. Pure fast-forward (`main` had zero commits of its own — it was frozen
+      at a 2026-05-09 baseline, 67 commits behind). Repo also pushed to a new GitHub remote
+      (`origin` → `mertkaanakgunlu-debug/JARVIS`, public) — see the follow-up write-up below.
 - [x] Add a minimal test suite (none existed before this phase) + offline-failover tests.
       New `tests/` — pytest + pytest-asyncio (added to `requirements.txt`), configured via
       `[tool.pytest.ini_options]` in `pyproject.toml` (`testpaths = ["tests"]`,
@@ -706,12 +707,89 @@ interrupt via the real graph + real `policy_guard`, not just a mocked path.
       3s forever with no backoff — if the PC is off for hours, that's a reconnect attempt every 3s
       the whole time. Now exponential backoff (3s → doubling → capped at 60s), reset to 3s on a
       successful `channel.ready`.
-      **Not fixed, flagged separately** (found in passing, out of scope, currently dead/unreachable
-      code — no call sites): `WsClient.reconnect(host, apiKey)` accepts new host/key parameters but
-      never applies them (`_host`/`_apiKey` are `final`) — see the spawned follow-up task.
+      **[task_a9cee697, fixed 2026-07-15 same-day follow-up]** `WsClient.reconnect(host, apiKey)`
+      accepted new host/key parameters but never applied them (`_host`/`_apiKey` were `final`) —
+      now mutable and actually reassigned before reconnecting. Was dead code (no call sites) at the
+      time; still no call sites, but now correct whenever mobile settings-switching wires one in.
 - Note: offline resilience is largely already achieved by the local-first Faz 1-3 work; this
       phase's provider-router tests (above) are the first *persisted* proof of that claim rather
       than a one-off manual verification.
+
+### Faz 8 follow-up — 2026-07-15 (same-day continuation session)
+
+Picked up HANDOFF.md's own "recommended next steps" from the session above: the merge decision,
+the Faz 0 bugs that were opportunistically deferred, and the `flutter analyze` verification that
+needed a Flutter SDK not installed at the time.
+
+- **Repo pushed to GitHub** (owner request): `langgraph-migration` → `main` fast-forward merge
+  (see above), then a new public repo created by the owner and `main` pushed to it
+  (`github.com/mertkaanakgunlu-debug/JARVIS`). Before pushing, the full git history was scanned for
+  ever-committed secrets (`.env`, `credentials.json`, `token.json`, `.pem`/`.key` filenames, plus a
+  content-pattern scan for Google/OpenAI/Slack API-key and PEM-private-key shapes across every
+  commit's diff) — nothing found; `.env`/`data/` were already correctly gitignored, only the
+  placeholder-only `.env.example` is tracked.
+- **Flutter SDK installed** — no official winget package exists, so installed via
+  `git clone https://github.com/flutter/flutter.git -b stable --depth 1 C:\flutter`, added to the
+  user PATH. `flutter doctor`: Flutter SDK itself is fine; Android toolchain and Visual Studio are
+  both absent (no Android Studio/SDK, no VS Desktop-C++ workload) — installing either is a
+  multi-GB, separate undertaking, deliberately not done unprompted. `flutter pub get` +
+  `flutter analyze` in `mobile/` both ran clean: **zero mentions of `ws_client.dart`** in the
+  analyzer output (the Faz 8 BUG-mob-tls/BUG-reconnect/task_a9cee697 Dart changes compile and
+  type-check for real, not just by inspection) and **zero `error`-severity findings anywhere** in
+  the app — 69 pre-existing `info`-level deprecation notices (`withOpacity`→`withValues`,
+  `partialResults`→`SpeechListenOptions`), unrelated to this session, left untouched.
+  `flutter build apk` was not attempted (needs the Android SDK — see above).
+- **BUG-15** (finance sync regex never matches, `tools/finance.py`) fixed — live-diagnosed root
+  cause: `gmail.py`'s `_fmt_message()` actually emits `"• [id]  Subject"` (bullet-prefixed), but the
+  `msg_ids` regex expected a bare `"[id]"` at line start, so it never matched and sync always
+  reported zero messages regardless of what Gmail actually had. Same root cause had also broken the
+  "read" step's subject/body extraction, which searched for a `"Konu:"`/`"---"` shape
+  `_fmt_message()` has never produced (subject always came out empty; body included the header
+  block). All three regexes fixed to match the real format.
+- **BUG-16** (`todo('add')` background analysis silently fails, `graph/tools.py`) fixed —
+  `asyncio.create_task(_bg_analyze())`'s result was never referenced anywhere; asyncio only holds a
+  *weak* reference to a task, so an unreferenced one is eligible for garbage collection before it
+  finishes, silently killing the prioritization before `store.update()` ever ran. Fixed with a
+  module-level `_todo_bg_tasks` strong-reference set, pruned via a per-task done-callback.
+- **BUG-17** (gcp_quota cache key never hits, `gcp_quota.py`) fixed — the freshness check tested
+  `cached.get("rpm_pro") is not None`, but no code anywhere ever wrote a key literally named
+  `"rpm_pro"` (only `"rpm_pro_used"`/`"rpm_flash_used"`/etc.), so it never matched and every call
+  attempted a live Cloud Monitoring fetch regardless of cache state. `_load_cache()` already filters
+  by TTL, so the fix is simply `if cached: return cached`.
+- **BUG-18** (gcp_quota forecast daily-rate math wrong, `gcp_quota.py`) fixed — the forecast read
+  `usage.json`'s `last_updated`, which `usage.py` refreshes on *every* save (effectively always
+  "now"), so `days_elapsed` collapsed to 1 on every call and `daily_rate` became the entire all-time
+  cost total instead of a real per-day average — a wildly overstated "spend forecast." Fixed by
+  adding `first_seen` to `usage.py` (set once via `setdefault`, never overwritten after) and having
+  the forecast anchor on that instead.
+- **`_OllamaEF`/`_GeminiEF` missing `embed_query()`** (`jarvis/memory.py`, both previously flagged
+  only for Ollama) fixed — live-reproduced root cause (not assumed): this project's installed
+  chromadb version calls `embedding_function()` for `.add()` but
+  `embedding_function.embed_query()` for `.query()` **unconditionally, no `hasattr` fallback**
+  (confirmed via `chromadb/api/models/CollectionCommon.py`'s `_embed(is_query=True)`), so *every*
+  semantic recall (`recall_facts`/`recall_procedures`/`recall`/doc RAG) against an Ollama- or
+  Gemini-backed collection raised `AttributeError` the moment it queried — `.add()` alone always
+  looked fine, which is why this had gone unnoticed. Both classes gained an `embed_query()` that
+  delegates to the same logic as `__call__` (no query/document asymmetry needed for either backend
+  as used here). Ollama path confirmed live against the real local Ollama server.
+- **Bonus find while live-verifying `_GeminiEF` against the real Gemini API** (owner asked to
+  "complete everything necessary"): `_build_gemini_ef`'s hardcoded model id
+  (`"models/text-embedding-004"`) has been retired server-side — every real call 404'd. A real
+  `client.models.list()` call found the actual current embedding models
+  (`gemini-embedding-001`/`-2`/`-2-preview`); switched to `gemini-embedding-2`. Also added a
+  construction-time smoke-test embed call (same reasoning as `_build_ollama_ef`'s reachability
+  probe) so a future model-id retirement fails fast and falls through to the default ONNX EF
+  instead of crashing every real recall call. Confirmed live: the error changed from `404
+  NOT_FOUND` (wrong model) to `429 RESOURCE_EXHAUSTED` / "prepayment credits depleted" (this
+  account's already-documented, pre-existing billing state — see MEMORY.md — not a code bug),
+  proving the model id itself is now correct even though this account can't currently complete a
+  real embed call to prove the full round-trip end to end.
+- **11 new regression tests** (`test_finance_tool.py`, `test_gcp_quota.py`,
+  `test_memory_embedding.py`, `test_todo_bg_analysis.py`) — full suite now **103/103 passing**.
+- **Still deferred, unchanged**: the 21 stray `.claude/worktrees/*`/`claude/*` scratch branches
+  (destructive, needs explicit owner go-ahead); Faz 6 (hardware-gated); Android SDK (not installed,
+  see above); BUG-25's appendix-table checkmark (the fix itself shipped in Faz 2 — this is a stale
+  table row, not an open bug, see the bug backlog appendix below).
 
 ---
 
@@ -740,11 +818,11 @@ also reported via this session's code-review tooling.
 | BUG-14 | graph/nodes.py:144 | agent_node ainvoke unguarded | 4 ✅ |
 | BUG-recursion | graph/state.py:11 | no recursion_limit / tool-call cap | 4 ✅ |
 | BUG-confirm-payload | api.py:249 | `/chat` 500 loses ConfirmationRequired payload | 4 ✅ |
-| BUG-15 | tools/finance.py:161 | finance sync regex never matches → feature dead | 0 |
-| BUG-16 | graph/tools.py:670 | todo('add') bg analysis silently fails | 0 |
-| BUG-17 | gcp_quota.py:106 | quota cache key never hits | 0 |
-| BUG-18 | gcp_quota.py:307 | forecast daily-rate math wrong → false alarms | 0 |
-| BUG-19 | monitor.py:390 | budget/quota alerts no dedup, re-fire every cycle | 7 |
+| BUG-15 | tools/finance.py:161 | finance sync regex never matches → feature dead | 8 ✅ (follow-up 2026-07-15) |
+| BUG-16 | graph/tools.py:670 | todo('add') bg analysis silently fails | 8 ✅ (follow-up 2026-07-15) |
+| BUG-17 | gcp_quota.py:106 | quota cache key never hits | 8 ✅ (follow-up 2026-07-15) |
+| BUG-18 | gcp_quota.py:307 | forecast daily-rate math wrong → false alarms | 8 ✅ (follow-up 2026-07-15) |
+| BUG-19 | monitor.py:390 | budget/quota alerts no dedup, re-fire every cycle | 7 ✅ |
 | BUG-20 | tools/files.py:56 | file_write uncaught ValueError on home paths | 8 ✅ |
 | BUG-21 | tools/calendar.py:261 | dedup guard hardcodes +03:00 | 8 ✅ |
 | BUG-itu | tools/itu_mail.py:61 | IMAP connection leak on login failure | 8 ✅ |
@@ -757,10 +835,11 @@ also reported via this session's code-review tooling.
 | BUG-upload | api.py:391 | /chat/upload no size cap, no cleanup | 8 ✅ |
 | BUG-23 | voice.py:138 | openwakeword buffer never reset between sessions | 3 ✅ |
 | BUG-usage | usage.py:63 | UsageTracker clobbers across concurrent processes | 8 ✅ |
-| BUG-25 | agent.py:552 | entity extraction fires every trivial turn | 2 |
+| BUG-25 | agent.py:552 | entity extraction fires every trivial turn | 2 ✅ |
 | BUG-elec | electron/App.jsx | HUD never sends API-key header | 8 ✅ |
 | BUG-mob-tls | mobile/ws_client.dart:22 | cleartext ws token in query string | 8 ✅ (query-param exposure closed; wire-level cleartext remains -- no TLS termination exists) |
 | BUG-reconnect | ws_client.dart:42 | 3s reconnect forever, no backoff cap | 8 ✅ |
+| task_a9cee697 | mobile/lib/core/ws_client.dart:84 | reconnect(host, apiKey) ignores its own params (_host/_apiKey final) | 8 ✅ (follow-up 2026-07-15) |
 
 ## Previously-completed refactor phases (context)
 

@@ -6,6 +6,42 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Faz 8 devam] — 2026-07-15 — GitHub'a taşıma, kalan Faz 0 bug'ları, Flutter doğrulama
+
+- **Repo GitHub'a taşındı**: `langgraph-migration` → `main` fast-forward merge (main 2026-05-09'dan
+  beri donmuştu, 67 commit geride kalmıştı, hiçbiri kayıp değildi) + yeni public repo'ya push
+  (`github.com/mertkaanakgunlu-debug/JARVIS`). Push öncesi tüm git geçmişi secret taraması yapıldı
+  (`.env`/`credentials.json`/`token.json`/`.pem`/`.key` hiç commit edilmemiş; API-key/private-key
+  deseni için içerik taraması temiz).
+- **Flutter SDK kuruldu** (`C:\flutter`, git clone — winget'te resmi paket yok) ve `mobile/`'da
+  `flutter analyze` çalıştırıldı: `ws_client.dart` sıfır hata/uyarıyla derleniyor (Faz 8'in
+  BUG-mob-tls/BUG-reconnect/task_a9cee697 Dart değişiklikleri artık gerçekten derlenmiş olarak
+  doğrulandı). 69 önceden var olan, bu oturumla ilgisiz `info`-seviye deprecation notu bulundu,
+  dokunulmadı. Android SDK yok, `flutter build apk` denenmedi (ayrı, çok daha büyük bir kurulum).
+- **`WsClient.reconnect()` artık kendi host/apiKey parametrelerini gerçekten uyguluyor**
+  (task_a9cee697) — `_host`/`_apiKey` `final` olduğu için önceden hiç atanmıyordu.
+- **4 Faz-0 bug'u düzeltildi** (ROADMAP.md'de "opportunistic, deferred" olarak bırakılmıştı):
+  BUG-15 (finance sync regex — `gmail.py`'nin gerçek `"• [id]"` formatına göre düzeltildi, subject/
+  body ayrıştırma da aynı kök nedenden dolayı düzeltildi), BUG-16 (todo bg analiz —
+  `asyncio.create_task()`'ın sonucu hiç referans tutulmuyordu, GC'lenebiliyordu; modül seviyeli
+  strong-ref set eklendi), BUG-17 (gcp_quota cache — tazelik kontrolü hiç yazılmayan bir anahtarı
+  arıyordu), BUG-18 (gcp_quota forecast — `last_updated` her kayıtta yenilendiği için günlük oran
+  her zaman TÜM zamanların toplamına eşitleniyordu; yeni `first_seen` alanına anchor edildi).
+- **`_OllamaEF`/`_GeminiEF.embed_query()` eksikti** (`jarvis/memory.py`) — canlı repro ile bulundu:
+  bu projedeki chromadb sürümü `.query()` için koşulsuz `embed_query()` çağırıyor (hasattr fallback
+  yok), `.add()` içinse `__call__` — her iki EF de sadece `__call__` içeriyordu, yani her semantik
+  recall `AttributeError` fırlatıyordu. İkisine de `__call__`'a delege eden `embed_query()` eklendi.
+- **Bonus bulgu, `_GeminiEF`'i canlı Gemini API'sine karşı doğrularken bulundu**: `_build_gemini_ef`'in
+  hardcoded model id'si (`"models/text-embedding-004"`) Google tarafında emekliye ayrılmış (her
+  çağrı 404 veriyordu). Gerçek `client.models.list()` çağrısı güncel embedding modellerini gösterdi
+  (`gemini-embedding-001`/`-2`/`-2-preview`); `gemini-embedding-2`'ye geçildi. Ayrıca construction
+  anında bir smoke-test embed çağrısı eklendi (Ollama'nın reachability probe'una benzer) — gelecekte
+  Google bir modeli tekrar emekliye ayırırsa bu katman artık her gerçek recall'da çökmek yerine
+  hızlıca default ONNX EF'e düşecek.
+- **11 yeni regresyon testi**, toplam **103/103 test geçiyor**.
+
+---
+
 ## [Faz 8] — 2026-07-15 — Temizlik & konsolidasyon (non-destructive scope)
 
 - **`jarvis/legacy/` retired** — the old pydantic-ai orchestrator (unimported by any live path,

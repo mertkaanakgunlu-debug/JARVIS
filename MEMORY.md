@@ -67,6 +67,40 @@
   `find_similar_fact`'s `0.15`) but too tight for general semantic recall. `recall_facts`/
   `recall_procedures` (`jarvis/memory.py`) use `1.1`/`1.0` for this reason — see the comment above
   `find_similar_fact` in that file before adding another distance-thresholded recall method.
+- **This project's installed chromadb version requires embedding functions to implement
+  `embed_query()` separately from `__call__`** — confirmed live (2026-07-15):
+  `chromadb/api/models/CollectionCommon.py`'s `_embed(is_query=...)` calls
+  `embedding_function(input=...)` for `.add()` but `embedding_function.embed_query(input=...)` for
+  `.query()`, **unconditionally, with no `hasattr` fallback** in the code path this project's
+  `Collection.query()` actually hits. Any future custom `EmbeddingFunction` in `jarvis/memory.py`
+  (`_OllamaEF`/`_GeminiEF` are the two so far) needs both methods or every semantic recall against
+  it will raise `AttributeError` the moment it's queried — `.add()` alone will look completely fine,
+  which is exactly why this went unnoticed for a while. The simplest correct implementation (used
+  by both existing classes) is `embed_query = lambda self, input: self(input)` — neither backend
+  used here needs a genuinely different query-vs-document embedding.
+- **Gemini's embedding model id drifts — verify live, don't trust a hardcoded string.**
+  `_build_gemini_ef`'s model id was `"models/text-embedding-004"` until 2026-07-15; live-tested
+  that day and found retired (`404 NOT_FOUND ... not supported for embedContent`). A real
+  `client.models.list()` call showed the actual currently-servable embedding models were
+  `gemini-embedding-001`, `gemini-embedding-2-preview`, `gemini-embedding-2` — switched to the
+  latter (current non-preview). `_build_gemini_ef` now also smoke-tests one real embed call at
+  construction time (mirroring `_build_ollama_ef`'s reachability probe) so the *next* time Google
+  retires a model id, this tier fails fast and falls through to the default ONNX EF instead of
+  returning an object that 404s on every real recall call. Note: this account's `GEMINI_API_KEY`
+  separately hits the already-documented "prepayment credits depleted" 429 (below) on embedding
+  calls too, not just chat — same known account-level state, not a new/different issue.
+- **GitHub remote configured 2026-07-15**: `origin` → `github.com/mertkaanakgunlu-debug/JARVIS`
+  (public). `main` is pushed and tracks `origin/main`; `langgraph-migration` is local-only (identical
+  commit to `main` as of the merge, not separately pushed — nothing is lost by that, all content is
+  on `main`). The 21 `claude/*` scratch worktree branches remain local-only, not pushed (deliberate
+  — they're slated for deletion, pending owner go-ahead, not for publishing).
+- **Flutter SDK installed 2026-07-15** at `C:\flutter` via `git clone
+  https://github.com/flutter/flutter.git -b stable --depth 1` (no official winget package exists —
+  `winget search flutter` returns unrelated apps tagged "flutter", not the SDK itself), added to the
+  user PATH. `flutter doctor`: SDK itself fine; Android toolchain and Visual Studio both absent (no
+  Android Studio/SDK, no VS Desktop-C++ workload) — either is a separate multi-GB install, not done
+  as part of this. `flutter analyze`/`flutter pub get` work today; `flutter build apk` does not
+  (needs the Android SDK).
 
 ## Direction: LOCAL-FIRST pivot (owner decision, 2026-07-14)
 
@@ -478,5 +512,14 @@ The north-star target came from an owner-commissioned research report
 - `data/` (ChromaDB, SQLite DBs, OAuth token caches, uploads) is entirely gitignored.
 - `vault/conversations/*.md` (daily transcripts) are gitignored for privacy; the vault
   directory structure itself is tracked via `.gitkeep`.
-- No automated test suite exists in `jarvis/` — `CONTRIBUTING.md`'s implied "run tests"
-  step has nothing to run today.
+- `tests/` (pytest, added Faz 8, extended in the 2026-07-15 follow-up session) is the automated
+  test suite — 103 tests as of 2026-07-15, run with `pytest` from the repo root. Not exhaustive
+  (most tool modules still have zero coverage) — extend incrementally rather than reintroducing
+  throwaway scratch scripts for anything touching shared logic.
+- **`asyncio.create_task()` only holds a *weak* reference to the returned task** — a task with no
+  other referent (e.g. a bare `asyncio.create_task(coro())` whose result is never stored) is
+  eligible for garbage collection before it finishes, silently killing it — no exception, no log,
+  it just stops. Hit `graph/tools.py`'s `todo('add')` background prioritization this way (BUG-16,
+  fixed 2026-07-15 via a module-level strong-reference set + a per-task done-callback to prune it
+  after completion). Check any other fire-and-forget `create_task(...)` call in this codebase for
+  the same pattern before assuming it's fine.

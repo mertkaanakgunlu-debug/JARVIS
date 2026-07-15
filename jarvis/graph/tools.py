@@ -48,6 +48,13 @@ if TYPE_CHECKING:
     from jarvis.config import Settings
     from jarvis.memory import Memory
 
+# BUG-16: asyncio only holds a *weak* reference to a task created via
+# create_task() -- one with no other referent (module-level here, since
+# make_tools() itself may be called more than once per process, e.g. MCP
+# reconnects) can be garbage-collected mid-run, silently killing todo('add')'s
+# background prioritization before it ever calls store.update().
+_todo_bg_tasks: set[asyncio.Task] = set()
+
 
 def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     """Build LangChain tool instances capturing workspace/settings/memory in closures."""
@@ -677,12 +684,13 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             # already-running loop, so this can just schedule directly; no
             # loop.is_running() branch / _run_coro thread-bridge fallback
             # needed (that was only ever there for a sync caller context).
-            import asyncio
             async def _bg_analyze():
                 from jarvis.todo_analyzer import analyze_and_save
                 await analyze_and_save(tid, title, description, settings, store)
             try:
-                asyncio.create_task(_bg_analyze())
+                bg_task = asyncio.create_task(_bg_analyze())
+                _todo_bg_tasks.add(bg_task)
+                bg_task.add_done_callback(_todo_bg_tasks.discard)
             except Exception:
                 pass  # Analysis is optional
             return (

@@ -55,6 +55,13 @@ def _build_ollama_ef(settings: "Settings"):
                         out.append(r.json()["embedding"])
                 return out
 
+            def embed_query(self, input: list[str]) -> list[list[float]]:
+                # This chromadb version calls __call__ for add() but
+                # embed_query() for query() unconditionally (no hasattr
+                # fallback) -- nomic-embed-text has no separate query/doc
+                # mode here, so just reuse the same embedding path.
+                return self(input)
+
             def name(self) -> str:
                 return f"ollama-{model}"
 
@@ -64,9 +71,14 @@ def _build_ollama_ef(settings: "Settings"):
 
 
 def _build_gemini_ef(api_key: str):
-    """Return a ChromaDB-compatible embedding function using Gemini text-embedding-004.
+    """Return a ChromaDB-compatible embedding function using Gemini's embedding model.
 
-    Falls back to None (ChromaDB default ONNX EF) if api_key is empty or import fails.
+    Falls back to None (ChromaDB default ONNX EF) if api_key is empty, import fails, or the
+    smoke-test embed call below fails -- e.g. "models/text-embedding-004" (this function's
+    model id until 2026-07-15) was live-confirmed retired: Google's API now 404s it and only
+    serves gemini-embedding-001/2/2-preview. Probed eagerly here for the same reason
+    _build_ollama_ef probes reachability above: fail fast at construction time so a broken tier
+    falls through to the next one instead of silently crashing every real recall call later.
     """
     if not api_key:
         return None
@@ -74,14 +86,21 @@ def _build_gemini_ef(api_key: str):
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
         embedder = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-004",
+            model="models/gemini-embedding-2",
             google_api_key=api_key,
             task_type="retrieval_document",
         )
+        embedder.embed_documents(["ping"])  # smoke test -- see docstring
 
         class _GeminiEF:
             def __call__(self, input: list[str]) -> list[list[float]]:
                 return embedder.embed_documents(input)
+
+            def embed_query(self, input: list[str]) -> list[list[float]]:
+                # Same chromadb embed_query()-for-query() requirement as
+                # _OllamaEF above -- BUG (found live alongside it): this
+                # class had the identical missing-method crash.
+                return self(input)
 
             def name(self) -> str:
                 return "gemini-text-embedding-004"

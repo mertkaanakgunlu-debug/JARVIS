@@ -5,8 +5,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/ws_event.dart';
 
 class WsClient {
-  final String _host;
-  final String _apiKey;
+  String _host;
+  String _apiKey;
 
   WebSocketChannel? _channel;
   StreamController<WsEvent> _controller = StreamController<WsEvent>.broadcast();
@@ -82,6 +82,8 @@ class WsClient {
   }
 
   void reconnect(String host, String apiKey) {
+    _host = host;
+    _apiKey = apiKey;
     _channel?.sink.close();
     _reconnectTimer?.cancel();
     _reconnectDelay = _baseReconnectDelay;

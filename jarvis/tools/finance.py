@@ -156,9 +156,12 @@ def _sync_burgan(months_back: int, settings: "Settings") -> str:
             settings=settings,
         )
 
-        # Parse out message IDs from the result lines (format: "  [id] ...")
+        # Parse out message IDs from the result lines. BUG-15: gmail.py's
+        # _fmt_message() actually emits "• [id]  Subject" (bullet prefix) --
+        # this regex required plain leading whitespace before "[", which never
+        # matched, so msg_ids was always empty and sync silently found nothing.
         import re
-        msg_ids = re.findall(r"^\s*\[([A-Za-z0-9]+)\]", raw, re.MULTILINE)
+        msg_ids = re.findall(r"^•\s*\[([A-Za-z0-9]+)\]", raw, re.MULTILINE)
 
         if not msg_ids:
             return f"📭 Burgan bildirimi bulunamadı (filtre: {query})"
@@ -171,11 +174,13 @@ def _sync_burgan(months_back: int, settings: "Settings") -> str:
                 message_id=mid,
                 settings=settings,
             )
-            # Extract subject + body from the read output
-            subject_match = re.search(r"^Konu:\s*(.+)$", full, re.MULTILINE)
+            # Extract subject + body from the read output. Same root cause as
+            # the msg_ids regex above: gmail.py's actual format is
+            # "• [id]  Subject" / "  From: ...\n\n{body}", not "Konu: .../---".
+            subject_match = re.search(r"^•\s*\[[A-Za-z0-9]+\]\s+(.+)$", full, re.MULTILINE)
             subject = subject_match.group(1).strip() if subject_match else ""
-            # Body starts after the --- separator
-            body_split = full.split("---\n", 1)
+            # Body starts after the blank line that separates it from the headers
+            body_split = full.split("\n\n", 1)
             body = body_split[1].strip()[:2000] if len(body_split) > 1 else full[:2000]
 
             tx = await extract_transaction(subject, body, settings)

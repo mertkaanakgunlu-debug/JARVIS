@@ -3,227 +3,184 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-15 — Faz 8 (Temizlik & Konsolidasyon, non-destructive scope)
+## Last session: 2026-07-15 — GitHub push + Faz 8 follow-up (remaining Faz 0 bugs, Flutter verification)
 
-**Context:** Owner said "sıradaki faz ile devam et" (continue with the next phase). Two things
-needed resolving before starting: (1) Faz 7 was still fully uncommitted from the prior session —
-asked and confirmed "commit Faz 7 first," matching the established one-phase-per-commit pattern,
-so it was committed (`1039a1b`) before any Faz 8 diff began. (2) Per the phase overview table, Faz
-8 is the only remaining phase that isn't hardware-gated (Faz 6) — but it bundles several
-sub-tasks, two of which (merge `langgraph-migration` → `main`, delete the 21 stray
-`.claude/worktrees/*` branches) are pre-flagged in this repo's own docs as needing explicit owner
-go-ahead. Asked and confirmed: full non-destructive scope (legacy retirement + minimal test suite
-+ all 9 remaining P2 bugs + electron/mobile hygiene), explicitly excluding the merge and worktree
-cleanup.
+**Context:** Two separate asks in the same session. First: the repo had never been pushed anywhere
+(`git remote -v` was empty) — owner asked to push it, chose GitHub/public and "merge
+`langgraph-migration` → `main` first, then push `main`" from an explicit either/or question. Second:
+"continue completing all other missing items, no hardware yet, install what's needed (Flutter
+etc.)" — picked up the prior session's own "recommended next steps": the merge decision, the four
+Faz-0 bugs left "opportunistic, deferred," `WsClient.reconnect()`'s dead param bug, `_OllamaEF`'s
+missing `embed_query()`, and the `flutter analyze` verification that had no Flutter SDK to run on.
 
 ## What happened this session
 
-1. **Retired `jarvis/legacy/`** — confirmed via grep first (nothing outside the directory itself
-   imported it) then `git rm -r`'d the old pydantic-ai orchestrator and the dead
-   `jarvis/prompts/system.md` pointer file outright, not archived. Updated every doc that
-   referenced either path (`CLAUDE.md`, `ROADMAP.md`, `MEMORY.md`, `ProjectState.md`,
-   `docs/SAFETY.md`, `README.md`) to reflect the deletion; both are recoverable from git history
-   before this commit if ever needed for reference.
-2. **New minimal test suite** — `tests/` (pytest + pytest-asyncio, added to `requirements.txt`;
-   neither was previously installed). 92 tests across 10 files:
-   - `test_policy_guard.py` (20) — risk classification, the BUG-6 per-action read/write downgrade
-     for the four mixed-risk external_api tools, kill-switch veto scoping (L3-only, never blocks
-     local writes or downgraded reads), the unregistered-tool fail-safe.
-   - `test_session_store.py` (9) — no-duplication across turn buckets and `last_turn_idx`
-     resumption (the Faz 0 bonus fixes, never previously left a persisted test), a rollback-on-
-     failure atomicity test (via a connection proxy — `sqlite3.Connection` methods can't be
-     monkeypatched directly on an instance, confirmed live), a concurrent 3-writers×3-readers
-     stress test.
-   - `test_provider_router.py` (8) — **the offline-failover proof**: with zero cloud credentials
-     configured, both `fast` and `reasoning` roles resolve to bare local Ollama, not a fallback
-     wrapper around nothing; with cloud configured, local Ollama is confirmed always last in the
-     `reasoning` fallback chain. No network access needed — constructing a `ChatOpenAI`/
-     `ChatGoogleGenerativeAI` client doesn't itself call out to Ollama or Google.
-   - `test_kill_switch.py` (6), `test_usage_tracker.py` (7) — see bug fixes below; these are the
-     regression tests for the two cross-process fixes.
-   - One regression test file per remaining bug fix (`test_files_tool.py`, `test_calendar_tool.py`,
-     `test_pdf_tool.py`, `test_geo_math_tool.py`, `test_cli_model_switch.py`,
-     `test_graph_critic_node.py`, `test_api_upload.py`).
-   - New `tests/conftest.py`'s `isolated_cwd` fixture is the enforcement point for this repo's own
-     isolate-test-data-paths lesson (MEMORY.md) — chdir's into a fresh `tmp_path` AND resets
-     `kill_switch`'s module-level `_cache`, since that cache is keyed off cwd-relative state and
-     would otherwise leak between tests. Config: `[tool.pytest.ini_options]` in `pyproject.toml`
-     (`testpaths = ["tests"]`, `asyncio_mode = "auto"`). Run with `pytest` from repo root.
-3. **9 P2 bugs fixed**, each verified live (not just read-and-assumed) before being formalized into
-   a test — see `ROADMAP.md`'s Faz 8 section for the full per-bug writeup:
-   - **BUG-20** `file_write` ValueError on home paths (`tools/files.py`) — new `_display_path()`
-     helper.
-   - **BUG-21** calendar dedup hardcoded `+03:00` (`tools/calendar.py`) — now `zoneinfo`-based,
-     DST-correct for any configured timezone, not just coincidentally-correct Istanbul.
-   - **BUG-itu** IMAP connection leak on login failure (`tools/itu_mail.py`) — `MailBox(host,
-     port)` opens the socket in `__init__`; now closed via `.logout()` if `.login()` raises.
-   - **BUG-pdf** cache keyed on path not content (`tools/pdf.py`) — new `_content_key()` hashes
-     file bytes; a same-path content swap with an *older* mtime (restored backup, archive
-     extraction) no longer serves stale cached text forever.
-   - **BUG-geomath** Devito fallback hardcodes `duration=0.5` (`tools/geo_math_tool.py`) — the
-     runtime-failure fallback (not just "Devito not installed") now passes through the actual
-     requested duration.
-   - **BUG-modelswitch** unanchored `"pro" in text` substring hijack (`cli.py`) — ordinary
-     messages containing "proje"/"problem"/"program"/etc. were silently swallowed into a model
-     switch (the CLI `continue`s after a detected switch, dropping the user's real message
-     entirely). Fixed with `\b`-anchored word-boundary regex per keyword; Turkish
-     apostrophe-suffixed forms ("Pro'ya") still match correctly.
-   - **BUG-emptyresp** empty LLM response saved as success (`graph/nodes.py`) — `critic_node`'s
-     fast-path used to accept an empty response unconditionally regardless of revision budget; now
-     redirects for a retry when budget remains, substitutes a visible message only once budget is
-     truly exhausted.
-   - **BUG-upload** `/chat/upload` no size cap + no cleanup (`api.py`) — chunked read with a
-     50 MB cap (413 before buffering an oversized file), cleanup wired into both the PDF branch
-     (immediate, after synchronous extraction) and the Excel/CSV/Word branch (in the SSE
-     generator's `finally`, since the agent may read the file at any point while streaming).
-   - **BUG-usage** `UsageTracker` clobbers across processes (`usage.py`) — `record()` now re-reads
-     the on-disk total fresh immediately before merging its delta in, under a new lock. Narrows the
-     failure window to a brief TOCTOU race rather than "guaranteed loss whenever two processes are
-     alive together" — does not eliminate it (would need a real cross-process file lock, which
-     nothing else in this codebase uses either).
-4. **Bonus fix, found live while fixing BUG-usage** (same root cause, safety-relevant, not in the
-   original backlog): `kill_switch.py`'s `_load()` cached the first successful read for the rest
-   of the process's life. Since `policy_guard.evaluate()` checks `is_enabled()` on every L3 call
-   specifically so a trip takes effect immediately, the load-once cache meant a trip from one
-   process (e.g. the CLI's `/killswitch`) was invisible to an already-running `--api --monitor`
-   server until it restarted — silently defeating the "hard stop, no prompt" guarantee in exactly
-   this project's targeted always-on deployment shape. Now always re-reads from disk (the file is
-   a few bytes; the only caller is already about to do far more expensive work).
-5. **Electron/mobile client hygiene**:
-   - **BUG-elec**: neither of Electron's two REST calls (`App.jsx`'s file-drop → `/chat/upload`,
-     `HudPanels.jsx`'s `BottomBar` chat input → `/chat/stream`) ever sent `X-API-Key` — both would
-     401 the moment `JARVIS_API_KEY` is configured. `BottomBar` didn't even accept an `apiKey`
-     prop; now threaded through. `npm run build` confirmed clean after the fix.
-   - **BUG-mob-tls**: the mobile client's `/ws` token traveled as a `?token=` query param.
-     Switched to `IOWebSocketChannel` (Android-only, fine — no Flutter Web target) so it goes in an
-     `X-API-Key` header instead; `jarvis/api.py`'s `ws_endpoint` checks the header first, falling
-     back to the query param only for Electron (browser `WebSocket` API genuinely can't set custom
-     headers — not client-fixable). **Honest scope**: this closes URL-logging exposure, not
-     wire-level cleartext — no TLS termination exists on this server, so confidentiality on an
-     untrusted network still depends on tunneling through Tailscale, same as before.
-   - **BUG-reconnect**: WS reconnect now backs off exponentially (3s → doubling → 60s cap, reset
-     on a successful `channel.ready`) instead of retrying every 3s forever.
-   - **Not fixed, flagged separately**: `WsClient.reconnect(host, apiKey)` accepts new host/key
-     params but never applies them (`_host`/`_apiKey` are `final`) — found in passing, currently
-     dead code (zero call sites), spawned as a follow-up task rather than fixed inline (out of
-     scope for this bundle, and touching `final`-field semantics deserved its own focused pass).
-6. **Docs synced**: `ROADMAP.md` (Faz 8 section fully written up + phase table + bug backlog
-   appendix rows checked off), `CHANGELOG.md` (new entry), `MEMORY.md` (legacy-retirement note +
-   a new Faz 8 design-decisions entry covering the cross-process staleness pattern and the
-   BUG-mob-tls partial-mitigation caveat), `CLAUDE.md` (legacy paragraph rewritten, test-suite
-   section added), `CONTRIBUTING.md` (new Testing section), `ProjectState.md`/`docs/SAFETY.md`/
-   `README.md` (dead-file table rows fixed).
+1. **Merged and pushed to GitHub.** `langgraph-migration` → `main` was a pure fast-forward (`main`
+   had zero commits of its own — frozen at a 2026-05-09 baseline, 67 commits behind). Before
+   pushing anywhere, scanned the *entire* git history for ever-committed secrets: filenames
+   (`.env`, `credentials.json`, `token.json`, `.pem`/`.key`) via `git log --all --diff-filter=A`,
+   and content patterns (Google/OpenAI/Slack API-key shapes, PEM private-key headers) via
+   `git log --all -p -G'<pattern>'` — both came back clean; `.env`/`data/` were already correctly
+   gitignored, only the placeholder-only `.env.example` is tracked. Owner then created an empty
+   GitHub repo and gave the URL; added as `origin`, pushed `main`. **Current state:** `origin` →
+   `github.com/mertkaanakgunlu-debug/JARVIS` (public), `main` tracks `origin/main`.
+   `langgraph-migration` stays local-only (identical commit to `main`, nothing lost).
+2. **Flutter SDK installed** — no official winget package exists (`winget search flutter` only
+   surfaces unrelated apps tagged "flutter"); installed via `git clone
+   https://github.com/flutter/flutter.git -b stable --depth 1 C:\flutter`, added to user PATH.
+   `flutter doctor`: SDK itself fine; Android toolchain and Visual Studio both absent — installing
+   either is a separate multi-GB undertaking, deliberately not done unprompted. `flutter pub get` +
+   `flutter analyze` in `mobile/` both ran: **zero mentions of `ws_client.dart`** anywhere in the
+   analyzer output (confirmed by grepping the full output, not just skimming) and **zero
+   `error`-severity findings anywhere in the app** — only 69 pre-existing `info`-level deprecation
+   notices (`withOpacity`→`withValues`, `partialResults`→`SpeechListenOptions`), all unrelated to
+   this session, left untouched. This is the first real compiler-verified confirmation that Faz 8's
+   `ws_client.dart` changes (BUG-mob-tls, BUG-reconnect) actually compile, not just look right on
+   inspection. `flutter build apk` was not attempted (needs the Android SDK).
+3. **`WsClient.reconnect(host, apiKey)` fixed** (`mobile/lib/core/ws_client.dart`, task_a9cee697) —
+   `_host`/`_apiKey` were `final`, so the new parameters were silently discarded. Now mutable,
+   reassigned at the top of `reconnect()` before it calls `connect()`. Still no call sites (dead
+   code), but now correct whenever mobile settings-switching gets wired in.
+4. **Four Faz-0 bugs fixed**, each root-caused live (not read-and-assumed) before fixing:
+   - **BUG-15** (`jarvis/tools/finance.py`) — `_sync_burgan()`'s `msg_ids` regex expected a bare
+     `"[id]"` at line start; `jarvis/tools/gmail.py`'s `_fmt_message()` actually emits
+     `"• [id]  Subject"` (bullet-prefixed) — never matched, so sync always reported zero messages.
+     Same root cause broke the "read" step's subject/body extraction (searched for a
+     `"Konu:"`/`"---"` shape that's never been produced). All three regexes fixed to match the real
+     format; verified via a new test that drives real `gmail_control` formatting output through
+     `finance_control(action="sync")` with only the Google API service object and the LLM
+     extraction call mocked.
+   - **BUG-16** (`jarvis/graph/tools.py`) — `todo('add')`'s `asyncio.create_task(_bg_analyze())`
+     result was never referenced anywhere. asyncio only holds a *weak* reference to a task; an
+     unreferenced one is eligible for garbage collection before it finishes — no exception, no log,
+     the prioritization just silently never lands. Fixed with a module-level `_todo_bg_tasks`
+     strong-reference set, pruned via a per-task done-callback once it actually completes.
+   - **BUG-17** (`jarvis/gcp_quota.py`) — `_try_fetch_cloud_quotas()`'s freshness check tested
+     `cached.get("rpm_pro") is not None`, but no code anywhere ever wrote a key literally named
+     `"rpm_pro"` (only `"rpm_pro_used"`/`"rpm_flash_used"`/etc.) — never matched, so every call
+     attempted a live Cloud Monitoring fetch regardless of cache state. `_load_cache()` already
+     filters by TTL, so the fix is just `if cached: return cached`.
+   - **BUG-18** (`jarvis/gcp_quota.py`) — `quota_forecast()` read `usage.json`'s `last_updated`,
+     which `jarvis/usage.py` refreshes on *every* save (effectively always "now") — `days_elapsed`
+     collapsed to 1 on every call, so `daily_rate` became the entire all-time cost total instead of
+     a real per-day average (a wildly overstated forecast). Fixed by adding `first_seen` to
+     `usage.py` (set once via `setdefault`, never overwritten after) and anchoring the forecast on
+     that instead of `last_updated`.
+5. **`_OllamaEF`/`_GeminiEF` missing `embed_query()` fixed** (`jarvis/memory.py`) — this was flagged
+   in the prior session as an `_OllamaEF`-only issue with an unconfirmed caller ("whatever calls
+   `.embed_query()` on it"). Live-reproduced this session (isolated temp-cwd `Memory` + real Ollama
+   server, per MEMORY.md's isolate-test-data-paths lesson): the actual caller is **this project's
+   installed chromadb itself** — `chromadb/api/models/CollectionCommon.py`'s `_embed(is_query=...)`
+   calls `embedding_function()` for `.add()` but `embedding_function.embed_query()` for `.query()`,
+   **unconditionally, no `hasattr` fallback**. So *every* semantic recall
+   (`recall_facts`/`recall_procedures`/`recall`/doc RAG) against an Ollama- or Gemini-backed
+   collection raised `AttributeError` the moment it queried — `.add()` alone always looked fine,
+   which is exactly why this went unnoticed. `_GeminiEF` had the identical bug, not previously
+   flagged (found while fixing `_OllamaEF`, same class shape). Both now have an `embed_query()`
+   delegating to the same logic as `__call__` — neither backend needs genuine query/document
+   asymmetry here. Ollama path confirmed live against the real local Ollama server (repro script
+   crashed before the fix, succeeded after).
+6. **Bonus bug found live while verifying `_GeminiEF` against the real Gemini API** (owner then
+   asked to "complete everything necessary"): `_build_gemini_ef`'s hardcoded model id
+   (`"models/text-embedding-004"`) turned out to be retired server-side — 404 on every real call. A
+   real `client.models.list()` call found the current embedding models
+   (`gemini-embedding-001`/`-2`/`-2-preview`); switched to `gemini-embedding-2`. Also added a
+   construction-time smoke-test embed call (mirrors `_build_ollama_ef`'s reachability probe) so a
+   future model retirement fails fast and falls through to the default ONNX EF instead of crashing
+   every real recall call. Confirmed live: the error changed from `404 NOT_FOUND` to `429
+   RESOURCE_EXHAUSTED` ("prepayment credits depleted") — proving the model id is now correct; the
+   429 itself is this account's already-documented, pre-existing billing state (MEMORY.md), not
+   something this session caused or can fix.
+7. **12 new regression tests** — `tests/test_finance_tool.py`, `tests/test_gcp_quota.py`,
+   `tests/test_memory_embedding.py`, `tests/test_todo_bg_analysis.py`. Full suite: **104/104 pass**.
+8. **Docs synced**: `ROADMAP.md` (Faz 8's status line, the merge bullet, the `WsClient.reconnect`
+   bullet, a new "Faz 8 follow-up — 2026-07-15" write-up, bug backlog appendix rows for
+   BUG-15/16/17/18/task_a9cee697 checked off — also fixed two stale un-checked rows for BUG-19 and
+   BUG-25, both of which were already done per their own Faz sections but never got their appendix
+   checkmark), `CHANGELOG.md` (new entry), `MEMORY.md` (chromadb `embed_query()` gotcha, the
+   `asyncio.create_task()` weak-reference gotcha, GitHub remote + Flutter install facts, corrected
+   the stale "no test suite exists" line, the Gemini model-id-drift gotcha).
 
 ## Verification performed
 
-**Every bug fix was verified live before being formalized into a test** — not just read-and-
-assumed correct. Ad-hoc scratch scripts (not committed) reproduced each bug's exact failure
-scenario against the fixed code: BUG-20 (a real write to a Desktop-relative path outside
-workspace), BUG-21 (offset computation for both Europe/Istanbul and DST-observing Europe/Berlin),
-BUG-pdf (same-path content swap with a deliberately older mtime), BUG-geomath (forced the exact
-except-branch via Devito's absent import), BUG-modelswitch (a battery of Turkish/English false-
-positive and true-positive phrases), BUG-emptyresp (all three critic-node branches: retry-with-
-budget, exhausted-budget-substitutes-message, normal-exchange-unaffected), BUG-upload (chunked-
-read boundary math: under-cap/at-cap/one-byte-over/500MB-aborts-early), BUG-usage and the
-kill_switch bonus fix (two-instances-sharing-one-file cross-process simulations, and a
-warm-cache-then-external-write staleness simulation for kill_switch specifically). All of these
-were then rewritten as the corresponding `tests/` file — **92/92 pass**, confirmed via a full
-`pytest` run from repo root (not just per-file), 9 seconds, no cross-test pollution. `jarvis`
-package import confirmed clean after the `jarvis/legacy/` deletion
-(`python -c "import jarvis; import jarvis.agent"`). Electron `npm run build` confirmed clean
-(32 modules transformed) after the `App.jsx`/`HudPanels.jsx` edits. Confirmed via `git status`/
-`ls -la data/` that no test run touched the real project `data/` directory. **Real product, real
-data** (matching every prior phase's own verification tier): plain `python -m jarvis` starts
-clean (banner renders, no exceptions from any Faz 8 code path) and exits cleanly on EOF —
-surfaced one pre-existing, unrelated issue during this run (`_OllamaEF` missing `embed_query()`,
-non-fatal, flagged separately below, not caused by this session's diff). `python -m jarvis --api`
-started clean and answered `GET /health` with `200 {"status":"ok",...}` ~18s after startup, clean
-process shutdown after.
+Every fix was root-caused via a live, isolated repro before being changed (not read-and-assumed) —
+this project's own standing practice. The `_OllamaEF`/`_GeminiEF` bug specifically was diagnosed by
+constructing a real `Memory` against a real (running) local Ollama server in an isolated temp cwd,
+inserting into a real Chroma collection, and reading the actual traceback — which is how the true
+root cause (chromadb's own `_embed()`, not any first-party code) was found instead of assumed.
+`finance.py`'s BUG-15 fix is covered by a test that exercises the real `gmail_control` formatting
+end to end (only the Google API service object and the LLM call are mocked). `flutter analyze`
+was run and grepped for `ws_client.dart` specifically (zero mentions) and for any `error -` line
+(zero, anywhere in the app) rather than eyeballing 6000+ characters of output. Full `pytest` run
+from repo root: **103/103 pass**, ~19s, confirmed via `git status`/no changes under `data/` that no
+test run touched real project data.
 
-**Not verifiable in this environment**: the mobile Dart client (`ws_client.dart`) changes —
-no Flutter/Dart SDK installed on this machine (`flutter`/`dart` both absent from PATH), so
-`IOWebSocketChannel`'s header-based auth and the exponential-backoff reconnect logic could only be
-reviewed by hand against the `web_socket_channel: ^3.0.1` public API (confirmed via its pubspec
-entry), not compiled or run. Hand-off: run `flutter analyze`/`flutter build` on a machine with the
-SDK installed before trusting this compiles, and a real device test for the header-based `/ws`
-auth actually connecting.
+**Not verifiable in this environment:** a full real embed call completing end-to-end against
+Gemini specifically (this account's `GEMINI_API_KEY` is out of prepayment credits — a `429`, not a
+code issue, see MEMORY.md) — but the model-id fix itself *was* live-confirmed correct (the error
+changed from `404 NOT_FOUND` to `429 RESOURCE_EXHAUSTED` once the id was fixed, which only happens
+if the model id resolved correctly). `flutter build apk` (no Android SDK on this machine — a separate multi-GB install,
+deliberately not done unprompted; `flutter analyze`'s zero-errors result is the verification bar
+that was actually asked for). Whether the newly-pushed GitHub repo's history is *exhaustively* free
+of every possible secret pattern — the scan covered known filenames and common API-key/PEM shapes,
+which is a strong but not information-theoretically complete guarantee.
 
 ## Explicitly deferred / not this session's scope
 
-- **Merge `langgraph-migration` → `main`** — explicit owner go-ahead required (shared branch
-  state), scoped out up front alongside the worktree cleanup, not assumed as part of "the next
-  phase."
-- **21 stray `.claude/worktrees/*` scratch branches** — still deferred, still needs owner
-  go-ahead (destructive, unchanged from every prior session's note).
-- **`WsClient.reconnect(host, apiKey)` ignoring its own parameters** (`mobile/lib/core/
-  ws_client.dart`) — spawned as a follow-up task (`task_a9cee697`) rather than fixed inline; found
-  in passing while fixing BUG-mob-tls/BUG-reconnect in the same file, currently dead code (no call
-  sites), not safety-relevant enough to justify scope-creeping into the client-hygiene bundle.
-- **`_OllamaEF` missing `embed_query()`** (`jarvis/memory.py`) — spawned as a follow-up task
-  (`task_3b9a631d`); surfaced live during this session's `python -m jarvis` smoke test but
-  pre-existing and unrelated to anything in this session's diff (`memory.py` was never touched).
-  Non-fatal (a memory-recall path logs the error and the process keeps running), but a real,
-  reproducible interface mismatch between the local Ollama embedding function and whatever calls
-  `.embed_query()` on it.
-- **Real TLS termination for `/ws`** — would fully close BUG-mob-tls's wire-level cleartext gap
-  (the header-based fix only closes URL-logging exposure). Not built: genuinely new infrastructure
-  (a cert, uvicorn `ssl_certfile`/`ssl_keyfile` config), out of proportion for a client-hygiene bug
-  fix. Confidentiality on an untrusted network still depends on Tailscale.
-- **Faz 6 — Fiziksel Dünya / IoT** stays hardware-gated (Zigbee coordinator dongle + Home
-  Assistant instance; owner has only an RP2040 today). Unchanged from every prior session.
-- **Test suite is "minimal," not comprehensive** — most tool modules (spotify, finance, todo,
-  scheduler, gmail/drive actions beyond the calendar dedup-guard fix, the sub-agent bridges, voice)
-  still have zero test coverage. Extend `tests/` incrementally rather than reverting to throwaway
-  scratch scripts.
+- **21 stray `.claude/worktrees/*`/`claude/*` scratch branches** — still deferred, still needs
+  explicit owner go-ahead (destructive), unchanged from every prior session's note. Not pushed to
+  GitHub either (deliberate — they're slated for deletion, not publishing).
+- **Android SDK / Visual Studio** — neither installed. Either would unblock more of `flutter doctor`
+  (`build apk` needs the Android SDK specifically) but is a separate, much larger install than what
+  "install Flutter" implied; flagged rather than done unprompted.
+- **Faz 6 — Fiziksel Dünya / IoT** stays hardware-gated (Zigbee coordinator dongle + Home Assistant
+  instance; owner confirmed again this session: no hardware yet).
+- **`WsClient.reconnect()`'s fix has no live caller yet** — still dead code (correct now, but
+  nothing invokes it) until mobile settings-switching (change server/API key without restarting)
+  becomes a real feature.
+- **Test suite is still "minimal," not comprehensive** — 103 tests now, but most tool modules
+  (spotify, todo beyond the one bg-task test, scheduler, gmail/drive actions beyond calendar's
+  dedup guard and finance's sync, the sub-agent bridges, voice) still have zero coverage.
 
 ## Git state as of this session
 
-- Branch: `langgraph-migration`, **not merged to `main`**.
-- **Faz 7 was committed this session** (`1039a1b`) — this session started with Faz 7 fully
-  uncommitted (per the prior session's own note); owner confirmed committing it first before any
-  Faz 8 diff began.
-- **Everything from Faz 8 is uncommitted** (per this project's standing instruction: only commit
-  when explicitly asked; this session wasn't asked to commit Faz 8). `git status`: ~19 modified
-  source/doc files, 3 deleted files (`jarvis/legacy/__init__.py`, `jarvis/legacy/agent_pydantic.py`,
-  `jarvis/prompts/system.md`), one new untracked directory (`tests/`, 10 files + `conftest.py`).
+- `main`: pushed, tracks `origin/main` (`github.com/mertkaanakgunlu-debug/JARVIS`, public).
+- `langgraph-migration`: local only, currently identical commit to `main`. Currently checked out.
+- All of this session's fixes (memory.py, gcp_quota.py, finance.py, graph/tools.py, usage.py,
+  ws_client.dart) plus the 4 new test files and the doc updates are **uncommitted** — per this
+  project's standing instruction, only commit when explicitly asked; this session wasn't asked to.
+  `git status` will show modified files across `jarvis/`, `mobile/lib/core/ws_client.dart`, `tests/`,
+  and the docs listed above.
 
 ## Recommended next steps (pick up here)
 
-1. **Decide on commit strategy for Faz 8** — one coherent phase, same shape as every prior
-   phase; the owner's call, not assumed. Given this phase bundles several genuinely separate
-   concerns (legacy retirement, a new test suite, 9 unrelated bug fixes, client hygiene), a single
-   session did all of it, but a single *commit* vs. several smaller ones is worth asking about
-   explicitly rather than defaulting to the one-phase-per-commit pattern without checking — this
-   phase's diff is broader than usual.
-2. **Ask about the two explicitly-deferred destructive items** if there's appetite to unblock
-   them: merging to `main` (this branch has been ahead of `main` since Faz 0) and the 21 stray
-   worktree branches.
-3. **`WsClient.reconnect()` follow-up** (`task_a9cee697`) is sitting as a spawned suggestion —
-   pick it up if/when mobile settings-switching (change server/API key without restarting the app)
-   becomes a real feature; currently dead code with no live impact.
-4. **Run `flutter analyze`/`flutter build`** on a machine with the Flutter SDK to confirm the
-   `ws_client.dart` changes actually compile — not verified in this environment (see above).
-5. **Faz 6 — Fiziksel Dünya / IoT** stays hardware-gated. Nothing to do here until hardware is
-   actually acquired.
-6. Consider extending `tests/` coverage to another tool module or two per future session touching
-   that area, rather than a dedicated "more tests" phase — the infrastructure (`conftest.py`,
-   pytest config) is now in place, so incremental addition is cheap.
+1. **Decide on a commit** for this session's diff — nothing has been committed yet (see above).
+2. **21 stray worktree branches** — ask again if there's appetite to clean these up; still needs
+   explicit go-ahead every session, hasn't been given yet.
+3. **Android SDK**, only if real APK builds/device testing become a real near-term need — otherwise
+   leave it; `flutter analyze` already covers "does the Dart code compile."
+4. **Gemini embedding tier** — model id fixed and construction-time smoke-tested, but a full
+   real embed call has never completed end-to-end (this account is out of prepayment credits, a
+   billing state, not a code issue). Once credits are topped up, worth a quick real check that
+   Gemini-backed recall actually returns results, not just that construction succeeds.
+5. Consider extending `tests/` coverage to another tool module or two per future session touching
+   that area — same standing suggestion as last session, still true.
 
 ## Environment checklist to resume work
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pytest                                # new this session -- 92 tests, ~9s, fully offline
-ollama serve                          # confirm it's up: curl http://localhost:11434/api/tags --
-                                       # not needed for the test suite (provider-router tests never
-                                       # invoke a real model), only for actually running the agent
-python -m jarvis                      # CLI -- retired jarvis/legacy/ import confirmed clean
-python -m jarvis --api --monitor      # long-running path -- kill_switch cross-process fix matters
-                                       # most here; try `/killswitch off` from a separate CLI
-                                       # session and confirm this process's next L3 call is vetoed
-                                       # without restarting it (not done live this session --
-                                       # covered by tests/test_kill_switch.py's simulation instead)
+pytest                                # 103 tests, ~19s, fully offline
+ollama serve                          # confirm it's up: curl http://localhost:11434/api/tags
+python -m jarvis                      # CLI
+python -m jarvis --api --monitor      # long-running path
+
+# mobile/ (Flutter now installed at C:\flutter, on user PATH in new terminals)
+cd mobile
+flutter pub get
+flutter analyze                       # zero errors expected; 69 pre-existing info-level notices
 ```
 
-No new required `.env` vars this session. New dev-only dependencies: `pytest>=8.0`,
-`pytest-asyncio>=0.24` (added to `requirements.txt`, already installed in `.venv`).
+No new required `.env` vars this session. No new Python dependencies. Flutter SDK is new
+system-level tooling (`C:\flutter`, user PATH) — not a project dependency, doesn't touch
+`requirements.txt`/`.venv`.
