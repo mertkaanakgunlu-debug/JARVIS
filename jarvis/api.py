@@ -63,12 +63,23 @@ _voice_wakeword: bool = False   # set by run_server() before uvicorn starts
 async def lifespan(app: FastAPI):
     start_metrics_task()
     if _agent is not None:
+        # Faz 5: connect MCP servers (Playwright, etc.) now, on uvicorn's own
+        # real long-lived loop, before any request (including one that could
+        # spawn a TaskExecutor background job) is served -- see
+        # JarvisAgent.connect_mcp_tools()'s docstring for why that ordering
+        # matters (a background job's own short-lived asyncio.run() loop must
+        # never be the one that opens the MCP stdio session).
+        await _agent.connect_mcp_tools()
         start_live_data_task(_agent, _settings)
         if _voice_enabled or _voice_wakeword:
             start_voice_task(_agent, _settings, wakeword=_voice_wakeword)
     yield
     # ── Shutdown: archive current session so next startup begins clean ──────────
     if _agent is not None:
+        try:
+            await _agent.close_mcp_tools()  # Faz 5: don't leave a launched browser process behind
+        except Exception as _e:
+            print(f"[lifespan] MCP shutdown failed: {_e}")
         try:
             import asyncio as _asyncio
             await _asyncio.get_event_loop().run_in_executor(None, _agent.reset)

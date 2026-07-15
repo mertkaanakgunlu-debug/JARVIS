@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     # now defaults on -- see docs/SAFETY.md.
     confirmation_gate_enabled: bool = True
 
+    # Faz 5: MCP client layer. Dedicated flags for the shipped Playwright
+    # (browser automation) server -- flip mcp_playwright_enabled=True in .env,
+    # no JSON needed. mcp_servers is the generic escape hatch for any other
+    # MCP server (e.g. a future ha-mcp in Faz 6) -- a JSON object in .env,
+    # same shape MultiServerMCPClient itself takes: {"name": {"command":,
+    # "args":, "transport": "stdio"}} or {"name": {"transport": "http", "url":}}.
+    # See .env.example for the exact Windows npx gotcha (must go through
+    # `cmd /c`, not bare `npx` -- confirmed live, see jarvis/mcp_integration.py).
+    mcp_playwright_enabled: bool = False
+    mcp_playwright_headless: bool = True
+    mcp_servers: dict[str, dict] = {}
+
     # Faz 4: hard cap on LangGraph super-step recursion per turn (BUG-recursion)
     # -- without this, a model stuck in a tool-call loop (e.g. repeatedly
     # mis-calling a tool and retrying) runs unbounded instead of failing

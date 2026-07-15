@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. — Architecture Map
 
-> Last updated: 2026-07-14 (Faz 3 — real-time local voice + remote `/ws` audio transport).
+> Last updated: 2026-07-15 (Faz 5 — MCP client layer).
 > Source of truth is always the code; this document summarises it.
 
 ## Entry points
@@ -54,9 +54,66 @@ A manual `/model` switch (`switch_model()`) pins the `fast` role to a specific c
 (`Settings.pin_cloud_model`), bypassing the local-first default; `reasoning` is never affected by
 the pin. See [MEMORY.md](../MEMORY.md) for the local-first pivot rationale.
 
-## Tools (36 registered)
+## Tools (36 native + dynamic MCP)
 
-See [TOOLS.md](TOOLS.md) for the full list with risk levels.
+See [TOOLS.md](TOOLS.md) for the full native-tool list with risk levels. Faz 5 adds a second,
+dynamically-discovered tool source — see the MCP layer section below.
+
+## MCP layer (Faz 5 — `jarvis/mcp_integration.py`)
+
+Dual-layer per the roadmap: the 36 native `@tool` wrappers above are untouched; MCP is a purely
+additive tool source layered on top, config-driven so a future server (ha-mcp, Faz 6) is just a
+config entry, not new code.
+
+- **Config:** `Settings.mcp_playwright_enabled` (dedicated convenience flag for the one server
+  shipped this phase — Microsoft's `@playwright/mcp`, real browser automation: navigate, click,
+  type, snapshot, screenshot, evaluate JS, …) + `Settings.mcp_servers` (generic escape hatch, a
+  JSON `{name: {command, args, transport}}` dict shaped exactly like
+  `langchain_mcp_adapters.client.MultiServerMCPClient`'s own constructor argument — any future
+  server is additive config, not code).
+- **Connection lifecycle (`McpToolManager`, one instance per `JarvisAgent`):** MCP's stdio
+  transport keeps ONE subprocess alive for a session's lifetime — required for stateful servers
+  like browser automation, where a later `browser_click` must still see the page a prior
+  `browser_navigate` opened (confirmed live: the adapter's default *stateless* `get_tools()`
+  spawns a fresh process — and fresh, blank browser — per call, silently breaking multi-step
+  flows). `McpToolManager` always uses the persistent `client.session()` + `load_mcp_tools(session)`
+  pattern instead, held open by an `AsyncExitStack` for the process's life. That session's stdio
+  streams are loop-bound (same underlying constraint as the checkpointer — see `graph/graph.py`'s
+  docstring), so `JarvisAgent.connect_mcp_tools()` is always called explicitly, once, from the
+  *real* long-lived loop (`cli.py`'s `_run_loop`/`_run_voice_loop`, `api.py`'s `lifespan()`) before
+  any turn or `TaskExecutor` background job can run — never lazily from whichever caller chats
+  first. `chat()`/`chat_stream()` also call it as an idempotent no-op safety net. `build_graph()`
+  takes the discovered tools via a new `extra_tools` param and gets rebuilt once they're known
+  (`__init__` runs before any loop exists, so the graph is first built MCP-less, same as today with
+  MCP disabled — zero regression).
+- **Gating — fail-closed by design:** every discovered MCP tool gets a `ToolSpec` synthesized at
+  connect time (`tool_registry.register_dynamic_spec()`), so `policy_guard`, `audit_log`, and the
+  async scheduler cover it identically to a native tool with zero changes to any of them (they only
+  ever call `get_spec()`/read `TOOL_SPECS`). Classification mirrors `policy_guard._READ_ACTIONS`'
+  existing per-action override pattern: a short explicit allow-list of pure-inspection
+  (`browser_snapshot`, `browser_take_screenshot`, `browser_console_messages`, …) and
+  inconsequential-navigation (`browser_navigate`, `browser_wait_for`, …) tool names get L1/L2
+  no-confirm; **everything else — including any tool name never seen before, e.g. a future
+  Playwright MCP version — defaults to L3 + `requires_confirmation=True`**, same gate as
+  `shell_run`/`gmail send`. This is the direct mitigation for the prompt-injection risk a
+  browser-automation tool uniquely adds beyond `web_search`/`url_read` (an attacker-controlled page
+  can get the model to *want* to click/submit something, but can't actually act without the user
+  approving that specific call).
+- **Windows gotcha (confirmed live, not assumed):** `npx` is `npx.cmd`, a batch shim — spawning it
+  directly raises `WinError 2`. Every npx-based server config goes through `cmd /c npx ...`.
+
+**Verified live (2026-07-15):** `@playwright/mcp` launches under Windows via `langchain-mcp-adapters`;
+state persists across separate tool calls in one session (`browser_navigate` then a later
+`browser_snapshot` see the same page, both through the actual compiled graph's `ToolNode`, not just
+a standalone script); all 24 real tool names get correctly fail-closed-classified ToolSpecs; kill
+switch vetoes a tripped L3 MCP call but not an L1 one. **With a real LLM** (`python -m jarvis`,
+Gemini 2.5 Pro via Vertex): the model independently decided to navigate (auto-approved, executed,
+confirmed via `data/audit_log.jsonl`) and, separately, to click something (correctly logged
+`risk_level: 3, outcome: confirm_required` — the gate firing live, not simulated). The CLI's
+interactive approve/deny prompt itself wasn't cleanly confirmed over piped stdin (see
+[ROADMAP.md](../ROADMAP.md)'s Faz 5 verify section and [HANDOFF.md](../HANDOFF.md) for the
+hand-off) — the classification/audit trail is proven live; the terminal UI round-trip needs a real
+interactive session to finish confirming.
 
 ## Sub-agents (pydantic-ai, bridged via `_run_coro`)
 

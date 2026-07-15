@@ -1,7 +1,9 @@
 # J.A.R.V.I.S. — Tool Registry
 
-36 tools registered by `make_tools()` in `jarvis/graph/tools.py`.
-Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass + `TOOL_SPECS` dict).
+36 native tools registered by `make_tools()` in `jarvis/graph/tools.py`, plus (Faz 5) a dynamic
+MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass +
+`TOOL_SPECS` dict); MCP tools are inserted into that same dict at connect time via
+`register_dynamic_spec()`, not listed in the dict's literal source.
 
 ## Risk levels
 
@@ -52,6 +54,25 @@ Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass + `TOOL_SPE
 | `google_drive` | L3 | external_api | ✓ | ✓ | 60s | Drive: search/read/download (L1) · upload/share/delete (L3) |
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
 | `procedure_save` | L2 | memory | — | — | 15s | Save a reusable multi-step workflow to procedural memory (Faz 2) |
+
+## MCP tools (Faz 5, dynamic — `jarvis/mcp_integration.py`)
+
+Not in `make_tools()`/the table above — discovered at connect time from configured MCP servers
+and registered the same way. Only enabled when `MCP_PLAYWRIGHT_ENABLED=True` (or a server is added
+to `MCP_SERVERS`) in `.env`; ships disabled by default. Names below are the real, live-verified
+(2026-07-15) 24-tool set from `@playwright/mcp@latest`'s core capability (opt-in extras — storage,
+network mocking, devtools, PDF, testing — are not enabled).
+
+| Tool | Risk | Confirm? | Why |
+|---|---|---|---|
+| `browser_snapshot`, `browser_take_screenshot`, `browser_console_messages`, `browser_network_requests`, `browser_network_request`, `browser_find` | L1 | — | Pure inspection, no page mutation |
+| `browser_navigate`, `browser_navigate_back`, `browser_wait_for`, `browser_resize`, `browser_close`, `browser_tabs` | L2 | — | Navigation / tab management, no lasting external effect |
+| `browser_click`, `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_select_option`, `browser_file_upload`, `browser_drag`, `browser_drop`, `browser_hover`, `browser_handle_dialog`, `browser_evaluate`, `browser_run_code_unsafe`, *any future/unrecognized tool name* | L3 | ✓ | Fail-closed default — can submit forms, run arbitrary JS, or act on a page whose content the model doesn't control (prompt-injection surface) |
+
+Classification lives in `jarvis/mcp_integration.py`'s `_classify()` — a short explicit allow-list
+for the left two rows, everything else falls through to the fail-closed default. This mirrors
+`policy_guard._READ_ACTIONS`' existing per-action override pattern for the four mixed-risk Google/
+ITU tools above, just keyed by MCP tool name instead of an `action` argument.
 
 > **Faz 4 (2026-07-14) finished what Phase 3 started**: `jarvis/graph/nodes.py`'s
 > `make_confirmation_node` now gates through `jarvis/policy_guard.py` — per-*action*, not

@@ -3,231 +3,221 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-14 (same-day continuation, fifth phase — Faz 4)
+## Last session: 2026-07-15 — Faz 5 (MCP Katmanı)
 
-**Context:** Picked up directly from this same day's Faz 0-3 sessions (all committed — `git log`
-shows `98e255f` as the prior HEAD). Implemented Faz 4 — the full security kernel + async tools —
-per [ROADMAP.md](ROADMAP.md)'s pre-approved checklist. Everything below is done; nothing was
-descoped without saying so explicitly (see "Explicitly deferred" at the end).
+**Context:** Owner said "faz 5 ile devam et, eksik kurulum varsa tamamlayalım — tarayıcı
+izinlerini verebilirim" (continue with Faz 5, complete any missing setup, offered browser
+permissions). Faz 4 was still fully uncommitted from the prior session (23 modified + 4 new
+files) — asked and got explicit go-ahead to commit it first (`55cd807`) before starting Faz 5, so
+the two phases' diffs don't mix. Then asked a second question — ROADMAP.md's Faz 5 bullet only
+names ha-mcp (Home Assistant) as the eventual MCP target, but that's hardware-gated to Faz 6 and
+the owner has no HA instance — which concrete external MCP server to integrate and verify against.
+Owner picked the recommended option: **Playwright MCP** (Microsoft's official browser-automation
+server), which also explains the "browser permissions" offer literally (granting a controlled
+process permission to open/drive a real browser).
 
 ## What happened this session (all uncommitted — see Git state below)
 
-1. **New `jarvis/policy_guard.py`** — transport-agnostic safety kernel (no LangGraph/LangChain
-   imports, so it's reusable outside the graph). Single choke point for "is this call allowed,
-   does it need the user's OK" — `graph/nodes.py`'s `confirmation_node` now calls into it instead
-   of inlining risk checks. **Per-action, not per-tool (BUG-6):** the four mixed-risk
-   `external_api` tools (`google_calendar`/`gmail`/`google_drive`/`itu_mail`) have their read
-   actions (list/search/read/download) downgraded back to L1/no-confirm — only genuinely risky
-   actions interrupt now.
-2. **New `jarvis/kill_switch.py`** — persisted (`data/kill_switch.json`, survives a restart)
-   emergency stop scoped to L3 (external-effect) actions only; does not block L2 local writes.
-   `/killswitch [status|on|off <reason>]` in the CLI. **New `jarvis/audit_log.py`** — append-only
-   JSONL (`data/audit_log.jsonl`), two event kinds: `decision` (policy_guard's ruling, written in
-   `confirmation_node`) and `execution_start`/`execution_end` (the call actually ran + outcome,
-   written by `agent.py`'s `_HudEventCallback`, matched via LangChain's `run_id` across the
-   start/end pair — this fires for every transport since the callback is attached the same way in
-   `chat()`/`chat_stream()`/`resume_and_stream()`).
-3. **Confirmation gate now defaults on and works everywhere.** `confirmation_gate_enabled=True`
-   (was `False`). All three interfaces handle an interrupted call:
-   - CLI text (`cli.py`): catches `ConfirmationRequired`, shows what's pending, prompts y/n +
-     optional reason, resumes via `resume_and_stream()`.
-   - Voice (`cli.py`'s `--voice` loop, `voice_api.py`'s wakeword/PTT loop, `api.py`'s `/ws`
-     remote-audio session — all three via new shared helpers in `jarvis/voice/session.py`):
-     `chat_stream()`'s `__jarvis_confirm__` marker is detected instead of spoken as raw JSON
-     (**BUG-4**, live and real now), replaced with a natural spoken question, and the next
-     utterance is treated as the answer (anything not clearly affirmative denies — fail-safe).
-   - API: `POST /chat` catches `ConfirmationRequired` and returns a structured
-     `{"confirmation_required": true, "id", "payload"}` response instead of an opaque 500
-     (**BUG-confirm-payload**). `POST /chat/stream` already carried the marker through.
-   - `prompts/core/02_tool_policy.md`'s "you do NOT need to ask" directive is gone (**BUG-5**),
-     replaced with guidance describing the real approve/deny round-trip.
-4. **Bug fixes bundled in:** `python_run` reclassified L2→L3+confirm (**BUG-1** — it was more
-   powerful than `shell_run`, arbitrary unsandboxed Python from any absolute path, while sitting at
-   a lower gate; this is the access-control fix, sandboxing itself is NOT done, said so explicitly
-   in `docs/SAFETY.md`). SSRF guard in `webfetch.py` (**BUG-6-ssrf** — blocks
-   localhost/private/link-local/reserved/metadata-endpoint URLs, checked against the *resolved* IP
-   so DNS rebinding can't bypass it). Auth on `/system/wake` (**BUG-2** — new shared
-   `jarvis/api_auth.py`, `/system/ping` stays public). Recursion cap (**BUG-recursion** — new
-   `Settings.graph_recursion_limit`, default 30, wired into every graph config) + agent-node LLM
-   call timeout (**BUG-14** — `Settings.agent_llm_timeout_sec`, default 90s, wraps
-   `llm.ainvoke()` in `asyncio.wait_for`).
-5. **Async scheduler.** `task_executor.py`'s `ASYNC_KEYWORDS` now genuinely derives from
-   `TOOL_SPECS[...].supports_background` (union with the old hand-picked phrases — strict
-   superset, no regression). The five sub-agent tool bridges (`math_solve`/`write_content`/
-   `research`/`generate_code`/`geo_math`'s analyze branch) plus `todo` converted from sync
-   `@tool def` + the `_run_coro()` thread-and-fresh-event-loop bridge to native `async def`
-   `@tool`s — `_run_coro()` itself became dead code in `graph/tools.py` and was deleted
-   (`tools/finance.py` has its own separate, untouched `_run_coro`). Voice loops in **API mode
-   only** (`voice_api.py`'s `run_one_response`, shared by the local wakeword/PTT loop and the
-   remote `/ws` session — the standalone CLI `--voice` mode has no `TaskExecutor` attached and is
-   unaffected) now hand a `should_async()`-flagged query to `TaskExecutor` with a short spoken
-   acknowledgement instead of blocking the turn — and the mic — in silence for up to minutes;
-   completion fires a Windows toast in addition to the pre-existing FCM push.
-6. **A real bug caught live, not assumed:** `TaskExecutor._run()`'s background `agent.chat()` call
-   could raise `ConfirmationRequired` (it's an `Exception` subclass) with no channel to answer it —
-   would have surfaced as a cryptic `"confirmation_required:<uuid>"` failure. Now caught
-   specifically, reworded to name the blocked action and tell the user to ask interactively.
-7. **Docs brought back in sync with the code**, not just the roadmap: `docs/SAFETY.md` rewritten
-   (its entire "known gap" framing was inverted by this session — now states what's fixed and an
-   honest "known limits" list, not aspirational). `docs/TOOLS.md`'s `python_run` row + Phase 3
-   note updated. `CLAUDE.md`'s safety section rewritten (previously told every future session "the
-   gate doesn't work" — now accurate). `docs/ARCHITECTURE.md`'s gap table row updated. This
-   project's own `MEMORY.md` got a full Faz 4 section plus fixes to two claims that Faz 4 made
-   stale (`_run_coro` sub-agent bridge, Phase 2/3 gate status).
+1. **New `jarvis/mcp_integration.py`** (`McpToolManager`) — connects to configured external MCP
+   servers via the official `langchain-mcp-adapters` package (new dependency,
+   `langchain-mcp-adapters==0.3.0`, `mcp` pulled in transitively) and merges their tools into the
+   graph as a second, dynamically-discovered tool source alongside the 36 native `@tool` wrappers
+   (dual layer, unchanged, per the roadmap). Every discovered tool gets a `ToolSpec` synthesized at
+   connect time via new `tool_registry.register_dynamic_spec()`, inserted into the exact same
+   `TOOL_SPECS` dict the native tools live in — `policy_guard`, `audit_log`, and the async scheduler
+   (`task_executor.py`'s `should_async()`) all cover MCP tools with **zero code changes** to any of
+   them, since they only ever call `get_spec()`/read `TOOL_SPECS`.
+2. **Ships with one real server, disabled by default:** `Settings.mcp_playwright_enabled` (+
+   `mcp_playwright_headless`) — flip `MCP_PLAYWRIGHT_ENABLED=True` in `.env`.
+   `Settings.mcp_servers` is a generic JSON escape hatch (`{name: {command, args, transport}}`,
+   `MultiServerMCPClient`'s own config shape) for any other future server — e.g. Faz 6's ha-mcp
+   should need a `.env` entry, not new Python code.
+3. **Fail-closed classification (the phase's own risk callout — "no MCP tool may bypass the
+   gate")**: `mcp_integration._classify()` allow-lists a short, explicit set of Playwright tool
+   names confirmed (live) to be pure inspection (`browser_snapshot`, `browser_take_screenshot`,
+   `browser_console_messages`, `browser_find`, `browser_network_request(s)`) → L1, or
+   inconsequential navigation (`browser_navigate`, `browser_navigate_back`, `browser_wait_for`,
+   `browser_resize`, `browser_close`, `browser_tabs`) → L2, both no-confirm. **Every other tool —
+   click, type, fill_form, select_option, file_upload, drag, drop, hover, handle_dialog, evaluate,
+   run_code_unsafe, and any name never seen before — defaults to L3 + `requires_confirmation=True`**,
+   same gate as `shell_run`/`gmail send`. This is the concrete mitigation for the prompt-injection
+   risk a browser tool uniquely adds beyond `web_search`/`url_read`: both already feed untrusted
+   page text to the model, but only Playwright gives it hands — a poisoned page can make the model
+   *want* to click/submit something, but the fail-closed default means it can't without the user
+   approving that exact, described call. Bonus fix bundled in:
+   `policy_guard.describe_call()`'s `_DETAIL_KEYS` gained `element`/`url`/`text` — without this a
+   pending `browser_click` confirmation showed just the bare tool name, no indication of what would
+   actually be clicked.
+4. **Solved the actual hard part of this phase** (not in the original 2-bullet roadmap scope, a
+   real correctness issue found during implementation): MCP's stdio transport needs ONE persistent
+   subprocess for a session's life for a *stateful* server like browser automation — confirmed live
+   (and independently corroborated by a LangChain forum thread hitting the identical symptom) that
+   the adapter's default, convenience `client.get_tools()` spawns a **fresh session — and fresh,
+   blank browser — per tool call**, silently breaking `browser_navigate` → `browser_click`.
+   `McpToolManager` always uses the persistent `client.session()` + `load_mcp_tools(session)`
+   pattern instead, held open by an `AsyncExitStack` for the manager's life.
+5. **That persistent session is event-loop-bound** (same class of constraint as the LangGraph
+   checkpointer — see `graph/graph.py`'s docstring), and this codebase has several independent
+   loops (CLI/uvicorn's main loop vs. `TaskExecutor`'s own per-call `asyncio.run()`). So
+   `JarvisAgent.connect_mcp_tools()` (new) is called **explicitly, once, from each entry point's own
+   real long-lived loop** — `cli.py`'s `_run_loop`/`_run_voice_loop` (right at the top, before the
+   main while-loop) and `api.py`'s `lifespan()` (before `yield`) — never lazily from whichever
+   caller's `chat()` happens to fire first. `build_graph()` gained an `extra_tools` param for this;
+   the pre-existing `switch_model()`/quota-fallback rebuild call sites in `agent.py` were updated to
+   keep passing `self._mcp.tools` through too, so a mid-session model switch doesn't silently drop
+   already-connected MCP tools. `chat()`/`chat_stream()` also call `connect_mcp_tools()` as an
+   idempotent belt-and-suspenders safety net. `close_mcp_tools()` (new) is wired into `cli.py`'s
+   loop-exit paths and `api.py`'s `lifespan()` shutdown so a launched npx/browser process tree
+   doesn't linger.
+6. **A real bug caught live, not assumed, and fixed same session:** `connect_mcp_tools()`'s graph
+   rebuild was gated on `if self._mcp.tools:` alone — true forever after the first successful
+   connect, so every call after the first (including the safety-net one at the top of *every single*
+   `chat()`/`chat_stream()` call) was silently rebuilding the entire graph — re-constructing every
+   LLM provider and re-running `.bind_tools()` across all ~60 tools — on every turn for the rest of
+   the process's life. Caught by the live smoke test's repeated `bind_tools()` schema-warning
+   volume; neither isolated verification script would have caught this (neither exercises
+   `JarvisAgent` itself, per MEMORY.md's isolate-test-data-paths constraint). Fixed with a one-time
+   `self._mcp_graph_rebuilt` guard, reset in `close_mcp_tools()`.
+7. **Windows fix (confirmed live, not assumed):** `npx` is `npx.cmd`, a batch shim — Python's
+   subprocess APIs (no shell by default) raise `WinError 2` spawning it directly. Every npx-based
+   server config goes through `{"command": "cmd", "args": ["/c", "npx", ...]}`.
+8. **Docs brought fully in sync**: `ROADMAP.md`'s Faz 5 section (checked off, full verify writeup),
+   `docs/ARCHITECTURE.md` (new "MCP layer" section), `docs/TOOLS.md` (new MCP tools table, all 24
+   real names with risk/confirm), `docs/SAFETY.md` ("What Faz 5 changed" section), `MEMORY.md`
+   (design-decisions section mirroring the Faz 4 one), `CLAUDE.md` (safety-model paragraph),
+   `CHANGELOG.md` (new entry), `.env.example` (new `MCP_*` vars + the Windows npx gotcha spelled
+   out inline).
+
+## Missing setup completed this session
+
+- **Node.js confirmed present** (v24.18.0, installed Faz-4-post-handoff) but not on PATH in any
+  fresh Bash/PowerShell tool process this session either — same documented gotcha as before (HKCU
+  PATH is correct; only pre-existing shell processes don't see it). Prepended manually for every
+  command that needed `node`/`npx` this session; a normal terminal the owner opens will have it
+  automatically.
+- **`langchain-mcp-adapters` installed** (`uv pip install`, per MEMORY.md's plain-`pip`-backtracks
+  gotcha) — `requirements.txt` updated.
+- **Playwright's Chromium browser binaries installed** (`npx playwright install chromium`, both the
+  full and headless-shell variants — `~/AppData/Local/ms-playwright/`) — pre-installed deliberately
+  so a user's first real "browse this page" request doesn't stall on a ~150MB first-run download.
+- **`.playwright-mcp/` gitignored** — the server's own page-snapshot cache, written to the repo root
+  (not configurable to `data/` without a flag not yet investigated), same treatment as `data/`.
 
 ## Verification performed
 
-**Two isolated (temp-dir, no real data touched) scratch scripts, not committed — no test suite
-exists in-repo, see `CONTRIBUTING.md`'s gap:**
-- `verify_faz4.py` — 61 checks: `policy_guard`'s per-action decisions for all four mixed-risk
-  tools' full read/write split, `python_run`'s reclassification, kill-switch veto scoped correctly
-  to L3-only (confirmed it does NOT veto an L2 `file_write` or a downgraded read action),
-  kill-switch persistence surviving a simulated process restart (cleared the in-memory cache,
-  reloaded from disk), `audit_log` writes/truncation/tail, the SSRF guard against 7 blocked
-  address classes (localhost, loopback, 3 private ranges, cloud metadata, IPv6 loopback) plus a
-  real public URL correctly allowed through, `voice/session.py`'s marker-parsing +
-  affirmative-detection (English and Turkish) + bilingual question phrasing,
-  `task_executor`'s registry-derived keywords, and source-level confirmation that
-  `chat()`/`chat_stream()`'s configs carry `recursion_limit` and a transport-tagged callback.
-- `verify_faz4_callback.py` — a **second, real** (unmocked) LangGraph compiled graph +
-  LangChain callback manager, no LLM/credentials needed (a fake `AIMessage` with `tool_calls`
-  already set stands in for the model's decision — `ToolNode` itself is genuine). This was the one
-  real uncertainty pure source-reading couldn't resolve: does LangChain's callback manager really
-  pass `run_id` to `on_tool_start`/`on_tool_end`, so `_HudEventCallback`'s
-  `execution_start`/`execution_end` pairing actually closes. Confirmed yes, for a real registered
-  L2 tool name (`file_write`), with the transport tag carried through correctly.
-- **Full `python -m jarvis` startup smoke-tested end to end against real session data** (this is
-  the actual product's real entry point, not a throwaway script constructing an agent — see
-  [MEMORY.md](MEMORY.md)'s isolate-test-data-paths note, which is about test scripts, not about
-  running the real CLI): clean banner, a real turn flowed through the new
-  `confirmation_gate_enabled=True` default and the rebuilt `confirmation_node` with no new
-  exception, stopped at this dev machine's pre-existing Vertex-ADC-missing gap (same finding as
-  Faz 1, unrelated to this session), and shut down cleanly on EOF. No stray `data/kill_switch.json`
-  or `data/audit_log.jsonl` got created by this (confirms no risk≥2 decision point was hit before
-  the ADC failure — consistent with the turn failing at the LLM-provider layer, before any tool
-  call was ever attempted).
-- Full compile + import check across every new/modified Python file (`py_compile` plus a real
-  `import jarvis.X` for each, including the heavy ones — `api.py`, `voice_api.py` — which pull in
-  FastAPI/onnxruntime/faster-whisper).
+**Two isolated scratch scripts** (fresh temp `cwd` per run, per MEMORY.md's isolate-test-data-paths
+lesson — learned this session that `kill_switch.py` *also* persists to a cwd-relative
+`data/kill_switch.json`, not just `SessionStore`/`Memory`, so it needed the same isolation):
+- `verify_faz5_gating.py` — 26/26 checks: real Playwright MCP tools discovered (24, matches the
+  live README-documented core set), every one gets a `ToolSpec`, category tagged `"mcp"`,
+  known-read-only names classified L1/no-confirm, known-nav names L2/no-confirm, every consequential
+  name (click/type/fill_form/press_key/select_option/file_upload/drag/drop/hover/handle_dialog/
+  evaluate/run_code_unsafe) *and* a synthetic never-seen-before name both correctly fail-closed to
+  L3+confirm, kill switch (tripped) vetoes `browser_click` but correctly does not veto
+  `browser_snapshot`, no MCP tool is `supports_background=True`, `describe_call()` doesn't crash on
+  an MCP tool name, manager closes cleanly.
+- `verify_faz5_graph.py` — 6/6 checks: a graph built with `extra_tools=None` has zero `browser_*`
+  tools (no regression to today's zero-MCP behavior); the MCP-merged graph's actual compiled
+  `ToolNode` (`graph.nodes["tools"].bound.tools_by_name`) both contains `browser_navigate`/
+  `browser_click` and native tools are still present (dual-layer, not replaced); **the tool object
+  retrieved from that real compiled graph's ToolNode was invoked directly and genuinely drove the
+  real browser** — `browser_navigate("https://example.com")` then a separate `browser_snapshot()`
+  call on the same session saw "Example Domain", proving state persistence through the actual
+  production code path, not just a standalone script.
 
-**Not verifiable in this environment, explicit hand-off:**
-- **A live tool-calling turn through a real LLM** — Ollama wasn't running during the Faz 4
-  implementation itself (`http://localhost:11434` refused the connection); it was started
-  immediately after (see "Post-handoff update" below) but no live gated chat turn was actually
-  driven through it this session. Substituted with the real-LangGraph/fake-`AIMessage` callback
-  test above, which exercises the identical LangChain callback machinery without needing a model.
-  Ollama is up now (confirm with `curl http://localhost:11434/api/tags` — it isn't left running
-  between sessions historically, see MEMORY.md) — a real `"gmail'imi kontrol et"`-shaped turn
-  should show a `decision` audit entry, and a real `"alice@x.com'a mail gönder"`-shaped turn should
-  actually interrupt and prompt.
-- **Actually hearing the spoken confirmation question and answering by voice** — same hand-off
-  category as Faz 3's unverifiable speaker/mic items; the marker-detection and question-generation
-  logic is unit-tested, but perceived audio quality/timing isn't.
-- **Electron/mobile confirmation UI** — not built this phase (see below), so nothing to verify
-  there yet.
+**Real product, real LLM (2026-07-15, `python -m jarvis`, `MCP_PLAYWRIGHT_ENABLED=True`, Ollama
+was up too but this turn routed to the `reasoning` role — `gemini-2.5-pro (Vertex, reasoning)`, per
+the router's own complexity-based pick):** confirmed via `data/audit_log.jsonl` (real, not a test
+double) that the model, unprompted about tool names, independently decided to:
+- call `browser_navigate` → logged `decision ... outcome: auto_approved`, then
+  `execution_start`/`execution_end ok: true` with real returned page content ("Page Title: Example
+  Domain") — a real MCP tool call executed through the full production stack.
+- separately decide to call `browser_click` → logged `decision ... risk_level: 3, outcome:
+  confirm_required` — **the fail-closed gate firing live, from a real model's actual decision**, not
+  a synthetic policy_guard.evaluate() call in a script.
 
-## Post-handoff update (same day, 2026-07-15): Node.js installed, Electron build verified
+This is what caught the graph-rebuild bug (§6 above) — the isolated scripts don't touch
+`JarvisAgent`, so this tier was the only one that could have found it.
 
-Right after the above was written, the owner asked to install what the machine needs. Did:
-- **Ollama started** (`Start-Process ollama.exe serve`) — both models confirmed present
-  (`qwen2.5:7b-instruct`, `nomic-embed-text`). Not left running persistently between sessions
-  historically (see [MEMORY.md](MEMORY.md)) — check it's actually up before assuming so.
-- **Node.js LTS installed, user-scope (no admin needed)** — see [MEMORY.md](MEMORY.md) for the
-  exact path/method. This closes the "no Node.js" gap that blocked Electron verification since
-  Faz 3. `cd electron; npm install` succeeded (existing `node_modules` was already on disk, just
-  unusable without `node`/`npm` on PATH); **`npm run build` (electron-vite) succeeded with zero
-  errors** across all 32 renderer modules + main + preload — a real build-tool verification of
-  every Faz 3 `.jsx`/`.js` file (`useJarvisSocket.js`, `useRemoteAudioSession.js`,
-  `pcm-capture-worklet.js`, `App.jsx`, `Widget.jsx`, `main/index.js`), not just careful reading.
-  **Deliberately not done: `npm run dev`** — that launches a real, visible Electron window on the
-  owner's screen; a clean build doesn't prove runtime correctness, but popping up unrequested GUI
-  wasn't part of what was asked. If picking this up: `npm run dev` in `electron/` (after
-  prepending Node to PATH if using a terminal opened before the install — see MEMORY.md) is the
-  next real step, ideally with `python -m jarvis --api` also running so it has a backend to
-  actually connect to.
-- Verified nothing else was missing: all `requirements.txt` Python deps already satisfied (no
-  new ones needed — confirmed again), MiKTeX/`pdflatex` present. `gcloud` (for Vertex ADC) is
-  still not installed — deliberately skipped: completing ADC needs an interactive browser OAuth
-  login I can't do non-interactively, Vertex is optional (local Ollama + AI Studio free tier both
-  work without it), and it's been explicitly "not asked for" twice now (Faz 1, Faz 4) — install it
-  if Vertex access is actually wanted, not preemptively.
+**Not cleanly closed — explicit hand-off:** the CLI's interactive approve/deny prompt itself. Two
+live attempts (piped stdin, both via a `/reset` + message + `y` + `/exit` input sequence) each ended
+with an empty `_print_jarvis` panel instead of a rendered `[red]Confirmation required[/red]` panel +
+`Approve?` prompt, even though the audit log confirms `confirmation_node` correctly reached the
+`confirm_required` classification both times (once even logging it twice, 2ms apart, suggesting a
+retry/second pass). Read both `jarvis/agent.py`'s `GraphInterrupt`→`ConfirmationRequired` handling
+(`chat()`, ~line 770) and `jarvis/graph/nodes.py`'s `confirmation_node` (~line 358) end to end this
+session looking for a bug — both look structurally correct and neither was modified by this phase.
+Best-guess explanation is piped-non-TTY-stdin racing multiple sequential `Prompt.ask()` calls within
+what's conceptually one turn (main-loop prompt + confirmation prompt sharing one stdin stream), not
+a gating bug — but this is a guess, not a finding. **Next session (or the owner directly): re-run
+the identical request from a real interactive terminal** (`MCP_PLAYWRIGHT_ENABLED=True`,
+`python -m jarvis`, ask it to click something on a live page) and confirm the red panel actually
+renders and typing `y` actually resumes the click. If it reproduces in a real terminal too, that's a
+real bug in Faz 4's interrupt/resume plumbing surfaced by Faz 5, not a test-harness artifact, and
+needs its own fix.
 
 ## Explicitly deferred / not this phase's scope
 
-- **No Electron/mobile UI renders a confirmation prompt**, i.e. nothing calls
-  `POST /chat/confirm/{conf_id}` from a click. The API returns the right structured payload
-  (`{"confirmation_required": true, "id", "payload"}` from `/chat`; the `__jarvis_confirm__` SSE
-  frame from `/chat/stream`) but no UI consumes it yet. The Electron *build* is now verified clean
-  (see above) — what's missing is the actual confirmation dialog component + wiring, not the
-  ability to build/ship JS at all. Flutter mobile is in the same boat, unstarted.
-- **`python_run` is gated, not sandboxed.** The subprocess itself still has no resource/network
-  restriction — the fix this session is strictly "ask before running it," not "limit what it can
-  do once approved." Said explicitly in `docs/SAFETY.md`, not glossed over.
-- **No formal WHEN_IDLE/INTERRUPT work-class taxonomy.** The roadmap bullet mentioned one; built
-  the minimal real thing instead (registry-derived `should_async()` + hand off to the existing
-  `TaskExecutor`) since a finer-grained per-tool-call scheduler has no second consumer yet and
-  would also break the ReAct loop for turns that need a tool's result to answer — see
-  `ROADMAP.md`'s Faz 4 section for the full reasoning.
-- **Voice confirmation phrasing isn't fully localized** — the wrapper question is bilingual, the
-  embedded per-call description stays in English technical form even in a Turkish session.
-- **monitor.py was not touched.** It makes zero tool calls today (pure Gmail/Calendar reads +
-  toast/push, no LLM, no `agent.chat()` call anywhere in it) — there's nothing in it to route
-  through `policy_guard` yet. `docs/SAFETY.md`'s old claim that "monitor auto-denies L3 actions" was
-  checked against the actual code and found to not correspond to anything real; removed rather than
-  left stale.
-- **Cleanup of the 21 stray `.claude/worktrees/*` directories** — still deferred, still needs the
-  owner's explicit go-ahead (destructive), unrelated to this session, Faz 8 territory.
+- **ha-mcp / Home Assistant** — still Faz 6, hardware-gated (no HA instance, no Zigbee dongle). The
+  generic `Settings.mcp_servers` escape hatch this phase built is specifically so that phase is
+  config, not code, when the hardware arrives.
+- **Playwright's opt-in capability flags** (`--caps=storage,network,devtools,vision,pdf,testing`) —
+  not enabled. The 24-tool core set (navigate/click/type/snapshot/screenshot/evaluate/...) is
+  already a real, useful capability; the opt-in extras (cookie/localStorage manipulation, network
+  request mocking, video/trace recording, coordinate-based mouse control, PDF export, test-locator
+  generation) weren't asked for and would need their own risk classification pass before shipping.
+- **No per-server enable/disable UI** — `.env` only, matches every other integration in this
+  project (Spotify, Calendar, Drive, ...).
+- **The CLI interrupt round-trip verification gap above** — genuinely unresolved, not glossed over.
 
 ## Git state as of this session
 
 - Branch: `langgraph-migration`, **not merged to `main`**.
-- **Everything from this session is uncommitted** (per this project's standing instruction: only
-  commit when explicitly asked). `git status`: 23 modified files, 4 new
-  (`jarvis/policy_guard.py`, `jarvis/kill_switch.py`, `jarvis/audit_log.py`,
-  `jarvis/api_auth.py`). `git diff --stat`: 1071 insertions, 188 deletions across the modified
-  files. Nothing under `data/` is tracked (gitignored, as expected) — `kill_switch.json`/
-  `audit_log.jsonl` will appear there on first real trip/side-effecting call, not from this
-  session's verification (confirmed clean).
+- **Faz 4 was committed this session** (`55cd807`, 28 files, +1601/-338) — see git log.
+- **Everything from Faz 5 is uncommitted** (per this project's standing instruction: only commit
+  when explicitly asked, and this session wasn't asked to commit Faz 5 specifically — only Faz 4).
+  `git status`: 15 modified files (`.env.example`, `CHANGELOG.md`, `CLAUDE.md`, `MEMORY.md`,
+  `ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/SAFETY.md`, `docs/TOOLS.md`, `jarvis/agent.py`,
+  `jarvis/api.py`, `jarvis/cli.py`, `jarvis/config.py`, `jarvis/graph/graph.py`,
+  `jarvis/policy_guard.py`, `jarvis/tool_registry.py`, `requirements.txt`, `.gitignore`), 1 new
+  (`jarvis/mcp_integration.py`), +468/-22 across the modified files (not counting this rewrite of
+  `HANDOFF.md` itself). `.playwright-mcp/` is untracked but now gitignored, won't show in `git add`.
+  `data/audit_log.jsonl`/`data/kill_switch.json` (the latter never created — kill switch was never
+  really tripped, only in isolated temp-dir tests) are gitignored as always.
 
 ## Recommended next steps (pick up here)
 
-1. **Decide on commit strategy** — this is a coherent, single-purpose phase (unlike Faz 3's
-   Part A/B split); one commit is probably right, but that's the owner's call, not assumed.
-2. **Start Ollama and run a real gated turn** (see "Not verifiable" above) before fully trusting
-   this in daily use — the logic is thoroughly tested in isolation and via a real (if LLM-free)
-   LangGraph execution, but nothing this session actually watched a real model decide to call
-   `gmail("send", ...)` and get interrupted.
-3. **Faz 5 — MCP Katmanı** ([ROADMAP.md](ROADMAP.md)) is next per the roadmap. `policy_guard.
-   evaluate()` was deliberately written to not know or care who's calling it, specifically so
-   Faz 5's MCP tool integration can call the same function rather than inventing its own gate.
-4. If the Electron/mobile confirmation UI is wanted, that's a real, not-yet-scoped chunk of work —
-   Node.js is now available in this environment too (see "Post-handoff update" above), so a future
-   session can build/syntax-check it directly; actually *seeing* it will still need `npm run dev`
-   run where a human can look at the window.
+1. **Resolve the CLI interrupt round-trip question above** — run the same live request from a real
+   (not piped) terminal before trusting the confirmation gate covers MCP tools in daily use exactly
+   like it covers native ones.
+2. **Decide on commit strategy for Faz 5** — one coherent phase, similar shape to Faz 4; the owner's
+   call, not assumed.
+3. **Faz 6 — Fiziksel Dünya / IoT** ([ROADMAP.md](ROADMAP.md)) is next per the roadmap, but stays
+   `⛔ deferred` — hardware-gated (owner has only an RP2040 today; needs a Zigbee coordinator dongle
+   at minimum). Nothing to do here until hardware is actually acquired.
+4. **Faz 7 — Proaktiflik** is the other unstarted phase and does *not* need hardware for its
+   software-proactivity half (calendar/email self-initiation) — a legitimate next-session candidate
+   if Faz 6 stays blocked on hardware.
 5. Confirm whether the 21 stray worktrees/branches should be cleaned up (still deferred, still
-   needs owner go-ahead — destructive).
+   needs owner go-ahead — destructive, unrelated to this session).
 
 ## Environment checklist to resume work
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ollama serve                          # confirm it's up: curl http://localhost:11434/api/tags —
-                                       # started 2026-07-15 but not left running between sessions
-python -m jarvis                      # CLI text — try a risky action, e.g. "briefly test gmail send"
-python -m jarvis --voice              # voice — same, listen for the spoken confirmation question
-python -m jarvis --api                # API mode — POST /chat with a risky message, check for
-                                       # {"confirmation_required": true, ...} in the response
+                                       # was up this session but isn't left running between sessions
+python -m jarvis                      # CLI text — set MCP_PLAYWRIGHT_ENABLED=True in .env first,
+                                       # then try "example.com'a git ve bir linke tıkla" — confirm
+                                       # the confirmation prompt actually renders in a REAL terminal
+                                       # (this is exactly what last session couldn't confirm)
 ```
 
-```powershell
-# Electron (Node.js now installed — see MEMORY.md if PATH isn't picked up in an old terminal)
-cd electron
-npm run build                         # verified clean 2026-07-15 — re-run after any JS/JSX edit
-npm run dev                           # launches the actual HUD window; pair with --api running
-```
+New `.env` vars this session: `MCP_PLAYWRIGHT_ENABLED` (default `False`),
+`MCP_PLAYWRIGHT_HEADLESS` (default `True`), `MCP_SERVERS` (advanced, default `{}`) — see
+`.env.example` for the exact JSON shape and the Windows `cmd /c npx` note.
 
-New CLI command this session: `/killswitch` (bare = status, `on`, `off <reason>`).
-
-No new Python dependencies this session — `jarvis/tools/webfetch.py`'s SSRF guard uses only
-`ipaddress`/`socket`/`urllib.parse`, all stdlib. Node.js LTS was installed post-handoff (see
-above) — no `package.json` changes, so nothing new to `npm install` beyond what's already there.
+New Python dependency: `langchain-mcp-adapters` (installed via `uv pip install`, already in
+`requirements.txt` — a fresh `.venv` needs `uv pip install -r requirements.txt`, not plain `pip`,
+per MEMORY.md's existing resolution-backtracking gotcha). No new Node.js packages pinned anywhere —
+`npx -y @playwright/mcp@latest` always resolves the latest published version at connect time.

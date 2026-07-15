@@ -302,6 +302,75 @@ The north-star target came from an owner-commissioned research report
     assume every tool in `graph/tools.py` can be freely converted the same way without checking
     it's graph-only first.
 
+- **MCP client layer (Faz 5, 2026-07-15):** `jarvis/mcp_integration.py`'s `McpToolManager` connects
+  to configured external MCP servers and merges their tools into the graph as a second,
+  dynamically-discovered tool source alongside the 36 native `@tool` wrappers — design decisions
+  worth knowing before touching any of it:
+  - **The persistent-session requirement was discovered empirically, not assumed from docs** — a
+    LangChain forum thread independently confirmed the exact same failure mode a scratch test on
+    this machine hit first: `MultiServerMCPClient`'s default, convenience `get_tools()` method
+    creates a *fresh* MCP session (and therefore, for a stdio server, a fresh subprocess) **per
+    tool call**. For a stateless server that's just wasteful; for a stateful one like browser
+    automation it's silently broken — a `browser_navigate` then a separate `browser_click` call
+    would land in two different, unrelated browser processes, the second with no page loaded.
+    Fixed by always using `client.session(name)` (persistent, entered via an `AsyncExitStack` held
+    for the manager's life) + `load_mcp_tools(session)`, never the default `get_tools()`. Verified
+    live: `browser_navigate` then a *separate* `browser_snapshot` call correctly see the same page,
+    through the actual compiled graph's `ToolNode`, not just a standalone script.
+  - **That persistent session is event-loop-bound, and this project has several independent event
+    loops in play** (the same root cause as **BUG-9**'s `AsyncSqliteSaver` rejection — see
+    `jarvis/graph/graph.py`'s docstring). `JarvisAgent.__init__` runs before any loop exists in
+    every real entry point (confirmed: `cli.py` constructs `JarvisAgent` before its own
+    `asyncio.run()`; `api.py`'s `init_agent()` runs before uvicorn's loop starts) — so MCP tools
+    cannot connect at construction time. They connect lazily via `connect_mcp_tools()`, which
+    rebuilds `self._graph` with the newly-known tools (`build_graph()` gained an `extra_tools`
+    param for this, and the switch_model()/quota-fallback rebuild call sites were updated to keep
+    passing `self._mcp.tools` through so a mid-session model switch doesn't silently drop them).
+    Critically, this method is called **explicitly, once, from each entry point's own real
+    long-lived loop** (`cli.py`'s `_run_loop`/`_run_voice_loop`, right before their main
+    while-loop; `api.py`'s `lifespan()`, before `yield`) — deliberately **not** lazily from
+    whichever caller's `chat()` happens to fire first, because in API mode that could in principle
+    be a `TaskExecutor` background job running on its own short-lived per-call `asyncio.run()`
+    thread, which would bind the subprocess's stdio streams to a loop that's about to be destroyed.
+    `chat()`/`chat_stream()` still call `connect_mcp_tools()` too, purely as an idempotent
+    belt-and-suspenders safety net (matches this codebase's existing style, e.g.
+    `session_store.py`'s migration-registration comment) — it only ever does real work once per
+    process; every call after the first (including these) is a cheap no-op. Don't "simplify" this
+    to a single lazy call inside `chat()`/`chat_stream()` without re-deriving whether that's still
+    safe — it was deliberately NOT the primary path for the reason above.
+  - **Fail-closed by design, not by omission**: `mcp_integration._classify()` only special-cases a
+    short, explicit allow-list of Playwright tool names confirmed (live) to be pure inspection
+    (`browser_snapshot`, `browser_take_screenshot`, `browser_console_messages`, `browser_find`, …)
+    or inconsequential navigation (`browser_navigate`, `browser_wait_for`, `browser_tabs`, …) — L1
+    and L2 respectively, no confirmation. **Every other tool name, including one this codebase has
+    never seen (e.g. a future Playwright MCP version's new tool, or a completely different future
+    MCP server's tools), defaults to L3 + `requires_confirmation=True`.** This mirrors
+    `policy_guard._READ_ACTIONS`' existing per-action override pattern for the four mixed-risk
+    Google/ITU tools (Faz 4) — same idea, keyed by MCP tool name instead of an `action` argument.
+    If asked to add a new MCP server, resist the urge to pre-classify its whole tool surface as
+    low-risk for convenience; extend the allow-list only for names you've actually confirmed are
+    side-effect-free, same bar as the Playwright list was held to.
+  - **Why a browser tool is a materially bigger step than `web_search`/`url_read`**: both already
+    feed untrusted web text to the model (existing prompt-injection surface, unchanged by this
+    phase), but neither gives the model *hands* — Playwright does. A poisoned page's text can get
+    the model to *decide* to click/submit/type something, but the fail-closed default means it
+    can't actually do so without the user approving that specific, described call
+    (`policy_guard.describe_call()` — extended this phase with `element`/`url`/`text` in
+    `_DETAIL_KEYS` so a pending `browser_click` confirmation actually names what gets clicked
+    instead of showing the bare tool name). This is the project's own established mitigation
+    pattern (see the Faz 4 security-kernel entry above), just applied to a new, riskier tool source.
+  - **Windows: `npx` must go through `cmd /c`, confirmed live, not assumed** — `npx` on Windows is
+    `npx.cmd`, a batch shim, not a real executable; Python's subprocess APIs (which don't invoke a
+    shell by default) raise `WinError 2` spawning it directly. Every npx-based MCP server config
+    (the shipped Playwright one, and the pattern documented in `.env.example` for
+    `MCP_SERVERS`) uses `{"command": "cmd", "args": ["/c", "npx", ...]}`, never bare `"npx"`.
+  - **Config is dedicated-flags-plus-escape-hatch, matching this codebase's existing per-integration
+    convention** (Spotify/Calendar/Drive each get their own `Settings` fields rather than a generic
+    blob): `mcp_playwright_enabled`/`mcp_playwright_headless` for the one server shipped this phase,
+    plus a generic `mcp_servers: dict[str, dict]` (JSON-parsed from the `.env` string by
+    pydantic-settings automatically) for anything else — e.g. Faz 6's ha-mcp should need a
+    `MCP_SERVERS` entry, not new Python code.
+
 ## Known permanently-true gotchas
 
 - `.env` is never committed (gitignored); `.env.example` is the template.

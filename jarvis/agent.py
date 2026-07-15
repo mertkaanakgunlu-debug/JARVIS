@@ -45,6 +45,7 @@ from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
 from jarvis import audit_log               # Faz 4
 from jarvis.tool_registry import get_spec  # Faz 4
+from jarvis.mcp_integration import McpToolManager  # Faz 5
 
 
 # ── Phase 3: confirmation gate ────────────────────────────────────────────────
@@ -339,7 +340,18 @@ class JarvisAgent:
 
         db_path = Path("data") / "jarvis_checkpoints.db"
         self._checkpointer = make_checkpointer(db_path)
-        self._graph = build_graph(settings, self.workspace, self.memory, self._checkpointer)
+        # Faz 5: MCP tools connect lazily via connect_mcp_tools() -- __init__
+        # runs before any event loop exists in every real entry point (cli.py
+        # constructs JarvisAgent before its own asyncio.run(); api.py's
+        # init_agent() runs before uvicorn's loop starts), and MCP's stdio
+        # transport needs a real, long-lived loop to connect on. self._mcp.tools
+        # is always [] here -- see connect_mcp_tools()'s docstring.
+        self._mcp = McpToolManager()
+        self._mcp_graph_rebuilt = False  # guards connect_mcp_tools()'s one-time graph rebuild
+        self._graph = build_graph(
+            settings, self.workspace, self.memory, self._checkpointer,
+            extra_tools=self._mcp.tools,
+        )
 
         self.usage = UsageTracker(Path("data") / "usage.json")
 
@@ -504,7 +516,10 @@ class JarvisAgent:
             new_settings.cloud_model = model_id
             new_settings.pin_cloud_model = True
 
-        new_graph = build_graph(new_settings, self.workspace, self.memory, self._checkpointer)
+        new_graph = build_graph(
+            new_settings, self.workspace, self.memory, self._checkpointer,
+            extra_tools=self._mcp.tools,  # Faz 5: don't drop already-connected MCP tools on a model switch
+        )
         with self._state_lock:
             self._graph = new_graph
             self._effective_settings = new_settings
@@ -638,6 +653,47 @@ class JarvisAgent:
 
     # ── Chat ───────────────────────────────────────────────────────────────────
 
+    # ── Faz 5: MCP tool lifecycle ────────────────────────────────────────────
+
+    async def connect_mcp_tools(self) -> None:
+        """Connect configured MCP servers (Playwright, etc.) and rebuild the
+        graph — ONCE — so their tools are actually offered to the LLM.
+        Fully idempotent: McpToolManager.connect() only does real work once
+        per process, and self._mcp_graph_rebuilt guards the graph rebuild
+        itself so it also only happens once (BUG caught live, 2026-07-15 —
+        `if self._mcp.tools: rebuild` alone is NOT idempotent, since
+        self._mcp.tools stays truthy forever after a successful connect; every
+        call after the first — including the defensive one at the top of
+        chat()/chat_stream(), which fires on literally every turn — was
+        silently rebuilding the ENTIRE graph, re-constructing every LLM
+        provider and re-running .bind_tools() across all ~60 tools, on every
+        single turn for the rest of the process's life).
+
+        Callers: cli.py's _run_loop()/_run_voice_loop() and api.py's
+        lifespan() call this explicitly, once, right as their real long-lived
+        event loop starts — before any user turn or TaskExecutor background
+        job can possibly run — so the MCP session is always opened on the
+        loop that will actually service it for the rest of the process's
+        life (see jarvis/mcp_integration.py's module docstring for why that
+        matters). chat()/chat_stream() also call this as a belt-and-suspenders
+        safety net for any caller that skips the explicit bootstrap (e.g. a
+        script constructing JarvisAgent directly) — safe because it's a no-op
+        once the real bootstrap has already run.
+        """
+        await self._mcp.connect(self.settings)
+        if self._mcp.tools and not self._mcp_graph_rebuilt:
+            self._graph = build_graph(
+                self.settings, self.workspace, self.memory, self._checkpointer,
+                extra_tools=self._mcp.tools,
+            )
+            self._mcp_graph_rebuilt = True
+
+    async def close_mcp_tools(self) -> None:
+        """Close any live MCP subprocess(es) — call on clean process shutdown
+        so a launched npx/browser process tree doesn't linger."""
+        await self._mcp.close()
+        self._mcp_graph_rebuilt = False
+
     async def chat(
         self,
         user_input: str,
@@ -665,6 +721,7 @@ class JarvisAgent:
         # between would clobber one turn's result with the other's.
         await self._acquire_state_lock()
         try:
+            await self.connect_mcp_tools()  # Faz 5: no-op after the first real connect
             ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(
                 self.settings, ctx.memory_ctx, detected_language,
@@ -735,7 +792,10 @@ class JarvisAgent:
                     fb_settings = copy.copy(self._effective_settings)
                     fb_settings.cloud_tier = "aistudio"
                     fb_settings.cloud_model = self._effective_settings.cloud_model_fallback
-                    self._graph = build_graph(fb_settings, self.workspace, self.memory, self._checkpointer)
+                    self._graph = build_graph(
+                        fb_settings, self.workspace, self.memory, self._checkpointer,
+                        extra_tools=self._mcp.tools,  # Faz 5: don't drop already-connected MCP tools
+                    )
                     self._effective_settings = fb_settings
                     result = await self._graph.ainvoke(state, config=config)
                 else:
@@ -819,6 +879,7 @@ class JarvisAgent:
         # self._history/_turn still reflect the *previous* completed turn.
         await self._acquire_state_lock()
         try:
+            await self.connect_mcp_tools()  # Faz 5: no-op after the first real connect
             ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(
                 self.settings, ctx.memory_ctx, detected_language,

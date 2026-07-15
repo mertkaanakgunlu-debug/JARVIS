@@ -12,6 +12,13 @@ langchain-openai>=0.2                  # ChatOpenAI against Ollama's OpenAI-comp
 # Migration to LangGraph sub-graphs is tracked as Phase 8 of the refactor roadmap.
 pydantic-ai[openai,google-gai]>=0.0.14
 
+# MCP client layer (Faz 5): wraps the official `mcp` SDK (pulled in transitively)
+# and converts external MCP servers' tools into LangChain tool objects. Dual-layer
+# design -- the ~34 existing @tool wrappers above are untouched; see
+# jarvis/mcp_integration.py for the fail-closed ToolSpec synthesis that keeps
+# every MCP tool behind policy_guard.
+langchain-mcp-adapters>=0.1
+
 # Settings from .env
 pydantic-settings>=2.6
 

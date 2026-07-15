@@ -23,6 +23,15 @@ local_write     — writes local filesystem or local DB
 local_execute   — spawns a subprocess or script
 external_read   — reads from an external network service (web, API, IMAP read)
 external_write  — creates / updates / sends via external service
+
+Categories
+----------
+filesystem | compute | network | memory | external_api | ui | sub_agent
+mcp   — Faz 5: tools discovered at runtime from an external MCP server
+        (e.g. Playwright browser automation). See jarvis/mcp_integration.py
+        and register_dynamic_spec() below -- these specs are NOT in the
+        TOOL_SPECS literal below (the tool names don't exist until the
+        server actually responds), they're inserted at connect time.
 """
 from __future__ import annotations
 
@@ -250,6 +259,16 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
 def get_spec(tool_name: str) -> ToolSpec | None:
     """Return the ToolSpec for *tool_name*, or None if not registered."""
     return TOOL_SPECS.get(tool_name)
+
+
+def register_dynamic_spec(spec: ToolSpec) -> None:
+    """Register a ToolSpec discovered at runtime (Faz 5: MCP tools) into the
+    same dict the ~34 static @tool wrappers live in, so get_spec() -- and
+    therefore policy_guard, the audit callback, and the async scheduler,
+    which all only ever call get_spec()/read TOOL_SPECS -- cover it
+    identically with zero changes to any of them. Idempotent: re-registering
+    an existing name (e.g. a reconnect) just overwrites that entry."""
+    TOOL_SPECS[spec.name] = spec
 
 
 # Convenience views ──────────────────────────────────────────────────────────────

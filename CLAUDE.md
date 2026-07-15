@@ -54,6 +54,14 @@ gated tools do not interrupt (per-action, not per-tool). There's also a kill swi
 all when tripped, and an append-only audit log (`jarvis/audit_log.py`,
 `data/audit_log.jsonl`) recording every risk_level ≥ 2 call's decision and outcome.
 
+**Faz 5 (2026-07-15) extended the same gate to MCP tools** — `jarvis/mcp_integration.py` connects
+to external MCP servers (disabled by default; ships with Microsoft's Playwright MCP for real
+browser automation, `MCP_PLAYWRIGHT_ENABLED=True` to turn it on) and registers a `ToolSpec` per
+discovered tool into the exact same registry the native tools use — zero changes needed to
+`policy_guard`/the audit log/the kill switch. Fail-closed: anything beyond pure page
+inspection/navigation (click, type, fill a form, run JS, ...) requires confirmation by default,
+same as `gmail send`.
+
 **What's still genuinely not done** (see `docs/SAFETY.md`'s "Known limits" for the full honest
 list — don't oversell past this):
 - No Electron/mobile UI renders a confirmation prompt from the API's structured response yet —
@@ -72,7 +80,7 @@ See `docs/SAFETY.md` for the full mechanism list and `docs/TOOLS.md` for per-too
 | `CLAUDE.md` (this file) | Orientation + conventions for Claude Code sessions |
 | `HANDOFF.md` | Where the *last* session left off — read every time you resume |
 | `MEMORY.md` | Durable facts/decisions/gotchas that rarely change |
-| `ROADMAP.md` | What's next, prioritized — Phase 5-8 + the current bug backlog |
+| `ROADMAP.md` | What's next, prioritized — Phase 6-8 + the current bug backlog |
 | `ProjectState.md` | Full feature inventory (Faz 1-21) + architecture snapshot |
 | `docs/ARCHITECTURE.md` | Subsystem map |
 | `docs/TOOLS.md` | Tool registry with risk levels |

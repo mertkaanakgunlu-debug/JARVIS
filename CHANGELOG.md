@@ -6,6 +6,43 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Faz 5] — 2026-07-15 — MCP client layer
+
+- **New `jarvis/mcp_integration.py`** (`McpToolManager`, built on the official
+  `langchain-mcp-adapters`) — connects to configured external MCP servers and merges their tools
+  into the graph as a second, dynamically-discovered tool source alongside the 36 native `@tool`
+  wrappers (dual layer, per the roadmap — the native tools are untouched). Every discovered tool
+  gets a `ToolSpec` synthesized at connect time (`tool_registry.register_dynamic_spec()`) inserted
+  into the same `TOOL_SPECS` dict the native tools live in, so `policy_guard`, `audit_log`, and the
+  async scheduler cover MCP tools identically with zero changes to any of them.
+- **Ships with one real server, disabled by default:** Microsoft's official Playwright MCP — real
+  browser automation (navigate/click/type/snapshot/screenshot/evaluate JS/…). Flip
+  `MCP_PLAYWRIGHT_ENABLED=True` in `.env`. `Settings.mcp_servers` is a generic JSON escape hatch for
+  any other server (e.g. a future ha-mcp, Faz 6) — purely additive config, no code changes needed.
+- **Fail-closed classification:** a short explicit allow-list of pure-inspection/navigation
+  Playwright tool names gets L1/L2 no-confirm; every other tool — including any name never seen
+  before — defaults to L3 + `requires_confirmation=True`, the same gate as `shell_run`/`gmail send`.
+  Direct mitigation for the prompt-injection risk a browser tool uniquely adds beyond
+  `web_search`/`url_read`: a poisoned page can make the model *want* to click/submit something, but
+  can't act without the user approving that specific call.
+- **Persistent-session architecture** — MCP's stdio transport needs one subprocess alive for a
+  session's life for a stateful server like browser automation (confirmed live: the adapter's
+  default stateless `client.get_tools()` spawns a fresh process, and fresh blank browser, per tool
+  call, silently breaking `navigate` → `click`). `McpToolManager` uses the persistent
+  `client.session()` pattern instead, held open by an `AsyncExitStack`. That session is loop-bound
+  (same class of constraint as the LangGraph checkpointer), so `JarvisAgent.connect_mcp_tools()` is
+  called explicitly, once, from each entry point's real long-lived loop (`cli.py`'s
+  `_run_loop`/`_run_voice_loop`, `api.py`'s `lifespan()`) before any turn or `TaskExecutor`
+  background job can run — never lazily from whatever caller happens to `chat()` first.
+  `build_graph()` gained an `extra_tools` param for this.
+- **Windows fix (confirmed live):** `npx` is `npx.cmd`, a batch shim — spawning it directly via
+  Python's subprocess APIs raises `WinError 2`. Every npx-based server config goes through
+  `cmd /c npx ...`.
+- **Bonus fix bundled in:** `policy_guard.describe_call()`'s detail extraction (used in confirmation
+  prompts / TTS / audit log) didn't recognize any of Playwright's argument names, so a pending
+  `browser_click` confirmation showed just the bare tool name with no indication of what would be
+  clicked — added `element`/`url`/`text` to `_DETAIL_KEYS`.
+
 ## [Faz 4] — 2026-07-14 — Security kernel + async tools
 
 - **New `jarvis/policy_guard.py`** — transport-agnostic safety kernel (no LangGraph/LangChain

@@ -133,6 +133,7 @@ def build_graph(
     workspace: Path,
     memory: "Memory",
     checkpointer=None,
+    extra_tools: list | None = None,
 ):
     """Build and compile the JARVIS LangGraph state machine (Faz 2).
 
@@ -141,8 +142,16 @@ def build_graph(
         workspace:    Current working directory (passed to tools)
         memory:       ChromaDB + vault memory instance
         checkpointer: Optional LangGraph checkpointer (SqliteSaver)
+        extra_tools:  Faz 5 -- already-connected MCP tools (JarvisAgent
+                      connects these asynchronously via connect_mcp_tools()
+                      before rebuilding the graph with them; build_graph()
+                      itself stays synchronous, unchanged for every existing
+                      caller that doesn't pass this). Dual-layer: appended
+                      alongside, never replacing, make_tools()'s ~34 wrappers.
     """
     tools = make_tools(workspace, settings, memory)
+    if extra_tools:
+        tools = [*tools, *extra_tools]
 
     # Faz 1: role→provider router (jarvis/providers/) — fast is Ollama-primary
     # with a cloud fallback; reasoning is cloud-first with local as its own

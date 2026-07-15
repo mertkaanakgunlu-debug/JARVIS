@@ -109,7 +109,15 @@ _ACTION_VERBS: dict[str, str] = {
     "share": "share a Drive file",
 }
 
-_DETAIL_KEYS = ("title", "to", "subject", "query", "name", "file_id", "event_id", "command", "script_path")
+_DETAIL_KEYS = (
+    "title", "to", "subject", "query", "name", "file_id", "event_id", "command", "script_path",
+    # Faz 5: MCP tools (Playwright) don't use the action="..." dispatch
+    # convention the native external_api tools do, so the verb fallback
+    # above is just the bare tool name -- these keys are what make
+    # e.g. "browser_click" read as "browser_click (element=Submit button)"
+    # in a confirmation prompt instead of naming nothing about the call.
+    "element", "url", "text",
+)
 
 
 def describe_call(tool_name: str, args: dict[str, Any]) -> str:

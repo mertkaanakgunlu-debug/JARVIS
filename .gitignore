@@ -33,6 +33,10 @@ electron/dist-electron/
 electron/dist/
 electron/out/
 
+# Faz 5: Playwright MCP page-snapshot cache (runtime artifact, written to the
+# repo root by @playwright/mcp itself -- not configurable to data/)
+.playwright-mcp/
+
 # IDE
 .vscode/
 .idea/

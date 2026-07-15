@@ -252,6 +252,19 @@ async def _handle_confirmation_cli(agent: JarvisAgent, conf_id: str, payload: di
 # ── Main loops ─────────────────────────────────────────────────────────────────
 
 async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
+    """Faz 5: connect MCP servers (Playwright, etc.) on this function's own
+    long-lived loop before any turn can run, and guarantee cleanup on the way
+    out (normal /exit, or Ctrl+C/EOF) -- see JarvisAgent.connect_mcp_tools()'s
+    docstring for why this must be the loop that opens the connection, not
+    wherever the first chat() call happens to come from."""
+    await agent.connect_mcp_tools()
+    try:
+        await _run_loop_impl(agent, monitor)
+    finally:
+        await agent.close_mcp_tools()
+
+
+async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
     settings = agent.settings
 
     _print_banner(settings, monitor_active=monitor is not None)
@@ -822,6 +835,9 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
         return
 
     settings = agent.settings
+    # Faz 5: connect MCP servers (Playwright, etc.) now, on this function's
+    # own long-lived loop -- see JarvisAgent.connect_mcp_tools()'s docstring.
+    await agent.connect_mcp_tools()
     engine = RealtimeVoiceEngine(DuplexAudioIO(settings), settings)
     loop = asyncio.get_running_loop()
 
@@ -927,6 +943,8 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
             # re-gate on the wake phrase for the next command.
     except KeyboardInterrupt:
         console.print("\n[dim]JARVIS offline. Goodbye.[/dim]")
+    finally:
+        await agent.close_mcp_tools()  # Faz 5: don't leave a launched browser process behind
 
 
 def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> None:

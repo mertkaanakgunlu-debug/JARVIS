@@ -1,8 +1,10 @@
 # J.A.R.V.I.S. — Safety & Confirmation Model
 
-> Updated 2026-07-14 (Faz 4). Phase 2 (ToolSpec metadata, commit `166a205`) and Phase 3
+> Updated 2026-07-15 (Faz 5). Phase 2 (ToolSpec metadata, commit `166a205`) and Phase 3
 > (confirmation gate node, commit `7e7e471`) shipped 2026-05-24 but, per the 2026-07-14 review,
 > didn't protect anything end-to-end. **Faz 4 closed that gap** — see "What Faz 4 changed" below.
+> **Faz 5 extended it to a second, dynamically-discovered tool source (MCP)** without changing the
+> gate itself at all — see "What Faz 5 changed" below.
 > Treat this file as current; if it and the code disagree, trust the code and fix this file.
 
 ## Current safety mechanisms
@@ -12,7 +14,8 @@
 | `DENY_PATTERNS` | `jarvis/tools/shell.py:9` | Blocks `rm -rf`, `format`, `del /f`, etc. in `shell_run` |
 | System prompt rules | `jarvis/prompts/core/*.md` (see [prompt_loader.py](../jarvis/prompts/prompt_loader.py)) | "NEVER" directives (no hallucination, no fake data, etc.) — **not** `jarvis/prompts/system.md`, a dead pointer file left over from before the Phase 1 prompt-modularization split |
 | `ToolSpec` risk metadata | `jarvis/tool_registry.py` | `risk_level` (L1-L3) + `requires_confirmation` per tool |
-| **`policy_guard` kernel (Faz 4)** | `jarvis/policy_guard.py` | Transport-agnostic risk classification: per-*action* gating (not per-tool) for the four mixed-risk external_api tools, plus the kill-switch veto. Single choke point — the graph's confirmation node calls it, and any future direct tool dispatcher (MCP, Faz 5) is meant to call the same function rather than reimplement this logic. |
+| **`policy_guard` kernel (Faz 4)** | `jarvis/policy_guard.py` | Transport-agnostic risk classification: per-*action* gating (not per-tool) for the four mixed-risk external_api tools, plus the kill-switch veto. Single choke point — the graph's confirmation node calls it. **Faz 5 confirmed the design worked as intended**: MCP tools (`jarvis/mcp_integration.py`) call the exact same `get_spec()`/`policy_guard.evaluate()` path with zero changes to this module — they're just more rows in `TOOL_SPECS`, added dynamically instead of statically. |
+| **MCP tool gating (Faz 5)** | `jarvis/mcp_integration.py` (`_classify()`) | Every tool discovered from a connected MCP server gets a `ToolSpec` synthesized at connect time — fail-closed by default (L3 + `requires_confirmation=True`) unless explicitly known to be read-only/inconsequential-navigation (a short allow-list, e.g. Playwright's `browser_snapshot`). Registered into the same `TOOL_SPECS` dict via `tool_registry.register_dynamic_spec()`, so every mechanism in this table already covers it. |
 | Confirmation gate | `jarvis/graph/nodes.py` (`make_confirmation_node`) | Interrupts the graph before tool calls `policy_guard` says need confirmation. **Now wired into all three interfaces** (see below) and **on by default**. |
 | **Kill switch (Faz 4)** | `jarvis/kill_switch.py`, persisted at `data/kill_switch.json` | Emergency stop for external-effect (L3) actions specifically — file writes/todos/etc. (L2) are unaffected. Defaults to enabled (armed). `/killswitch off <reason>` (CLI) or `/killswitch on` to toggle; survives a process restart by design (it's a file, not a Settings field) — a trip stays tripped until someone deliberately re-arms it. |
 | **Audit log (Faz 4)** | `jarvis/audit_log.py`, append-only at `data/audit_log.jsonl` | Two event kinds per risk_level ≥ 2 tool call: `decision` (policy_guard's ruling — auto_approved / confirm_required / user_approved / user_denied / blocked_kill_switch, written in `confirmation_node`) and `execution_start`/`execution_end` (the call actually ran, with outcome — written by `_HudEventCallback` in `jarvis/agent.py`, the same LangChain callback attached in `chat()`/`chat_stream()`/`resume_and_stream()`, so this fires for every transport). Never truncates/rewrites existing lines. |
@@ -67,6 +70,28 @@ exact action tables.
   than `shell_run` (arbitrary unsandboxed Python from any absolute path) while sitting at a lower
   gate. **This is an access-control fix, not a sandbox** — the subprocess itself still has no
   resource/network restrictions; true sandboxing is a deferred hardening item, not implemented.
+
+## What Faz 5 changed
+
+- New `jarvis/mcp_integration.py` connects to configured external MCP servers (disabled by
+  default) and merges their tools into the graph as a second, dynamically-discovered tool source.
+  Ships with one real server: Microsoft's official Playwright MCP (real browser automation —
+  navigate/click/type/snapshot/screenshot/evaluate JS/…), flip `MCP_PLAYWRIGHT_ENABLED=True` to
+  enable it.
+- **A browser tool is a materially bigger step than the existing `web_search`/`url_read`** — both
+  already feed untrusted web page text to the model (an existing, unchanged prompt-injection
+  surface), but neither gives the model the ability to *act* on a page. Playwright does: a poisoned
+  page's content could get the model to *decide* to click/submit/type something. The mitigation is
+  the same gate this whole document describes, just applied here: every Playwright tool beyond pure
+  inspection/navigation (click, type, fill_form, select_option, file_upload, drag, drop, hover,
+  handle_dialog, evaluate, run_code_unsafe) defaults to L3 + `requires_confirmation=True`, so the
+  model deciding to click something and the click actually happening are still separated by the
+  user approving that specific, described call.
+- `policy_guard.describe_call()`'s `_DETAIL_KEYS` gained `element`/`url`/`text` — without this, a
+  pending `browser_click` confirmation would have shown just the bare tool name with no indication
+  of what was about to be clicked, undermining the informed-consent point of asking at all.
+- No change to the gate's mechanics, the kill switch, or the audit log — see the `policy_guard`
+  kernel row above for why none of those needed to change.
 
 ## Known limits (honest, not aspirational)
 

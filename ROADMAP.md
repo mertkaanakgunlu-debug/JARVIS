@@ -27,7 +27,7 @@
 | 2 | 5 katmanlı bilişsel hafıza | **1. öncelik**; salt-yazılım | L | ✅ done (2026-07-14) |
 | 3 | Gerçek zamanlı yerel ses | En yüksek UX; Faz 1'e bağlı | XL | ✅ done (2026-07-14) |
 | 4 | Güvenlik çekirdeği + async araç | Otonomi/MCP/IoT ön koşulu | L | ✅ done (2026-07-14) |
-| 5 | MCP katmanı | IoT yazılım ön koşulu | M | ⬜ |
+| 5 | MCP katmanı | IoT yazılım ön koşulu | M | ✅ done (2026-07-15) |
 | 6 | Fiziksel dünya / IoT | ⛔ Donanıma bağlı (Faz 0+4+5) | L + HW | ⬜ deferred |
 | 7 | Proaktiflik | Capstone; kısmen donanıma bağlı | L | ⬜ deferred |
 | 8 | Temizlik & konsolidasyon | — | M | ⬜ |
@@ -441,14 +441,79 @@ LangChain callback machinery without needing one. Perceived voice-confirmation U
 the spoken question and answering by voice) — same hand-off category as Faz 3's unverifiable
 speaker/mic items.
 
-## Faz 5 — MCP Katmanı
+## Faz 5 — MCP Katmanı ✅ done (2026-07-15)
 
-- [ ] MCP client integrated into `jarvis/graph/tools.py` tool assembly; every MCP tool gets a
-      `ToolSpec` so `policy_guard` + the scheduler cover it.
-- [ ] Keep the ~34 existing `@tool` wrappers as-is (dual layer); MCP tools inherit the same
-      gate + audit.
+- [x] MCP client integrated: new `jarvis/mcp_integration.py` (`McpToolManager`, built on the
+      official `langchain-mcp-adapters`). Every discovered MCP tool gets a `ToolSpec` synthesized
+      at connect time via `tool_registry.register_dynamic_spec()`, inserted into the exact same
+      `TOOL_SPECS` dict the 36 native tools live in — `policy_guard`, `audit_log`, and the async
+      scheduler cover MCP tools with **zero code changes** to any of them (they only ever call
+      `get_spec()`/read `TOOL_SPECS`). `jarvis/graph/graph.py`'s `build_graph()` gained an
+      `extra_tools` param that `jarvis/graph/tools.py`'s native `make_tools()` list is merged with.
+- [x] Kept the 36 existing `@tool` wrappers completely as-is (dual layer, confirmed by test: a
+      graph built with `extra_tools=None` has zero `browser_*` tools — no regression). MCP tools
+      inherit the identical confirm gate + audit trail.
+- [x] Config-driven, extensible to a future server (ha-mcp, Faz 6) with zero new code:
+      `Settings.mcp_servers` (generic JSON `{name: {command, args, transport}}`, the exact shape
+      `MultiServerMCPClient` itself takes) + dedicated `mcp_playwright_enabled`/
+      `mcp_playwright_headless` convenience flags for the one server shipped this phase
+      (Microsoft's official Playwright MCP — real browser automation: navigate/click/type/
+      snapshot/screenshot/evaluate JS/…, ships **disabled by default**).
+- [x] Fail-closed classification (the phase's own risk callout: "no MCP tool may bypass the
+      gate"): a short explicit allow-list of pure-inspection/inconsequential-navigation Playwright
+      tool names gets L1/L2 no-confirm; **every other tool — including any name never seen before**
+      — defaults to L3 + `requires_confirmation=True`, same gate as `shell_run`/`gmail send`. This
+      is the concrete mitigation for the prompt-injection risk a browser tool uniquely adds beyond
+      `web_search`/`url_read` (already-untrusted page text) — a poisoned page can make the model
+      *want* to click/submit something, but can't act without the user approving that exact call.
+- [x] Solved the actual hard part of this phase (not called out in the original 2-bullet scope, a
+      real correctness issue found during implementation, not assumed from docs): MCP's stdio
+      transport needs ONE persistent subprocess for a session's life for a *stateful* server like
+      browser automation (confirmed live — the adapter's default stateless `get_tools()` spawns a
+      fresh process, and fresh blank browser, per tool call, silently breaking `navigate` →
+      `click`). `McpToolManager` uses the persistent `client.session()` pattern instead. That
+      session is loop-bound (same class of constraint as the checkpointer, see `graph/graph.py`'s
+      docstring) — `JarvisAgent.connect_mcp_tools()` is therefore called explicitly, once, from
+      the real long-lived loop in each entry point (`cli.py`'s `_run_loop`/`_run_voice_loop`,
+      `api.py`'s `lifespan()`) before any turn or `TaskExecutor` background job can run, never
+      lazily from whichever caller happens to `chat()` first.
+- [x] Windows gotcha fixed (confirmed live, not assumed): `npx` is `npx.cmd`, a batch shim —
+      spawning it directly raises `WinError 2`. Every npx-based server config goes through
+      `cmd /c npx ...`.
 
-**Verify:** an external MCP server's tools appear as gated tools; no MCP tool bypasses `policy_guard`.
+**Verify:** ✅ core mechanism fully confirmed live (2026-07-15), see [MEMORY.md](MEMORY.md) for the
+full design write-up and [HANDOFF.md](HANDOFF.md) for the live-turn detail. Three tiers:
+(1) **Isolated, 26/26 checks** (temp cwd, per this project's isolate-test-data-paths lesson —
+`kill_switch.py` also persists to a cwd-relative file, not just `SessionStore`/`Memory`, learned
+while writing this phase's verification): real Playwright MCP tools discovered, every one gets a
+`ToolSpec`, fail-closed classification correct for both known-safe and known-risky tool names *and*
+an unseen future name, kill switch vetoes a tripped L3 MCP call but correctly does not veto an L1
+one, no MCP tool is background-eligible. (2) **Graph-level, 6/6 checks**: a compiled graph built
+without MCP tools has zero `browser_*` entries (no regression); the MCP-merged graph's actual
+`ToolNode` — not a mock — both contains them and genuinely dispatches through the persistent
+session (`browser_navigate` then a separate `browser_snapshot` call see the same page).
+(3) **Real product, live LLM** (`python -m jarvis`, real Gemini 2.5 Pro via Vertex, not simulated):
+confirmed via `data/audit_log.jsonl` — the model independently decided to call `browser_navigate`
+(logged `auto_approved`, executed, real page content came back) and, separately, `browser_click`
+(logged `risk_level: 3, outcome: confirm_required` — the fail-closed gate firing for real, from a
+real model's decision, not a synthetic test). This same live run caught a real bug, now fixed (see
+below) — a good example of why this tier is worth the friction even when scripted checks pass.
+**Not cleanly closed:** the CLI's interactive approve/deny round-trip specifically over piped stdin
+produced an empty final response instead of a rendered confirmation prompt on both live attempts —
+`agent.chat()`'s `GraphInterrupt`→`ConfirmationRequired` handling and `confirmation_node`'s
+interrupt logic both read correctly on inspection and are unmodified Faz 4 code, so this looks like
+piped-non-TTY-stdin racing multiple sequential `Prompt.ask()` calls rather than a gating bug — but
+it's not proven either way. Hand-off: re-run the same request from a real interactive terminal
+(not piped) to confirm the prompt renders and an approval actually resumes the click.
+
+**Bug caught live, not assumed (fixed same session):** `JarvisAgent.connect_mcp_tools()`'s graph
+rebuild was gated on `if self._mcp.tools:` alone — true forever after the first successful connect,
+so every call after the first (including the belt-and-suspenders one at the top of every single
+`chat()`/`chat_stream()`) silently rebuilt the *entire* graph — re-constructing every LLM provider
+and re-running `.bind_tools()` across all ~60 tools — on every turn for the rest of the process's
+life. Caught by the live smoke test's repeated `bind_tools()` schema-warning volume, not by either
+isolated script (neither exercises `JarvisAgent` itself, per the isolate-test-data-paths
+constraint). Fixed with a one-time `self._mcp_graph_rebuilt` guard, reset on `close_mcp_tools()`.
 
 ## Faz 6 — Fiziksel Dünya / IoT  ⛔ hardware-gated (deferred)
 
