@@ -158,7 +158,13 @@ class TaskExecutor:
         _prevent_sleep()
 
         try:
-            response, _ = asyncio.run(self._agent.chat(task.user_query, transport="task-async"))
+            # GPT-5.6 review remediation, Faz 5: was self._agent.chat(), which
+            # reads/writes the live self._history mid-flight (interleaving
+            # this background exchange into the transcript the user is
+            # looking at) and holds _state_lock for the whole ainvoke() call
+            # (blocking foreground chat for as long as this task runs). See
+            # JarvisAgent.background_turn()'s docstring for the isolation.
+            response = asyncio.run(self._agent.background_turn(task.user_query, transport="task-async"))
             task.result_text = response
             task.result_artifacts = self._collect_artifacts(response)
             task.status = "done"

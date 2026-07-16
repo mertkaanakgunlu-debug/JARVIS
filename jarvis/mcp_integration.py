@@ -70,9 +70,25 @@ _LOCAL_NAV_TOOLS = frozenset({
     "browser_resize", "browser_close", "browser_tabs",
 })
 
+# GPT-5.6 review remediation, Faz 4 (P1): browser_navigate previously had no
+# SSRF guard at all -- the browser could be pointed at localhost/private/link
+# -local/cloud-metadata addresses via any URL the model was told to visit
+# (including one suggested by a page's own content -- the same prompt-
+# injection vector jarvis/tools/webfetch.py's url_read guards against).
+# Tools that take a navigable "url" argument get the same shared check.
+_URL_ARG_TOOLS = frozenset({"browser_navigate"})
+
+
+# GPT-5.6 review remediation, Faz 4: was "@latest" -- an unpinned dependency
+# that npx re-resolves on every launch means a server-side release (bug,
+# behavior change, or compromise) reaches this project with zero review and
+# no diff to look at. Pinned to the current stable release as of 2026-07-15
+# (confirmed via `npm view @playwright/mcp version`); bump deliberately.
+_PLAYWRIGHT_MCP_VERSION = "0.0.78"
+
 
 def _playwright_server_config(settings: "Settings") -> dict:
-    args = ["-y", "@playwright/mcp@latest"]
+    args = ["-y", f"@playwright/mcp@{_PLAYWRIGHT_MCP_VERSION}"]
     if settings.mcp_playwright_headless:
         args.append("--headless")
     args.append("--isolated")  # in-memory profile, nothing persisted to disk between runs
@@ -90,6 +106,33 @@ def _effective_server_config(settings: "Settings") -> dict[str, dict]:
     if settings.mcp_playwright_enabled and "playwright" not in servers:
         servers["playwright"] = _playwright_server_config(settings)
     return servers
+
+
+async def _ssrf_guard_interceptor(request, handler):
+    """langchain-mcp-adapters ToolCallInterceptor: short-circuits a
+    _URL_ARG_TOOLS call whose "url" argument resolves to a blocked address
+    (jarvis.url_policy.is_blocked_url — same guard as url_read) instead of
+    letting it reach the real MCP server. Returned as a CallToolResult with
+    isError=True so it surfaces to the agent as a normal failed-tool-call
+    message (self-correctable), not a crash."""
+    if request.name in _URL_ARG_TOOLS:
+        url = str((request.args or {}).get("url", "") or "")
+        if url:
+            from jarvis.url_policy import is_blocked_url
+
+            blocked, why = is_blocked_url(url)
+            if blocked:
+                from mcp.types import CallToolResult, TextContent
+
+                logger.warning("Blocked MCP %s to %r: %s", request.name, url, why)
+                return CallToolResult(
+                    isError=True,
+                    content=[TextContent(
+                        type="text",
+                        text=f"[BLOCKED: {why}] Refusing to navigate to: {url}",
+                    )],
+                )
+    return await handler(request)
 
 
 def _classify(tool_name: str) -> tuple[int, bool, str]:
@@ -146,7 +189,9 @@ class McpToolManager:
             for name in server_config:
                 try:
                     session = await stack.enter_async_context(client.session(name))
-                    server_tools = await load_mcp_tools(session)
+                    server_tools = await load_mcp_tools(
+                        session, tool_interceptors=[_ssrf_guard_interceptor]
+                    )
                 except Exception as e:
                     logger.warning("MCP server %r unreachable, skipping: %s", name, e)
                     continue

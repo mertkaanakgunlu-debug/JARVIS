@@ -1,0 +1,74 @@
+name: CI
+
+# GPT-5.6 review remediation, Faz 7 (verdict #21, CONFIRMED): no CI existed
+# at all before this -- every change relied entirely on whoever wrote it
+# running `pytest` locally. windows-latest, not ubuntu, because several
+# direct dependencies (pywin32, winotify) are Windows-only -- this project
+# runs on the owner's Windows PC by design (see CLAUDE.md), not a
+# cross-platform target.
+
+on:
+  push:
+    branches: [main, langgraph-migration]
+  pull_request:
+    branches: [main, langgraph-migration]
+
+jobs:
+  python:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      # Installs from the pinned lockfile (requirements-lock.txt), not
+      # requirements.txt's ">=" ranges -- see that file's header for why.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+          pip install ruff
+
+      - name: Lint (ruff)
+        run: ruff check jarvis/ tests/
+
+      - name: Test (pytest)
+        run: pytest
+
+  # Best-effort companion clients -- not this project's Python core, and not
+  # gated on by the python job above. continue-on-error so a mobile/Electron
+  # break doesn't block a backend-only PR; still visible as a failed check.
+  mobile:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: flutter pub get
+        working-directory: mobile
+        run: flutter pub get
+      - name: flutter analyze
+        working-directory: mobile
+        run: flutter analyze
+
+  electron:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: electron/package-lock.json
+      - name: npm ci
+        working-directory: electron
+        run: npm ci
+      - name: build
+        working-directory: electron
+        run: npm run build

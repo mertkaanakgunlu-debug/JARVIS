@@ -504,6 +504,50 @@ The north-star target came from an owner-commissioned research report
     would close this properly; not built this phase — genuinely new infrastructure (a cert, uvicorn
     `ssl_certfile`/`ssl_keyfile` config), out of proportion for a client-hygiene bug fix.
 
+## GPT-5.6 review remediation (owner decision, 2026-07-15)
+
+An external GPT-5.6 static review of this repo, verified claim-by-claim against real code in one
+session and implemented (7 phases, P0 security first) in the next — see CHANGELOG.md's
+"[GPT-5.6 review remediation]" entry for the full per-phase writeup, HANDOFF.md for that session's
+state. Durable facts worth knowing beyond that session:
+
+- **`jarvis/api.py`'s bind host is no longer always `0.0.0.0`.** `resolve_api_bind_host(settings)`
+  now governs it: empty `JARVIS_API_KEY` defaults to `127.0.0.1` (was `0.0.0.0` unconditionally) and
+  *fails startup* if `JARVIS_API_HOST` is explicitly set to something non-loopback with no key. If a
+  fresh `python -m jarvis --api` run ever refuses to start with a host-related `RuntimeError`, this
+  is why — set `JARVIS_API_KEY` in `.env`, don't work around the check.
+- **CORS is an explicit allowlist now** (`resolve_cors_origins()`), never `"*"`. Always permits the
+  Electron desktop client (`file://`) and any `localhost`/`127.0.0.1` origin; anything else needs
+  `JARVIS_API_CORS_ORIGINS` (JSON array) in `.env`.
+- **Proactive turns (`monitor.py` → `JarvisAgent.proactive_turn()`) structurally cannot execute an
+  L2 (auto-approve) or non-gated L3 tool call anymore** — `jarvis/graph/nodes.py`'s
+  `confirmation_node` blocks any risk_level≥2 call on a `transport="monitor-*"` turn unless it's
+  already going through the pre-existing L3-interrupt-to-notification path. This was previously only
+  a system-prompt instruction ("don't do this during a background check"), i.e. not actually
+  enforced — now it is, in code.
+- **Agent-written procedures (`procedure_save`) start as `draft`, not immediately recallable.**
+  `jarvis.memory.Memory.recall_procedures()` filters to `status='approved'` only — a human must run
+  `/procedures approve <id>` (CLI) first. Seed procedures (`source='seed'`, the static workflow
+  files migrated at startup) are still immediately `approved`.
+- **`TaskExecutor`'s background jobs (deep research, reports, sims) go through
+  `JarvisAgent.background_turn()`, not `.chat()`.** If you're debugging why a background task's
+  exchange doesn't show up in the live conversation *while it's running* — that's intentional; it
+  gets appended to `self._history` only after it completes. `chat()`/`chat_stream()`'s own BUG-8
+  locking (the whole-turn `_state_lock` hold) was deliberately left untouched by this pass.
+- **`jarvis/url_policy.py`** is the shared SSRF guard (localhost/private/link-local/metadata,
+  resolved-IP checked for DNS-rebinding) — used by both `url_read` and MCP's `browser_navigate`
+  interceptor. Add any *new* URL-fetching tool through this, not a fresh ad-hoc check.
+- **`shell.py`/`python_exec.py`'s deny-lists are a basic guard, not a sandbox.** Still true after
+  this pass (`docs/SAFETY.md`'s "Known limits" stands) — `python_run`'s subprocess still has no
+  resource/network isolation, just a source-text substring scan before it's allowed to start.
+- **`ruff` is now part of this project** (`.github/workflows/ci.yml`, `[tool.ruff]` in
+  `pyproject.toml`) — not a `requirements.txt` runtime dependency (dev-only), install separately
+  (`pip install ruff`) to run `ruff check jarvis/ tests/` locally. `E402`/`F841` are deliberately
+  ignored project-wide (see the pyproject.toml comment for why) — don't "fix" those if you see them.
+- **`requirements-lock.txt`** is a `pip freeze` snapshot of the proven-working `.venv/`, not a `uv
+  lock` resolution — regenerate it after intentionally changing `requirements.txt` and confirming
+  `pytest` is still green (see the file's own header).
+
 ## Known permanently-true gotchas
 
 - `.env` is never committed (gitignored); `.env.example` is the template.
@@ -512,10 +556,12 @@ The north-star target came from an owner-commissioned research report
 - `data/` (ChromaDB, SQLite DBs, OAuth token caches, uploads) is entirely gitignored.
 - `vault/conversations/*.md` (daily transcripts) are gitignored for privacy; the vault
   directory structure itself is tracked via `.gitkeep`.
-- `tests/` (pytest, added Faz 8, extended in the 2026-07-15 follow-up session) is the automated
-  test suite — 104 tests as of 2026-07-15, run with `pytest` from the repo root. Not exhaustive
-  (most tool modules still have zero coverage) — extend incrementally rather than reintroducing
-  throwaway scratch scripts for anything touching shared logic.
+- `tests/` (pytest, added Faz 8, substantially extended in the 2026-07-15 GPT-5.6 remediation
+  session) is the automated test suite — 160 tests as of 2026-07-15, run with `pytest` from the
+  repo root. A handful are timing-sensitive and occasionally flake under full-suite load (see
+  HANDOFF.md) but always pass in isolation. Not exhaustive (most tool modules still have zero
+  coverage) — extend incrementally rather than reintroducing throwaway scratch scripts for anything
+  touching shared logic.
 - **`asyncio.create_task()` only holds a *weak* reference to the returned task** — a task with no
   other referent (e.g. a bare `asyncio.create_task(coro())` whose result is never stored) is
   eligible for garbage collection before it finishes, silently killing it — no exception, no log,

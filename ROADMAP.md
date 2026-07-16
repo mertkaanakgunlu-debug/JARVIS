@@ -86,20 +86,18 @@ the full safety kernel (that's Faz 4).
   every subsequent turn's context and burning tokens. Fixed by having `save_turn()` delete all
   `turn_idx <= current` for the session (collapsing to one bucket) and having both readers select
   only the `MAX(turn_idx)` bucket.
-- **`_schedule_summary_backfill()` leaks an unawaited coroutine** (symptom fixed, feature gap
-  documented, NOT fully fixed): `asyncio.create_task(_backfill())` constructs the `_backfill()`
-  coroutine *before* checking for a running loop; when none exists the `create_task` call raises
-  (caught) but the already-constructed coroutine is never awaited, so Python eventually prints
-  `RuntimeWarning: coroutine ... was never awaited`. Fixed the leak by checking
-  `asyncio.get_running_loop()` first. **Not fixed:** both real entry points
-  (`cli.py:734`/`api.py:92`) construct `JarvisAgent` *before* `asyncio.run()`/`uvicorn` start their
-  loop, so this early-return path is hit on every real startup — meaning startup summary backfill
-  (Faz 13-A) has likely never actually run outside of contexts where a loop happens to pre-exist.
-  Sessions still get summarized when actively archived via `reset()` (that path runs `_schedule_summarize_one`
-  from inside a running loop, so it's fine); only the "catch up on old un-summarized archives at
-  startup" path is dead. Properly fixing this needs the CLI/API entry points to re-invoke backfill
-  once their loop is up — deferred, tracked as **[BUG-backfill]** in the appendix, candidate for
-  Faz 2 (it directly feeds the memory/summary system) or Faz 8 cleanup.
+- **`_schedule_summary_backfill()` leaks an unawaited coroutine** (leak fixed same session; the
+  feature-gap half — **fixed 2026-07-15, GPT-5.6 review remediation Faz 7**): `asyncio.create_task
+  (_backfill())` constructs the `_backfill()` coroutine *before* checking for a running loop; when
+  none exists the `create_task` call raises (caught) but the already-constructed coroutine is never
+  awaited, so Python eventually prints `RuntimeWarning: coroutine ... was never awaited`. Fixed the
+  leak by checking `asyncio.get_running_loop()` first. The "not fixed" half — both real entry points
+  construct `JarvisAgent` *before* `asyncio.run()`/`uvicorn` start their loop, so the early-return
+  path was hit on every real startup, meaning startup summary backfill (Faz 13-A) never actually ran
+  — is now fixed: `JarvisAgent.run_startup_backfill()` is called again from `cli.py`'s
+  `_run_loop()`/`_run_voice_loop()` and `api.py`'s `lifespan()`, once their loop is genuinely up
+  (idempotent, safe to call more than once). See CHANGELOG.md's "[GPT-5.6 review remediation]" entry
+  and `tests/test_startup_backfill.py`.
 
 **Verify:** ✅ two concurrent `chat()`-shaped critical sections (main loop + background thread with
 its own `asyncio.run()`, mirroring `TaskExecutor`) fully serialize via `_state_lock`, confirmed with
@@ -820,7 +818,7 @@ also reported via this session's code-review tooling.
 | BUG-10 | session_store.py:186 | read/write lock asymmetry + non-transactional save_turn | 0 ✅ |
 | BUG-11 | agent.py:333 | switch_session thread_id collision corrupts history | 0 ✅ |
 | BUG-dup | session_store.py:216 | save_turn/load_history duplicate messages (cumulative snapshot read as delta) | 0 ✅ |
-| BUG-backfill | agent.py:413 | summary backfill leaks unawaited coroutine; never actually runs at startup | 0 (leak fixed; feature gap deferred) |
+| BUG-backfill | agent.py:413 | summary backfill leaks unawaited coroutine; never actually runs at startup | 0 (leak) / GPT-5.6 remediation Faz 7 (feature gap) ✅ |
 | BUG-12 | graph/streaming.py:26 | critic draft+revision concatenated, persisted | 3 ✅ |
 | BUG-13 | agent.py:636 | chat_stream only catches GraphInterrupt, drops turn | 3 ✅ |
 | BUG-14 | graph/nodes.py:144 | agent_node ainvoke unguarded | 4 ✅ |

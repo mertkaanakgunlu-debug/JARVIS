@@ -20,4 +20,4 @@ that prompt.
 | 03_voice_policy.md | 1 | 2026-05-24 | Phase 1 modularization |
 | 04_agent_registry.md | 1 | 2026-05-24 | Phase 1 modularization |
 | 05_memory_policy.md | 1 | 2026-05-24 | Phase 1 modularization |
-| 06_context_injection.md | 2 | 2026-07-14 | Faz 2: added facts_block + procedure_block |
+| 06_context_injection.md | 3 | 2026-07-15 | GPT-5.6 review remediation Faz 3: framed retrieved blocks as untrusted reference data, not instructions |

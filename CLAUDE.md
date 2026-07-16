@@ -13,7 +13,8 @@ owner's Windows PC, phone talks to it over the home network / Tailscale.
 ## Project location & environment
 
 - Repo root: `C:\Users\mertk\Desktop\Jarvis` — **not** under OneDrive. (README.md and
-  CONTRIBUTING.md currently say to `cd` into a OneDrive path — that's stale, ignore it.)
+  CONTRIBUTING.md's `cd` paths were fixed to match this during the GPT-5.6 review remediation
+  pass, 2026-07-15 — no longer stale.)
 - Python 3.13+, venv at `.venv/` (already populated — `.\.venv\Scripts\Activate.ps1`).
 - Canonical install is `pip install -r requirements.txt` — `pyproject.toml` has no dependency list.
 - Shell: this project's own scripts assume **PowerShell**, not bash.

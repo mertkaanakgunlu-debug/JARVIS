@@ -27,7 +27,7 @@ import logging
 import time
 from typing import Dict, Optional, Set, Tuple
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 

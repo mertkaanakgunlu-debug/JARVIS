@@ -8,7 +8,6 @@ LaTeX report generation chains into the existing report_compose / report_compile
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)

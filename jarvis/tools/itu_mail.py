@@ -26,11 +26,10 @@ from __future__ import annotations
 import logging
 import smtplib
 import ssl
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -171,7 +170,7 @@ def itu_mail_control(
     if action == "search":
         if not query:
             return "⚠ query gerekli."
-        from imap_tools import AND, A
+        from imap_tools import AND
         # Parse simple key=value pairs or raw string
         # Support: FROM:xxx SUBJECT:xxx BODY:xxx SINCE:YYYY-MM-DD
         criteria = {}

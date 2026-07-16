@@ -8,7 +8,6 @@ AI response chunks (skipping tool-call messages and intermediate states).
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import Any
 
 from langchain_core.messages import AIMessageChunk
 

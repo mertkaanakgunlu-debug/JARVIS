@@ -18,3 +18,19 @@ include = ["jarvis*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+# GPT-5.6 review remediation, Faz 7 (verdict #21): CI lint gate.
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+# Pre-existing, deliberate exceptions -- not GPT-5.6 review findings, left
+# as-is rather than scope-creeping this pass into unrelated cleanup:
+#   E402 -- several modules import after a required setup step (e.g.
+#           __main__.py's load_dotenv() before importing Settings-reading
+#           modules; api.py's router imports after app/lifespan setup) --
+#           deliberate ordering, not accidental.
+#   F841 -- a handful of pre-existing "assigned but unused" locals where the
+#           RHS's side effect (subprocess.run, ax.contour, getattr) is what
+#           matters, not the binding.
+ignore = ["E402", "F841"]
