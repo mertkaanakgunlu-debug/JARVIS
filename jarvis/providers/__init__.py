@@ -57,6 +57,7 @@ router's log line (below) to see every tier that was actually attempted.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from langchain_core.language_models import BaseChatModel
@@ -69,6 +70,102 @@ logger = logging.getLogger(__name__)
 Role = Literal["realtime", "reasoning", "fast", "local"]
 
 _LOCAL_ROLES = ("fast", "local", "realtime")
+
+_DEGRADED: set[str] = set()  # process-local; a feature warns at most once
+
+
+def _cloud_allowed(settings: "Settings", *, pinned: bool = False) -> bool:
+    """Whether ANY cloud tier may be constructed for this call right now.
+
+    off      -> never, pinned or not -- CLOUD_POLICY=off's entire point is a
+                structural guarantee, not routing advice a busy model can
+                route around.
+    explicit -> only when `pinned` (the caller is honoring an explicit user
+                selection -- switch_model()/pin_cloud_model), never for
+                automatic fallback/escalation.
+    auto     -> always -- pre-sprint behavior, unchanged.
+    """
+    policy = getattr(settings, "cloud_policy", "auto")
+    if policy == "off":
+        return False
+    if policy == "explicit":
+        return pinned
+    return True
+
+
+def cloud_extractors_enabled(settings: "Settings") -> bool:
+    """Whether a direct-Gemini helper (fact_extractor, session_summarizer,
+    entity_extractor, finance_extractor, todo_analyzer, email_triage's LLM
+    step, pdf_vision, deep_research's synthesis step) may construct a cloud
+    model at all.
+
+    These modules predate the Faz 1 provider router and still build
+    ChatGoogleGenerativeAI directly (a known, tracked gap — see the
+    stabilization-sprint report's "not migrated" list) rather than requesting
+    a role from get_llm(). Until they're migrated onto a shared gateway, they
+    get this narrow, explicit gate instead: off under CLOUD_POLICY=off (no
+    "explicit pin" concept applies to a background extractor — there's no
+    user turn to attach a manual override to), unchanged otherwise.
+    """
+    return getattr(settings, "cloud_policy", "auto") != "off"
+
+
+def note_degraded(feature: str) -> None:
+    """Record that `feature` is running in a degraded (no-LLM) mode this
+    process -- logs once per feature, not once per call, so a busy session
+    doesn't spam the log with the same fact every turn."""
+    if feature not in _DEGRADED:
+        _DEGRADED.add(feature)
+        logger.warning(
+            "router: %s disabled by CLOUD_POLICY=off -- degraded, returning "
+            "its empty/no-op result instead of a silent unlogged skip", feature,
+        )
+
+
+def degraded_features() -> list[str]:
+    """Every feature that has hit note_degraded() so far this process — the
+    list /status.degraded surfaces to the user."""
+    return sorted(_DEGRADED)
+
+
+@dataclass
+class _Tier:
+    """One provider tier plus the identity metadata stamped onto its runs.
+
+    Stabilization sprint: provider identity is DECLARED at construction and
+    travels into every callback via with_config(metadata=...) — never guessed
+    from a model-name string after the fact. jarvis/llm_trace.py's recorder
+    reads these keys to report which tier actually answered.
+    """
+    model: BaseChatModel
+    provider: str    # "ollama" | "vertex" | "aistudio"
+    model_id: str
+    billable: bool   # only Vertex costs real money today
+
+
+def _compose(tiers: list[_Tier], tools: list | None, role: str) -> BaseChatModel:
+    """bind_tools -> with_config(metadata) -> with_fallbacks, in that order.
+
+    Order matters twice over: RunnableWithFallbacks has no bind_tools (the
+    pre-Faz-1 latent bug), and bind_tools accessed through a with_config
+    RunnableBinding's __getattr__ would rebind the RAW model, silently
+    dropping the identity metadata — so tools first, then the tags.
+    """
+    runnables = []
+    for idx, t in enumerate(tiers):
+        m = t.model
+        if tools:
+            m = m.bind_tools(tools)
+        m = m.with_config(metadata={
+            "jarvis_provider": t.provider,
+            "jarvis_model": t.model_id,
+            "jarvis_billable": t.billable,
+            "jarvis_tier_index": idx,
+            "jarvis_role": role,
+        })
+        runnables.append(m)
+    primary, *rest = runnables
+    return primary.with_fallbacks(rest) if rest else primary
 
 
 def _safe_construct(label: str, factory):
@@ -86,29 +183,43 @@ def _safe_construct(label: str, factory):
         return None
 
 
-def _make_local(settings: "Settings", max_output_tokens: int) -> BaseChatModel:
+def _make_local(settings: "Settings", max_output_tokens: int) -> _Tier:
     """Ollama, via its OpenAI-compatible endpoint (config.ollama_api_url)."""
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(
+    model = ChatOpenAI(
         model=settings.local_model,
         base_url=settings.ollama_api_url,
         api_key="ollama",  # required by the SDK, ignored by Ollama
         max_tokens=max_output_tokens,
         timeout=120,  # generous — first call after a swap may need to load the model into VRAM
+        stream_usage=True,  # ask for usage in streams (Ollama /v1 include_usage) so traces get real token counts
     )
+    return _Tier(model, "ollama", settings.local_model, billable=False)
 
 
-def _cloud_tiers(settings: "Settings", max_output_tokens: int, *, pro: bool) -> list[BaseChatModel]:
+def _cloud_tiers(
+    settings: "Settings", max_output_tokens: int, *, pro: bool, pinned: bool = False,
+) -> list[_Tier]:
     """Configured cloud tiers in priority order: [Vertex (if configured), AI Studio (if keyed)].
 
     pro=True picks the Vertex *primary*/reasoning model; pro=False picks the
     Vertex *fast* model. AI Studio always targets cloud_model_fallback
     (gemini-2.5-flash) for both — see module docstring for why.
+
+    Returns [] under CLOUD_POLICY=off (always) or "explicit" UNLESS pinned=True
+    (a user's manual switch_model() pin, threaded through from
+    _pinned_cloud_tiers's Vertex-delegation branch below — its own default
+    caller, the automatic fallback/escalation path, leaves pinned=False).
     """
+    if not _cloud_allowed(settings, pinned=pinned):
+        logger.info("router: cloud tier(s) suppressed by cloud_policy=%s",
+                    getattr(settings, "cloud_policy", "auto"))
+        return []
+
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    tiers: list[BaseChatModel] = []
+    tiers: list[_Tier] = []
     if settings.use_vertex:
         vertex_model = settings.vertex_model_primary if pro else settings.vertex_model_fast
         m = _safe_construct(f"vertex:{vertex_model}", lambda: ChatGoogleGenerativeAI(
@@ -119,7 +230,7 @@ def _cloud_tiers(settings: "Settings", max_output_tokens: int, *, pro: bool) -> 
             max_output_tokens=max_output_tokens,
         ))
         if m is not None:
-            tiers.append(m)
+            tiers.append(_Tier(m, "vertex", vertex_model, billable=True))
     if settings.gemini_api_key:
         m = _safe_construct(f"aistudio:{settings.cloud_model_fallback}", lambda: ChatGoogleGenerativeAI(
             model=settings.cloud_model_fallback,
@@ -127,33 +238,42 @@ def _cloud_tiers(settings: "Settings", max_output_tokens: int, *, pro: bool) -> 
             max_output_tokens=max_output_tokens,
         ))
         if m is not None:
-            tiers.append(m)
+            tiers.append(_Tier(m, "aistudio", settings.cloud_model_fallback, billable=False))
     return tiers
 
 
-def _make_pinned_cloud(settings: "Settings", max_output_tokens: int) -> BaseChatModel | None:
-    """Explicit switch_model() override for the fast role — bypasses Ollama entirely.
+def _pinned_cloud_tiers(settings: "Settings", max_output_tokens: int) -> list[_Tier]:
+    """Explicit switch_model() override tiers for the fast role — bypasses Ollama.
 
     Reproduces the pre-Faz-1 make_llm_fast() behavior (Vertex Flash with its
     own AI-Studio-Flash fallback, or a bare AI Studio effective_cloud_model) so
-    a user's manual model pin is honored exactly as before. Returns None if
-    even that can't be constructed (e.g. pinned to aistudio/* with no API key)
-    — caller falls back to the local-first default rather than crashing.
+    a user's manual model pin is honored exactly as before. Returns [] if
+    nothing can be constructed (e.g. pinned to aistudio/* with no API key) —
+    caller falls back to the local-first default rather than crashing.
+
+    Callers only reach this function because settings.pin_cloud_model is
+    True — an explicit user selection — so it checks _cloud_allowed itself
+    (pinned=True) before either branch, and threads pinned=True into the
+    Vertex delegation so CLOUD_POLICY=explicit doesn't re-block it there.
     """
+    if not _cloud_allowed(settings, pinned=True):
+        logger.info("router: pinned cloud tier suppressed by cloud_policy=%s",
+                    getattr(settings, "cloud_policy", "auto"))
+        return []
+
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     if settings.use_vertex:
-        tiers = _cloud_tiers(settings, max_output_tokens, pro=False)
-        if not tiers:
-            return None
-        primary, *rest = tiers
-        return primary.with_fallbacks(rest) if rest else primary
+        return _cloud_tiers(settings, max_output_tokens, pro=False, pinned=True)
 
-    return _safe_construct(f"pinned aistudio:{settings.effective_cloud_model}", lambda: ChatGoogleGenerativeAI(
+    m = _safe_construct(f"pinned aistudio:{settings.effective_cloud_model}", lambda: ChatGoogleGenerativeAI(
         model=settings.effective_cloud_model,
         google_api_key=settings.gemini_api_key or None,
         max_output_tokens=max_output_tokens,
     ))
+    if m is None:
+        return []
+    return [_Tier(m, "aistudio", settings.effective_cloud_model, billable=False)]
 
 
 def get_llm(
@@ -172,35 +292,25 @@ def get_llm(
     """
     if role in _LOCAL_ROLES:
         if settings.pin_cloud_model:
-            pinned = _make_pinned_cloud(settings, max_output_tokens or 4096)
-            if pinned is not None:
-                if tools:
-                    pinned = pinned.bind_tools(tools)
+            pinned_tiers = _pinned_cloud_tiers(settings, max_output_tokens or 4096)
+            if pinned_tiers:
                 logger.info("router: role=%s -> pinned cloud:%s (manual override)",
                             role, settings.effective_cloud_model)
-                return pinned
+                return _compose(pinned_tiers, tools, role)
             logger.warning("router: pin_cloud_model set but no cloud tier could be built; "
                             "falling back to local-first default")
 
-        primary = _make_local(settings, max_output_tokens or 4096)
-        fallback_chain = _cloud_tiers(settings, max_output_tokens or 4096, pro=False)
-        if tools:
-            primary = primary.bind_tools(tools)
-            fallback_chain = [m.bind_tools(tools) for m in fallback_chain]
+        tiers = [_make_local(settings, max_output_tokens or 4096)]
+        tiers += _cloud_tiers(settings, max_output_tokens or 4096, pro=False)
         logger.info("router: role=%s -> local:%s (cloud fallback tiers: %d)",
-                    role, settings.local_model, len(fallback_chain))
-        return primary.with_fallbacks(fallback_chain) if fallback_chain else primary
+                    role, settings.local_model, len(tiers) - 1)
+        return _compose(tiers, tools, role)
 
     if role == "reasoning":
-        cloud_tiers = _cloud_tiers(settings, max_output_tokens or 2048, pro=True)
-        local = _make_local(settings, max_output_tokens or 2048)
-        chain = cloud_tiers + [local]  # local Ollama is always the last resort
-        primary, *rest = chain
-        if tools:
-            primary = primary.bind_tools(tools)
-            rest = [m.bind_tools(tools) for m in rest]
+        cloud = _cloud_tiers(settings, max_output_tokens or 2048, pro=True)
+        tiers = cloud + [_make_local(settings, max_output_tokens or 2048)]  # local Ollama is always the last resort
         logger.info("router: role=%s -> %d cloud tier(s) then local:%s",
-                    role, len(cloud_tiers), settings.local_model)
-        return primary.with_fallbacks(rest) if rest else primary
+                    role, len(cloud), settings.local_model)
+        return _compose(tiers, tools, role)
 
     raise ValueError(f"Unknown provider role: {role!r}")

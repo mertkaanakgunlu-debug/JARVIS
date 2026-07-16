@@ -11,7 +11,6 @@ First run opens a browser for OAuth; token is cached at data/.spotify_cache.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,7 +37,8 @@ def _get_client(settings: "Settings"):
     except ImportError:
         raise RuntimeError("spotipy not installed. Run: pip install spotipy")
 
-    cache_path = Path("data") / ".spotify_cache"
+    from jarvis import paths
+    cache_path = paths.data_dir() / ".spotify_cache"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     auth = SpotifyOAuth(

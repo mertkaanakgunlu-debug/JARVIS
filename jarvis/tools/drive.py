@@ -22,9 +22,7 @@ PDF auto-pipeline:
 from __future__ import annotations
 
 import io
-import json
 import mimetypes
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,8 +33,18 @@ _SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.file",
 ]
-_TOKEN_FILE = Path("data") / ".drive_token.json"
-_CACHE_DIR  = Path("data") / "drive_cache"
+
+
+def _token_file() -> Path:
+    # Was a cwd-relative module constant — inconsistent with gmail/calendar's
+    # project-root anchoring AND invisible to JARVIS_HOME. Both fixed here.
+    from jarvis import paths
+    return paths.project_data_dir() / ".drive_token.json"
+
+
+def _cache_dir() -> Path:
+    from jarvis import paths
+    return paths.data_dir() / "drive_cache"
 
 # Google Workspace MIME types → export format
 _EXPORT_MAP = {
@@ -59,7 +67,8 @@ _MIME_LABELS = {
 # ── OAuth helper ──────────────────────────────────────────────────────────────
 
 def _get_service(settings: "Settings"):
-    creds_path = Path(settings.google_calendar_creds_file)
+    from jarvis import paths
+    creds_path = paths.resolve_project(settings.google_calendar_creds_file)
     if not creds_path.exists():
         raise RuntimeError(
             f"Google OAuth credentials not found at '{creds_path}'. "
@@ -78,10 +87,11 @@ def _get_service(settings: "Settings"):
         )
 
     creds = None
-    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    token_file = _token_file()
+    token_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if _TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(_TOKEN_FILE), _SCOPES)
+    if token_file.exists():
+        creds = Credentials.from_authorized_user_file(str(token_file), _SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -89,7 +99,7 @@ def _get_service(settings: "Settings"):
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
             creds = flow.run_local_server(port=0)
-        _TOKEN_FILE.write_text(creds.to_json())
+        token_file.write_text(creds.to_json())
 
     return build("drive", "v3", credentials=creds)
 
@@ -109,8 +119,9 @@ def _file_info(f: dict) -> str:
 
 
 def _ensure_cache() -> Path:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR
+    cache_dir = _cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
 
 
 # ── Main control function ─────────────────────────────────────────────────────

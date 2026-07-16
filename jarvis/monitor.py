@@ -472,11 +472,11 @@ class JarvisMonitor:
         """
         try:
             from jarvis.notify import toast
-            from pathlib import Path
             from datetime import datetime as _dt
             from jarvis.finance_store import FinanceStore
+            from jarvis import paths
 
-            store = FinanceStore(Path("data/sessions.db"))
+            store = FinanceStore(paths.data_dir() / "sessions.db")
             now = _dt.now()
 
             # Check budget thresholds (fast — no network)
@@ -565,9 +565,12 @@ class JarvisMonitor:
                 from pathlib import Path
                 from jarvis.push_store import PushStore
                 from jarvis.fcm_sender import FcmSender
-                db = Path("data/sessions.db")
-                creds = getattr(self.settings, "firebase_credentials_path",
-                                Path("data/firebase_admin_credentials.json"))
+                from jarvis import paths
+                db = paths.data_dir() / "sessions.db"
+                creds = paths.resolve(
+                    getattr(self.settings, "firebase_credentials_path",
+                            Path("data/firebase_admin_credentials.json"))
+                )
                 self._push_store = PushStore(db)
                 self._fcm = FcmSender(self._push_store, creds)
             self._fcm.send_to_all(title=title, body=body, data=data or {})

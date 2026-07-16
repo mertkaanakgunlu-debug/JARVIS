@@ -48,7 +48,15 @@ async def extract_entities(
     response_text: str,
     settings: "Settings",
 ) -> list[Entity]:
-    """Return entities extracted from one exchange. Returns [] on any error."""
+    """Return entities extracted from one exchange. Returns [] on any error.
+
+    Not yet migrated onto jarvis/providers/get_llm() -- see the stabilization
+    sprint's report -- so it gets its own CLOUD_POLICY gate instead.
+    """
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("entity_extractor")
+        return []
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
 

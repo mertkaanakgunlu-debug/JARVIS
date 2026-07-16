@@ -12,7 +12,6 @@ First run opens a browser for OAuth consent; token cached at data/.calendar_toke
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,14 +21,18 @@ if TYPE_CHECKING:
     from jarvis.config import Settings
 
 _SCOPES = ["https://www.googleapis.com/auth/calendar"]
-# Absolute path so the token is found regardless of the working directory JARVIS starts from.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_TOKEN_FILE = _PROJECT_ROOT / "data" / ".calendar_token.json"
+
+
+def _token_file() -> Path:
+    # Project-root-anchored so the token is found regardless of the working
+    # directory JARVIS starts from; JARVIS_HOME (isolation profile) overrides.
+    from jarvis import paths
+    return paths.project_data_dir() / ".calendar_token.json"
 
 
 def _get_service(settings: "Settings"):
-    raw = Path(settings.google_calendar_creds_file)
-    creds_path = raw if raw.is_absolute() else _PROJECT_ROOT / raw
+    from jarvis import paths
+    creds_path = paths.resolve_project(settings.google_calendar_creds_file)
     if not creds_path.exists():
         raise RuntimeError(
             f"Google Calendar credentials not found at '{creds_path}'. "
@@ -47,10 +50,11 @@ def _get_service(settings: "Settings"):
         )
 
     creds = None
-    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    token_file = _token_file()
+    token_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if _TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(_TOKEN_FILE), _SCOPES)
+    if token_file.exists():
+        creds = Credentials.from_authorized_user_file(str(token_file), _SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -58,7 +62,7 @@ def _get_service(settings: "Settings"):
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
             creds = flow.run_local_server(port=0)
-        _TOKEN_FILE.write_text(creds.to_json())
+        token_file.write_text(creds.to_json())
 
     return build("calendar", "v3", credentials=creds)
 

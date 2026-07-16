@@ -1,9 +1,25 @@
+import os
 from pathlib import Path
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # --profile test (stabilization sprint) sets JARVIS_SKIP_DOTENV before
+    # this class is ever imported (see jarvis/__main__.py's argv pre-scan) --
+    # Settings has its OWN independent cwd-relative .env reader distinct from
+    # __main__'s load_dotenv() call, so skipping only the latter would still
+    # leak the real .env's secrets into a "clean" test run whenever cwd
+    # happens to be the repo root. Checked at class-definition (import) time,
+    # not per-instantiation -- consistent with every other test in this repo
+    # using the pre-existing Settings(_env_file=None) override directly,
+    # which this flag does not change or interact with.
+    model_config = SettingsConfigDict(
+        env_file=None if os.environ.get("JARVIS_SKIP_DOTENV") else ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     gemini_api_key: str = ""
     tavily_api_key: str = ""
@@ -23,6 +39,20 @@ class Settings(BaseSettings):
     jarvis_api_key: str = ""    # set in .env; empty = auth disabled (local-only)
     jarvis_api_port: int = 8000
 
+    # GPT-5.6 review remediation (2026-07-15), Faz 1 — API secure-by-default.
+    # "" (unset) = auto: resolve_api_bind_host() picks 127.0.0.1 when
+    # jarvis_api_key is empty, 0.0.0.0 when a key is set (LAN/Tailscale
+    # access, the documented real use case). An explicit non-loopback value
+    # here with an empty key is a startup fail-fast, not a silent bind — see
+    # jarvis/api.py's resolve_api_bind_host().
+    api_host: str = ""
+    # Explicit CORS allowlist -- replaces the old unconditional "*". JSON
+    # array of origins in .env, e.g. ["http://192.168.1.50:3000"] for a LAN
+    # web client. The Electron desktop client's file:// origin and any
+    # http(s)://localhost|127.0.0.1 dev origin are always allowed regardless
+    # of this list -- see jarvis/api.py's resolve_cors_origins().
+    api_cors_origins: list[str] = []
+
     # Faz 4: confirmation gate — interrupt before L3 tool calls. Was opt-in
     # (default False) through Phase 3/Faz 3 while the CLI/voice loops had no
     # code path to actually resume an interrupted call -- enabling it meant
@@ -30,6 +60,17 @@ class Settings(BaseSettings):
     # loops (CLI text, CLI/API voice, API) to handle the interrupt, so this
     # now defaults on -- see docs/SAFETY.md.
     confirmation_gate_enabled: bool = True
+
+    # Stabilization sprint (2026-07-16): --profile test's structural
+    # zero-external-side-effect guarantee. When False, make_confirmation_node
+    # (jarvis/graph/nodes.py) hard-denies any tool call whose ToolSpec is
+    # side_effect_type="external_write" (gmail send, calendar create/delete,
+    # Drive upload/share/delete, ...) BEFORE it ever reaches the interrupt --
+    # same "no prompt, no execution" shape as jarvis/kill_switch.py, applied
+    # narrower (external writes only; local writes/shell/python are untouched
+    # so tool-calling itself stays testable). True is the default -- normal
+    # runs are unaffected; only --profile test flips this.
+    external_writes_enabled: bool = True
 
     # Faz 5: MCP client layer. Dedicated flags for the shipped Playwright
     # (browser automation) server -- flip mcp_playwright_enabled=True in .env,
@@ -77,6 +118,21 @@ class Settings(BaseSettings):
     # affect the "reasoning" role (critic/planner), same as pre-Faz-1 behavior
     # where switch_model() never touched the Pro/critic model either.
     pin_cloud_model: bool = False
+
+    # Stabilization sprint (2026-07-16): the live manual-test session found
+    # AI Studio's key exhausted (429 RESOURCE_EXHAUSTED — prepayment credits
+    # depleted) and Vertex actively billing on every non-trivial turn despite
+    # the local-first pivot's intent — _is_trivially_simple() still defaults
+    # to cloud (sprint 2's fix, not this one). Until that's fixed, the only
+    # way to guarantee zero cloud spend during testing is a structural switch.
+    #   off      — no role, critic, planner, fallback, or background
+    #              extractor may construct/invoke a cloud model. Default —
+    #              deliberate, matches the owner's live-tested decision.
+    #   explicit — cloud only via a manual pin (switch_model()/pin_cloud_model).
+    #   auto     — today's pre-sprint behavior: routing/fallback decide freely.
+    # Existing setups: add CLOUD_POLICY=auto to .env to restore prior behavior.
+    cloud_policy: Literal["off", "explicit", "auto"] = "off"
+
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"

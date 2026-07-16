@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 def _get_store(settings: "Settings"):
     from jarvis.finance_store import FinanceStore
-    db_path = Path("data/sessions.db")
-    return FinanceStore(db_path)
+    from jarvis import paths
+    return FinanceStore(paths.data_dir() / "sessions.db")
 
 
 def finance_control(
@@ -116,7 +115,8 @@ def finance_control(
     if action == "chart":
         store = _get_store(settings)
         summ = store.summary(year=_year, month=_month)
-        finance_dir = Path(getattr(settings, "finance_data_dir", "data/finance"))
+        from jarvis import paths
+        finance_dir = paths.resolve(getattr(settings, "finance_data_dir", "data/finance"))
         from jarvis.finance_reporter import generate_chart_html
         path = generate_chart_html(summ, finance_dir)
         if path:
@@ -139,12 +139,12 @@ def _sync_burgan(months_back: int, settings: "Settings") -> str:
             return pool.submit(asyncio.run, coro).result()
 
     async def _do_sync():
-        from datetime import timedelta
         from jarvis.tools.gmail import gmail_control
         from jarvis.finance_extractor import extract_transaction
         from jarvis.finance_store import FinanceStore
+        from jarvis import paths
 
-        store = FinanceStore(Path("data/sessions.db"))
+        store = FinanceStore(paths.data_dir() / "sessions.db")
         sender_filter = getattr(settings, "finance_sender_filter", "burgan")
         query = f"from:{sender_filter}"
 

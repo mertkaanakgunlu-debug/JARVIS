@@ -53,7 +53,7 @@ def test_wave_simulate_2d_dispatches_to_numpy_when_devito_unavailable(monkeypatc
     with the same duration when devito is unavailable from the start, not
     just when it fails mid-run."""
     monkeypatch.setattr(gm, "_has", lambda lib: False)
-    monkeypatch.setattr(gm, "_OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(gm, "_output_dir", lambda: tmp_path)
 
     captured = {}
     monkeypatch.setattr(

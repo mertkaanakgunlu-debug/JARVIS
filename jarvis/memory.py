@@ -123,8 +123,11 @@ def _build_embedding_function(settings: "Settings"):
 
 class Memory:
     def __init__(self, settings: "Settings") -> None:
-        self._vault = settings.vault_dir
-        self._chroma_dir = settings.chroma_dir
+        from jarvis import paths
+        # Relative defaults (vault/, data/chroma) land under JARVIS_HOME when
+        # set; absolute values in .env pass through untouched.
+        self._vault = paths.resolve(settings.vault_dir)
+        self._chroma_dir = paths.resolve(settings.chroma_dir)
 
         self._vault.mkdir(parents=True, exist_ok=True)
         (self._vault / "conversations").mkdir(exist_ok=True)
@@ -432,22 +435,53 @@ class Memory:
     # Procedural memory: recallable tool-sequences (Faz 2)
     # ------------------------------------------------------------------
 
-    def store_procedure(self, procedure_id: int, name: str, description: str, body: str) -> None:
+    def store_procedure(self, procedure_id: int, name: str, description: str, body: str, status: str = "approved") -> None:
         """Embed a procedure's description; body travels along as metadata payload
-        (not itself embedded — only the description drives retrieval quality)."""
+        (not itself embedded — only the description drives retrieval quality).
+
+        status (Faz 3, procedural-memory poisoning defense) must mirror
+        ProcedureStore's row for this id (see
+        jarvis.procedure_store.default_status_for_source) — recall_procedures()
+        below filters on it. A 'draft' row is embedded here too (so a Chroma
+        entry exists at all, ready to flip once approved) but never returned
+        by recall until approve_procedure() runs."""
         self._procedures_collection.add(
             documents=[description],
             ids=[str(procedure_id)],
-            metadatas=[{"name": name, "body": body}],
+            metadatas=[{"name": name, "body": body, "status": status}],
         )
 
+    def approve_procedure(self, procedure_id: int, name: str, body: str) -> None:
+        """Flip a previously-stored draft procedure's Chroma metadata to
+        status='approved' so recall_procedures() starts returning it. Writes
+        the full metadata dict (not just {"status": ...}) rather than relying
+        on Chroma's update() being a per-key merge vs. a full replace.
+        Call alongside jarvis.procedure_store.ProcedureStore.approve() (see
+        /procedures in cli.py) — the two stores are not auto-synced."""
+        self._procedures_collection.update(
+            ids=[str(procedure_id)],
+            metadatas=[{"name": name, "body": body, "status": "approved"}],
+        )
+
+    def delete_procedure(self, procedure_id: int) -> None:
+        """Remove a rejected draft's Chroma entry. Call alongside
+        jarvis.procedure_store.ProcedureStore.reject() (see /procedures in
+        cli.py) so a rejected procedure doesn't linger as embedded-but-never-
+        recalled clutter."""
+        self._procedures_collection.delete(ids=[str(procedure_id)])
+
     def recall_procedures(self, query: str, n: int = 1, distance_max: float = 1.0) -> list[dict]:
-        """Return the best-matching procedure(s) for this query, or [] if none are close enough."""
+        """Return the best-matching **approved** procedure(s) for this query,
+        or [] if none are close enough. Faz 3: filters out 'draft' rows
+        (agent-written, not yet human-reviewed) via a Chroma metadata `where`
+        clause — a poisoned/wrong procedure can be written but never
+        influences a future turn until approved."""
         count = self._procedures_collection.count()
         if count == 0:
             return []
         results = self._procedures_collection.query(
             query_texts=[query], n_results=min(n, count),
+            where={"status": "approved"},
             include=["metadatas", "distances"],
         )
         metas = results.get("metadatas", [[]])[0]

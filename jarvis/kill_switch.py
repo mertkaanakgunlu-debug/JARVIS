@@ -20,9 +20,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_PATH = Path("data") / "kill_switch.json"
+from jarvis import paths
+
 _lock = threading.Lock()
 _cache: dict[str, Any] | None = None
+
+
+def _path() -> Path:
+    # Resolved per call so JARVIS_HOME set after import still takes effect.
+    return paths.data_dir() / "kill_switch.json"
 
 
 def _load() -> dict[str, Any]:
@@ -42,9 +48,10 @@ def _load() -> dict[str, Any]:
     a steady-state optimization.
     """
     global _cache
-    if _PATH.exists():
+    target = _path()
+    if target.exists():
         try:
-            loaded = json.loads(_PATH.read_text(encoding="utf-8"))
+            loaded = json.loads(target.read_text(encoding="utf-8"))
             if isinstance(loaded, dict) and "enabled" in loaded:
                 _cache = loaded
                 return _cache
@@ -57,8 +64,9 @@ def _load() -> dict[str, Any]:
 
 
 def _save() -> None:
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    _PATH.write_text(json.dumps(_cache, indent=2, ensure_ascii=False), encoding="utf-8")
+    target = _path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(_cache, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def is_enabled() -> bool:

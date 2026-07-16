@@ -34,6 +34,12 @@ def _settings(**overrides) -> Settings:
         cloud_model_fallback="gemini-2.5-flash",
         vertex_model_primary="gemini-2.5-pro",
         vertex_model_fast="gemini-2.5-flash",
+        # This file tests the ROUTER's own structural claims (which tiers
+        # compose in which order) -- CLOUD_POLICY's off-by-default gate is a
+        # separate, deliberate concern covered by test_cloud_policy.py. "auto"
+        # here reproduces the pre-sprint (pre-CLOUD_POLICY) behavior these
+        # tests were written against.
+        cloud_policy="auto",
     )
     defaults.update(overrides)
     return Settings(_env_file=None, **defaults)

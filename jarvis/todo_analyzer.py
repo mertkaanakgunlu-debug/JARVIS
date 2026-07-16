@@ -59,6 +59,10 @@ async def analyze_todo(
     settings: "Settings",
 ) -> TodoAnalysis | None:
     """Analyze a single new todo and return priority + instructions."""
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("todo_analyzer")
+        return None
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
         llm = ChatGoogleGenerativeAI(
@@ -95,6 +99,10 @@ async def analyze_all_todos(
     """Re-prioritize all open todos relative to each other."""
     if not todos:
         return []
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("todo_analyzer")
+        return None
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI
         llm = ChatGoogleGenerativeAI(

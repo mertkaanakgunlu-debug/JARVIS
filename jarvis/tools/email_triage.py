@@ -12,13 +12,10 @@ calendar creation and user-facing communication.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 _TRIAGE_PROMPT = """\
 Aşağıdaki e-postayı oku. Bu mail bir ödev, proje teslimi, sınav veya akademik son tarihi içeriyor mu?
@@ -42,8 +39,8 @@ Tarih: {date}
 
 def _get_gmail_service(settings: "Settings"):
     """Reuse gmail._get_service logic without importing the module's globals."""
-    raw = Path(settings.google_calendar_creds_file)
-    creds_path = raw if raw.is_absolute() else _PROJECT_ROOT / raw
+    from jarvis import paths
+    creds_path = paths.resolve_project(settings.google_calendar_creds_file)
 
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
@@ -55,7 +52,7 @@ def _get_gmail_service(settings: "Settings"):
         "https://www.googleapis.com/auth/gmail.send",
         "https://www.googleapis.com/auth/gmail.modify",
     ]
-    token_file = _PROJECT_ROOT / "data" / ".gmail_token.json"
+    token_file = paths.project_data_dir() / ".gmail_token.json"
 
     creds = None
     if token_file.exists():
@@ -72,7 +69,8 @@ def _get_gmail_service(settings: "Settings"):
 
 
 def _extract_text(payload: dict) -> str:
-    import base64, re
+    import base64
+    import re
     mime = payload.get("mimeType", "")
     if mime in ("text/plain", "text/html"):
         data = payload.get("body", {}).get("data", "")
@@ -139,6 +137,11 @@ def triage_emails(
         service = _get_gmail_service(settings)
     except Exception as e:
         return f"[EmailTriage] Gmail auth error: {e}"
+
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("email_triage")
+        return "[EmailTriage] Cloud LLM disabled (CLOUD_POLICY=off) — classification unavailable."
 
     try:
         from langchain_google_genai import ChatGoogleGenerativeAI

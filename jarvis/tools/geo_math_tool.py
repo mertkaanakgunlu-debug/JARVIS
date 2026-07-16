@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import json
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +27,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_OUTPUT_DIR = Path("data/geo_math_outputs")
+def _output_dir() -> Path:
+    # Was a cwd-relative module constant; now follows the JARVIS_HOME
+    # isolation root. (settings.geo_math_output_dir is a known orphan field —
+    # deliberately not wired this sprint, see the stabilization report.)
+    from jarvis import paths
+    return paths.data_dir() / "geo_math_outputs"
 
 # ── Library availability checks ────────────────────────────────────────────────
 
@@ -44,8 +48,7 @@ def _solve_symbolic(expression: str, variable: str = "", domain: str = "") -> st
     if not _has("sympy"):
         return "⚠ SymPy kurulu değil. Kur: pip install sympy"
     try:
-        import sympy as sp
-        from sympy import symbols, solve, latex, simplify, diff, integrate, Symbol
+        from sympy import solve, latex, simplify, Symbol
         from sympy.parsing.sympy_parser import (
             parse_expr, standard_transformations, implicit_multiplication_application
         )
@@ -143,7 +146,7 @@ def _wave_simulate_2d(
     Tries Devito first; falls back to pure NumPy FDM.
     Returns path to snapshot PNG.
     """
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _output_dir().mkdir(parents=True, exist_ok=True)
 
     if _has("devito"):
         return _wave_simulate_2d_devito(
@@ -188,7 +191,7 @@ def _wave_simulate_2d_devito(velocity_grid, source_pos, receivers, duration, nz,
         op(time_M=nt - 2, dt=dt)
 
         snapshot = u.data[0].copy()
-        out_path = _OUTPUT_DIR / "wave2d_devito.png"
+        out_path = _output_dir() / "wave2d_devito.png"
         _save_wave_snapshot(snapshot, out_path, title="2D Acoustic Wave (Devito)")
         return f"✅ Devito simülasyonu tamamlandı → {out_path}"
 
@@ -244,7 +247,7 @@ def _wave_simulate_2d_numpy(velocity_grid, source_pos, nz, nx, dz, dx, dt, durat
         if snapshot is None:
             snapshot = u_curr
 
-        out_path = _OUTPUT_DIR / "wave2d_numpy.png"
+        out_path = _output_dir() / "wave2d_numpy.png"
         _save_wave_snapshot(snapshot, out_path, title="2D Acoustic Wave (NumPy FDM)")
         return f"✅ NumPy FDM simülasyonu tamamlandı → {out_path}"
 
@@ -281,7 +284,7 @@ def _plot_2d(
     xlabel: str = "",
     ylabel: str = "",
 ) -> str:
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _output_dir().mkdir(parents=True, exist_ok=True)
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -303,7 +306,7 @@ def _plot_2d(
         ax.grid(True, alpha=0.2, color="#555")
         plt.tight_layout()
         safe_title = (title or "plot_2d").replace(" ", "_")[:30]
-        out_path = _OUTPUT_DIR / f"{safe_title}.png"
+        out_path = _output_dir() / f"{safe_title}.png"
         fig.savefig(str(out_path), dpi=120, facecolor=fig.get_facecolor())
         plt.close(fig)
         return f"✅ 2D grafik → {out_path}"
@@ -321,7 +324,7 @@ def _plot_contour(
     xlabel: str = "x",
     ylabel: str = "z (depth)",
 ) -> str:
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _output_dir().mkdir(parents=True, exist_ok=True)
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -346,7 +349,7 @@ def _plot_contour(
         ax.tick_params(colors="#aaa")
         plt.tight_layout()
         safe_title = (title or "contour").replace(" ", "_")[:30]
-        out_path = _OUTPUT_DIR / f"{safe_title}.png"
+        out_path = _output_dir() / f"{safe_title}.png"
         fig.savefig(str(out_path), dpi=120, facecolor=fig.get_facecolor())
         plt.close(fig)
         return f"✅ Kontur haritası → {out_path}"
@@ -357,7 +360,7 @@ def _plot_contour(
 # ── 3D surface plot (Plotly) ───────────────────────────────────────────────────
 
 def _plot_3d_surface(grid_data: list, title: str = "") -> str:
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _output_dir().mkdir(parents=True, exist_ok=True)
     if not _has("plotly"):
         return "⚠ plotly kurulu değil. Kur: pip install plotly"
     try:
@@ -383,7 +386,7 @@ def _plot_3d_surface(grid_data: list, title: str = "") -> str:
                 font=dict(color="#e0e0e0"),
             ),
         )
-        out_path = _OUTPUT_DIR / f"{(title or '3d_surface').replace(' ','_')[:30]}.html"
+        out_path = _output_dir() / f"{(title or '3d_surface').replace(' ','_')[:30]}.html"
         fig.write_html(str(out_path))
         return f"✅ 3D yüzey grafiği → {out_path}"
     except Exception as exc:
@@ -393,7 +396,7 @@ def _plot_3d_surface(grid_data: list, title: str = "") -> str:
 # ── Volume render (PyVista) ────────────────────────────────────────────────────
 
 def _plot_volume(volume_3d: list, isosurface_values: list | None = None, title: str = "") -> str:
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _output_dir().mkdir(parents=True, exist_ok=True)
     if not _has("pyvista"):
         # Fallback: render a 2D midplane slice with matplotlib
         return _plot_volume_fallback(volume_3d, title)
@@ -418,7 +421,7 @@ def _plot_volume(volume_3d: list, isosurface_values: list | None = None, title: 
             if iso.n_points > 0:
                 pl.add_mesh(iso, opacity=0.7, cmap="RdBu", show_scalar_bar=True)
         pl.add_title(title or "Volume Render", color="white")
-        out_path = _OUTPUT_DIR / f"{(title or 'volume').replace(' ','_')[:30]}.png"
+        out_path = _output_dir() / f"{(title or 'volume').replace(' ','_')[:30]}.png"
         pl.screenshot(str(out_path))
         pl.close()
         return f"✅ Volume render → {out_path}"
@@ -428,7 +431,7 @@ def _plot_volume(volume_3d: list, isosurface_values: list | None = None, title: 
 
 def _plot_volume_fallback(volume_3d: list, title: str = "") -> str:
     """2D midplane slice fallback when PyVista not installed."""
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _output_dir().mkdir(parents=True, exist_ok=True)
     try:
         import numpy as np
         import matplotlib
@@ -449,7 +452,7 @@ def _plot_volume_fallback(volume_3d: list, title: str = "") -> str:
         ax.imshow(slice_2d, cmap="RdBu_r", aspect="auto")
         ax.set_title(f"{title} (orta dilim — PyVista kuruluysa 3D göster)", color="#e0e0e0")
         plt.tight_layout()
-        out_path = _OUTPUT_DIR / f"{(title or 'volume_slice').replace(' ','_')[:30]}.png"
+        out_path = _output_dir() / f"{(title or 'volume_slice').replace(' ','_')[:30]}.png"
         fig.savefig(str(out_path), dpi=120, facecolor=fig.get_facecolor())
         plt.close(fig)
         return (

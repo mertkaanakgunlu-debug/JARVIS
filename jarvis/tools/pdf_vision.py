@@ -81,6 +81,14 @@ def read_pdf_vision(
         pages:    Optional page subset for PDFs — "1", "2-4", "1,3,5".
                   Ignored for image files.
     """
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("pdf_vision")
+        return (
+            "[ERROR] Cloud LLM disabled (CLOUD_POLICY=off) — vision reading unavailable "
+            "(no local vision model configured)."
+        )
+
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_core.messages import HumanMessage
 

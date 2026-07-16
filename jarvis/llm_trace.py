@@ -1,0 +1,172 @@
+"""Provider invocation trace — records which provider/model ACTUALLY answered.
+
+Stabilization sprint. Before this module, JarvisAgent derived its model label
+from the *requested* role (`_last_turn_used_pro`), so a turn served by the
+Ollama fallback was still labeled "Gemini (Vertex, reasoning)" — the live
+manual-test session proved the label could be wrong on every single turn.
+
+The fix has two halves:
+1. jarvis/providers/get_llm() stamps identity metadata onto every tier via
+   with_config(metadata={"jarvis_provider": ..., "jarvis_model": ...,
+   "jarvis_billable": ..., "jarvis_tier_index": ...}) — declared at
+   construction, never guessed from a model-name string.
+2. This LlmTraceRecorder rides the per-turn callbacks list (next to
+   _HudEventCallback) and turns each REAL chat-model invocation into one
+   LlmCallTrace: metadata + wall-clock latency + token usage. It works for
+   both ainvoke and astream paths because LangChain fires the same
+   on_chat_model_start/on_llm_end callbacks either way.
+
+Usage recording (Faz 4 of the sprint) plugs a UsageTracker into the recorder
+so cost is booked exactly once per real invocation — replacing the old
+result["messages"] rescan that double-counted history and the streaming
+`len//4` estimate that priced local tokens as Vertex.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from langchain_core.callbacks import BaseCallbackHandler
+
+
+@dataclass
+class LlmCallTrace:
+    """One real LLM invocation, as observed at the callback layer."""
+    provider: str        # "ollama" | "vertex" | "aistudio" | "unknown"
+    model: str
+    billable: bool
+    tier_index: int      # 0 = the chain's primary; >0 = a fallback tier answered
+    node: str            # langgraph node ("agent"/"critic"/"planner") if exposed, else ""
+    latency_ms: float
+    input_tokens: int
+    output_tokens: int
+    ok: bool
+
+
+class LlmTraceRecorder(BaseCallbackHandler):
+    """Per-turn callback handler: one LlmCallTrace per real chat-model call.
+
+    Construct one per turn, pass in the graph config's callbacks list, then
+    read .traces / .turn_summary() after the turn. Same run_id-keyed timing
+    idiom as _HudEventCallback (jarvis/agent.py) — that class is left
+    untouched; this one has a single responsibility: runtime truth.
+    """
+
+    def __init__(self, usage: Any = None, requested_role: str = "fast") -> None:
+        self.requested_role = requested_role
+        self.traces: list[LlmCallTrace] = []
+        self._usage = usage  # UsageTracker or None (trace-only)
+        self._pending: dict[str, dict] = {}  # run_id -> tier meta + start time
+
+    # ── start: capture the tier identity stamped by providers.get_llm ────────
+    def on_chat_model_start(self, serialized, messages, *, run_id=None,
+                            metadata=None, **kwargs) -> None:
+        md = metadata or {}
+        self._pending[str(run_id)] = {
+            "provider": md.get("jarvis_provider", "unknown"),
+            "model": md.get("jarvis_model", ""),
+            "billable": bool(md.get("jarvis_billable", False)),
+            "tier_index": int(md.get("jarvis_tier_index", 0)),
+            "node": md.get("langgraph_node", ""),
+            "started": time.monotonic(),
+        }
+
+    def on_llm_start(self, serialized, prompts, *, run_id=None,
+                     metadata=None, **kwargs) -> None:
+        # Fallback for callback managers that route chat models through the
+        # plain-LLM hook; keyed on run_id so double delivery can't dupe.
+        if str(run_id) not in self._pending:
+            self.on_chat_model_start(serialized, None, run_id=run_id, metadata=metadata)
+
+    # ── end/error: finalize the trace ─────────────────────────────────────────
+    def on_llm_end(self, response, *, run_id=None, **kwargs) -> None:
+        info = self._pending.pop(str(run_id), None)
+        started = info.get("started") if info else None
+        tokens_in, tokens_out = self._extract_usage(response)
+        trace = LlmCallTrace(
+            provider=(info or {}).get("provider", "unknown"),
+            model=(info or {}).get("model", ""),
+            billable=bool((info or {}).get("billable", False)),
+            tier_index=int((info or {}).get("tier_index", 0)),
+            node=(info or {}).get("node", ""),
+            latency_ms=(time.monotonic() - started) * 1000.0 if started else 0.0,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            ok=True,
+        )
+        self.traces.append(trace)
+        if self._usage is not None:
+            try:
+                self._usage.record(
+                    provider=trace.provider,
+                    model=trace.model,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    billable=trace.billable,
+                )
+            except Exception:
+                pass  # accounting must never break the turn
+
+    def on_llm_error(self, error, *, run_id=None, **kwargs) -> None:
+        info = self._pending.pop(str(run_id), None)
+        if info is None:
+            return
+        self.traces.append(LlmCallTrace(
+            provider=info.get("provider", "unknown"),
+            model=info.get("model", ""),
+            billable=bool(info.get("billable", False)),
+            tier_index=int(info.get("tier_index", 0)),
+            node=info.get("node", ""),
+            latency_ms=(time.monotonic() - info["started"]) * 1000.0,
+            input_tokens=0,
+            output_tokens=0,
+            ok=False,
+        ))
+
+    # ── extraction ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _extract_usage(response) -> tuple[int, int]:
+        """Token counts from an LLMResult: message.usage_metadata first
+        (langchain-core standard for chat models), llm_output token_usage as
+        the OpenAI-style fallback. (0, 0) when a provider reports nothing —
+        never a guess."""
+        try:
+            msg = response.generations[0][0].message
+            um = getattr(msg, "usage_metadata", None)
+            if um:
+                return int(um.get("input_tokens", 0) or 0), int(um.get("output_tokens", 0) or 0)
+        except Exception:
+            pass
+        try:
+            tu = (getattr(response, "llm_output", None) or {}).get("token_usage") or {}
+            if tu:
+                return int(tu.get("prompt_tokens", 0) or 0), int(tu.get("completion_tokens", 0) or 0)
+        except Exception:
+            pass
+        return 0, 0
+
+    # ── per-turn rollup ────────────────────────────────────────────────────────
+    def turn_summary(self) -> dict | None:
+        """The turn's headline: which provider/model produced the visible text.
+
+        Prefers the last successful call from the "agent" node (critic/planner
+        calls judge, they don't author the reply); falls back to the last
+        successful call when node metadata isn't exposed. None if nothing
+        succeeded — callers keep their previous label rather than lying.
+        """
+        ok_calls = [t for t in self.traces if t.ok]
+        if not ok_calls:
+            return None
+        agent_calls = [t for t in ok_calls if t.node == "agent"]
+        final = (agent_calls or ok_calls)[-1]
+        return {
+            "requested_role": self.requested_role,
+            "provider": final.provider,
+            "model": final.model,
+            "billable": final.billable,
+            "fallback_used": any(t.tier_index > 0 for t in ok_calls) or any(not t.ok for t in self.traces),
+            "calls": len(self.traces),
+            "input_tokens": sum(t.input_tokens for t in ok_calls),
+            "output_tokens": sum(t.output_tokens for t in ok_calls),
+        }

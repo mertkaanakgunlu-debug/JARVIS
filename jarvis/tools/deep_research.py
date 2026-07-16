@@ -75,6 +75,18 @@ def run_deep_research(
     user_msg = f"Research topic: {topic}\n\nSources:\n\n{context}"
 
     # ── Step 4: Synthesize with Gemini Pro ─────────────────────────────────────
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("deep_research")
+        lines = [f"## Research: {topic}", "",
+                 "*(Synthesis skipped — cloud LLM disabled by CLOUD_POLICY=off)*", ""]
+        for s in sources:
+            lines.append(f"### [{s['idx']}] {s['title']}")
+            lines.append(f"*{s['url']}*")
+            lines.append(s["content"][:600])
+            lines.append("")
+        return "\n".join(lines)
+
     try:
         from langchain_core.messages import SystemMessage, HumanMessage
         from langchain_google_genai import ChatGoogleGenerativeAI

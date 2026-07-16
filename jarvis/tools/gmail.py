@@ -10,9 +10,7 @@ First run opens a browser for OAuth consent; subsequent runs use the cache.
 from __future__ import annotations
 
 import base64
-import email as email_lib
 import re
-from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -26,13 +24,19 @@ _SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
 ]
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_TOKEN_FILE = _PROJECT_ROOT / "data" / ".gmail_token.json"
+
+
+def _token_file() -> Path:
+    # Project-root-anchored so the token is found regardless of cwd — but
+    # JARVIS_HOME (isolation profile) overrides it so tests can never touch
+    # the real token. See jarvis/paths.py.
+    from jarvis import paths
+    return paths.project_data_dir() / ".gmail_token.json"
 
 
 def _get_service(settings: "Settings"):
-    raw = Path(settings.google_calendar_creds_file)
-    creds_path = raw if raw.is_absolute() else _PROJECT_ROOT / raw
+    from jarvis import paths
+    creds_path = paths.resolve_project(settings.google_calendar_creds_file)
     if not creds_path.exists():
         raise RuntimeError(
             f"Google OAuth credentials not found at '{creds_path}'. "
@@ -50,10 +54,11 @@ def _get_service(settings: "Settings"):
         )
 
     creds = None
-    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    token_file = _token_file()
+    token_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if _TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(_TOKEN_FILE), _SCOPES)
+    if token_file.exists():
+        creds = Credentials.from_authorized_user_file(str(token_file), _SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -61,7 +66,7 @@ def _get_service(settings: "Settings"):
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
             creds = flow.run_local_server(port=0)
-        _TOKEN_FILE.write_text(creds.to_json())
+        token_file.write_text(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
 

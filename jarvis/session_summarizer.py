@@ -7,7 +7,7 @@ agent._bg_tasks icerisinde yasatilir.
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 _PROMPT = (
     "Summarize this conversation in 3-4 sentences for long-term memory recall.\n"
@@ -29,6 +29,11 @@ async def summarize_session(messages: list, settings) -> str:
     Returns:
         Summary string, or '' if conversation too short / API error.
     """
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("session_summarizer")
+        return ""
+
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     convo_lines: list[str] = []

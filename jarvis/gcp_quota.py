@@ -28,16 +28,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CACHE_PATH = Path("data/gcp_quota_cache.json")
 _CACHE_TTL_SEC = 900  # 15 minutes
+
+
+def _cache_path() -> Path:
+    from jarvis import paths
+    return paths.data_dir() / "gcp_quota_cache.json"
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 def _load_cache() -> dict:
     try:
-        if _CACHE_PATH.exists():
-            data = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
+        cache_path = _cache_path()
+        if cache_path.exists():
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
             ts = data.get("_ts", 0)
             age = datetime.now(timezone.utc).timestamp() - ts
             if age < _CACHE_TTL_SEC:
@@ -49,9 +54,10 @@ def _load_cache() -> dict:
 
 def _save_cache(data: dict) -> None:
     try:
-        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        cache_path = _cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         data["_ts"] = datetime.now(timezone.utc).timestamp()
-        _CACHE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        cache_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
         pass
 
@@ -59,7 +65,8 @@ def _save_cache(data: dict) -> None:
 # ── Local usage (from UsageTracker / usage.json) ──────────────────────────────
 
 def _load_usage_json() -> dict:
-    path = Path("data/usage.json")
+    from jarvis import paths
+    path = paths.data_dir() / "usage.json"
     try:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
@@ -108,7 +115,6 @@ def _try_fetch_cloud_quotas(settings: "Settings") -> dict:
 
     try:
         from google.cloud import monitoring_v3
-        from google.auth import default as gauth_default
     except ImportError:
         logger.debug("google-cloud-monitoring not installed — skipping cloud quota fetch")
         return {}

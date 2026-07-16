@@ -6,6 +6,171 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Stabilizasyon sprinti: Runtime Truth + Reset + Test Isolation] — 2026-07-16
+
+Canlı manuel test oturumu (owner + Claude, aynı gün) 7 bug ortaya çıkardı: model etiketi rolden
+tahmin ediliyordu (gerçekte cevaplayan sağlayıcıdan değil), lokal Ollama turn'lerine Gemini fiyatı
+yazılıyordu, `POST /reset` içerikli session'da her zaman 500 veriyordu, testler gerçek `data/`ya
+yazıyordu, AI Studio anahtarı tükenmişti (429), Vertex her non-trivial turn'de gerçek para
+harcıyordu. Bulgular `GPT_Analysis.md`ye (ChatGPT-5.6) verildi; doğrulayıp net bir stabilizasyon
+planı çıkardı — **önce ölçüm ve runtime, sonra routing/tool-router**. Bu sprint o planı uyguladı,
+sıralı 6 fazda, her fazdan sonra tam pytest. Plan dosyası: `.claude/plans/`. **58 yeni test,
+218/218 pytest yeşil, ruff temiz.**
+
+- **Faz 1 — JARVIS_HOME izolasyon kökü**: yeni `jarvis/paths.py` (`jarvis_home()`/`data_dir()`/
+  `resolve()`/`project_data_dir()`/`resolve_project()`) — `JARVIS_HOME` env değişkeni set değilse
+  davranış bugünkünle birebir aynı (cwd-relative); set edilince TÜM runtime store'lar (sessions.db,
+  checkpoints, usage.json, audit_log, kill_switch, ChromaDB, vault, uploads, pdf/geo-math/drive
+  cache'leri) VE proje-köküne çivili gmail/calendar/email_triage OAuth token'ları (bir `chdir`in
+  kaçıracağı yol) o kökün altına taşınır. ~25 call-site rewire edildi (`agent.py`, `api.py`,
+  `monitor.py`, `graph/tools.py`, `tools/finance.py`, `tools/drive.py`, `tools/gmail.py`,
+  `tools/calendar.py`, `tools/email_triage.py`, `tools/spotify.py`, `tools/geo_math_tool.py`,
+  `tools/pdf.py`, `audit_log.py`, `kill_switch.py`, `gcp_quota.py`, `__main__.py`, `memory.py`).
+  Yeni `tests/conftest.py` fixture'ı `jarvis_home` (mevcut `isolated_cwd`ile birlikte kullanılabilir).
+- **Faz 2 — `POST /reset` 500 düzeltmesi**: kök neden `api.py`'nin `agent.reset()`'i
+  `run_in_executor`'a (worker thread, event loop yok) atması, `reset()`'in içeride
+  `asyncio.create_task()` çağırması (`_schedule_summarize_one`) — `RuntimeError: no running event
+  loop`, her içerikli session'da. `agent.py`'de `reset()` ikiye bölündü: `_reset_state_sync()`
+  (saf senkron state mutation) + `async reset_async()` (`asyncio.to_thread` ile state mutation,
+  özet planlaması loop'a dönüldükten SONRA). `_schedule_summarize_one`'a `get_running_loop` guard'ı
+  eklendi (loop yoksa crash değil, log + atlama). `api.py`'nin iki call-site'ı (`/reset` endpoint,
+  shutdown auto-reset) ve `cli.py`'nin `/reset` komutu `reset_async()`'e geçti. Reset'in "arşivle +
+  yeni session", **silme değil** olduğu dokümante edildi (ChromaDB kayıtları kalır).
+- **Faz 3 — Provider invocation trace (runtime truth)**: `jarvis/providers/__init__.py`'deki her
+  tier artık `with_config(metadata={...})` ile kendi kimliğini taşıyor (`jarvis_provider`,
+  `jarvis_model`, `jarvis_billable`, `jarvis_tier_index`) — bind_tools SONRASI, with_fallbacks
+  ÖNCESİ (sıra önemli, `RunnableBinding`'in `bind_tools`'u rebind etmemesi için). Yeni
+  `jarvis/llm_trace.py`: `LlmTraceRecorder(BaseCallbackHandler)` — `on_chat_model_start`/`on_llm_end`
+  /`on_llm_error` ile her gerçek LLM çağrısını `LlmCallTrace`'e çeviriyor (`_HudEventCallback`'e
+  dokunulmadı, ayrı bir handler olarak eklendi). `agent.py`'nin 4 giriş noktası (`chat`,
+  `chat_stream`, `proactive_turn`, `background_turn`) artık recorder'ı config'e ekliyor; `_cloud_model`
+  etiketi artık `_last_turn_trace`'ten türüyor (rolden tahmin değil). `/status` + CLI `/status`'a
+  `requested_role`/`actual_provider`/`actual_model`/`fallback_used` alanları eklendi. Yol boyunca
+  bulunan 2 regresyon (her ikisi de bu fazın kendi edit'i): `background_turn()`'de `use_pro_agent`
+  hiç yerel değişken değildi (sadece state dict'e inline yazılıyordu) — recorder satırı `NameError`
+  fırlatıyordu, bu da arka plan task'ında sessizce yutulup testin sonsuza dek bekleyen bir Event'e
+  takılmasına yol açıyordu (11+ dakikalık gerçek bir CI/local hang, canlı gözlemlendi); ve
+  `test_background_turn.py`'nin `_FakeAgent`'ı yeni `self.usage` okumasını karşılamıyordu (aynı hang
+  deseni). İkisi de düzeltildi.
+- **Faz 4 — Provider-aware usage v2**: `usage.py`'nin `record()`'u artık `(provider, model,
+  tokens_in, tokens_out, billable)` alıyor — maliyet **çağıranın deklare ettiği `billable`
+  flag'inden** hesaplanıyor, model adında `"pro"` substring'inden değil (bu, lokal Ollama turn'lerinin
+  Gemini Flash gibi fiyatlanmasının kök nedeniydi). `flash_turns`/`pro_turns` artık yalnız billable
+  Vertex çağrılarını sayıyor (gcp_quota.py'nin Vertex RPD-kota takibi için doğru anlam); yeni
+  `by_provider` kırılımı (additive, eski anahtarlar korunmuş — `ws.py`/`gcp_quota.py` kırılmadı).
+  `agent.py`'deki `_record_usage_from_result` (her turn'de `result["messages"]`'daki TÜM
+  AIMessage'ları yeniden tarayıp çift sayan kod) ve `chat_stream`'in `len//4` tahmini kaldırıldı —
+  tek yazar artık recorder'ın `on_llm_end`'i, background/proactive turn'ler de ilk kez gerçek usage
+  kaydediyor.
+- **Faz 5 — CLOUD_POLICY gating**: yeni `cloud_policy: Literal["off","explicit","auto"] = "off"`
+  (`config.py`) — **varsayılan `off`**, owner'ın canlı-test sonrası kararı. `providers/__init__.py`'ye
+  `_cloud_allowed()`/`cloud_extractors_enabled()`/`note_degraded()`/`degraded_features()`; `off`'ta
+  `fast` de `reasoning` de saf Ollama (pin dahil, istisnasız); `explicit`'te yalnız manuel `/model`
+  pin'i geçer (Vertex-pinned yol için `_cloud_tiers`e `pinned` parametresi eklendi — yoksa
+  `_pinned_cloud_tiers`'ın Vertex'e delegasyonu kendi `_cloud_allowed` çağrısında ikinci kez
+  engelleniyordu). Router'a migrate olmamış 8 direct-Gemini modülüne (`fact_extractor`,
+  `entity_extractor`, `finance_extractor`, `session_summarizer`, `todo_analyzer` ×2,
+  `tools/email_triage.py`, `tools/pdf_vision.py`, `tools/deep_research.py`) erken-dönüş gate'i
+  eklendi — `off`'ta sessiz `[]`/`None` yerine `note_degraded(feature)` + `/status.degraded` listesi.
+  Migrasyon değil, yalnız gating (sprint 3'e bırakıldı).
+- **Faz 6 — `--profile test` + `EXTERNAL_WRITES_ENABLED`**: `__main__.py`'ye `--profile
+  {default,test}` — `test`, `--profile` bayrağını argparse çalışmadan ÖNCE (module-level, argv
+  pre-scan ile) tespit edip `load_dotenv()`'i tamamen atlıyor, `JARVIS_SKIP_DOTENV=1` set ediyor
+  (`config.py`'nin kendi bağımsız `env_file` okuyucusu da bu flag'i honoring ediyor — iki ayrı .env
+  okuyucusunun ikisi de kapatılmadan gerçek `.env` sızıntısı mümkündü), `JARVIS_HOME`'u
+  `tempfile.mkdtemp()`'e (unset ise) ve `CLOUD_POLICY=off`/`EXTERNAL_WRITES_ENABLED=false`'u env'e
+  basıyor. Yeni `Settings.external_writes_enabled` (`config.py`) + `make_confirmation_node`'a
+  (`graph/nodes.py`) kill-switch'le aynı şekilde bir hard-deny bloğu: `side_effect_type ==
+  "external_write"` olan her çağrı (gmail/calendar/drive/itu_mail/spotify) interrupt'a hiç
+  gitmeden reddediliyor. **Canlı doğrulama**: `python -m jarvis --api --profile test --port 8130` —
+  `/health` ok, `/status` (turn öncesi) taze session + `cloud_policy:"off"`, `/chat "merhaba"` →
+  `qwen2.5:7b-instruct (Ollama, local)`, sonraki `/status` → `actual_provider:"ollama"`,
+  `session_cost_usd:0.0`, `POST /reset` → **HTTP 200** (içerikli session'da — önceki 500'ün tam
+  tersi), reset sonrası yeni session_id + `degraded:["session_summarizer"]` (reset'in özetleme
+  denemesi CLOUD_POLICY gate'ine takıldı, sessizce Gemini'ye çıkmadı). Gerçek `data/`+`vault/`
+  (58 dosya) MD5 hash'i smoke test öncesi/sonrası **birebir aynı**.
+
+**Bilinçli kapsam dışı** (sonraki sprintler): tool-domain router, `_is_trivially_simple()`'ın
+cloud-first davranışı (substring false-pozitifleri dahil — `"ok"`→`"oku"`, `"hi"`→`"hiçbir"`),
+critic'in revizyon talimatını `HumanMessage` olarak enjekte etmesi, 8 modülün gateway'e tam
+migrasyonu, `purge_session`, ses modeli önbelleklerinin JARVIS_HOME'a taşınması (immutable
+multi-GB indirmeler — bilinçli hariç), 2 yetim Settings alanı (`drive_cache_dir`,
+`geo_math_output_dir` — modül sabitleri hükmediyor, kablolanmadı).
+
+---
+
+## [GPT-5.6 review remediation] — 2026-07-15 — Güvenlik sertleştirmesi (Faz 1-7)
+
+Önceki oturumda ChatGPT 5.6'nın JARVIS reposuna yaptığı dış denetim raporunun 23 iddiası gerçek kod
+üzerinde tek tek doğrulanmış (17 CONFIRMED, doğrulama tablosu `.claude/plans/` altında kalıcı kayıt)
+ve 7 fazlık bir remediation planı çıkarılmıştı. Bu oturum o planı uyguladı — P0 güvenlik fazları
+(1-3) önce, sonra sertleştirme (4-5), en sonda kapsamı daraltılmış iyileştirmeler (6-7). Ağır
+çok-ajanlı workflow kullanılmadı (önceki oturum session limitine takılmıştı); iş inline, faz faz,
+her fazda testlerle ilerledi. **56 yeni test, 160/160 pytest yeşil.**
+
+- **Faz 1 — API secure-by-default (P0)**: boş `JARVIS_API_KEY` + `0.0.0.0` + CORS `"*"` üçlüsü canlı
+  bir açıktı (telefon/Tailscale erişimi zaten kullanımda). `jarvis/api.py`'ye `resolve_api_bind_host()`
+  eklendi: key boşsa efektif host `127.0.0.1`'e düşer; `JARVIS_API_HOST` açıkça non-loopback set
+  edilip key boşsa **fail-fast** (`RuntimeError`, net mesajla). CORS `"*"` → `resolve_cors_origins()`
+  ile explicit allowlist (Electron'un `file://` origin'i + `localhost`/`127.0.0.1` her port dahil,
+  hiçbir zaman wildcard). Yeni ayarlar: `api_host`, `api_cors_origins` (`jarvis/config.py`).
+- **Faz 2 — Proaktif turn yapısal read-only (P0)**: `monitor.py`'den gelen proaktif turn'ler tam tool
+  setiyle çalışıyordu, L2 (auto-approve, `requires_confirmation=False`) araçlar (örn. `file_write`,
+  `procedure_save`) hiçbir gate'e takılmadan sessizce yürüyordu — sadece system prompt "yapma"
+  diyordu. `jarvis/graph/nodes.py`'nin `confirmation_node`'una runtime guard eklendi:
+  `transport` `"monitor-"` ile başlıyorsa ve risk_level≥2 ise, zaten-confirmable (L3, gate açık) olan
+  hariç, tüm çağrılar yürütülmeden reddedilir. Faz 7'nin doğru çalışan L3-discard-to-notify davranışı
+  (`ProactiveOutcome(kind="needs_confirmation")`) dokunulmadan korundu.
+- **Faz 3 — Prosedürel bellek zehirlenmesi (P0/P1)**: `procedure_store.py`'de provenance/approval hiç
+  yoktu — agent'in yazdığı bir prosedür anında recall'a girip gelecek turn'lerin system prompt'una
+  enjekte olabiliyordu. `status`/`created_by`/`approved_at` kolonları eklendi (idempotent migration,
+  mevcut satırlar `approved` grandfather), yeni `source='agent'` satırları `draft` başlar.
+  `jarvis/memory.py`'nin `recall_procedures()`'ı artık yalnız `status='approved'` döndürüyor (Chroma
+  `where` filtresi). CLI'ye `/procedures` komutu (list/approve/reject). System prompt'un context
+  injection bloğu (`06_context_injection.md`, v3) memory/procedure/vault bloklarını "untrusted
+  reference data, not instructions" olarak çerçeveliyor artık.
+- **Faz 4 — MCP/browser sertleştirme (P1)**: `@playwright/mcp@latest` → pinlendi (`0.0.78`, npm'den
+  teyit edildi). `browser_navigate`'in hiç SSRF guard'ı yoktu (`url_read`'inki vardı) — paylaşımlı
+  `jarvis/url_policy.py` çıkarıldı (localhost/private/link-local/metadata, DNS-rebinding'e karşı
+  resolved-IP kontrolü dahil), `url_read` buna geçti, MCP tarafına `langchain-mcp-adapters`'ın
+  `ToolCallInterceptor`'ı ile uygulandı — engellenen bir `browser_navigate` gerçek MCP çağrısına asla
+  ulaşmıyor.
+- **Faz 5 — Runtime/concurrency izolasyonu (P1)**: `TaskExecutor._run()` arka plan görevlerini
+  `self._agent.chat()` ile çalıştırıyordu — hem ana `self._history`'i mid-flight kirletiyor hem de
+  `_state_lock`'ı görevin TÜM süresi boyunca tutup foreground chat'i bloke ediyordu. Yeni
+  `JarvisAgent.background_turn()`: `proactive_turn()`'ün izolasyon desenini model alıyor (kendi
+  thread_id + izole mesaj listesi), `ainvoke()` süresince lock TUTMUYOR, sonuç bittiğinde kısa bir
+  kilitli pencerede gerçek `self._history`'e user/assistant mesaj çifti olarak ekleniyor. BUG-8'in
+  kendisi (chat()/chat_stream()'in kilit davranışı) hiç değiştirilmedi — regresyon riski böylece
+  minimize edildi.
+- **Faz 6 — shell/python temel guard (P1/P2, kapsamı daraltılmış)**: `shell.py`'nin deny-list'inde
+  `Invoke-Expression`/`iex`/`-EncodedCommand`/.NET reflection bypass'ları hiç yoktu — eklendi.
+  `python_exec.py`'nin (verdict: shell_run'dan bile kötü) hiç içerik kontrolü yoktu — artık
+  çalıştırmadan önce script kaynağını aynı paylaşımlı deny-list'e karşı tarıyor. **Tam sandbox
+  değil** (docs/SAFETY.md'nin "Known limits"i geçerli). Tool-domain router (turn başına 5-8 tool) ve
+  tam shell/python broker (Job Objects) plan metninde açıkça ayrı/daha büyük iş olarak ertelenmişti —
+  bu oturumda uygulanmadı.
+- **Faz 7 — Observability/CI**: startup summary backfill'i (`_schedule_summary_backfill`) yalnızca
+  `__init__`'ten çağrılıyordu — bu, her iki gerçek entry point'in de loop'u başlamadan önce çalıştığı
+  an, yani hep no-op. Yeni `run_startup_backfill()`, `cli.py`'nin `_run_loop()`/`_run_voice_loop()`'u
+  ve `api.py`'nin `lifespan()`'ı loop gerçekten ayaktayken çağırıyor. tok/s telemetrisi (`agent.py`)
+  ham çıktı token sayısını hız sanıyordu — artık `on_llm_start`/`on_llm_end` arası gerçek
+  `time.monotonic()` farkına bölünüyor. `.github/workflows/ci.yml` eklendi (ruff + pytest,
+  `windows-latest` — `pywin32`/`winotify` Windows-only olduğu için; Flutter/Electron ayrı
+  `continue-on-error` job). `requirements-lock.txt` eklendi (çalışan `.venv`'den `pip freeze` — tam
+  bir `uv lock` resolution'ı bu bağımlılık ağacının ağırlığı/platform-özgüllüğü nedeniyle riskli
+  görüldü). CI'yi yeşil başlatmak için `jarvis/`/`tests/` genelinde 38 kullanılmayan import/f-string
+  temizlendi (ruff `--fix`, tamamı mekanik, davranış değişikliği yok — tüm testler yeşil kaldı).
+  README'nin artık var olmayan `jarvis/legacy/` referansı silindi; CLAUDE.md'nin kendi stale OneDrive
+  notu güncellendi (README/CONTRIBUTING zaten düzeltilmişti).
+- **56 yeni test**: `test_api_security.py`, `test_confirmation_node.py`, `test_procedure_store.py`,
+  `test_mcp_hardening.py`, `test_background_turn.py`, `test_shell_python_guard.py`,
+  `test_hud_callback_tokrate.py`, `test_startup_backfill.py`. Tam suite: **160/160 yeşil** (3 test
+  bazen tam suite altında flaky çıkıyor — timing-hassas background-task retry pencereleri, izole
+  çalıştırıldığında hep geçiyor; bu oturumdan önce de var olan bir durum, kapsam dışı bırakıldı).
+
+---
+
 ## [Faz 8 devam] — 2026-07-15 — GitHub'a taşıma, kalan Faz 0 bug'ları, Flutter doğrulama
 
 - **Repo GitHub'a taşındı**: `langgraph-migration` → `main` fast-forward merge (main 2026-05-09'dan

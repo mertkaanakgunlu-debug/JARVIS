@@ -383,6 +383,7 @@ def make_confirmation_node(settings):
     from langgraph.types import interrupt as _interrupt
     from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
     from jarvis import audit_log, policy_guard
+    from jarvis.tool_registry import get_spec
 
     async def confirmation_node(state: JarvisState) -> dict:
         last_ai: AIMessage | None = None
@@ -395,6 +396,7 @@ def make_confirmation_node(settings):
             return {"confirmation_result": "approved"}
 
         transport = state.get("transport") or "unknown"
+        is_proactive = transport.startswith("monitor-")
         decisions = {
             tc.get("id"): policy_guard.evaluate(tc.get("name", ""), tc.get("args", {}) or {}, settings)
             for tc in last_ai.tool_calls
@@ -435,6 +437,88 @@ def make_confirmation_node(settings):
                 )
             )
             return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg]}
+
+        # Stabilization sprint -- --profile test's structural guarantee.
+        # Same hard-stop shape as the kill switch above (no interrupt, no
+        # execution, no matter what confirmation_gate_enabled says), narrower
+        # in scope: only tools whose ToolSpec.side_effect_type is
+        # "external_write" (gmail send, calendar create/delete, Drive
+        # upload/share/delete, ...) -- local writes/shell/python stay
+        # reachable so tool-calling itself remains testable under the profile.
+        if not getattr(settings, "external_writes_enabled", True):
+            blocked = [
+                tc for tc in last_ai.tool_calls
+                if (spec := get_spec(tc.get("name", ""))) is not None
+                and spec.side_effect_type == "external_write"
+            ]
+            if blocked:
+                for tc in blocked:
+                    d = decisions[tc.get("id")]
+                    audit_log.record(
+                        "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
+                        transport=transport, outcome="blocked_external_writes_disabled",
+                        reason="EXTERNAL_WRITES_ENABLED=false",
+                    )
+                stub_msgs = [
+                    ToolMessage(
+                        content="[BLOCKED: external writes are disabled in this profile -- this action was not executed]",
+                        tool_call_id=tc.get("id", ""),
+                    )
+                    for tc in last_ai.tool_calls
+                ]
+                ack_msg = HumanMessage(
+                    content=(
+                        "External-write actions (send email, create/delete calendar events, "
+                        "Drive upload/share/delete, ...) are disabled in this profile. "
+                        "Do NOT retry them. Tell the user this ran with external writes off."
+                    )
+                )
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg]}
+
+        # GPT-5.6 review remediation, Faz 2 (P0) -- "proactive turn not
+        # structurally read-only". Faz 7 already discards a genuinely-
+        # confirmable (requires_confirmation=True, gate enabled) L3 interrupt
+        # into a "needs_confirmation" notification during a proactive turn
+        # instead of executing it -- that path is untouched below, still the
+        # right UX (see ProactiveOutcome in jarvis/agent.py). The gap this
+        # closes: an L2 call with requires_confirmation=False (by tool-spec
+        # design, since a human normally just notices it in the transcript)
+        # previously sailed straight through as "auto_approved" during a
+        # proactive turn too -- with no human watching. Structural block
+        # instead of relying on the system prompt telling the model not to
+        # (docs/SAFETY.md's "What Faz 7 changed"). Evaluated before the
+        # confirmation_gate_enabled short-circuit below on purpose: that flag
+        # is a user's interactive-UX preference (skip being asked), not
+        # something that should also silence background/proactive safety.
+        if is_proactive:
+            unsupervised = [
+                tc for tc in last_ai.tool_calls
+                if decisions[tc.get("id")].risk_level >= 2
+                and not (decisions[tc.get("id")].requires_confirmation and settings.confirmation_gate_enabled)
+            ]
+            if unsupervised:
+                for tc in unsupervised:
+                    d = decisions[tc.get("id")]
+                    audit_log.record(
+                        "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
+                        transport=transport, outcome="blocked_proactive_readonly", reason=d.reason,
+                    )
+                stub_msgs = [
+                    ToolMessage(
+                        content="[BLOCKED: background/proactive checks are read-only -- this action was not executed]",
+                        tool_call_id=tc.get("id", ""),
+                    )
+                    for tc in last_ai.tool_calls
+                ]
+                ack_msg = HumanMessage(
+                    content=(
+                        "This is an automated background check, not a live conversation -- "
+                        "mutating or risky tool calls are not permitted here, even ones that "
+                        "would normally auto-approve. Do NOT retry them. If this needs the "
+                        "user's action, say so in your response instead."
+                    )
+                )
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg]}
 
         if not settings.confirmation_gate_enabled:
             return {"confirmation_result": "approved"}

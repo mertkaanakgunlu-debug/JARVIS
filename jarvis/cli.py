@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import sys
-from datetime import datetime
 
 from rich.console import Console
 from rich.panel import Panel
@@ -13,7 +11,6 @@ from rich.table import Table
 from rich.text import Text
 from rich.rule import Rule
 from rich.prompt import Prompt
-from rich import print as rprint
 
 from jarvis.agent import JarvisAgent, AVAILABLE_MODELS, ConfirmationRequired
 from jarvis.config import Settings
@@ -44,6 +41,7 @@ HELP_TEXT = """\
   [gold3]/session[/gold3] [dim]<id>[/dim]     Geçmiş oturuma geç
   [gold3]/entities[/gold3]         Tanınan varlıkları (kişi/proje/dosya) listele
   [gold3]/facts[/gold3]            Bilinen kalıcı gerçekleri (semantic memory) listele
+  [gold3]/procedures[/gold3]       Onay bekleyen prosedürler (alt: approve <id>, reject <id>)
   [gold3]/meta[/gold3]             Persona/direktif dosyalarının sürüm kaydını göster
   [gold3]/reset[/gold3]            Mevcut oturumu arşivle, yeni başlat
   [gold3]/help[/gold3]             Bu mesajı göster
@@ -266,6 +264,7 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
     docstring for why this must be the loop that opens the connection, not
     wherever the first chat() call happens to come from."""
     await agent.connect_mcp_tools()
+    agent.run_startup_backfill()
     try:
         await _run_loop_impl(agent, monitor)
     finally:
@@ -276,7 +275,7 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
     settings = agent.settings
 
     _print_banner(settings, monitor_active=monitor is not None)
-    console.print(f"[dim]Type [bold gold3]/help[/bold gold3] for commands. Ctrl+C to exit.[/dim]\n")
+    console.print("[dim]Type [bold gold3]/help[/bold gold3] for commands. Ctrl+C to exit.[/dim]\n")
 
     while True:
         try:
@@ -328,6 +327,15 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
                 f"[dim]Active model:[/dim]    [bold]{agent.current_model_label}[/bold] [dim]({active})[/dim]\n"
                 f"[dim]Session cost:[/dim]    [yellow]~${cost:.5f}[/yellow]"
             )
+            trace = agent.last_turn_trace
+            if trace:
+                console.print(
+                    f"[dim]Last turn:[/dim]       requested=[bold]{trace['requested_role']}[/bold] "
+                    f"-> actual=[bold]{trace['provider']}:{trace['model']}[/bold]"
+                    f"{' [yellow](fallback)[/yellow]' if trace.get('fallback_used') else ''} "
+                    f"[dim]({trace['calls']} LLM call(s), "
+                    f"{trace['input_tokens']} in / {trace['output_tokens']} out)[/dim]"
+                )
             continue
 
         if lower == "/indexed":
@@ -354,7 +362,9 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
 
         if lower in ("/reset", "/clear"):
             old_id = agent.session_id
-            agent.reset()
+            # reset_async: SQLite archive runs in to_thread instead of
+            # blocking this REPL's event loop mid-prompt.
+            await agent.reset_async()
             console.print(
                 f"[dim]Session [bold]{old_id}[/bold] archived. "
                 f"New session: [bold]{agent.session_id}[/bold][/dim]"
@@ -459,6 +469,67 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
                 for r in rows:
                     table.add_row(r["fact_text"], str(r["mention_count"]), (r["last_seen"] or "")[:19])
                 console.print(table)
+            continue
+
+        # ── /procedures command (GPT-5.6 review remediation, Faz 3) ──────────
+        if lower == "/procedures" or lower.startswith("/procedures "):
+            sub = user_input[len("/procedures"):].strip()
+
+            if not sub or sub == "list":
+                drafts = agent.procedure_store.get_drafts()
+                if not drafts:
+                    console.print("[dim]Onay bekleyen taslak prosedür yok.[/dim]")
+                else:
+                    table = Table(
+                        show_header=True,
+                        header_style="bold gold3",
+                        border_style="dim",
+                        title=f"[bold gold3]Onay Bekleyen Prosedürler ({len(drafts)})[/bold gold3]",
+                        title_justify="left",
+                    )
+                    table.add_column("ID", style="dim", width=6)
+                    table.add_column("İsim", style="bold")
+                    table.add_column("Açıklama")
+                    table.add_column("Oluşturulma", width=19)
+                    for p in drafts:
+                        table.add_row(str(p["id"]), p["name"], p["description"], (p["created_at"] or "")[:19])
+                    console.print(table)
+                    console.print(
+                        "[dim]Onaylamak için: /procedures approve <id>  ·  "
+                        "Reddetmek için: /procedures reject <id>[/dim]"
+                    )
+                continue
+
+            if sub.startswith("approve "):
+                try:
+                    pid = int(sub[len("approve "):].strip())
+                except ValueError:
+                    _print_error("Geçersiz id.")
+                    continue
+                row = agent.procedure_store.get(pid)
+                if not row or row["status"] != "draft":
+                    _print_error(f"#{pid} bulunamadı ya da zaten taslak değil.")
+                    continue
+                agent.procedure_store.approve(pid)
+                agent.memory.approve_procedure(pid, row["name"], row["body"])
+                console.print(f"[gold3]✓[/gold3] Prosedür onaylandı: {row['name']} (id={pid}) — artık recall'a dahil.")
+                continue
+
+            if sub.startswith("reject "):
+                try:
+                    pid = int(sub[len("reject "):].strip())
+                except ValueError:
+                    _print_error("Geçersiz id.")
+                    continue
+                row = agent.procedure_store.get(pid)
+                if agent.procedure_store.reject(pid):
+                    agent.memory.delete_procedure(pid)
+                    console.print(f"[gold3]✓[/gold3] Taslak reddedildi ve silindi: {row['name'] if row else pid} (id={pid})")
+                else:
+                    _print_error(f"#{pid} bulunamadı ya da zaten taslak değil.")
+                continue
+
+            _print_error(f"Bilinmeyen alt komut: '{sub}'. Geçerli: list, approve <id>, reject <id>")
             continue
 
         if lower == "/meta":
@@ -846,6 +917,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
     # Faz 5: connect MCP servers (Playwright, etc.) now, on this function's
     # own long-lived loop -- see JarvisAgent.connect_mcp_tools()'s docstring.
     await agent.connect_mcp_tools()
+    agent.run_startup_backfill()
     engine = RealtimeVoiceEngine(DuplexAudioIO(settings), settings)
     loop = asyncio.get_running_loop()
 

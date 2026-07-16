@@ -65,6 +65,11 @@ python -m jarvis --voice --wakeword     # Always-listening "Hey JARVIS"
 python -m jarvis --api                  # FastAPI REST server (port 8000)
 python -m jarvis --api --port 9090      # Custom port
 python -m jarvis --monitor              # Background watcher only (no chat UI)
+
+# Isolated manual/scripted testing -- never touches the real .env, data/,
+# vault/, or OAuth tokens; zero cloud LLM calls; external writes hard-denied.
+# See CLAUDE.md's safety model section for the mechanism.
+python -m jarvis --api --profile test --port 8130
 ```
 
 ## CLI Commands
@@ -106,8 +111,7 @@ Jarvis/
 │   │   └── tools.py        # 35 LangChain @tool wrappers (make_tools)
 │   ├── tools/              # 18 tool implementation modules
 │   ├── subagents/          # math, writer, research, coder, geomath
-│   ├── prompts/            # system.md + workflows/
-│   └── legacy/             # Old pydantic-ai code (reference only)
+│   └── prompts/            # core/*.md + workflows/
 ├── mobile/                 # Flutter Android app
 ├── vault/                  # Obsidian-compatible markdown vault
 │   ├── conversations/      # Daily session transcripts

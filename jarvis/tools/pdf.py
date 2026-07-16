@@ -174,7 +174,8 @@ def read_pdf_multimodal(
         return f"[ERROR] Not a PDF: {p}", []
 
     if cache_dir is None:
-        cache_dir = Path("data") / "pdf_cache"
+        from jarvis import paths
+        cache_dir = paths.data_dir() / "pdf_cache"
 
     content_key = _content_key(p)
     cached_md = _cache_path(p, cache_dir, content_key)

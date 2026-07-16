@@ -18,7 +18,10 @@ Endpoints:
 Auth:
     All endpoints except /health and /system/ping require header:
         X-API-Key: <JARVIS_API_KEY from .env>
-    If JARVIS_API_KEY is empty, auth is disabled (local-only use).
+    If JARVIS_API_KEY is empty, auth is disabled (local-only use) and the
+    server refuses to bind to anything but loopback -- see
+    resolve_api_bind_host(). Set JARVIS_API_HOST/JARVIS_API_CORS_ORIGINS in
+    .env to reach this from another device (phone/Tailscale).
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from typing import AsyncGenerator
 import uuid as _uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Depends, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -73,6 +76,7 @@ async def lifespan(app: FastAPI):
         # matters (a background job's own short-lived asyncio.run() loop must
         # never be the one that opens the MCP stdio session).
         await _agent.connect_mcp_tools()
+        _agent.run_startup_backfill()
         start_live_data_task(_agent, _settings)
         if _voice_enabled or _voice_wakeword:
             start_voice_task(_agent, _settings, wakeword=_voice_wakeword)
@@ -100,8 +104,11 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             print(f"[lifespan] MCP shutdown failed: {_e}")
         try:
-            import asyncio as _asyncio
-            await _asyncio.get_event_loop().run_in_executor(None, _agent.reset)
+            # reset_async: state mutation on a worker thread, summarization
+            # scheduled back on this loop — the run_in_executor(reset) shape
+            # ran create_task on a loopless worker thread and always skipped
+            # the summary (silently, thanks to this except).
+            await _agent.reset_async()
         except Exception as _e:
             print(f"[lifespan] auto-reset on shutdown failed: {_e}")
 
@@ -109,9 +116,34 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="JARVIS API", version="0.2.0", docs_url="/docs", lifespan=lifespan)
 
+# GPT-5.6 review remediation, Faz 1: CORS used to be an unconditional "*",
+# which combined with an empty JARVIS_API_KEY (see resolve_api_bind_host
+# below) meant any website open in any browser on the LAN could script
+# requests against this API and read the response. Explicit allowlist
+# instead -- see resolve_cors_origins()'s docstring for what's always
+# permitted vs. settings-driven. Registered once at import time (before
+# uvicorn ever serves a request in the real run_server() path), reading a
+# fresh Settings() so JARVIS_API_CORS_ORIGINS in .env takes effect without
+# needing the module-global _settings (not populated until init_agent()).
+_CORS_LOCALHOST_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+
+def resolve_cors_origins(settings: Settings) -> list[str]:
+    """Explicit CORS allowlist for CORSMiddleware -- never '*'. Always
+    includes the shipped Electron desktop client's file:// origin (Chromium
+    serializes a file:// page's fetch() Origin header as literally "file://"
+    or, for some sandboxed contexts, the opaque-origin string "null") plus
+    whatever the user adds via JARVIS_API_CORS_ORIGINS (e.g. a future LAN web
+    client). localhost/127.0.0.1 on any port -- covering the Vite dev
+    server's variable port -- is handled separately via allow_origin_regex,
+    not this list."""
+    return ["file://", "null", *settings.api_cors_origins]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=resolve_cors_origins(Settings()),
+    allow_origin_regex=_CORS_LOCALHOST_REGEX,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -134,11 +166,14 @@ def _wire_routers(settings: Settings, agent: JarvisAgent) -> None:
     from jarvis.fcm_sender import FcmSender
     from jarvis.task_executor import TaskExecutor
     from jarvis.finance_store import FinanceStore
-    from pathlib import Path
+    from jarvis import paths
 
-    db_path = Path("data/sessions.db")
+    db_path = paths.data_dir() / "sessions.db"
     push_store = PushStore(db_path)
-    fcm = FcmSender(push_store, settings.firebase_credentials_path) if settings.push_enabled else None
+    fcm = (
+        FcmSender(push_store, paths.resolve(settings.firebase_credentials_path))
+        if settings.push_enabled else None
+    )
     executor = TaskExecutor(agent, fcm_sender=fcm)
     finance_store = FinanceStore(db_path)
 
@@ -208,6 +243,18 @@ class StatusResponse(BaseModel):
     model: str
     session_cost_usd: float
     vertex_active: bool
+    # Stabilization sprint — runtime truth fields. None before the first
+    # completed foreground turn; `model`/`session_cost_usd` stay for older
+    # clients (Electron HUD / Flutter).
+    requested_role: str | None = None
+    actual_provider: str | None = None
+    actual_model: str | None = None
+    fallback_used: bool | None = None
+    cloud_policy: str = "auto"
+    # Features currently running in degraded (no-LLM) mode because
+    # CLOUD_POLICY=off disabled their direct-Gemini call — see
+    # jarvis/providers.degraded_features().
+    degraded: list[str] = []
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -553,7 +600,13 @@ async def chat_confirm(conf_id: str, body: ConfirmRequest, request: Request):
     )
 
 
-_UPLOAD_DIR = Path("data/uploads")
+def _upload_dir() -> Path:
+    # Function, not module constant: JARVIS_HOME may be set after import
+    # (test fixture / --profile test), and uploads must follow it.
+    from jarvis import paths
+    return paths.data_dir() / "uploads"
+
+
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — mirrors files.py's MAX_READ_BYTES convention
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
@@ -653,8 +706,9 @@ async def chat_upload(
         )
 
     # ── Save file to disk (needed for all non-image types) ─────────────────────
-    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    saved_path = _UPLOAD_DIR / f"{_uuid.uuid4().hex}{suffix}"
+    upload_dir = _upload_dir()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = upload_dir / f"{_uuid.uuid4().hex}{suffix}"
     saved_path.write_bytes(content)
 
     # ── PDFs: marker-pdf → markdown + figures → multimodal message ─────────────
@@ -729,7 +783,9 @@ async def chat_upload(
 @app.get("/status", response_model=StatusResponse)
 async def status(request: Request):
     _check_auth(request)
+    from jarvis.providers import degraded_features
     agent = get_agent()
+    trace = agent.last_turn_trace or {}
     return StatusResponse(
         session_id=agent.session_id,
         memory_turns=agent.memory.count(),
@@ -737,6 +793,12 @@ async def status(request: Request):
         model=agent.current_model_label,
         session_cost_usd=agent.usage.session_cost,
         vertex_active=agent.settings.use_vertex,
+        requested_role=trace.get("requested_role"),
+        actual_provider=trace.get("provider"),
+        actual_model=trace.get("model"),
+        fallback_used=trace.get("fallback_used"),
+        cloud_policy=getattr(agent.settings, "cloud_policy", "auto"),
+        degraded=degraded_features(),
     )
 
 
@@ -744,13 +806,44 @@ async def status(request: Request):
 async def reset(request: Request):
     _check_auth(request)
     agent = get_agent()
-    # reset() blocks on JarvisAgent._state_lock (BUG-8) — offload so a
-    # concurrent in-flight chat() doesn't freeze this whole event loop.
-    await asyncio.get_event_loop().run_in_executor(None, agent.reset)
-    return {"ok": True, "message": "Conversation history cleared"}
+    # reset_async: the blocking _state_lock/SQLite work still runs off-loop
+    # (to_thread), but summarization is scheduled AFTER control returns to
+    # this loop. The old run_in_executor(agent.reset) shape called
+    # create_task on a loopless worker thread -> RuntimeError -> HTTP 500
+    # on every content-bearing session.
+    await agent.reset_async()
+    return {"ok": True, "message": "Conversation archived, new session started"}
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def resolve_api_bind_host(settings: Settings) -> str:
+    """Compute the actual uvicorn bind host from api_host + jarvis_api_key.
+
+    GPT-5.6 review remediation, Faz 1 (P0): this used to be an unconditional
+    host="0.0.0.0" with no relation to whether auth was even configured --
+    an empty JARVIS_API_KEY meant a fully open, unauthenticated API on every
+    network interface. Now: an explicit non-loopback api_host with no key is
+    a fail-fast RuntimeError instead of a silent bind. When api_host is
+    unset, the default follows the key -- no key -> 127.0.0.1 (local-only,
+    safe by default); key set -> 0.0.0.0 (LAN/Tailscale phone access, the
+    actual documented use case).
+    """
+    host = (settings.api_host or "").strip()
+    if not host:
+        return "0.0.0.0" if settings.jarvis_api_key else "127.0.0.1"
+    if not settings.jarvis_api_key and host not in _LOOPBACK_HOSTS:
+        raise RuntimeError(
+            f"JARVIS_API_HOST={host!r} is not loopback but JARVIS_API_KEY is empty -- "
+            "refusing to bind an unauthenticated API to a non-local address. "
+            "Set JARVIS_API_KEY in .env, or leave JARVIS_API_HOST unset (or 127.0.0.1) "
+            "for local-only use."
+        )
+    return host
+
 
 def run_server(settings: Settings, port: int = 8000, voice: bool = False, wakeword: bool = False, monitor: bool = False) -> None:
     """Start the Uvicorn server (blocking)."""
@@ -766,10 +859,15 @@ def run_server(settings: Settings, port: int = 8000, voice: bool = False, wakewo
             "uvicorn not installed. Run: pip install fastapi uvicorn[standard]"
         )
 
+    # Resolve (and possibly fail-fast on) the bind host BEFORE constructing
+    # the agent -- no point paying JarvisAgent's heavier init cost just to
+    # refuse to bind afterward.
+    bind_host = resolve_api_bind_host(settings)
+
     init_agent(settings)
 
     key_status = f"auth enabled (key: {settings.jarvis_api_key[:4]}…)" if settings.jarvis_api_key else "auth DISABLED"
-    print(f"\n  JARVIS API  —  http://0.0.0.0:{port}")
+    print(f"\n  JARVIS API  —  http://{bind_host}:{port}")
     print(f"  Docs        —  http://127.0.0.1:{port}/docs")
     print(f"  Auth        —  {key_status}")
     print(f"  Model       —  {settings.vertex_model_fast if settings.use_vertex else settings.effective_cloud_model}")
@@ -777,4 +875,4 @@ def run_server(settings: Settings, port: int = 8000, voice: bool = False, wakewo
         print(f"  Monitor     —  proactive: {'on' if settings.monitor_proactive_enabled else 'toast/FCM only'}")
     print()
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(app, host=bind_host, port=port, log_level="warning")

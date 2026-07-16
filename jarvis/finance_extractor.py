@@ -11,7 +11,7 @@ skip unparseable mails gracefully.
 from __future__ import annotations
 
 import logging
-from typing import Literal, Optional
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,11 @@ async def extract_transaction(
     """
     if not _HAS_PYDANTIC:
         logger.warning("pydantic not available — skipping transaction extraction")
+        return None
+
+    from jarvis.providers import cloud_extractors_enabled, note_degraded
+    if not cloud_extractors_enabled(settings):
+        note_degraded("finance_extractor")
         return None
 
     try:

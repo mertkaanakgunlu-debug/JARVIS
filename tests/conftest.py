@@ -43,3 +43,25 @@ def isolated_cwd(tmp_path, monkeypatch):
     import jarvis.kill_switch as kill_switch
     monkeypatch.setattr(kill_switch, "_cache", None)
     return tmp_path
+
+
+@pytest.fixture
+def jarvis_home(tmp_path, monkeypatch):
+    """Point JARVIS_HOME at a fresh temp dir for the test's duration.
+
+    The stabilization sprint's env-based isolation layer (jarvis/paths.py):
+    unlike isolated_cwd it also captures the project-root-anchored paths
+    (gmail/calendar OAuth tokens via paths.project_data_dir()) that a chdir
+    alone would miss. The two fixtures compose — use both when constructing
+    anything heavyweight. Resets kill_switch._cache for the same reason
+    isolated_cwd does (see its docstring).
+    """
+    # Distinct subdir, NOT tmp_path itself: tmp_path is shared with
+    # isolated_cwd in tests that compose both fixtures, and the whole point
+    # of composing them is asserting home != cwd.
+    home = tmp_path / "jarvis-home"
+    home.mkdir()
+    monkeypatch.setenv("JARVIS_HOME", str(home))
+    import jarvis.kill_switch as kill_switch
+    monkeypatch.setattr(kill_switch, "_cache", None)
+    return home

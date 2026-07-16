@@ -547,11 +547,10 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             schedule("list")
             schedule("delete", task_id="abc12345")
         """
-        from pathlib import Path as _Path
         from jarvis.scheduler import SchedulerStore, ONCE, DAILY, WEEKLY, MONTHLY
-        import json as _json
+        from jarvis import paths as _paths
 
-        db_path = _Path("data/sessions.db")
+        db_path = _paths.data_dir() / "sessions.db"
         store = SchedulerStore(db_path)
 
         action = action.strip().lower()
@@ -668,10 +667,10 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             todo("analyze")
             todo("edit", todo_id="a1b2c3d4", due_date="2026-05-25")
         """
-        from pathlib import Path as _Path
         from jarvis.todo_store import TodoStore, PRIORITY_LABELS
+        from jarvis import paths as _paths
 
-        db_path = _Path("data/sessions.db")
+        db_path = _paths.data_dir() / "sessions.db"
         store = TodoStore(db_path)
         action = action.strip().lower()
 
@@ -790,9 +789,10 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         Call this after completing a genuinely reusable multi-tool task — not
         every task, only ones worth remembering as a repeatable pattern (e.g. a
         specific report-generation pipeline, a particular multi-step data
-        transform). The next time a semantically similar request comes in, this
-        workflow is automatically suggested in context — no need to ask the user
-        to repeat themselves.
+        transform). Saved as a DRAFT, not active yet — the user must approve
+        it (/procedures approve <id>) before it is ever recalled or injected
+        into a future turn's context. Tell the user it's pending approval;
+        do not imply it will apply automatically.
 
         Parameters:
             name:        short identifier, e.g. "budget_chart_report"
@@ -802,11 +802,19 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             body:        the actual step-by-step instructions (same free-form
                          style as a workflow doc — numbered steps, tool names).
         """
-        from jarvis.procedure_store import ProcedureStore
+        from jarvis.procedure_store import ProcedureStore, default_status_for_source
+        from jarvis import paths as _paths
 
-        store = ProcedureStore(Path("data") / "sessions.db")
+        store = ProcedureStore(_paths.data_dir() / "sessions.db")
         pid = store.add(name, description, body, source="agent")
-        memory.store_procedure(pid, name, description, body)
+        status = default_status_for_source("agent")
+        memory.store_procedure(pid, name, description, body, status=status)
+        if status == "draft":
+            return (
+                f"📝 Procedure saved as DRAFT (id={pid}): {name}. "
+                "It will NOT be recalled in future turns until the user approves it "
+                "via /procedures — do not tell the user it is active yet."
+            )
         return f"✅ Procedure saved: {name} (id={pid})"
 
     # ── Faz 14: Google Drive ──────────────────────────────────────────────────

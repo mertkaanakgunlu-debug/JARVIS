@@ -135,6 +135,24 @@ exact action tables.
   server, not an interactive CLI session, is where this new autonomous entry point runs continuously
   in practice.
 
+## What the stabilization sprint changed (2026-07-16)
+
+- New `Settings.external_writes_enabled` (default `True`, no behavior change for normal runs).
+  When `False` — set automatically by `python -m jarvis --profile test` — `make_confirmation_node`
+  hard-denies any tool call whose `ToolSpec.side_effect_type == "external_write"` (gmail, calendar,
+  Drive, ITU mail, Spotify) **before it ever reaches the interrupt**, same "no prompt, no execution"
+  shape as the kill switch above, just narrower in scope (external writes only — local
+  writes/shell/python stay reachable so tool-calling itself remains testable under the profile).
+  Exists specifically so a scripted/CI test run can never accidentally send a real email or touch a
+  real calendar, without needing a human to answer a confirmation prompt that isn't there.
+- Unrelated to the gate itself, but relevant to trusting what you see while testing it: the model
+  label and cost shown in `/status`/`current_model_label` used to be derived from the *requested*
+  role, not the provider that actually answered — a turn served by the Ollama fallback could still
+  show "Gemini (Vertex, reasoning)" and a nonzero cost. `jarvis/llm_trace.py`'s `LlmTraceRecorder`
+  now reports the real per-call provider/model/cost — see `CHANGELOG.md`'s stabilization-sprint entry
+  for the mechanism. Doesn't change what the gate blocks, only whether you can trust what you're
+  told happened.
+
 ## Known limits (honest, not aspirational)
 
 - **No Electron/mobile UI for approving a confirmation.** The API returns the right structured

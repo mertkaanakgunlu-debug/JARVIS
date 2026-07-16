@@ -23,8 +23,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_PATH = Path("data") / "audit_log.jsonl"
+from jarvis import paths
+
 _lock = threading.Lock()
+
+
+def _path() -> Path:
+    # Resolved per call, not at import: JARVIS_HOME may be set by a test
+    # fixture or the --profile test entry point after this module loads.
+    return paths.data_dir() / "audit_log.jsonl"
 
 _MAX_FIELD_CHARS = 500
 
@@ -47,8 +54,9 @@ def record(event: str, **fields: Any) -> None:
         return
     try:
         with _lock:
-            _PATH.parent.mkdir(parents=True, exist_ok=True)
-            with _PATH.open("a", encoding="utf-8") as f:
+            target = _path()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception:
         pass
@@ -58,10 +66,11 @@ def tail(n: int = 20) -> list[dict[str, Any]]:
     """Return the last n audit entries, newest last (debugging / a future
     /audit CLI command — not required for the safety guarantee itself, which
     is the append-only file regardless of whether anything ever reads it)."""
-    if not _PATH.exists():
+    target = _path()
+    if not target.exists():
         return []
     try:
-        lines = _PATH.read_text(encoding="utf-8").splitlines()
+        lines = target.read_text(encoding="utf-8").splitlines()
     except Exception:
         return []
     out: list[dict[str, Any]] = []

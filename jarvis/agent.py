@@ -45,6 +45,8 @@ from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
 from jarvis import audit_log               # Faz 4
+from jarvis import paths                   # JARVIS_HOME isolation root
+from jarvis.llm_trace import LlmTraceRecorder  # runtime truth: actual provider per turn
 from jarvis.tool_registry import get_spec  # Faz 4
 from jarvis.mcp_integration import McpToolManager  # Faz 5
 
@@ -87,6 +89,7 @@ class _HudEventCallback(BaseCallbackHandler):
     def __init__(self, transport: str = "unknown") -> None:
         self._transport = transport
         self._audit_pending: dict[str, tuple[str, int]] = {}  # run_id -> (tool_name, risk_level)
+        self._llm_start_times: dict[str, float] = {}  # run_id -> time.monotonic() at on_llm_start
 
     def on_tool_start(self, serialized: dict, input_str: Any, **kwargs: Any) -> None:
         name = serialized.get("name", "tool")
@@ -140,6 +143,15 @@ class _HudEventCallback(BaseCallbackHandler):
         kind = "cloud" if "gemini" in str(model).lower() else "local"
         event_bus.tool_call(str(model), kind=kind)
 
+        # GPT-5.6 review remediation, Faz 7 (verdict #18, CONFIRMED): on_llm_end
+        # below used to label the raw output token *count* as "tok/s" with no
+        # duration involved at all. Timestamp here so on_llm_end can divide by
+        # actual elapsed wall-clock time instead.
+        run_id = kwargs.get("run_id")
+        if run_id is not None:
+            import time
+            self._llm_start_times[str(run_id)] = time.monotonic()
+
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
             gen = response.generations[0][0]
@@ -150,7 +162,13 @@ class _HudEventCallback(BaseCallbackHandler):
                 to_  = usage.get("output_tokens", 0)
                 mname = getattr(msg, "response_metadata", {}).get("model_name", "Gemini")
                 if to_ > 0:
-                    spd = f" · {to_:,} tok/s"
+                    spd = ""
+                    import time
+                    started = self._llm_start_times.pop(str(kwargs.get("run_id")), None)
+                    if started is not None:
+                        elapsed = time.monotonic() - started
+                        if elapsed > 0:
+                            spd = f" · {to_ / elapsed:,.1f} tok/s"
                     event_bus.tool_call(
                         f"{mname} · {ti:,} in / {to_:,} out{spd}", kind="local"
                     )
@@ -387,7 +405,10 @@ class JarvisAgent:
         # This is the settings switch_model()/the fallback rebuild actually act on.
         self._effective_settings = settings
         self.memory = Memory(settings)
-        self.workspace = Path(".").resolve()
+        # JARVIS_HOME isolation root (stabilization sprint): unset -> cwd,
+        # identical to the old Path(".") behavior; set -> tool outputs
+        # (pdf_cache/plots/reports) and all stores land under it.
+        self.workspace = paths.jarvis_home().resolve()
         self._env_block = _build_env_block(self.workspace)
         self._using_fallback = False
         self._active_model_id: str | None = None
@@ -395,6 +416,11 @@ class JarvisAgent:
         # turn — None before the first turn. Drives _cloud_model's per-turn
         # label since the router now picks a provider per turn, not once.
         self._last_turn_used_pro: bool | None = None
+        # Stabilization sprint: the most recent foreground turn's ACTUAL
+        # provider/model (LlmTraceRecorder.turn_summary()) — None before the
+        # first turn. When present, this is the label's source of truth; the
+        # role-derived guesses above become the pre-first-turn fallback only.
+        self._last_turn_trace: dict | None = None
 
         # BUG-8: this singleton is mutated from the main loop, TaskExecutor's
         # background thread, and API endpoints (e.g. /reset) concurrently.
@@ -403,7 +429,7 @@ class JarvisAgent:
         # see _acquire_state_lock() and jarvis/graph/graph.py's docstring.
         self._state_lock = threading.Lock()
 
-        db_path = Path("data") / "jarvis_checkpoints.db"
+        db_path = paths.data_dir() / "jarvis_checkpoints.db"
         self._checkpointer = make_checkpointer(db_path)
         # Faz 5: MCP tools connect lazily via connect_mcp_tools() -- __init__
         # runs before any event loop exists in every real entry point (cli.py
@@ -418,10 +444,10 @@ class JarvisAgent:
             extra_tools=self._mcp.tools,
         )
 
-        self.usage = UsageTracker(Path("data") / "usage.json")
+        self.usage = UsageTracker(paths.data_dir() / "usage.json")
 
         # Faz 12-B: persistent session store — auto-resume last session
-        self.session_store = SessionStore(Path("data") / "sessions.db")
+        self.session_store = SessionStore(paths.data_dir() / "sessions.db")
         last = self.session_store.latest_session()
         if last:
             self.session_id = last
@@ -436,14 +462,14 @@ class JarvisAgent:
             self._turn: int = 0
 
         # Faz 13-C: scheduler store (same DB file, separate table)
-        self.scheduler = SchedulerStore(Path("data") / "sessions.db")
+        self.scheduler = SchedulerStore(paths.data_dir() / "sessions.db")
 
         # Faz 13-D: to-do store (same DB file, separate table)
-        self.todo_store = TodoStore(Path("data") / "sessions.db")
+        self.todo_store = TodoStore(paths.data_dir() / "sessions.db")
 
         # Faz 2: semantic memory (facts) + procedural memory (procedures) stores
-        self.facts_store = FactStore(Path("data") / "sessions.db")
-        self.procedure_store = ProcedureStore(Path("data") / "sessions.db")
+        self.facts_store = FactStore(paths.data_dir() / "sessions.db")
+        self.procedure_store = ProcedureStore(paths.data_dir() / "sessions.db")
         self._seed_procedures_if_empty()
 
         # Phase 4: context builder (deduplicates 5-call memory retrieval)
@@ -478,20 +504,30 @@ class JarvisAgent:
                 "PDF report: read the data, delegate plot scripting, write LaTeX, compile."
             )
             pid = self.procedure_store.add(name, description, body, source="seed")
-            self.memory.store_procedure(pid, name, description, body)
+            self.memory.store_procedure(pid, name, description, body, status="approved")
         except Exception:
             pass
 
     @property
     def _cloud_model(self) -> str:
-        """Display label for whichever role/provider served the most recent turn.
+        """Display label for whichever provider ACTUALLY served the last turn.
 
-        Faz 1: the graph now picks between the local "fast" role and the cloud
-        "reasoning" role per turn (see _is_trivially_simple/use_pro_agent in
-        chat()/chat_stream()), so a single static label no longer tells the
-        whole story — this reflects the actual choice instead. Before the
-        first turn, falls back to the old static/pinned label.
+        Stabilization sprint: when a turn has completed, the label derives
+        from LlmTraceRecorder's per-call metadata (_last_turn_trace) — the
+        pre-sprint role-derived branches below could claim "Vertex, reasoning"
+        while the Ollama fallback did the answering. Those branches now serve
+        only the pre-first-turn / pinned states, where no trace exists yet.
         """
+        trace = self._last_turn_trace
+        if trace:
+            display = {
+                "ollama": "Ollama, local",
+                "vertex": "Vertex",
+                "aistudio": "AI Studio",
+            }.get(trace["provider"], trace["provider"])
+            fb = ", fallback" if trace.get("fallback_used") else ""
+            return f"{trace['model']} ({display}{fb})"
+
         suffix = " (fallback)" if self._using_fallback else ""
         s = self._effective_settings
 
@@ -516,16 +552,26 @@ class JarvisAgent:
     def current_model_label(self) -> str:
         return self._cloud_model
 
+    @property
+    def last_turn_trace(self) -> dict | None:
+        """The last foreground turn's actual provider/model rollup (or None).
+
+        Keys: requested_role, provider, model, billable, fallback_used,
+        calls, input_tokens, output_tokens — see LlmTraceRecorder.turn_summary.
+        """
+        return self._last_turn_trace
+
     async def _acquire_state_lock(self) -> None:
         """Acquire _state_lock without blocking the calling event loop's thread."""
         await asyncio.get_running_loop().run_in_executor(None, self._state_lock.acquire)
 
-    def reset(self) -> None:
-        """Archive current session and start a fresh one. Triggers summarization if content exists.
+    def _reset_state_sync(self) -> tuple[str, bool]:
+        """The lock-guarded state mutation shared by reset()/reset_async().
 
-        Synchronous + blocking acquire — safe from the CLI's sync context;
-        callers on an event loop (e.g. the /reset endpoint) must offload this
-        via run_in_executor so they don't freeze the loop while it waits.
+        Pure sync work (SQLite archive + new session + in-memory clears) with
+        NO event-loop interaction — safe to run on any thread, including
+        asyncio.to_thread workers. Returns (old_session_id, had_content) so
+        the caller decides whether/where to schedule summarization.
         """
         with self._state_lock:
             old_session_id = self.session_id
@@ -534,8 +580,44 @@ class JarvisAgent:
             self.session_id = self.session_store.new_session()
             self._history = []
             self._turn = 0
+        return old_session_id, had_content
+
+    def reset(self) -> None:
+        """Archive the current session and start a fresh one (sync variant).
+
+        NOT a delete: the old session stays in the session store and any
+        conversation memory already embedded into ChromaDB stays there too.
+        Summarization is fire-and-forget and only possible when the calling
+        thread has a running event loop (_schedule_summarize_one no-ops with
+        a warning otherwise) — a skipped summary never fails the reset.
+        Async callers (API endpoints, the CLI's async REPL) should prefer
+        reset_async(), which never blocks the loop on the SQLite work.
+        """
+        old_session_id, had_content = self._reset_state_sync()
         if had_content:
-            self._schedule_summarize_one(old_session_id)
+            try:
+                self._schedule_summarize_one(old_session_id)
+            except Exception as exc:
+                print(f"[reset] summary scheduling failed (reset itself OK): {exc}")
+        event_bus.session(self.session_id, None)
+
+    async def reset_async(self) -> None:
+        """Archive the current session and start a fresh one (async variant).
+
+        Fixes the POST /reset 500: the old shape ran the whole sync reset()
+        inside run_in_executor, so _schedule_summarize_one's create_task ran
+        on a worker thread with no running loop and raised RuntimeError.
+        Here the blocking state mutation goes to a worker thread via
+        to_thread, and summarization is scheduled only after control returns
+        to the event loop — where create_task is legal. A scheduling failure
+        logs and moves on; the reset has already succeeded by then.
+        """
+        old_session_id, had_content = await asyncio.to_thread(self._reset_state_sync)
+        if had_content:
+            try:
+                self._schedule_summarize_one(old_session_id)
+            except Exception as exc:
+                print(f"[reset] summary scheduling failed (reset itself OK): {exc}")
         event_bus.session(self.session_id, None)
 
     def switch_session(self, session_id: str) -> int:
@@ -642,17 +724,31 @@ class JarvisAgent:
 
     # ── Session summarization (Faz 13-A, fire-and-forget) ─────────────────────
 
+    def run_startup_backfill(self) -> None:
+        """Call once the real event loop is up — cli.py's _run_loop()/
+        _run_voice_loop() and api.py's lifespan(), right alongside
+        connect_mcp_tools() (same "must be the real long-lived loop, not
+        __init__" constraint). GPT-5.6 review remediation, Faz 7 (verdict
+        #17, CONFIRMED): _schedule_summary_backfill() below was only ever
+        called from __init__, which both real entry points run *before*
+        asyncio.run()/uvicorn start their loop — so `sessions_needing_
+        summary()` was always non-empty potential work that silently never
+        executed. Safe to call more than once (idempotent): fires only for
+        sessions still missing a summary, so a second call from a resumed
+        session (e.g. --api's lifespan running after CLI already backfilled)
+        just finds nothing left to do.
+        """
+        self._schedule_summary_backfill()
+
     def _schedule_summary_backfill(self) -> None:
         """On startup: summarize+embed all archived sessions that have no summary yet.
 
-        No-ops if there's no event loop running yet — true in both real entry
-        points (cli.py/api.py construct JarvisAgent before asyncio.run()/
-        uvicorn start their loop), not just tests. Known gap: this means
-        backfill currently never actually runs; left as-is for Faz 0 (would
-        need the CLI/API entry points to re-invoke this once their loop is
-        up — out of scope for a data-integrity-only pass). Checking for a
-        loop *before* constructing the coroutine (rather than catching the
-        RuntimeError from create_task after the fact) avoids leaking an
+        No-ops if there's no event loop running yet — true of the
+        __init__-time call (constructed before asyncio.run()/uvicorn start
+        their loop in both real entry points) but not of run_startup_
+        backfill()'s later call once that loop is actually running. Checking
+        for a loop *before* constructing the coroutine (rather than catching
+        the RuntimeError from create_task after the fact) avoids leaking an
         unawaited coroutine object each time.
         """
         pending = self.session_store.sessions_needing_summary()
@@ -690,7 +786,20 @@ class JarvisAgent:
         task.add_done_callback(self._bg_tasks.discard)
 
     def _schedule_summarize_one(self, session_id: str) -> None:
-        """Fire-and-forget: summarize a single just-archived session."""
+        """Fire-and-forget: summarize a single just-archived session.
+
+        No-ops (with a visible warning) when the calling thread has no
+        running event loop — same guard idiom as _schedule_summary_backfill,
+        and checked BEFORE building the coroutine to avoid leaking an
+        unawaited coroutine object. This was the POST /reset 500 root cause:
+        an unguarded create_task on an executor worker thread.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            print(f"[reset] no running event loop — summary for {session_id} skipped")
+            return
+
         async def _do() -> None:
             from jarvis.session_summarizer import summarize_session
             from datetime import datetime as _dt
@@ -821,9 +930,13 @@ class JarvisAgent:
                 "critique": "",
                 "transport": transport,
             }
+            recorder = LlmTraceRecorder(
+                usage=self.usage,
+                requested_role="reasoning" if use_pro_agent else "fast",
+            )
             config = {
                 "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
-                "callbacks": [_HudEventCallback(transport)],
+                "callbacks": [_HudEventCallback(transport), recorder],
                 # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
                 # model stuck retrying a tool call fails clearly instead of
                 # looping unbounded.
@@ -847,7 +960,7 @@ class JarvisAgent:
             except Exception as exc:
                 msg = str(exc)
                 if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
-                    print(f"\n[JARVIS] Quota hit — falling back to AI Studio Flash.")
+                    print("\n[JARVIS] Quota hit — falling back to AI Studio Flash.")
                     self._using_fallback = True
                     import copy
                     # BUG-22: base the fallback on _effective_settings (which
@@ -874,7 +987,15 @@ class JarvisAgent:
                         response = m.content
                         break
 
-            self._record_usage_from_result(result, use_pro_agent)
+            # Runtime truth: label the turn with the provider that ACTUALLY
+            # answered (per-tier callback metadata), not the requested role.
+            # Usage is recorded live by the recorder's on_llm_end callback
+            # (one UsageTracker.record per real LLM call, including a quota-
+            # fallback's re-invocation above, which reuses the same config)
+            # -- no post-hoc rescan of result["messages"] needed anymore.
+            trace = recorder.turn_summary()
+            if trace:
+                self._last_turn_trace = trace
 
             all_msgs = result.get("messages", [])
             non_system = [m for m in all_msgs if not isinstance(m, SystemMessage)]
@@ -898,25 +1019,6 @@ class JarvisAgent:
         event_bus.state("idle")
 
         return response, self.current_model_label
-
-    def _record_usage_from_result(self, result: dict, use_pro_agent: bool) -> None:
-        from langchain_core.messages import AIMessage as LCAIMessage
-        model_id = self._active_model_id or (
-            f"vertex/{self.settings.vertex_model_primary}" if use_pro_agent
-            else f"vertex/{self.settings.vertex_model_fast}"
-        )
-        for msg in result.get("messages", []):
-            if not isinstance(msg, LCAIMessage):
-                continue
-            um = getattr(msg, "usage_metadata", None)
-            if not um:
-                continue
-            msg_model = getattr(msg, "response_metadata", {}).get("model_name", model_id)
-            self.usage.record(
-                msg_model,
-                um.get("input_tokens", 0),
-                um.get("output_tokens", 0),
-            )
 
     async def chat_stream(
         self,
@@ -979,9 +1081,13 @@ class JarvisAgent:
                 "critique": "",
                 "transport": transport,
             }
+            recorder = LlmTraceRecorder(
+                usage=self.usage,
+                requested_role="reasoning" if use_pro_agent else "fast",
+            )
             config = {
                 "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
-                "callbacks": [_HudEventCallback(transport)],
+                "callbacks": [_HudEventCallback(transport), recorder],
                 # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
                 # model stuck retrying a tool call fails clearly instead of
                 # looping unbounded.
@@ -1027,6 +1133,12 @@ class JarvisAgent:
 
             full_response = "".join(chunks)
 
+            # Runtime truth: streaming fires the same on_chat_model_start/
+            # on_llm_end callbacks, so the trace is just as real here.
+            stream_trace = recorder.turn_summary()
+            if stream_trace:
+                self._last_turn_trace = stream_trace
+
             # Rebuild history from checkpointer to preserve tool messages (Faz 12-B fix)
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
@@ -1043,18 +1155,14 @@ class JarvisAgent:
                 non_system.append(AIMessage(content=full_response))
                 self._history = _strip_images_for_storage(_trim_history(non_system))
 
-            # Token usage estimate (streaming doesn't return metadata)
-            all_text = " ".join(
-                m.content for m in initial_messages
-                if hasattr(m, "content") and isinstance(m.content, str)
-            )
-            est_in = max(1, len(all_text) // 4)
-            est_out = max(1, len(full_response) // 4)
-            model_id = self._active_model_id or (
-                f"vertex/{self.settings.vertex_model_primary}" if use_pro_agent
-                else f"vertex/{self.settings.vertex_model_fast}"
-            )
-            self.usage.record(model_id, est_in, est_out)
+            # Usage is recorded live by the recorder's on_llm_end callback
+            # (real usage_metadata when the provider reports it mid-stream —
+            # stream_usage=True on the Ollama tier, see providers/__init__.py).
+            # The old len//4 estimate always priced the turn as the requested
+            # Vertex model regardless of which provider actually answered
+            # (the exact bug this sprint fixes) -- a provider that reports no
+            # usage during streaming now records 0 tokens rather than a wrong
+            # guess; cost is never overstated, only possibly under-reported.
 
             # Persist conversation state to SQLite
             self.session_store.save_turn(self.session_id, self._history, self._turn)
@@ -1202,9 +1310,18 @@ class JarvisAgent:
                 "critique": "",
                 "transport": f"monitor-{source}",
             }
+            # Usage IS recorded for a proactive turn (real tokens were really
+            # spent) — only the foreground /status label is left untouched
+            # (_last_turn_trace is never written below), so a background
+            # self-check can never clobber what the user sees as "the last
+            # thing I asked".
+            recorder = LlmTraceRecorder(
+                usage=self.usage,
+                requested_role="reasoning" if use_pro_agent else "fast",
+            )
             config = {
                 "configurable": {"thread_id": f"{self.session_id}-proactive-{uuid.uuid4().hex[:8]}"},
-                "callbacks": [_HudEventCallback(f"monitor-{source}")],
+                "callbacks": [_HudEventCallback(f"monitor-{source}"), recorder],
                 "recursion_limit": self.settings.graph_recursion_limit,
             }
             try:
@@ -1237,3 +1354,106 @@ class JarvisAgent:
         if not text or text.upper().startswith(_NO_ACTION_MARKER):
             return ProactiveOutcome(kind="none")
         return ProactiveOutcome(kind="response", text=text)
+
+    async def background_turn(self, user_query: str, *, transport: str = "task-async") -> str:
+        """Entry point for TaskExecutor's user-initiated (not proactive)
+        background jobs -- deep research, geo-math sims, finance reports,
+        anything long enough to run off-thread while the user keeps chatting.
+
+        GPT-5.6 review remediation, Faz 5: TaskExecutor._run() used to call
+        self.chat() directly, which (a) read/appended self._history mid-flight
+        -- interleaving the background task's own exchange into the live
+        conversation transcript the user is looking at, mid-turn -- and (b)
+        held _state_lock for the *entire* LLM/tool loop, so a long background
+        task blocked every foreground chat()/chat_stream() call for its whole
+        duration. Both fixed the same way proactive_turn() already fixes the
+        "don't touch live state mid-flight" half: this runs on its own
+        LangGraph thread_id with its own local message list, never reading
+        self._history/self._turn during the (potentially long) ainvoke() call
+        -- so _state_lock is only ever held for the brief final append below,
+        not the task itself. Unlike proactive_turn(), this DOES get the full
+        system prompt (real memory/facts/procedure/vault context) since it's
+        a genuine user-requested task, not a background self-check -- and it
+        DOES raise ConfirmationRequired on an L3 interrupt (TaskExecutor
+        already catches this and reports "ask me interactively instead",
+        same as chat() callers do; there is no resumption path for a
+        background thread_id, so the interrupt is not registered into
+        self._pending_confirmations).
+
+        On success, the exchange is appended to the *real* self._history as a
+        synthetic user/assistant pair (not the raw isolated message list) so
+        the user's next live turn has it as context and it survives a
+        session_store reload -- "confirm-or-notify, not silent execution"
+        cuts both ways: a background result must be visible later, just not
+        while it's still running.
+        """
+        await self.connect_mcp_tools()  # no-op after the first real connect
+
+        ctx = self._context_builder.build(user_query, session_id=self.session_id)
+        system_prompt = _load_system_prompt(
+            self.settings, ctx.memory_ctx, "tr",
+            self._env_block, user_query, ctx.entities_block,
+            ctx.past_sessions_block, ctx.open_todos_block,
+            ctx.facts_block, ctx.procedure_block,
+        )
+        use_pro_agent = not _is_trivially_simple(user_query, False)
+        state = {
+            "messages": [SystemMessage(content=system_prompt), HumanMessage(content=user_query)],
+            "user_query": user_query,
+            "language": "tr",
+            "memory_context": ctx.memory_ctx,
+            "needs_planning": False,
+            "use_pro_agent": use_pro_agent,
+            "plan": "",
+            "response": "",
+            "revise_count": 0,
+            "critic_verdict": "",
+            "critique": "",
+            "transport": transport,
+        }
+        # Usage IS recorded for a background turn — only the foreground
+        # /status label is left untouched (same rule as proactive_turn).
+        recorder = LlmTraceRecorder(
+            usage=self.usage,
+            requested_role="reasoning" if use_pro_agent else "fast",
+        )
+        config = {
+            "configurable": {"thread_id": f"{self.session_id}-task-{uuid.uuid4().hex[:8]}"},
+            "callbacks": [_HudEventCallback(transport), recorder],
+            "recursion_limit": self.settings.graph_recursion_limit,
+        }
+
+        try:
+            result = await self._graph.ainvoke(state, config=config)
+        except GraphInterrupt as exc:
+            try:
+                payload = exc.args[0][0].value
+            except Exception:
+                payload = {}
+            raise ConfirmationRequired(str(uuid.uuid4()), payload) from exc
+
+        response = result.get("response", "")
+        if not response:
+            from langchain_core.messages import AIMessage
+            for m in reversed(result.get("messages", [])):
+                if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+                    response = m.content
+                    break
+
+        # Brief critical section -- not held across the ainvoke() above -- to
+        # append this result into the *real* history, same shared-state
+        # invariant _state_lock protects everywhere else (BUG-8).
+        from langchain_core.messages import AIMessage
+        await self._acquire_state_lock()
+        try:
+            self._history = self._history + [
+                HumanMessage(content=f"[Background task] {user_query}"),
+                AIMessage(content=response),
+            ]
+            self.session_store.save_turn(self.session_id, self._history, self._turn)
+        finally:
+            self._state_lock.release()
+
+        self.memory.store("user", user_query, self.session_id)
+        self.memory.store("assistant", response, self.session_id)
+        return response
