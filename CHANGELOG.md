@@ -6,6 +6,94 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Patch 1.2 + Sprint 2 + model A/B: kabiliyet regresyonu] — 2026-07-17
+
+**Bağlam:** Owner "eskiden takvime ekleme gibi işleri yapıyordu, şimdi yapamıyor" dedi. Teşhis
+(kodda doğrulandı): kabiliyet kaybı kod çürümesi DEĞİL, motor değişimi — "takvim" çalışırken
+non-trivial her turn cloud Gemini'ye gidiyordu; `CLOUD_POLICY=off` (maliyet kararı) sonrası her
+şey qwen2.5:7b'ye düştü ve o model ~34 araç + uzun prompt altında tool-call kanalını
+kullanamıyor. İkinci dış review (ChatGPT-5.6, `GPT_Analysis.md`) modelin tek suçlu olmadığını
+gösterdi: 8 modelden-bağımsız gerçek bug. Bu üç fazlı çalışma o planı uyguladı. **34+38 yeni test
+(324/324 pytest yeşil), ruff temiz**, artı canlı kabul turu (aşağıda).
+
+### Patch 1.2 — Tool Runtime Safety (deterministik, LLM'den bağımsız)
+- **`imap-tools` bağımlılığı eklendi** (`requirements.txt`/lock) — E15 canlı: temiz kurulumda
+  `itu_mail` `No module named 'imap_tools'` ile `/chat`'i 500'lüyordu.
+- **SafeToolNode** (`jarvis/graph/safe_tools.py`): tool-body exception'ları artık yapılandırılmış
+  `[TOOL_ERROR]` ToolMessage'a dönüyor (kategori + retryable; sanitize edilmiş tek satır,
+  traceback/credential sızmaz) — graph tool hatasıyla ölmüyor, model tepki verebiliyor. LangGraph'ın
+  default `handle_tool_errors`'ı yalnız `ToolInvocationError`'ı yakalıyordu.
+- **Deterministik tool-call sınırları** (`nodes.py` confirmation node başı, policy'den önce,
+  router'dan bağımsız): batch≤4, turn≤6, round≤2, identical=1 — aşan batch KOMPLE reddedilir. Canlı
+  A2: qwen2.5 tek-satırlık selamlamaya ~20 çağrılık halüsinasyon batch'i (2 mail send) üretmişti;
+  tek savunma external-write gate'iydi. Yeni `tool_execution_ledger` + `tool_result_accounting`
+  node'u (tools SONRASI çalışan, çağrının nasıl bittiğini bilen tek yer) `seen`/`completed`
+  fingerprint ayrımını tutuyor. Audit blok kayıtları `batch_size`/`turn_attempted_count`/
+  `unique_tool_count`/`external_write_count` ile zenginleştirildi.
+- **`GraphRecursionError` → ledger-bazlı kontrollü cevap** (F16'nın opak 500'ü yerine): en az bir
+  başarılı tool varsa "tamamlananlar korundu", yoksa "doğrulanamadı" — asla battaniye iddia.
+  `/chat` 200, `/chat/stream` normal SSE; yarım turn history'ye yazılmaz.
+- **ProcedureStore idempotency** (F16: 10 duplicate draft): content fingerprint + güvenli migration
+  (backfill → approved-öncelikli canonical → `archived_duplicate` → partial UNIQUE index — mevcut
+  duplicate'ler yüzünden index doğrudan kurulamaz). `add_or_get()` → `ProcedureAddResult(id, created)`;
+  duplicate'ta `[ALREADY_EXISTS]` döner ve Chroma'ya ikinci kez yazmaz.
+- **Context hygiene / turn compaction** (A2→A3 kök nedeni): history'ye artık yalnız gerçek
+  kullanıcı mesajı + nihai cevap (+ opsiyonel tek satır tool özeti) giriyor; raw batch/stub/
+  policy-ack/critic mesajları checkpoint/audit/ledger'da kalıyor. `_trim_history` mesaj-sayısı
+  yerine tamamlanmış-turn bazlı (max 10). Eskiden bir halüsinasyon batch'i 20-mesaj penceresini
+  taşırıp kullanıcının az önce söylediği bilgiyi ("rengim mavi") atıyordu.
+
+### Sprint 2 — Capability router + graph separation
+- **Deterministik capability router** (`jarvis/graph/tool_router.py`): kelime-sınırlı (`\b`) TR+EN
+  tablo → `ToolRoute(primary_domain, domains≤3, confidence, explicit_tool_intent)`; conversation=0
+  araç, belirsiz istek ASLA full set, toplam subset≤8. `ToolSpec.domain` alanı + 13-domain haritası;
+  MCP araçları 'mcp' karantinasında (açık browser/otomasyon ifadesi olmadan hiçbir turn'e açılmaz);
+  `procedure_save` yalnız açık "prosedür kaydet" niyetinde. `_is_trivially_simple` + iki substring
+  sinyal seti emekli ("ok"∈"çok", "hi"∈"tarihi" bug sınıfı öldü).
+- **Turn-scoped binding**: `make_agent_node` artık state[tool_route] → subset → (role,subset)-başına
+  `get_llm` cache'i bind ediyor; route yoksa (arka plan/eski checkpoint) full set. Hiçbir yer artık
+  ~34 şemayı birden bind etmiyor.
+- **Graph ayrımı** (F16'nın döngüsünü yapısal kırar): yeni **bare compose node** (sıfır tool
+  şeması) nihai cevabı üretiyor — tanık olduğu çağrıyı yeniden düzenlemesi imkânsız.
+  `tools→tool_result_accounting→post_tool_router→(compose|agent)`: tek-adımlı başarı→compose;
+  multi-step şekil (planner veya multi-domain route) + round bütçesi→agent. Critic fake
+  `HumanMessage` enjeksiyonu kaldırıldı — critique yalnız state'te, compose node-lokal
+  SystemMessage ile uygular; revizyon bare compose'dan geçer.
+
+### Faz 3 — Yerel model A/B: qwen2.5:7b → **qwen3:8b** (default değişti)
+Aynı 16-senaryo suite, `temperature=0`, aynı scoped subset'ler, `--profile test`:
+- **qwen2.5:7b: SIFIR gerçek tool çağrısı** — "dosyayı oluşturdum/maili gönderdim" hepsi
+  halüsinasyon metni, tool katmanına hiç ulaşmadı (audit boş, diskte dosya yok). Başarısızlıktan
+  beter: güvenlik gate'leri devreye bile girmedi.
+- **qwen3:8b: gerçek iyi-biçimli çağrılar** — `file_write` GERÇEKTEN yazdı, `shell_run` dir
+  GERÇEKTEN çalıştı → external-write gate, shell deny-list, SSRF guard, killswitch İLK KEZ uçtan
+  uca gerçek çağrılarla doğrulandı. 8 GB RTX 4070 Laptop VRAM'e sığıyor.
+- Local tier `temperature=0` (deterministik tool-calling + A/B tekrarlanabilirliği).
+
+### Yol boyunca CANLI bulunan 3 gerçek bug (A/B'den bağımsız, kalıcı düzeltme)
+1. **langgraph 1.2.x non-streaming `ainvoke()` dinamik interrupt'i RAISE etmiyor**, `result["__interrupt__"]`'te
+   döndürüyor → `/chat`'in `except GraphInterrupt`'i hiç tetiklenmiyordu, onay payload'u sessizce
+   düşüyordu (Faz 4'ten beri latent — yalnız streaming CLI/voice yolları canlı doğrulanmıştı).
+   chat/proactive/background üç giriş noktası da value-surface'i ele alıyor.
+2. **Boş-cevap fallback'i tüm mesaj listesini tarıyordu** → replay edilen history'ye uzanıp önceki
+   turn'ün cevabını aynen döndürüyordu (canlı "echo"). Artık yalnız bu turn'ün mesajlarına bakıyor.
+3. **`graph_stream_to_text` yalnız "agent" node'unu stream ediyordu**; Sprint 2 sonrası final cevap
+   "compose"dan geliyor → onaylanan `shell_run` boş stream dönüyordu. Compose da stream ediliyor.
+
+### Kabul turu (16 senaryo, qwen3:8b default, ground-truth: audit + dosya sistemi)
+GPT-5.6'nın kabul metrik tablosu: **HTTP 500 = 0** · raw-JSON/pseudo final = 0 · uydurma tool adı =
+0 · aynı tool+args tekrarı = 0 (F16 tek draft) · izinsiz dış yan etki = 0 · **A2→A3 short-term
+recall = GEÇER** · gerçek tool-call üretimi ≈ %100 (tool gerektiren her testte) · doğru domain
+seçimi 15/15 · **maliyet $0.00**. E15/E14 kimlik-yok artık düzgün `[TOOL_ERROR]`/hata mesajı (500
+değil); killswitch izole doğrulandı (temiz session, off → `blocked_kill_switch`).
+
+**Bilinen sınır (yeni):** aynı tool-isteği önceki turn'de geçmişte varsa, model tool çağırmadan
+önceki turn'ün cevabını yankılayabiliyor (D13b canlıda: killswitch testini geçersiz kıldı —
+killswitch'in kendisi izole testte sağlam). Turn compaction'ın özet-satırının yan etkisi;
+sonraki iterasyona bırakıldı.
+
+---
+
 ## [Stabilizasyon Patch 1.1: dış review düzeltmeleri] — 2026-07-16
 
 Stabilizasyon sprintinin (aşağıda) dış incelemesi (ChatGPT-5.6, sprint commit'i `c7f2b63`
