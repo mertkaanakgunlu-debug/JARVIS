@@ -89,12 +89,31 @@ _DOMAIN_PATTERNS: dict[str, list[str]] = {
     "mcp": [r"\btarayıcı", r"\bbrowser\b", r"\bplaywright\b", r"\bmcp\b", r"\btıkla", r"\bclick\b"],
 }
 
+# Turkish diacritic fold. ASR transcripts and casual typing routinely drop
+# ç/ğ/ı/ö/ş/ü (and the ' in "Drive'a"), which silently broke routing — a
+# closure sweep found "grafik ciz" → conversation (no tools), "Spotifyda çal"
+# → conversation, "Drivea yükle" → files (google_drive invisible). Folding BOTH
+# the query and the pattern sources to lowercase ASCII fixes it and, as a
+# bonus, sidesteps the Turkish İ/ı re.IGNORECASE casing trap this module's
+# header already warns about (the "ok in çok" incident). translate() only
+# rewrites letters, so regex metacharacters (\b \. \w (|) ? + [-]) are untouched.
+_TR_FOLD = str.maketrans({
+    "ç": "c", "ğ": "g", "ı": "i", "İ": "i", "ö": "o", "ş": "s", "ü": "u", "I": "i",
+    "Ç": "c", "Ğ": "g", "Ö": "o", "Ş": "s", "Ü": "u",
+})
+
+
+def _fold(s: str) -> str:
+    """Lowercase + Turkish-diacritic-fold to ASCII for diacritic-insensitive matching."""
+    return s.translate(_TR_FOLD).lower()
+
+
 _COMPILED: dict[str, list[re.Pattern]] = {
-    domain: [re.compile(p, re.IGNORECASE) for p in patterns]
+    domain: [re.compile(_fold(p), re.IGNORECASE) for p in patterns]
     for domain, patterns in _DOMAIN_PATTERNS.items()
 }
 
-_EXPLICIT_INTENT = re.compile(r"\baracıyla|\baraç\b|\btool\b|\bkullanarak", re.IGNORECASE)
+_EXPLICIT_INTENT = re.compile(_fold(r"\baracıyla|\baraç\b|\btool\b|\bkullanarak"), re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -128,7 +147,7 @@ class ToolRoute:
 
 def classify_query(query: str) -> ToolRoute:
     """Score every domain by distinct pattern hits; no hits ⇒ conversation."""
-    text = query or ""
+    text = _fold(query or "")  # diacritic-insensitive: patterns are folded to match
     scores: dict[str, int] = {}
     for domain, patterns in _COMPILED.items():
         hits = sum(1 for p in patterns if p.search(text))
