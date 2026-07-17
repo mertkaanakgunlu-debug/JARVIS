@@ -1,0 +1,2 @@
+Bu run'da workspace kokune veya data/plots/ altina hicbir dosya olusmadi.
+(grafik/plot testi gibi 'basarili' gorunen ama gercekte dosya uretmeyen durumlar icin bu dosyanin YOKLUGU onemli bir kanittir.)
