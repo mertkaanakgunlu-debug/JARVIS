@@ -24,3 +24,18 @@ class JarvisState(TypedDict):
     transport: str       # Faz 4: "cli-text" | "voice-cli" | "voice-local" | "voice-remote"
                           # | "api" | "api-stream" | "api-upload" | "task-async" — set by
                           # JarvisAgent.chat()/chat_stream(); audit_log's provenance tag
+
+    # ── Patch 1.2 (Faz 1B): deterministic per-turn tool-execution accounting ──
+    # All five are reset explicitly in the initial state of every turn (each
+    # turn also gets a fresh thread_id, so nothing leaks via the checkpointer)
+    # and read with .get() everywhere — old checkpoints without them resume
+    # fine. seen vs completed is deliberate: `seen` is stamped the moment a
+    # call reaches the policy layer (so a FAILED call's exact repeat is still
+    # blocked), `completed` only after the tool actually returned a
+    # non-error result (stamped by tool_result_accounting, the only node
+    # that runs after real execution — the confirmation node can't know).
+    tool_calls_attempted: int          # every call that hit the gate: run, failed or blocked
+    tool_rounds: int                   # how many tool batches the agent produced this turn
+    seen_tool_fingerprints: list[str]      # sha256(tool + canonical args) at policy time
+    completed_tool_fingerprints: list[str]  # subset of seen that actually succeeded
+    tool_execution_ledger: list[dict]  # {"tool", "fingerprint", "ok", "content_head"} per call

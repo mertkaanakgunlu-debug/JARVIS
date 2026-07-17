@@ -105,6 +105,7 @@ huggingface_hub==1.23.0
 hyperframe==6.1.0
 idna==3.18
 importlib_resources==7.1.0
+imap_tools==1.13.0
 iniconfig==2.3.0
 jaraco.classes==3.4.0
 jaraco.context==6.1.2

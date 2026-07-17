@@ -19,8 +19,10 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -38,7 +40,8 @@ CREATE TABLE IF NOT EXISTS procedures (
     approved_at   TEXT,
     created_at    TEXT NOT NULL,
     last_used_at  TEXT,
-    use_count     INTEGER DEFAULT 0
+    use_count     INTEGER DEFAULT 0,
+    fingerprint   TEXT
 );
 """
 
@@ -53,11 +56,32 @@ _MIGRATION_COLUMNS = {
     "status": "ALTER TABLE procedures ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'",
     "created_by": "ALTER TABLE procedures ADD COLUMN created_by TEXT",
     "approved_at": "ALTER TABLE procedures ADD COLUMN approved_at TEXT",
+    # Patch 1.2 (Faz 1C): content identity for idempotency — see add_or_get().
+    "fingerprint": "ALTER TABLE procedures ADD COLUMN fingerprint TEXT",
 }
 
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _normalize(text: str) -> str:
+    """Whitespace-collapsed, case-folded — cosmetic edits don't defeat identity."""
+    return " ".join((text or "").split()).lower()
+
+
+def compute_fingerprint(name: str, description: str, body: str, source: str = "agent") -> str:
+    """Content identity of a procedure: same (normalized) fields ⇒ same hash."""
+    payload = "\x1f".join((_normalize(name), _normalize(description), _normalize(body), source))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class ProcedureAddResult:
+    """Store-layer answer to add_or_get() — the caller renders any user/model
+    text (layer separation: the store never returns display strings)."""
+    procedure_id: int
+    created: bool
 
 
 def default_status_for_source(source: str) -> str:
@@ -79,10 +103,10 @@ class ProcedureStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._path = db_path
         self._lock = threading.Lock()
-        self._conn = self._open(db_path)
+        self._conn, self.archived_duplicate_ids = self._open(db_path)
 
     @staticmethod
-    def _open(db_path: Path) -> sqlite3.Connection:
+    def _open(db_path: Path) -> tuple[sqlite3.Connection, list[int]]:
         conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
@@ -91,19 +115,76 @@ class ProcedureStore:
         for column, ddl in _MIGRATION_COLUMNS.items():
             if column not in existing:
                 conn.execute(ddl)
-        return conn
+
+        # ── Patch 1.2 (Faz 1C) idempotency migration, in strict order ──
+        # A pre-existing db can already hold content-duplicate rows (live
+        # incident F16: procedure_save re-issued ~10 times, every INSERT
+        # accepted), so the UNIQUE index CANNOT be created first: backfill
+        # fingerprints, archive the duplicate rows, THEN index.
+        # (1) backfill fingerprints for legacy rows
+        for r in conn.execute(
+            "SELECT id, name, description, body, source FROM procedures WHERE fingerprint IS NULL"
+        ).fetchall():
+            conn.execute(
+                "UPDATE procedures SET fingerprint=? WHERE id=?",
+                (compute_fingerprint(r["name"], r["description"], r["body"], r["source"] or "agent"), r["id"]),
+            )
+        # (2) archive non-canonical duplicates. Canonical = an approved row if
+        # any (never demote an approved copy in favor of a draft twin), else
+        # the earliest row. Archived rows keep their content but leave every
+        # live query (drafts list, recall sync, the unique index below).
+        archived: list[int] = []
+        for g in conn.execute(
+            "SELECT fingerprint FROM procedures WHERE status != 'archived_duplicate' "
+            "GROUP BY fingerprint HAVING COUNT(*) > 1"
+        ).fetchall():
+            rows = conn.execute(
+                "SELECT id FROM procedures WHERE fingerprint=? AND status != 'archived_duplicate' "
+                "ORDER BY (status='approved') DESC, id ASC",
+                (g["fingerprint"],),
+            ).fetchall()
+            for r in rows[1:]:
+                conn.execute("UPDATE procedures SET status='archived_duplicate' WHERE id=?", (r["id"],))
+                archived.append(r["id"])
+        # (3) unique index over live rows only — archived history stays put.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_procedures_fingerprint_live "
+            "ON procedures(fingerprint) WHERE status != 'archived_duplicate'"
+        )
+        return conn, archived
+
+    def add_or_get(
+        self, name: str, description: str, body: str,
+        source: str = "agent", created_by: str = "",
+    ) -> ProcedureAddResult:
+        """Idempotent insert: same (normalized) content ⇒ the existing row.
+
+        The check-then-insert runs under the store lock (single writer per
+        process); the partial UNIQUE index backstops cross-process races.
+        status is derived from source, not caller-settable — see
+        default_status_for_source().
+        """
+        status = default_status_for_source(source)
+        fp = compute_fingerprint(name, description, body, source)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM procedures WHERE fingerprint=? AND status != 'archived_duplicate'",
+                (fp,),
+            ).fetchone()
+            if row:
+                return ProcedureAddResult(procedure_id=row["id"], created=False)
+            cur = self._conn.execute(
+                """INSERT INTO procedures (name, description, body, source, status, created_by, created_at, fingerprint)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (name, description, body, source, status, created_by, _now_iso(), fp),
+            )
+        return ProcedureAddResult(procedure_id=cur.lastrowid, created=True)
 
     def add(self, name: str, description: str, body: str, source: str = "agent", created_by: str = "") -> int:
-        """Insert a new procedure. Returns the new row id. status is derived
-        from source, not caller-settable — see default_status_for_source()."""
-        status = default_status_for_source(source)
-        with self._lock:
-            cur = self._conn.execute(
-                """INSERT INTO procedures (name, description, body, source, status, created_by, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (name, description, body, source, status, created_by, _now_iso()),
-            )
-        return cur.lastrowid
+        """Back-compat shim over add_or_get() — returns the row id either way.
+        (Pre-Patch-1.2 this was an unconditional INSERT; the F16 duplicate
+        pile-up came through exactly here.)"""
+        return self.add_or_get(name, description, body, source, created_by).procedure_id
 
     def get_all(self) -> list[dict[str, Any]]:
         with self._lock:

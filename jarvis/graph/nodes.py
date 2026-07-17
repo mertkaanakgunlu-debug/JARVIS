@@ -383,6 +383,7 @@ def make_confirmation_node(settings):
     from langgraph.types import interrupt as _interrupt
     from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
     from jarvis import audit_log, policy_guard
+    from jarvis.graph.tool_accounting import tool_call_fingerprint
 
     async def confirmation_node(state: JarvisState) -> dict:
         last_ai: AIMessage | None = None
@@ -400,6 +401,124 @@ def make_confirmation_node(settings):
             tc.get("id"): policy_guard.evaluate(tc.get("name", ""), tc.get("args", {}) or {}, settings)
             for tc in last_ai.tool_calls
         }
+
+        # ── Patch 1.2 (Faz 1B): deterministic pre-gate, BEFORE policy audit ──
+        # LLM-independent limits (live incident A2: ~20 hallucinated calls,
+        # 2 email sends, off a one-line smalltalk turn). Router-independent by
+        # design: even if Faz 2's capability router misroutes, these hold.
+        # Check order per the external review: (1) batch size (2) turn budget
+        # (3) duplicate fingerprints (4) policy/risk/confirmation below.
+        batch = list(last_ai.tool_calls)
+        batch_fps = [
+            tool_call_fingerprint(tc.get("name", ""), tc.get("args") or {})
+            for tc in batch
+        ]
+        rich = {  # measurement fields on every block record (A2 stays quantifiable)
+            "batch_size": len(batch),
+            "turn_attempted_count": int(state.get("tool_calls_attempted") or 0) + len(batch),
+            "unique_tool_count": len({tc.get("name", "") for tc in batch}),
+            "external_write_count": sum(
+                1 for tc in batch
+                if decisions[tc.get("id")].side_effect_type == "external_write"
+            ),
+        }
+        # Counters advance on EVERY processed batch — blocked ones included
+        # ("attempted" deliberately counts blocked calls; rounds count any
+        # batch the agent produced). Applied only via a completed return, so
+        # a confirmation interrupt+resume can't double-count.
+        counter_updates = {
+            "tool_calls_attempted": rich["turn_attempted_count"],
+            "tool_rounds": int(state.get("tool_rounds") or 0) + 1,
+        }
+
+        def _reject_batch(outcome: str, stub_text: str, ack_text: str, *, per_call_stubs: list[ToolMessage] | None = None) -> dict:
+            """Whole-batch refusal: executing 'just the safe part' of an
+            over-limit or duplicate-bearing batch would be guessing which part
+            of a hallucination was safe. Same stub+ack shape as the kill-switch
+            path so LangGraph state stays valid and the agent must acknowledge."""
+            audit_log.record("decision", tool="*batch*", action="", risk_level=0,
+                             transport=transport, outcome=outcome, reason=ack_text[:120], **rich)
+            stubs = per_call_stubs or [
+                ToolMessage(content=stub_text, tool_call_id=tc.get("id", "")) for tc in batch
+            ]
+            return {
+                "confirmation_result": "denied",
+                "messages": stubs + [HumanMessage(content=ack_text)],
+                **counter_updates,
+            }
+
+        max_batch = getattr(settings, "max_tool_calls_per_ai_message", 4)
+        if len(batch) > max_batch:
+            return _reject_batch(
+                "blocked_batch_limit",
+                "[BLOCKED: tool-call batch over limit -- nothing in this batch was executed]",
+                f"You issued {len(batch)} tool calls in one message; the limit is "
+                f"{max_batch}. The ENTIRE batch was rejected -- none of it ran. If tools "
+                f"are genuinely needed, re-issue at most {max_batch} essential call(s).",
+            )
+
+        max_turn = getattr(settings, "max_tool_calls_per_turn", 6)
+        already_attempted = int(state.get("tool_calls_attempted") or 0)
+        if already_attempted + len(batch) > max_turn:
+            return _reject_batch(
+                "blocked_turn_limit",
+                "[BLOCKED: per-turn tool-call budget exhausted -- this call was not executed]",
+                f"The tool-call budget for this turn ({max_turn}) is exhausted "
+                f"({already_attempted} already attempted). No further tool calls will run "
+                "this turn. Answer the user with what you already have.",
+            )
+
+        max_rounds = getattr(settings, "max_tool_rounds_per_turn", 2)
+        if int(state.get("tool_rounds") or 0) >= max_rounds:
+            return _reject_batch(
+                "blocked_round_limit",
+                "[BLOCKED: tool-round budget exhausted -- this call was not executed]",
+                f"You already used {max_rounds} tool round(s) this turn -- the budget is "
+                "spent. Do NOT issue more tool calls. Answer the user with what you have.",
+            )
+
+        seen_fps = list(state.get("seen_tool_fingerprints") or [])
+        completed_fps = set(state.get("completed_tool_fingerprints") or [])
+        dup_flags: list[bool] = []
+        within_batch: set[str] = set()
+        for fp in batch_fps:
+            dup_flags.append(fp in seen_fps or fp in within_batch)
+            within_batch.add(fp)
+        if any(dup_flags):
+            per_call = [
+                ToolMessage(
+                    content=(
+                        "[DUPLICATE_TOOL_CALL_BLOCKED] The identical call already "
+                        + ("completed successfully" if fp in completed_fps else "was attempted")
+                        + " in this turn. Do not retry it."
+                    ) if dup else
+                    "[SKIPPED: batched with a duplicate call -- re-issue this one alone if still needed]",
+                    tool_call_id=tc.get("id", ""),
+                )
+                for tc, fp, dup in zip(batch, batch_fps, dup_flags)
+            ]
+            for tc, fp, dup in zip(batch, batch_fps, dup_flags):
+                if dup:
+                    audit_log.record(
+                        "decision", tool=tc.get("name", ""), action="", risk_level=0,
+                        transport=transport, outcome="blocked_duplicate_call",
+                        reason="identical tool+args already seen this turn", **rich,
+                    )
+            return _reject_batch(
+                "blocked_duplicate_batch",
+                "",  # unused -- per_call_stubs given
+                "One or more of these tool calls were exact repeats of calls already made "
+                "this turn. Repeats never execute. Do NOT retry them; if another call in "
+                "the batch was genuinely new, re-issue only that one.",
+                per_call_stubs=per_call,
+            )
+
+        # Past the pre-gate: these calls now reach the policy layer, so their
+        # fingerprints become 'seen' (exact repeats are blocked from here on,
+        # whether this batch ends up approved, denied or vetoed).
+        counter_updates["seen_tool_fingerprints"] = seen_fps + [
+            fp for fp in batch_fps if fp not in seen_fps
+        ]
 
         for tc in last_ai.tool_calls:
             d = decisions.get(tc.get("id"))
@@ -435,7 +554,7 @@ def make_confirmation_node(settings):
                     "switch needs to be re-enabled first."
                 )
             )
-            return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg]}
+            return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
 
         # Stabilization sprint -- --profile test's structural guarantee.
         # Same hard-stop shape as the kill switch above (no interrupt, no
@@ -476,7 +595,7 @@ def make_confirmation_node(settings):
                         "Do NOT retry them. Tell the user this ran with external writes off."
                     )
                 )
-                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg]}
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
 
         # GPT-5.6 review remediation, Faz 2 (P0) -- "proactive turn not
         # structurally read-only". Faz 7 already discards a genuinely-
@@ -521,14 +640,14 @@ def make_confirmation_node(settings):
                         "user's action, say so in your response instead."
                     )
                 )
-                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg]}
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
 
         if not settings.confirmation_gate_enabled:
-            return {"confirmation_result": "approved"}
+            return {"confirmation_result": "approved", **counter_updates}
 
         confirmable = [tc for tc in last_ai.tool_calls if decisions[tc.get("id")].requires_confirmation]
         if not confirmable:
-            return {"confirmation_result": "approved"}
+            return {"confirmation_result": "approved", **counter_updates}
 
         # Interrupt — pauses the graph until resume_and_stream() is called
         tools_info = [
@@ -567,6 +686,7 @@ def make_confirmation_node(settings):
             return {
                 "confirmation_result": "denied",
                 "messages": stub_msgs + [ack_msg],
+                **counter_updates,
             }
 
         for tc in confirmable:
@@ -575,7 +695,7 @@ def make_confirmation_node(settings):
                 "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
                 transport=transport, outcome="user_approved",
             )
-        return {"confirmation_result": "approved"}
+        return {"confirmation_result": "approved", **counter_updates}
 
     confirmation_node.__name__ = "confirmation_node"
     return confirmation_node

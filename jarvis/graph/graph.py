@@ -40,9 +40,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode
 
 from jarvis.providers import get_llm
+from jarvis.graph.safe_tools import make_safe_tool_node
+from jarvis.graph.tool_accounting import make_tool_result_accounting_node
 from jarvis.graph.state import JarvisState
 from jarvis.graph.nodes import (
     make_agent_node,
@@ -168,13 +169,16 @@ def build_graph(
     confirmation_node = make_confirmation_node(settings)
     planner_node = make_planner_node(llm_pro)
     critic_node = make_critic_node(llm_pro)
-    tools_node = ToolNode(tools)
+    # Patch 1.2 (Faz 1A): tool-body exceptions become structured [TOOL_ERROR]
+    # ToolMessages instead of killing the graph run — see safe_tools.py.
+    tools_node = make_safe_tool_node(tools)
 
     builder = StateGraph(JarvisState)
     builder.add_node("agent", agent_node)
     builder.add_node("confirmation", confirmation_node)
     builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
+    builder.add_node("tool_result_accounting", make_tool_result_accounting_node())
     builder.add_node("critic", critic_node)
 
     # START → planner (if /think) or directly to agent
@@ -198,7 +202,12 @@ def build_graph(
         route_from_confirmation,
         {"tools": "tools", "agent": "agent"},
     )
-    builder.add_edge("tools", "agent")
+    # Patch 1.2 (Faz 1B): completed-fingerprint/ledger bookkeeping happens
+    # AFTER execution -- the only point that knows how a call actually ended.
+    # Faz 2B will retarget the accounting node's outgoing edge at the
+    # post_tool_router; until then it flows back to the agent as before.
+    builder.add_edge("tools", "tool_result_accounting")
+    builder.add_edge("tool_result_accounting", "agent")
 
     # critic → agent (revise) or END (accept / exhausted)
     builder.add_conditional_edges(

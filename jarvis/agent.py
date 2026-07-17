@@ -27,7 +27,7 @@ from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.errors import GraphInterrupt
+from langgraph.errors import GraphInterrupt, GraphRecursionError
 
 from jarvis.config import Settings
 from jarvis.context_builder import ContextBuilder
@@ -125,7 +125,12 @@ class _HudEventCallback(BaseCallbackHandler):
         name, risk_level = pending
         out_s = str(output)
         if ok is None:
-            ok = not (out_s.startswith("[ERROR]") or out_s.startswith("⚠") or "[BLOCKED" in out_s)
+            ok = not (
+                out_s.startswith("[ERROR]")
+                or out_s.startswith("⚠")
+                or out_s.startswith("[TOOL_ERROR]")
+                or "[BLOCKED" in out_s
+            )
         audit_log.record(
             "execution_end", tool=name, risk_level=risk_level,
             transport=self._transport, ok=ok, result_preview=out_s[:200],
@@ -310,12 +315,61 @@ def _proactive_system_prompt(settings: Settings) -> str:
     )
 
 
-def _trim_history(messages: list[Any], max_messages: int = 20) -> list[Any]:
+def _trim_history(messages: list[Any], max_turns: int = 10) -> list[Any]:
+    """Keep the last ``max_turns`` conversation turns (Patch 1.2, Faz 1D).
+
+    A turn starts at each HumanMessage and runs to the next one. The old flat
+    max_messages=20 cap let ONE polluted turn evict everything before it —
+    live incident A2→A3 (2026-07-16): a ~20-call hallucination batch's stubs
+    pushed the fact the user had just stated ("rengim mavi") out of the
+    window, so the very next turn couldn't recall it.
+    """
     from langchain_core.messages import SystemMessage as SM
     system_msgs = [m for m in messages if isinstance(m, SM)]
     non_system = [m for m in messages if not isinstance(m, SM)]
-    trimmed = non_system[-max_messages:]
-    return system_msgs + trimmed
+    starts = [i for i, m in enumerate(non_system) if isinstance(m, HumanMessage)]
+    if len(starts) > max_turns:
+        non_system = non_system[starts[-max_turns]:]
+    return system_msgs + non_system
+
+
+def _execution_summary_from_ledger(ledger: list[dict] | None) -> str:
+    """One short, non-system line for history: what ran and how it ended.
+    Deduped per (tool, outcome) — 10 identical failures read once, not 10x."""
+    if not ledger:
+        return ""
+    parts: list[str] = []
+    seen: set[tuple[str, bool]] = set()
+    for e in ledger:
+        key = (str(e.get("tool", "?")), bool(e.get("ok")))
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(f"{key[0]} {'ok' if key[1] else 'failed/blocked'}")
+    return "[Tool execution summary: " + "; ".join(parts) + "]"
+
+
+def _compact_completed_turn_for_history(
+    original_user_message: HumanMessage,
+    final_assistant_response: str,
+    execution_summary: str = "",
+) -> list[Any]:
+    """Canonical history form of a completed turn (Patch 1.2, Faz 1D).
+
+    Conversation history carries ONLY what the conversation was: the user's
+    real message and the answer they saw, plus at most one summary line for
+    tool activity. Raw tool-call batches, stub ToolMessages, policy acks and
+    critic instructions never enter it — their home is the checkpoint, the
+    audit log and the execution ledger. (An orphan ToolMessage replayed into
+    a later turn is also a wire-format violation on the OpenAI-compatible
+    endpoint, so this doubles as protocol hygiene.)
+    """
+    from langchain_core.messages import AIMessage
+    exchange: list[Any] = [original_user_message]
+    if execution_summary:
+        exchange.append(AIMessage(content=execution_summary))
+    exchange.append(AIMessage(content=final_assistant_response))
+    return exchange
 
 
 def _build_human_message(
@@ -468,6 +522,15 @@ class JarvisAgent:
         # Faz 2: semantic memory (facts) + procedural memory (procedures) stores
         self.facts_store = FactStore(paths.data_dir() / "sessions.db")
         self.procedure_store = ProcedureStore(paths.data_dir() / "sessions.db")
+        # Patch 1.2 (Faz 1C): the store's open-time migration may have just
+        # archived legacy content-duplicate rows (F16 damage) — drop their
+        # Chroma twins so semantic recall can't keep surfacing archived copies.
+        # Chroma delete of an id that was never embedded is harmless.
+        for _pid in self.procedure_store.archived_duplicate_ids:
+            try:
+                self.memory.delete_procedure(_pid)
+            except Exception:
+                pass
         self._seed_procedures_if_empty()
 
         # Phase 4: context builder (deduplicates 5-call memory retrieval)
@@ -880,6 +943,38 @@ class JarvisAgent:
         await self._mcp.close()
         self._mcp_graph_rebuilt = False
 
+    async def _recursion_stop_response(self, config: dict, transport: str) -> str:
+        """Patch 1.2 (Faz 1B): honest user-facing text when GRAPH_RECURSION_LIMIT
+        fires (live incident F16: 10 duplicate procedure drafts, then an opaque
+        HTTP 500). What actually completed comes from the execution ledger in
+        the turn's last checkpoint — a blanket "the first operation succeeded"
+        would be a lie whenever the loop started before any tool ran, or every
+        attempt errored. Callers must NOT persist the half-finished turn.
+        """
+        ledger: list[dict] = []
+        try:
+            snap = await self._graph.aget_state(config)
+            ledger = list((snap.values or {}).get("tool_execution_ledger") or [])
+        except Exception:
+            pass  # no checkpoint (e.g. loop before first tool round) — report honestly below
+        ok_tools = [e.get("tool", "?") for e in ledger if e.get("ok")]
+        audit_log.record(
+            "graph_stopped_recursion", transport=transport,
+            successful_tools=len(ok_tools), ledger_size=len(ledger),
+        )
+        if ok_tools:
+            uniq = ", ".join(dict.fromkeys(ok_tools))
+            return (
+                "JARVIS aynı işlemleri tekrar etmeye başladığı için turn güvenli "
+                "biçimde durduruldu. Başarıyla tamamlanan işlemler korundu; tekrar "
+                f"çağrıları yürütülmedi. (Tamamlanan: {uniq})"
+            )
+        return (
+            "JARVIS tekrarlayan bir araç döngüsüne girdiği için turn güvenli "
+            "biçimde durduruldu. Herhangi bir işlemin başarıyla tamamlandığı "
+            "doğrulanamadı."
+        )
+
     async def chat(
         self,
         user_input: str,
@@ -941,6 +1036,15 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": transport,
+                # Patch 1.2 (Faz 1B): explicit per-turn reset of the
+                # tool-accounting fields. A fresh thread_id already isolates
+                # the checkpointer per turn, but safety counters get an
+                # explicit zero rather than relying on that indirection.
+                "tool_calls_attempted": 0,
+                "tool_rounds": 0,
+                "seen_tool_fingerprints": [],
+                "completed_tool_fingerprints": [],
+                "tool_execution_ledger": [],
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,
@@ -971,6 +1075,18 @@ class JarvisAgent:
                 }
                 event_bus.confirmation_required(conf_id, payload)
                 raise ConfirmationRequired(conf_id, payload) from exc
+            except GraphRecursionError:
+                # Patch 1.2 (Faz 1B): the recursion limit is the last-resort
+                # loop stopper -- answer with an honest, ledger-based message
+                # instead of the opaque HTTP 500 of live incident F16. The
+                # half-finished turn is deliberately NOT persisted to history
+                # or episodic memory (early return skips both).
+                response = await self._recursion_stop_response(config, transport)
+                trace = recorder.turn_summary()
+                if trace:
+                    self._last_turn_trace = trace
+                event_bus.state("idle")
+                return response, self.current_model_label
             # Patch 1.1: the pre-router "if '429' in str(exc): rebuild the
             # graph on AI Studio Flash and re-run the whole turn" block that
             # used to live here is gone. It predated the provider router --
@@ -998,9 +1114,17 @@ class JarvisAgent:
             if trace:
                 self._last_turn_trace = trace
 
-            all_msgs = result.get("messages", [])
-            non_system = [m for m in all_msgs if not isinstance(m, SystemMessage)]
-            self._history = _strip_images_for_storage(_trim_history(non_system))
+            # Patch 1.2 (Faz 1D): history gets the canonical exchange only —
+            # prior turns + [user message, (tool summary), final answer]. The
+            # raw graph transcript (tool batches, stubs, acks) stays in the
+            # checkpoint/audit/ledger, never in conversation history.
+            exchange = _compact_completed_turn_for_history(
+                human_msg, response,
+                _execution_summary_from_ledger(result.get("tool_execution_ledger")),
+            )
+            self._history = _strip_images_for_storage(
+                _trim_history(self._history + exchange, self.settings.max_conversation_turns)
+            )
 
             # Persist conversation state to SQLite
             self.session_store.save_turn(self.session_id, self._history, self._turn)
@@ -1081,6 +1205,15 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": transport,
+                # Patch 1.2 (Faz 1B): explicit per-turn reset of the
+                # tool-accounting fields. A fresh thread_id already isolates
+                # the checkpointer per turn, but safety counters get an
+                # explicit zero rather than relying on that indirection.
+                "tool_calls_attempted": 0,
+                "tool_rounds": 0,
+                "seen_tool_fingerprints": [],
+                "completed_tool_fingerprints": [],
+                "tool_execution_ledger": [],
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,
@@ -1121,6 +1254,17 @@ class JarvisAgent:
                 }
                 event_bus.confirmation_required(conf_id, payload)
                 yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
+            except GraphRecursionError:
+                # Patch 1.2 (Faz 1B): same controlled stop as chat() -- the
+                # message flows out as ordinary stream tokens (no 500, no
+                # [ERROR] frame), and the half-finished turn is not persisted.
+                msg = await self._recursion_stop_response(config, transport)
+                stream_trace = recorder.turn_summary()
+                if stream_trace:
+                    self._last_turn_trace = stream_trace
+                event_bus.state("idle")
+                yield msg
+                return
             except (asyncio.CancelledError, GeneratorExit):
                 # BUG-13: barge-in (or any other cancellation of the task driving this
                 # generator) must propagate — never swallow — so the caller's await
@@ -1142,21 +1286,26 @@ class JarvisAgent:
             if stream_trace:
                 self._last_turn_trace = stream_trace
 
-            # Rebuild history from checkpointer to preserve tool messages (Faz 12-B fix)
+            # Patch 1.2 (Faz 1D): same canonical-exchange compaction as chat().
+            # (Pre-1.2 this rebuilt history from the checkpoint to PRESERVE raw
+            # tool messages — Faz 12-B; deliberately inverted now, the ledger
+            # summary is what history keeps.) The checkpoint is read only for
+            # the execution ledger.
+            ledger: list[dict] = []
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
                 if checkpoint_tuple:
-                    real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
-                    non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
-                    self._history = _strip_images_for_storage(_trim_history(non_system))
-                else:
-                    raise ValueError("no checkpoint")
+                    ledger = list(
+                        checkpoint_tuple.checkpoint["channel_values"].get("tool_execution_ledger") or []
+                    )
             except Exception:
-                # Fallback: rebuild manually (loses tool messages, but doesn't crash)
-                from langchain_core.messages import AIMessage
-                non_system = [m for m in initial_messages if not isinstance(m, SystemMessage)]
-                non_system.append(AIMessage(content=full_response))
-                self._history = _strip_images_for_storage(_trim_history(non_system))
+                pass
+            exchange = _compact_completed_turn_for_history(
+                human_msg, full_response, _execution_summary_from_ledger(ledger),
+            )
+            self._history = _strip_images_for_storage(
+                _trim_history(self._history + exchange, self.settings.max_conversation_turns)
+            )
 
             # Usage is recorded live by the recorder's on_llm_end callback
             # (real usage_metadata when the provider reports it mid-stream —
@@ -1235,6 +1384,18 @@ class JarvisAgent:
                 # swallow, so a barge-in cancellation is correctly observed.
                 interrupted = True
                 raise
+            except GraphRecursionError:
+                # Patch 1.2 (Faz 1B): a loop after an approved confirmation
+                # (F16's exact shape) ends with the same honest, ledger-based
+                # message as chat()/chat_stream() -- not an [ERROR] frame.
+                msg = await self._recursion_stop_response(config, "resume")
+                if recorder is not None:
+                    resumed_trace = recorder.turn_summary()
+                    if resumed_trace:
+                        self._last_turn_trace = resumed_trace
+                event_bus.state("idle")
+                yield msg
+                return
             except Exception as exc:
                 event_bus.state("idle")
                 yield f"[ERROR: {exc}]"
@@ -1251,20 +1412,29 @@ class JarvisAgent:
                 if resumed_trace:
                     self._last_turn_trace = resumed_trace
 
-            # Rebuild history from checkpointer
+            # Patch 1.2 (Faz 1D): canonical-exchange compaction. The user
+            # message of THIS turn isn't a local here (the turn began in
+            # chat()/chat_stream(), which persisted nothing before the
+            # interrupt) — user_query travels in the graph state, so read it
+            # and the ledger from the turn's checkpoint.
+            ledger: list[dict] = []
+            resumed_user_query = ""
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
                 if checkpoint_tuple:
-                    real_messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
-                    non_system = [m for m in real_messages if not isinstance(m, SystemMessage)]
-                    self._history = _strip_images_for_storage(_trim_history(non_system))
-                else:
-                    raise ValueError("no checkpoint")
+                    vals = checkpoint_tuple.checkpoint["channel_values"]
+                    ledger = list(vals.get("tool_execution_ledger") or [])
+                    resumed_user_query = str(vals.get("user_query") or "")
             except Exception:
-                from langchain_core.messages import AIMessage
-                non_system = list(self._history)
-                non_system.append(AIMessage(content=full_response))
-                self._history = _strip_images_for_storage(_trim_history(non_system))
+                pass
+            exchange = _compact_completed_turn_for_history(
+                HumanMessage(content=resumed_user_query or "[onaylanan araç eylemi]"),
+                full_response,
+                _execution_summary_from_ledger(ledger),
+            )
+            self._history = _strip_images_for_storage(
+                _trim_history(self._history + exchange, self.settings.max_conversation_turns)
+            )
 
             self.session_store.save_turn(self.session_id, self._history, self._turn)
         finally:

@@ -69,6 +69,10 @@ class _FakeResumeAgent:
         # get_tuple -> None makes the method take its documented fallback
         # path (rebuild history manually) -- no checkpointer machinery needed.
         self._checkpointer = SimpleNamespace(get_tuple=lambda cfg: None)
+        # Patch 1.2 (Faz 1D): resume_and_stream now reads
+        # settings.max_conversation_turns for the turn-based history window.
+        from jarvis.config import Settings
+        self.settings = Settings(_env_file=None)
         self.saved_turns: list[tuple] = []
         self.session_store = SimpleNamespace(
             save_turn=lambda sid, hist, turn: self.saved_turns.append((sid, list(hist), turn)),

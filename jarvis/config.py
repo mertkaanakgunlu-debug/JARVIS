@@ -105,6 +105,25 @@ class Settings(BaseSettings):
     # with a clear error.
     graph_recursion_limit: int = 30
 
+    # Patch 1.2 (Faz 1B): deterministic, LLM-independent tool-call limits,
+    # enforced in the confirmation node BEFORE policy evaluation and
+    # independent of the capability router (defense stays up even if routing
+    # misfires). Motivated by live incident A2 (2026-07-16): a local model
+    # hallucinated a ~20-call batch (2 email sends included) off a one-line
+    # smalltalk turn -- only the external-write gate stood between that and
+    # execution. An over-limit batch is rejected WHOLE: executing "just the
+    # first N" of a hallucinated batch would be guessing which part of the
+    # hallucination was safe.
+    max_tool_calls_per_ai_message: int = 4   # batch size cap per AIMessage
+    max_tool_calls_per_turn: int = 6         # attempted calls per turn (run/failed/blocked all count)
+    max_identical_tool_call: int = 1         # same tool+args fingerprint per turn
+    max_tool_rounds_per_turn: int = 2        # tool batches per turn (loop stopper until Faz 2B's router)
+
+    # Patch 1.2 (Faz 1D): conversation-history window in completed TURNS, not
+    # messages — with turn compaction (agent.py) one polluted turn can no
+    # longer evict the rest of the window (the A2→A3 recall failure).
+    max_conversation_turns: int = 10
+
     # Faz 4: timeout on the agent node's own LLM call (BUG-14) -- distinct
     # from ToolSpec.timeout_seconds, which only bounds tool execution. A
     # wedged provider connection previously hung the whole turn (and, in

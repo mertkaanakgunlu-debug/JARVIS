@@ -71,6 +71,10 @@ openwakeword>=0.6         # Uses hey_jarvis_v0.1.onnx; requires onnxruntime (alr
 # Spotify music control (Faz 8: spotify tool — set SPOTIFY_CLIENT_ID/SECRET in .env)
 spotipy>=2.23             # Spotify Web API wrapper
 
+# ITU webmail over IMAP (itu_mail tool — Patch 1.2: was imported lazily but
+# never declared, so a clean install 500'd on first itu_mail call)
+imap-tools>=1.0
+
 # Voice I/O (Iteration 3)
 faster-whisper>=1.1      # STT — CTranslate2 based, multilingual, no PyTorch
 sounddevice>=0.4         # Audio capture + playback

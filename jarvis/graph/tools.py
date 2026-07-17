@@ -806,7 +806,14 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         from jarvis import paths as _paths
 
         store = ProcedureStore(_paths.data_dir() / "sessions.db")
-        pid = store.add(name, description, body, source="agent")
+        # Patch 1.2 (Faz 1C): idempotent — an identical re-save returns the
+        # existing row instead of inserting again (live incident F16: 10
+        # duplicate drafts from one looping turn). On a duplicate, the Chroma
+        # side is NOT re-written either (store_procedure would double-embed).
+        result = store.add_or_get(name, description, body, source="agent")
+        if not result.created:
+            return f"[ALREADY_EXISTS] Procedure draft already exists: id={result.procedure_id}. Do not save it again."
+        pid = result.procedure_id
         status = default_status_for_source("agent")
         memory.store_procedure(pid, name, description, body, status=status)
         if status == "draft":
