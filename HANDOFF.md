@@ -3,135 +3,91 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-17 — Patch 1.2 + Sprint 2 + model A/B (kabiliyet regresyonu)
+## Last session: 2026-07-18 — P0 tamam + P1 latency fix (GPT_Analysis 2. tur planı)
 
-**Bağlam:** Owner "eskiden takvime ekleme gibi işleri yapıyordu, şimdi yapamıyor — sorun modelde
-mi başka yerde mi?" diye sordu + ChatGPT-5.6'nın ikinci review'unu (`GPT_Analysis.md`) verdi.
-**Teşhis (kodda doğrulandı):** kabiliyet kaybı kod çürümesi değil, motor değişimi — "takvim"
-çalışırken non-trivial turn'ler cloud Gemini'deydi; `CLOUD_POLICY=off` (maliyet kararı) sonrası her
-şey qwen2.5:7b'ye düştü, o da ~34 araç altında tool-call üretemiyor. Ama tek sorun bu değildi:
-review + kod doğrulaması 8 modelden-bağımsız gerçek bug çıkardı. Onaylanan plan
-`.claude/plans/...witty-wirth.md` — inline, sıralı, faz-sonu commit'ler ($0 kalır kararı, cloud
-köprüsü yok).
+**Bağlam:** Owner GPT-5.6'nın 2. review'unu (`GPT_Analysis.md`) verdi; birlikte analiz edip
+onaylı plan (`.claude/plans/...optimized-tiger.md`, kapsam: **Hepsi P0+P1+P2, tüm 13 domain**)
+çıkardı. Bu oturum sıralı+faz-sonu-commit ile P0'ı bitirdi ve P1'in çekirdeğini kanıtladı.
 
-## Bu oturumda ne yapıldı (hepsi commit + push edildi)
+**7 commit, `langgraph-migration`. 391/391 pytest yeşil, ruff temiz.** Sırayla:
+`4b1eec6` P0-A mekanik · `fe557a3` P0-A davranışsal · `54fc533` diacritic+closure ·
+`417e205` oracle harness+trace · `2f77439` P1 thinking-off.
 
-**5 commit, `langgraph-migration` → origin. 324/324 pytest yeşil, ruff temiz.** Sırayla:
+## Bu oturumda ne yapıldı
 
-1. **`6c9fa0d` `feat: complete stabilization patch 1.1`** — önceki oturumun working tree'si (Patch
-   1.1, 23 dosya) nihayet commit edildi (review "kaybolmadan koru" dedi).
-2. **`4b3a8cc` `test: add manual E2E test driver`** — `scripts/manual_test_driver.py` (path'ler
-   env ile parametreli: `JARVIS_TEST_BASE_URL`/`_HOME`/`_RESULTS`; `--all` bayrağı).
-3. **`2092441` `fix: add deterministic tool runtime safety (Patch 1.2)`** — 4 alt-faz:
-   - **1A** `imap-tools` bağımlılığı + `SafeToolNode` (`jarvis/graph/safe_tools.py`): tool
-     exception → sanitize `[TOOL_ERROR]` ToolMessage, graph ölmüyor.
-   - **1B** deterministik limitler (batch4/turn6/round2/identical1, `nodes.py` confirmation başı) +
-     `tool_execution_ledger`/`tool_result_accounting` node (`jarvis/graph/tool_accounting.py`) +
-     seen/completed fingerprint ayrımı + ledger-bazlı recursion cevabı (opak 500 yerine).
-   - **1C** `ProcedureStore` idempotency: content fingerprint + güvenli migration + `add_or_get()`.
-   - **1D** turn compaction (`agent.py`: history'ye yalnız gerçek human + nihai AI + tek satır özet)
-     + turn-bazlı `_trim_history` (max 10). A2→A3 regresyonu düzeldi.
-4. **`f05de2c` `feat: add capability-scoped tool routing (Sprint 2)`**:
-   - **2A** `jarvis/graph/tool_router.py`: deterministik `\b`-sınırlı TR+EN sınıflandırıcı →
-     `ToolRoute`; `ToolSpec.domain` + 13-domain haritası; MCP karantina; `_is_trivially_simple`
-     emekli. `make_agent_node` turn-scoped subset bind ediyor (route yoksa full set).
-   - **2B** bare `compose` node + `post_tool_router` (F16 döngüsü yapısal kapandı) + ephemeral
-     critic (fake HumanMessage kaldırıldı).
-5. **`c1e1467` `feat: qwen3:8b local model + Faz 3 live-found fixes`**:
-   - A/B sonucu: **default `qwen2.5:7b-instruct` → `qwen3:8b`** + local `temperature=0`.
-   - Canlı bulunan 3 gerçek bug (aşağıda "Live fixes").
+### Faz 1 — P0-A (doğruluk & izolasyon), hepsi testli
+1. **Audit `ok`** — `_record_execution_end` `str(ToolMessage)` yerine `.content`'e bakıyor;
+   kanonik `content_is_failure()` (tool_accounting) yeniden kullanıldı; `⚠` kanonik
+   `_FAILURE_PREFIXES`'e eklendi. B6/Calendar/Gmail artık doğru `ok:false` logluyor.
+2. **`shell_run` workspace** — `shell.run(cwd=workspace)` + cd/Set-Location escape guard.
+3. **`plot_data` inline** — `data_json` (JSON array/obj), `path` opsiyonel; B6 kök nedeni kapandı.
+4. **History-echo guard** — compose_node: route tool bekliyor + bu turn `completed_tool_fingerprints`
+   boş → node-local SystemMessage "tamamlanma iddia etme". B6 + D13b sınıfını kapatıyor.
+5. **Harness senaryo izolasyonu** — driver her senaryo öncesi `/reset` (A3/B5b hariç); D13b artık
+   D10'dan izole.
 
-## Faz 3 A/B kararı — neden qwen3:8b
+### Faz 2 — P0-B (oracle'lı ölçüm altyapısı)
+- **`scripts/eval_oracle.py`** — `Expected`/`Observed`/`score`: trace + dosya sistemi + yanıtı
+  BİRLİKTE denetliyor (yanıta asla tek başına güvenmiyor). B6-sınıfı yanlış-pozitif otomatik
+  yakalanıyor. Saf + unit-testli (12 test).
+- **`jarvis/tool_trace.py`** — L1 dahil HER tool çağrısı `data/tool_trace.jsonl`'e; `JARVIS_TOOL_TRACE`
+  ile gated (test profilinde otomatik). Audit'in L1-körlüğünü kapatıyor.
+- **Driver** — senaryo-başına trace temizleme + oracle skorlama + özet. B6/D11/C9/D12 auto-score;
+  cred/key gerektiren (calendar/mail/web_search) senaryolar **skorlanmıyor**, yeşile boyanmıyor.
+- **G17a/G17b** — restart-persistent-memory senaryosu (fresh session'da recall). **Offline'da
+  extractor degraded olduğu için FAIL beklenir** — sınırı gizlemeden raporlar.
+- **13-domain closure (2.4)** — hepsi membership-closure geçiyor. **YENİ BULGU + FIX:** router
+  diacritic'e duyarlıydı; ASR/gündelik yazım ç/ğ/ı/ö/ş/ü veya `'` düşürünce yanlış yönlendiriyordu
+  (`grafik ciz`→conversation, `Drivea yukle`→files/google_drive görünmez). `_fold()` ile
+  sorgu+pattern ASCII'ye foldlanıyor; Türkçe İ/ı casing tuzağını da kapatıyor. **Bu owner'ın
+  "artık takvime ekleyemiyor" şikayetiyle aynı sınıfta olabilir (sesle konuşuluyorsa).**
 
-Aynı 16-senaryo suite, `temp=0`, aynı scoped subset, `--profile test`, ground-truth = audit +
-dosya sistemi:
-- **qwen2.5:7b — SIFIR gerçek tool çağrısı.** "dosyayı oluşturdum / maili gönderdim" hepsi
-  halüsinasyon metni; audit boş, diskte `jarvis_test.txt` yok. Başarısızlıktan beter: gate'ler
-  devreye bile girmedi.
-- **qwen3:8b — gerçek çağrılar.** `file_write` GERÇEKTEN yazdı, `shell_run` dir GERÇEKTEN çalıştı;
-  external-write gate / shell deny-list / SSRF / killswitch İLK KEZ uçtan uca gerçek çağrılarla
-  doğrulandı. 8 GB RTX 4070 Laptop VRAM'e sığıyor. Daha yavaş (turn 15-40s) ama doğruluk çok yüksek.
+### Faz 3 — P1 çekirdeği (qwen3 no-thinking) — CANLI DOĞRULANDI
+- **Planın varsaydığı yöntemler `/v1`'de ÇALIŞMIYOR** (canlı test, Ollama 0.32): `/no_think`
+  token, top-level `think:false`, `chat_template_kwargs{enable_thinking:false}` — üçü de yok
+  sayıldı (~160 reasoning token).
+- **Çalışan yöntem:** OpenAI-standard `reasoning_effort="none"` — Ollama 0.32 `/v1`'de onurlandırılıyor.
+  Client değişikliği/yeni bağımlılık YOK (langchain-ollama kurulu değil). `ChatOpenAI(reasoning_effort=
+  "none")`: **172→2 token, 7.15s→0.52s (~14x)**; temsili Türkçe `file_write` tool call **birebir aynı**
+  (8.2s→1.5s), tool-calling regresyon YOK.
+- **Uygulama:** `config.local_reasoning_effort` (default `"none"`); `_make_local(reasoning_effort=...)`;
+  yalnız fast/local/realtime rolüne uygulanıyor, reasoning-rol fallback'i tam thinking'te kalıyor.
+  `LOCAL_REASONING_EFFORT=""` ile geri alınır. 7 test.
 
-## Live fixes (A/B sırasında bulundu, kalıcı, testli)
+## SONRAKİ OTURUM — kalan iş (çoğu CANLI, senin makinende)
 
-1. **langgraph 1.2.x non-streaming `ainvoke()` dinamik interrupt'i RAISE etmiyor** —
-   `result["__interrupt__"]`'te döndürüyor. `/chat`'in `except GraphInterrupt`'i hiç tetiklenmiyordu,
-   onay payload'u sessizce düşüyordu (Faz 4'ten beri latent; yalnız streaming CLI/voice canlı
-   test edilmişti). chat/proactive/background üçünde de düzeltildi.
-2. **Boş-cevap fallback'i tüm mesaj listesini tarıyordu** → önceki turn'ün cevabını yankılıyordu
-   ("echo"). Artık yalnız bu turn'ün mesajları.
-3. **`graph_stream_to_text` yalnız "agent" node'unu stream ediyordu** → Sprint 2 sonrası onaylanan
-   `shell_run` boş stream dönüyordu. "compose" da stream ediliyor.
+1. **Faz 3.3 — thinking on/off A/B (EN ÖNCELİKLİ).** Artık oracle otomatik pass/fail veriyor.
+   Default `"none"` (thinking off) **tek senaryo spot-check'iyle** shipped — 16 senaryo ×5'te
+   doğruluğun korunduğu DOĞRULANMALI. Koşum:
+   ```powershell
+   ollama serve            # ayrı pencere (zaten çalışıyor olabilir)
+   $env:JARVIS_TEST_HOME = "C:\...\stable-test-home"
+   $env:JARVIS_TEST_RESULTS = "C:\...\ab_off.jsonl"
+   python -m jarvis --api --profile test --port 8132     # terminal 1
+   python scripts/manual_test_driver.py --all             # terminal 2 → sonunda ORACLE x/y özeti
+   # thinking-ON turu için: server'ı LOCAL_REASONING_EFFORT="" ile başlat, ab_on.jsonl'e yaz
+   ```
+   Doğruluk düşerse tek env var (`LOCAL_REASONING_EFFORT=""`) ile thinking geri gelir.
+2. **Faz 3.2 — latency enstrümantasyonu** (KURULMADI): cold/warm ayrımı + TTFT + reasoning-token
+   sayısı. Şimdilik driver'ın `elapsed_s`'i + tool_trace yeterli sinyal veriyor; isteğe bağlı.
+3. **Faz 4 — challenger'lar** (CANLI, model pull + owner judgment): `qwen3.5:9b` Q4_K_M,
+   `ministral-3:8b` Q4_K_M. Aynı oracle harness. 8K ctx başla; Türkçe + (qwen3.5) multimodal ayrı
+   ölç. `config.local_model` sadece kazanan default'a alınırsa değişir.
+4. **G17b restart-memory** offline'da FAIL edecek (extractor degraded) — beklenen; kalıcı hafıza
+   ayrı iş.
+5. **`main` merge YAPMA** — bu A/B doğrulaması bitmeden değil.
 
-## YENİ — ham kanıtları incelerken bulunan 2 bug (DÜZELTİLMEDİ, sonraki oturuma)
-
-Owner "hangi sorguya ne yanıt verdi, kendim teyit etmeliyim" dedi → `test_output/` klasörü
-oluşturuldu (16 test × 6 koşum, okunaklı sorgu/yanıt + ham `audit_log.jsonl` + gerçekten oluşan
-dosyalar; bkz. `test_output/README.md`). Bu inceleme önceki kabul raporundaki bir hatayı ortaya
-çıkardı:
-
-1. **B6 (grafik) testi 3 koşumda da (03/05/06) gerçekte hiç başarılı olmadı** — model kendi
-   verdiği sayıları (1,4,9,16) bir dosyaya yazmadan `plot_data`'yı var olmayan bir path'e
-   (`jarvis_test.csv` / `workspace`) referansla çağırdı; araç doğru şekilde
-   `[ERROR] Data file not found` döndürdü; `data/plots/` hiçbir home'da hiç oluşmadı. Buna
-   rağmen JARVIS kullanıcıya *"Grafik başarıyla oluşturuldu, `line_graph.png` mevcut"* dedi —
-   tamamen halüsinasyon. Önceki "gerçek tool-call üretimi ≈ %100" iddiam bu yüzden yanlıştı:
-   **15/16, B6 hariç.**
-2. **Audit log'un kendisi de bu başarısızlığı yanlış logluyor** — `[jarvis/agent.py:128](jarvis/agent.py:128)`
-   `_record_execution_end`'de `out_s = str(output)`; `output` burada bir ham string değil bir
-   `ToolMessage` **nesnesi**, `str()`'i `"content='[ERROR]...' name=... "` ile başlıyor, yani
-   `out_s.startswith("[ERROR]")` hiç eşleşmiyor ve `ok` hep `True` kalıyor. Bu Faz 4'ten kalma,
-   bu oturumda yazılmamış ama fark edilmemiş bir kod — **Faz 1B'nin kendi dedup/ledger mantığını
-   etkilemiyor** (`jarvis/graph/tool_accounting.py`'nin `tool_message_ok()` gerçek
-   `ToolMessage.content`'e doğrudan bakıyor, doğru). Düzeltme: `_record_execution_end`'e
-   `output.content` alanını (varsa) tercih eden bir kontrol eklemek.
-3. **`shell_run` `--profile test` izolasyonuna dahil değil** — `[jarvis/graph/tools.py:63-68](jarvis/graph/tools.py:63)`,
-   `file_read`/`file_write`/`file_list`'in aksine `workspace` parametresi almıyor;
-   `shell_tools.run()` doğrudan process'in gerçek çalışma dizininde (repo kökü) çalışıyor,
-   `JARVIS_HOME`'a taşınmıyor. Canlı kanıt: test home'unda "dir" istendiğinde gerçek proje kökü
-   (`.venv`, `Jarvis.rar`, `CLAUDE.md`) listelendi. Zararsız `dir` gibi komutlarda sorun
-   yaratmadı ama izolasyon garantisinin sınırı — düzeltilmedi, owner'ın kararı bekleniyor.
-
-Ham kanıtlar + commit: `9e2a049` (`test: add manual test evidence`).
-
-Testler: `tests/test_interrupt_surface.py` (3).
-
-## Kabul turu (16 senaryo, qwen3:8b default)
-
-**HTTP 500 = 0 · raw-JSON/pseudo final = 0 · uydurma tool adı = 0 · aynı tool+args tekrarı = 0
-(F16 tek draft) · izinsiz dış yan etki = 0 · A2→A3 recall = GEÇER · gerçek tool-call ≈ %100 ·
-doğru domain 15/15 · maliyet $0.00.** E14/E15 kimlik-yok artık düzgün hata mesajı (500 değil).
-Killswitch izole doğrulandı (temiz session, off → `blocked_kill_switch` + model doğru bildirim).
-
-## Bilinen sınırlar / sonraki adımlar
-
-1. **YENİ bulgu — history echo:** aynı tool-isteği önceki turn'de geçmişte varsa, model tool
-   çağırmadan önceki turn'ün cevabını yankılayabiliyor (D13b canlıda killswitch testini geçersiz
-   kıldı — killswitch'in kendisi izole testte sağlam). Turn compaction özet-satırının yan etkisi.
-   Muhtemel çözüm: tool-turn'lerinde nihai cevabı da history'de kısaltmak, veya tekrarlanan
-   isteklerde compose'a "geçmişi kopyalama" talimatı. Sonraki iterasyona bırakıldı.
-2. **Pre-first-turn model label** hâlâ `cloud_model_label` ("Gemini 2.5 Pro (cloud)") gösteriyor
-   `CLOUD_POLICY=off`'ta bile — kozmetik, ilk turn'den sonra trace-driven label düzeltiyor
-   (önceki handoff'tan taşındı, hâlâ açık).
-3. **qwen3:8b latency:** turn başına 15-40s. Kabul edilebilir ama voice UX için gözden geçirilebilir
-   (num_ctx/quantization ayarı, veya kısa turn'ler için qwen2.5'e düşürme — ama o tool-calling
-   yapamıyor, dikkat).
-4. **Sprint 3** (8 direct-Gemini modülün shared gateway'e migrasyonu) — hâlâ kapsam dışı, değişmedi.
-5. **4 worktree branch** read-through — hâlâ carried over.
-6. Wake-word/HUD uçtan uca kabul turu — görev icra katmanı artık güvenilir olduğuna göre yapılabilir.
-
-## Environment checklist to resume work
-
+## Ortam / komutlar
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt          # imap-tools artık listede
-ollama pull qwen3:8b                      # yeni default local model (~5.2GB)
-pytest                                    # 324 test, ~57s, offline
-ruff check jarvis/ tests/                 # clean
-python -m jarvis --api --profile test --port 8132   # izole smoke
-# kabul turu: JARVIS_TEST_HOME=... JARVIS_TEST_RESULTS=... python scripts/manual_test_driver.py --all
+pytest                                   # 391 test, offline
+ruff check jarvis/ tests/                # temiz (scripts/auth_setup.py'de pre-existing F541 var, alakasız)
 ```
+Yeni env vars: `JARVIS_TOOL_TRACE` (test profilinde otomatik 1), `LOCAL_REASONING_EFFORT`
+(default `none`; `""` → thinking on). Ollama 0.32.1, qwen3:8b (thinking cap'li) + qwen2.5:7b mevcut.
 
-Yeni env vars (hepsi opsiyonel, `.env.example`'da): `MAX_TOOL_CALLS_PER_AI_MESSAGE`/`_PER_TURN`,
-`MAX_IDENTICAL_TOOL_CALL`, `MAX_TOOL_ROUNDS_PER_TURN`, `MAX_CONVERSATION_TURNS`. `LOCAL_MODEL`
-default artık `qwen3:8b`; `LOCAL_TEMPERATURE` default `0.0`.
+## Değişmeyen taşınan işler
+- 8 direct-Gemini modülün shared gateway'e migrasyonu (Sprint 3) — kapsam dışı.
+- 4 worktree branch read-through — ayrı go-ahead bekliyor.
+- Electron/mobil confirmation render'ı — hâlâ yalnız CLI text+voice.
+- Pre-first-turn kozmetik model label — açık.
