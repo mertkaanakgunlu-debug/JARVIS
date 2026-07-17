@@ -202,9 +202,20 @@ def _safe_construct(label: str, factory):
         return None
 
 
-def _make_local(settings: "Settings", max_output_tokens: int) -> _Tier:
-    """Ollama, via its OpenAI-compatible endpoint (config.ollama_api_url)."""
+def _make_local(
+    settings: "Settings", max_output_tokens: int, *, reasoning_effort: str | None = None,
+) -> _Tier:
+    """Ollama, via its OpenAI-compatible endpoint (config.ollama_api_url).
+
+    reasoning_effort — passed straight to the /v1 request. "none" disables
+    qwen3's thinking channel (Faz 3, verified against Ollama 0.32 on 2026-07-18);
+    None/"" leaves thinking on. Only the routine local role sets it (see get_llm).
+    """
     from langchain_openai import ChatOpenAI
+
+    extra: dict = {}
+    if reasoning_effort:
+        extra["reasoning_effort"] = reasoning_effort
 
     model = ChatOpenAI(
         model=settings.local_model,
@@ -214,6 +225,7 @@ def _make_local(settings: "Settings", max_output_tokens: int) -> _Tier:
         temperature=getattr(settings, "local_temperature", 0.0),  # Faz 3: deterministic tool calling + A/B reproducibility
         timeout=120,  # generous — first call after a swap may need to load the model into VRAM
         stream_usage=True,  # ask for usage in streams (Ollama /v1 include_usage) so traces get real token counts
+        **extra,
     )
     return _Tier(model, "ollama", settings.local_model, billing="free")
 
@@ -322,14 +334,19 @@ def get_llm(
             logger.warning("router: pin_cloud_model set but no cloud tier could be built; "
                             "falling back to local-first default")
 
-        tiers = [_make_local(settings, max_output_tokens or 4096)]
+        # Faz 3: routine local turns (tool execution, simple chat) run with the
+        # thinking channel off — the big latency win, tool-calling unaffected.
+        effort = getattr(settings, "local_reasoning_effort", "none") or None
+        tiers = [_make_local(settings, max_output_tokens or 4096, reasoning_effort=effort)]
         tiers += _cloud_tiers(settings, max_output_tokens or 4096, pro=False)
-        logger.info("router: role=%s -> local:%s (cloud fallback tiers: %d)",
-                    role, settings.local_model, len(tiers) - 1)
+        logger.info("router: role=%s -> local:%s (effort=%s, cloud fallback tiers: %d)",
+                    role, settings.local_model, effort, len(tiers) - 1)
         return _compose(tiers, tools, role)
 
     if role == "reasoning":
         cloud = _cloud_tiers(settings, max_output_tokens or 2048, pro=True)
+        # The reasoning-role local fallback keeps full thinking — it's the tier
+        # you want deliberate reasoning from when no cloud is configured.
         tiers = cloud + [_make_local(settings, max_output_tokens or 2048)]  # local Ollama is always the last resort
         logger.info("router: role=%s -> %d cloud tier(s) then local:%s",
                     role, len(cloud), settings.local_model)

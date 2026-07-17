@@ -182,6 +182,17 @@ class Settings(BaseSettings):
     # identical decoding across candidates) and standard practice for
     # tool-calling agents; ChatOpenAI's implicit 0.7 default was neither.
     local_temperature: float = 0.0
+    # Faz 3 (P1): qwen3 ships with thinking ON by default, which the live
+    # verification (2026-07-18) showed dominates local latency — "2+2" spent
+    # ~172 output tokens and 7s in the reasoning channel for a 1-token answer.
+    # Ollama 0.32+ honors the OpenAI-standard reasoning_effort on /v1;
+    # "none" disables the channel (verified: 14x faster, and a representative
+    # file_write tool call stayed byte-identical, so tool-calling — the reason
+    # qwen3 replaced qwen2.5 — did not regress). Applied to the routine local
+    # role (fast/local/realtime) only; the reasoning-role local fallback keeps
+    # full thinking. Set "" (or "default") to restore thinking for A/B runs.
+    # NOTE: still to be confirmed across the full oracle A/B (16 scenarios ×5).
+    local_reasoning_effort: str = "none"
     embed_model: str = "nomic-embed-text"
     cloud_model: str = "gemini-2.5-pro"          # primary model for all user-facing responses
     cloud_model_pro: str = "gemini-2.5-pro"     # critic/planner (same tier, kept for Vertex compat)
