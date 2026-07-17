@@ -9,8 +9,13 @@ Saves PNG to workspace/data/plots/<output>.png and returns the saved path.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 SUPPORTED_KINDS = {"line", "scatter", "bar", "hist", "box", "violin", "heatmap"}
 
@@ -19,8 +24,63 @@ def _safe_filename(s: str) -> str:
     return re.sub(r"[^\w\-.]", "_", s)
 
 
+def frame_from_inline(data_json: str, x: str, y: str) -> tuple["pd.DataFrame | None", str, str, str]:
+    """Build a DataFrame from an inline ``data_json`` string.
+
+    Faz 1.3 — closes the B6 router-closure gap: the ``data`` domain exposes no
+    file-writing tool, so a model asked to chart numbers the user typed
+    ("1, 4, 9, 16") had no way to get them onto disk for the file-only
+    plot_data. Now the values ride straight into the tool.
+
+    Accepts either a JSON object of column→values
+    (``{"x": [1,2,3,4], "y": [1,4,9,16]}`` — x optional, synthesized as 0..n-1
+    when absent) or a bare JSON array (``[1,4,9,16]`` — single series, x=index).
+
+    Returns ``(df, x, y, error)``; ``error`` is "" on success, else an
+    ``[ERROR] ...`` string and ``df`` is None.
+    """
+    try:
+        parsed = json.loads(data_json)
+    except Exception as exc:
+        return None, x, y, f"[ERROR] data_json is not valid JSON: {exc}"
+
+    try:
+        import pandas as pd
+    except ImportError:
+        return None, x, y, "[ERROR] pandas is not installed. Run: pip install pandas openpyxl"
+
+    if isinstance(parsed, list):
+        if not parsed:
+            return None, x, y, "[ERROR] data_json array is empty."
+        df = pd.DataFrame({"y": parsed})
+        df.insert(0, "x", range(len(df)))
+        return df, (x or "x"), (y or "y"), ""
+
+    if isinstance(parsed, dict):
+        if not parsed:
+            return None, x, y, "[ERROR] data_json object is empty."
+        try:
+            df = pd.DataFrame({k: (v if isinstance(v, list) else [v]) for k, v in parsed.items()})
+        except Exception as exc:
+            return None, x, y, f"[ERROR] Could not build data from data_json: {exc}"
+        cols = list(df.columns)
+        yy = y or cols[-1]
+        if x:
+            xx = x
+        elif "x" in cols:
+            xx = "x"
+        elif len(cols) >= 2:
+            xx = cols[0]
+        else:  # single unnamed series → synthesize an index x
+            df.insert(0, "x", range(len(df)))
+            xx = "x"
+        return df, xx, yy, ""
+
+    return None, x, y, "[ERROR] data_json must be a JSON array or object."
+
+
 def generate_plot(
-    path: Path,
+    path: Path | None,
     kind: str,
     x: str,
     y: str,
@@ -28,11 +88,13 @@ def generate_plot(
     hue: str,
     output: str,
     plots_dir: Path,
+    *,
+    df: "pd.DataFrame | None" = None,
 ) -> str:
-    """Generate a chart from a CSV/Excel file and save as PNG.
+    """Generate a chart from a CSV/Excel file (or an inline DataFrame) and save as PNG.
 
     Args:
-        path:      Data file (CSV or Excel).
+        path:      Data file (CSV or Excel). May be None when ``df`` is given.
         kind:      Plot type: line | scatter | bar | hist | box | violin | heatmap.
         x:         Column name for x-axis (not required for heatmap/hist).
         y:         Column name for y-axis (not required for heatmap/hist).
@@ -40,13 +102,12 @@ def generate_plot(
         hue:       Optional grouping column for colour encoding.
         output:    Output filename stem (without extension). Auto-generated if empty.
         plots_dir: Directory where the PNG will be saved.
+        df:        Pre-built DataFrame (inline data path). When given, ``path``
+                   is used only as a filename hint and no file is read.
 
     Returns:
         Absolute path to the saved PNG, or an error string starting with [ERROR].
     """
-    if not path.exists():
-        return f"[ERROR] Data file not found: {path}"
-
     kind = kind.lower().strip()
     if kind not in SUPPORTED_KINDS:
         return (
@@ -54,22 +115,25 @@ def generate_plot(
             f"Choose from: {', '.join(sorted(SUPPORTED_KINDS))}"
         )
 
-    # Load data
+    # Load data — from the inline DataFrame if provided, else from the file.
     try:
-        import pandas as pd
+        import pandas as pd  # noqa: F401  # also validates the plotting stack is installed
     except ImportError:
         return "[ERROR] pandas is not installed. Run: pip install pandas openpyxl"
 
-    try:
-        suffix = path.suffix.lower()
-        if suffix == ".csv":
-            df = pd.read_csv(path, sep=None, engine="python", encoding_errors="replace")
-        elif suffix in (".xlsx", ".xls"):
-            df = pd.read_excel(path)
-        else:
-            return f"[ERROR] Unsupported file type '{suffix}'."
-    except Exception as exc:
-        return f"[ERROR] Could not load data: {exc}"
+    if df is None:
+        if path is None or not path.exists():
+            return f"[ERROR] Data file not found: {path}"
+        try:
+            suffix = path.suffix.lower()
+            if suffix == ".csv":
+                df = pd.read_csv(path, sep=None, engine="python", encoding_errors="replace")
+            elif suffix in (".xlsx", ".xls"):
+                df = pd.read_excel(path)
+            else:
+                return f"[ERROR] Unsupported file type '{suffix}'."
+        except Exception as exc:
+            return f"[ERROR] Could not load data: {exc}"
 
     # Validate columns
     if kind not in ("heatmap",) and x and x not in df.columns:
@@ -128,7 +192,8 @@ def generate_plot(
     if output:
         stem = _safe_filename(output)
     else:
-        stem = _safe_filename(f"{path.stem}_{kind}_{x or 'data'}_{y or ''}")
+        base = path.stem if path is not None else "inline"
+        stem = _safe_filename(f"{base}_{kind}_{x or 'data'}_{y or ''}")
         stem = stem.strip("_")
     out_path = plots_dir / f"{stem}.png"
 

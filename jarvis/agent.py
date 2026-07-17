@@ -30,6 +30,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphInterrupt, GraphRecursionError
 
 from jarvis.graph.tool_router import classify_query
+from jarvis.graph.tool_accounting import content_is_failure  # Faz 1.1: shared outcome judgement
 
 from jarvis.config import Settings
 from jarvis.context_builder import ContextBuilder
@@ -125,14 +126,15 @@ class _HudEventCallback(BaseCallbackHandler):
         if pending is None:
             return
         name, risk_level = pending
-        out_s = str(output)
+        # output is usually a ToolMessage object, not a raw string: str() of it
+        # is "content='[ERROR]...' name=..." so the old prefix check never
+        # matched and failed calls logged ok:true (the B6 false-positive, and
+        # every Calendar/Gmail credential error). Judge the real content with
+        # the same canonical helper the execution ledger uses.
+        content = getattr(output, "content", output)
+        out_s = content if isinstance(content, str) else str(content)
         if ok is None:
-            ok = not (
-                out_s.startswith("[ERROR]")
-                or out_s.startswith("⚠")
-                or out_s.startswith("[TOOL_ERROR]")
-                or "[BLOCKED" in out_s
-            )
+            ok = getattr(output, "status", None) != "error" and not content_is_failure(content)
         audit_log.record(
             "execution_end", tool=name, risk_level=risk_level,
             transport=self._transport, ok=ok, result_preview=out_s[:200],

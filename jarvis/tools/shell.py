@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
+from pathlib import Path
 
 # Commands/patterns that are never allowed, no matter what
 DENY_PATTERNS = [
@@ -56,11 +58,53 @@ def is_safe(command: str) -> tuple[bool, str]:
     return True, ""
 
 
-def run(command: str, *, confirmed: bool = False) -> str:
+# cd-family verbs that move the working directory. run() already sets
+# cwd=workspace, so relative work stays put; this catches the explicit-escape
+# vector (a command that changes directory OUT of the workspace before doing
+# its real work). Group 'target' is the first whitespace-delimited argument up
+# to the next statement separator.
+_CD_ESCAPE = re.compile(
+    r"\b(?:cd|chdir|sl|Set-Location|Push-Location)\b\s+(?P<target>[^;|&\r\n]+)",
+    re.IGNORECASE,
+)
+
+
+def escapes_workspace(command: str, workspace: str | Path) -> tuple[bool, str]:
+    """Best-effort: does the command try to change directory OUT of the
+    workspace?
+
+    NOT a sandbox — a determined absolute-path *read* (``Get-Content C:\\...``)
+    is still possible and remains covered only by shell_run's L3 confirmation
+    gate. This closes the concrete leak the manual round found: a bare ``dir``
+    listing the real repo root instead of the isolated test home. Kept
+    conservative to avoid false-blocking legitimate in-workspace ``cd data``.
+    """
+    ws = Path(workspace).resolve()
+    for m in _CD_ESCAPE.finditer(command or ""):
+        raw = m.group("target").strip().strip('"').strip("'")
+        if not raw:
+            continue
+        parts = re.split(r"[\\/]+", raw)
+        if ".." in parts:  # parent traversal
+            return True, f"directory change escapes workspace: '{raw}'"
+        if raw[:1] in ("\\", "/"):  # current-drive root (\ or /)
+            return True, f"directory change escapes workspace: '{raw}'"
+        p = Path(raw)
+        if p.is_absolute():
+            try:
+                p.resolve().relative_to(ws)
+            except ValueError:
+                return True, f"directory change escapes workspace: '{raw}'"
+    return False, ""
+
+
+def run(command: str, *, confirmed: bool = False, cwd: str | Path | None = None) -> str:
     """
     Execute a PowerShell command and return combined stdout+stderr.
     Raises ValueError for denied commands.
     Set confirmed=True when the CLI has already asked the user.
+    cwd pins the working directory (the caller passes the tool workspace so a
+    bare ``dir``/``ls`` lists the isolated home, not the process's real cwd).
     """
     safe, reason = is_safe(command)
     if not safe:
@@ -71,6 +115,7 @@ def run(command: str, *, confirmed: bool = False) -> str:
         capture_output=True,
         text=True,
         timeout=TIMEOUT_SECONDS,
+        cwd=str(cwd) if cwd else None,
     )
     output = result.stdout + result.stderr
     return output.strip() or "(no output)"

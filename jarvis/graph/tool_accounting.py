@@ -31,8 +31,13 @@ from jarvis.graph.state import JarvisState
 
 # A ToolMessage whose content starts with one of these did NOT succeed —
 # stubs injected by the confirmation node's block paths plus safe_tools'
-# error boundary. Kept in sync with those producers by the tests.
-_FAILURE_PREFIXES = ("[TOOL_ERROR]", "[ERROR]", "[BLOCKED", "[DENIED", "[DUPLICATE")
+# error boundary. Kept in sync with those producers by the tests. "⚠" is the
+# validation/warning prefix many native tools return on their did-not-happen
+# branch (schedule/todo/drive/finance: "⚠ title gerekli", "⚠ Bulunamadı", …);
+# their success branches use other glyphs (🗑 ⏸ ▶ ✏ ✓), so treating "⚠" as a
+# failure is correct for both the ledger and the audit callback that share
+# this tuple (the two used to diverge — see agent._record_execution_end).
+_FAILURE_PREFIXES = ("[TOOL_ERROR]", "[ERROR]", "[BLOCKED", "[DENIED", "[DUPLICATE", "⚠")
 
 _CONTENT_HEAD_CHARS = 120
 
@@ -43,14 +48,25 @@ def tool_call_fingerprint(name: str, args: dict[str, Any] | None) -> str:
     return hashlib.sha256(f"{name}:{canonical}".encode("utf-8")).hexdigest()
 
 
+def content_is_failure(content: Any) -> bool:
+    """True if a tool's textual result signals failure/no-op.
+
+    Single source of truth shared by the ledger (tool_message_ok) and the
+    audit callback (agent._record_execution_end) so both judge an outcome
+    identically — the audit used to str() the whole ToolMessage and never
+    matched these prefixes, logging failed calls as ok:true (the B6 grafik
+    false-positive)."""
+    s = content if isinstance(content, str) else str(content)
+    return s.lstrip().startswith(_FAILURE_PREFIXES)
+
+
 def tool_message_ok(tm: ToolMessage | None) -> bool:
     """Did this call genuinely succeed? (No message at all counts as failure.)"""
     if tm is None:
         return False
     if getattr(tm, "status", None) == "error":
         return False
-    content = tm.content if isinstance(tm.content, str) else str(tm.content)
-    return not content.lstrip().startswith(_FAILURE_PREFIXES)
+    return not content_is_failure(tm.content)
 
 
 def _last_executed_round(msgs: list) -> tuple[AIMessage | None, dict[str, ToolMessage]]:

@@ -23,7 +23,7 @@ from jarvis.tools.latex import latex_write, latex_compile, compose_report
 from jarvis.tools.excel import read_excel
 from jarvis.tools import python_exec
 from jarvis.tools.data_analysis import read_csv_file, analyze_data
-from jarvis.tools.plotting import generate_plot
+from jarvis.tools.plotting import generate_plot, frame_from_inline
 from jarvis.tools.indexer import index_file
 from jarvis.tools.webfetch import fetch_url
 from jarvis.tools.deep_research import run_deep_research
@@ -65,7 +65,12 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         safe, reason = shell_tools.is_safe(command)
         if not safe:
             return f"[BLOCKED] {reason}. Please ask the user to run this manually."
-        return shell_tools.run(command)
+        escapes, why = shell_tools.escapes_workspace(command, workspace)
+        if escapes:
+            return f"[BLOCKED] {why}. Commands run inside the workspace only."
+        # cwd=workspace: a bare dir/ls lists the isolated home, not the repo
+        # root (Faz 1.2 — the manual round's isolation leak).
+        return shell_tools.run(command, cwd=workspace)
 
     @tool
     def file_read(path: str) -> str:
@@ -216,15 +221,20 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
     @tool
     def plot_data(
-        path: str,
-        kind: str,
+        path: str = "",
+        kind: str = "line",
         x: str = "",
         y: str = "",
         title: str = "",
         hue: str = "",
         output: str = "",
+        data_json: str = "",
     ) -> str:
-        """Generate a chart from a CSV or Excel file and save as PNG.
+        """Generate a chart and save as PNG — from a CSV/Excel FILE or INLINE data.
+
+        Provide EITHER `path` (an existing CSV/Excel) OR `data_json` (values you
+        already have). When the user gives numbers directly ("şu sayılarla grafik
+        çiz: 1, 4, 9, 16"), use `data_json` — do NOT invent a file path.
 
         Supported kinds: line, scatter, bar, hist, box, violin, heatmap.
         - heatmap: auto-uses correlation matrix, no x/y needed.
@@ -232,20 +242,34 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         - box/violin: x = grouping column (optional), y = value column.
 
         Args:
-            path:   Data file path (workspace-relative or absolute).
-            kind:   Chart type (line | scatter | bar | hist | box | violin | heatmap).
-            x:      Column for x-axis (or histogram column for hist).
-            y:      Column for y-axis.
-            title:  Chart title text.
-            hue:    Optional column for colour grouping.
-            output: Output filename stem (auto-generated if empty).
+            path:      Data file path (workspace-relative or absolute). Leave empty
+                       when using data_json.
+            kind:      Chart type (line | scatter | bar | hist | box | violin | heatmap).
+            x:         Column for x-axis (or histogram column for hist).
+            y:         Column for y-axis.
+            title:     Chart title text.
+            hue:       Optional column for colour grouping.
+            output:    Output filename stem (auto-generated if empty).
+            data_json: Inline data as a JSON string — either an object of
+                       column→values ('{"x": [1,2,3,4], "y": [1,4,9,16]}'; x
+                       optional, defaults to 0..n-1) or a bare array
+                       ('[1,4,9,16]', single series with x = index).
 
         Returns:
             Absolute path to the saved PNG file.
         """
-        full = workspace / path if not Path(path).is_absolute() else Path(path)
+        df = None
+        full = None
+        if data_json.strip():
+            df, x, y, err = frame_from_inline(data_json, x, y)
+            if err:
+                return err
+        else:
+            if not path.strip():
+                return "[ERROR] Provide either a data file `path` or inline `data_json`."
+            full = workspace / path if not Path(path).is_absolute() else Path(path)
         plots_dir = workspace / "data" / "plots"
-        result = generate_plot(full, kind, x, y, title, hue, output, plots_dir)
+        result = generate_plot(full, kind, x, y, title, hue, output, plots_dir, df=df)
         event_bus.show_hud()
         return result
 
