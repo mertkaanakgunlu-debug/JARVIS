@@ -52,6 +52,13 @@ def _fake_agent(*, had_content: bool = True):
         session_store=_FakeSessionStore(),
         _bg_tasks=set(),
         scheduled=[],
+        # Patch 1.1: per-session telemetry/confirmation state the reset must
+        # clear -- pre-populated as if a turn (and an interrupt) happened.
+        _last_turn_trace={"provider": "ollama", "model": "qwen2.5:7b-instruct"},
+        _last_turn_used_pro=True,
+        _pending_confirmations={"conf-1": {"config": {}, "recorder": None}},
+        # ...and the one preference that must SURVIVE a reset:
+        _active_model_id="aistudio/gemini-2.5-flash",
     )
     agent._reset_state_sync = lambda: JarvisAgent._reset_state_sync(agent)
     agent._schedule_summarize_one = lambda sid: agent.scheduled.append(sid)
@@ -80,6 +87,26 @@ async def test_reset_async_empty_session_schedules_nothing():
     await JarvisAgent.reset_async(agent)
     assert agent.session_id == "s1"
     assert agent.scheduled == []
+
+
+# ── Patch 1.1: reset clears per-session telemetry + pending confirmations ────
+
+@pytest.mark.asyncio
+async def test_reset_clears_turn_telemetry_and_pending_confirmations():
+    """Without these clears, the fresh session's /status kept displaying the
+    ARCHIVED session's provider/model rollup, and a pre-reset confirmation id
+    stayed resumable -- its graph would have written history into the NEW
+    session. The user's explicit /model pin is a preference, not per-session
+    state, so it must survive."""
+    agent = _fake_agent(had_content=True)
+
+    await JarvisAgent.reset_async(agent)
+
+    assert agent._last_turn_trace is None
+    assert agent._last_turn_used_pro is None
+    assert agent._pending_confirmations == {}
+    assert agent._active_model_id == "aistudio/gemini-2.5-flash", \
+        "the manual model pin must survive a reset"
 
 
 @pytest.mark.asyncio

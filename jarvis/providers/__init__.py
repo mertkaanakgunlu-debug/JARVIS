@@ -103,11 +103,16 @@ def cloud_extractors_enabled(settings: "Settings") -> bool:
     ChatGoogleGenerativeAI directly (a known, tracked gap — see the
     stabilization-sprint report's "not migrated" list) rather than requesting
     a role from get_llm(). Until they're migrated onto a shared gateway, they
-    get this narrow, explicit gate instead: off under CLOUD_POLICY=off (no
-    "explicit pin" concept applies to a background extractor — there's no
-    user turn to attach a manual override to), unchanged otherwise.
+    get this narrow, explicit gate instead — cloud only under `auto`.
+    Patch 1.1: `explicit` now also gates them off, matching its promise
+    ("cloud only when the USER explicitly picked a cloud model"): a manual
+    /model pin is a statement about the conversation's answering model, not
+    consent for background extractors to make their own unprompted Gemini
+    calls. There is no per-extractor override concept yet; if one is ever
+    needed it should be its own opt-in flag, not a reinterpretation of
+    `explicit`.
     """
-    return getattr(settings, "cloud_policy", "auto") != "off"
+    return getattr(settings, "cloud_policy", "auto") == "auto"
 
 
 def note_degraded(feature: str) -> None:
@@ -117,8 +122,9 @@ def note_degraded(feature: str) -> None:
     if feature not in _DEGRADED:
         _DEGRADED.add(feature)
         logger.warning(
-            "router: %s disabled by CLOUD_POLICY=off -- degraded, returning "
-            "its empty/no-op result instead of a silent unlogged skip", feature,
+            "router: %s disabled by CLOUD_POLICY (off/explicit) -- degraded, "
+            "returning its empty/no-op result instead of a silent unlogged skip",
+            feature,
         )
 
 
@@ -136,11 +142,20 @@ class _Tier:
     travels into every callback via with_config(metadata=...) — never guessed
     from a model-name string after the fact. jarvis/llm_trace.py's recorder
     reads these keys to report which tier actually answered.
+
+    Patch 1.1 — `billing` replaces the old `billable: bool`: an AI Studio
+    (Gemini Developer API) key can be free-tier OR paid, and which one is
+    not inferable from the provider name — this repo's own key turned out to
+    be a paid one with depleted prepaid credits while the code asserted $0.
+    "free" = genuinely costs nothing (Ollama; AI Studio when the owner set
+    ai_studio_billing_mode=free); "paid" = priced by usage.py's table
+    (Vertex; AI Studio in paid mode); "unknown" = tracked as unpriced
+    tokens, never silently asserted free (AI Studio's default).
     """
     model: BaseChatModel
     provider: str    # "ollama" | "vertex" | "aistudio"
     model_id: str
-    billable: bool   # only Vertex costs real money today
+    billing: str     # "free" | "paid" | "unknown"
 
 
 def _compose(tiers: list[_Tier], tools: list | None, role: str) -> BaseChatModel:
@@ -159,7 +174,11 @@ def _compose(tiers: list[_Tier], tools: list | None, role: str) -> BaseChatModel
         m = m.with_config(metadata={
             "jarvis_provider": t.provider,
             "jarvis_model": t.model_id,
-            "jarvis_billable": t.billable,
+            "jarvis_billing": t.billing,
+            # Derived bool kept alongside for any reader that only wants
+            # "does this cost money for certain" (jarvis_billing is the
+            # authoritative three-state field).
+            "jarvis_billable": t.billing == "paid",
             "jarvis_tier_index": idx,
             "jarvis_role": role,
         })
@@ -195,7 +214,7 @@ def _make_local(settings: "Settings", max_output_tokens: int) -> _Tier:
         timeout=120,  # generous — first call after a swap may need to load the model into VRAM
         stream_usage=True,  # ask for usage in streams (Ollama /v1 include_usage) so traces get real token counts
     )
-    return _Tier(model, "ollama", settings.local_model, billable=False)
+    return _Tier(model, "ollama", settings.local_model, billing="free")
 
 
 def _cloud_tiers(
@@ -230,7 +249,7 @@ def _cloud_tiers(
             max_output_tokens=max_output_tokens,
         ))
         if m is not None:
-            tiers.append(_Tier(m, "vertex", vertex_model, billable=True))
+            tiers.append(_Tier(m, "vertex", vertex_model, billing="paid"))
     if settings.gemini_api_key:
         m = _safe_construct(f"aistudio:{settings.cloud_model_fallback}", lambda: ChatGoogleGenerativeAI(
             model=settings.cloud_model_fallback,
@@ -238,7 +257,8 @@ def _cloud_tiers(
             max_output_tokens=max_output_tokens,
         ))
         if m is not None:
-            tiers.append(_Tier(m, "aistudio", settings.cloud_model_fallback, billable=False))
+            tiers.append(_Tier(m, "aistudio", settings.cloud_model_fallback,
+                               billing=getattr(settings, "ai_studio_billing_mode", "unknown")))
     return tiers
 
 
@@ -273,7 +293,8 @@ def _pinned_cloud_tiers(settings: "Settings", max_output_tokens: int) -> list[_T
     ))
     if m is None:
         return []
-    return [_Tier(m, "aistudio", settings.effective_cloud_model, billable=False)]
+    return [_Tier(m, "aistudio", settings.effective_cloud_model,
+                  billing=getattr(settings, "ai_studio_billing_mode", "unknown"))]
 
 
 def get_llm(

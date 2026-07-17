@@ -159,6 +159,62 @@ async def test_external_writes_disabled_does_not_block_local_write(isolated_cwd)
     assert result["confirmation_result"] == "approved"
 
 
+# ── Patch 1.1: the gate is per-ACTION, not per-ToolSpec ───────────────────────
+# gmail/calendar/drive/itu_mail are spec'd side_effect_type="external_write"
+# wholesale because they mix read and write actions under one tool. The old
+# static-spec check therefore denied `gmail read` / `calendar list` too --
+# blinding the test profile to exactly the read paths it should exercise.
+
+@pytest.mark.asyncio
+async def test_external_writes_disabled_allows_gmail_read(isolated_cwd):
+    node = make_confirmation_node(_settings(external_writes_enabled=False))
+    state = _state_with_tool_call("gmail", "cli-text", {"action": "read", "query": "in:inbox"})
+
+    result = await node(state)
+
+    assert result["confirmation_result"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_external_writes_disabled_allows_calendar_list(isolated_cwd):
+    node = make_confirmation_node(_settings(external_writes_enabled=False))
+    state = _state_with_tool_call("google_calendar", "cli-text", {"action": "list"})
+
+    result = await node(state)
+
+    assert result["confirmation_result"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_external_writes_disabled_still_blocks_calendar_create(isolated_cwd, monkeypatch):
+    """The mirror case: on the same mixed tool, a WRITE action must stay
+    hard-denied before the interrupt."""
+    def _fail_if_reached(payload):
+        raise AssertionError("must not reach the interrupt when external writes are disabled")
+    monkeypatch.setattr("langgraph.types.interrupt", _fail_if_reached)
+
+    node = make_confirmation_node(_settings(external_writes_enabled=False))
+    state = _state_with_tool_call("google_calendar", "cli-text",
+                                  {"action": "create", "title": "Standup"})
+
+    result = await node(state)
+
+    assert result["confirmation_result"] == "denied"
+    assert any("external writes are disabled" in m.content
+               for m in result["messages"] if hasattr(m, "content"))
+
+
+@pytest.mark.asyncio
+async def test_external_writes_disabled_allows_drive_download(isolated_cwd):
+    node = make_confirmation_node(_settings(external_writes_enabled=False))
+    state = _state_with_tool_call("google_drive", "cli-text",
+                                  {"action": "download", "file_id": "abc123"})
+
+    result = await node(state)
+
+    assert result["confirmation_result"] == "approved"
+
+
 @pytest.mark.asyncio
 async def test_external_writes_enabled_default_true_no_behavior_change(isolated_cwd, monkeypatch):
     """Normal runs (the field's default) must be completely unaffected --

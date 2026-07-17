@@ -315,6 +315,11 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
             total_facts = agent.facts_store.total_facts()
             total_procedures = agent.procedure_store.total()
             history_len = len(agent._history)
+            unpriced = agent.usage.session_unpriced_tokens
+            unpriced_note = (
+                f" [magenta]+ {unpriced:,} unpriced tok[/magenta] [dim](AI Studio billing mode unknown)[/dim]"
+                if unpriced else ""
+            )
             console.print(
                 f"[dim]Session ID:[/dim]      [bold]{agent.session_id}[/bold] [dim]({history_len} messages loaded)[/dim]\n"
                 f"[dim]Total sessions:[/dim]  [bold]{total_sessions}[/bold]\n"
@@ -325,14 +330,22 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
                 f"[dim]Memory turns:[/dim]    [bold]{count}[/bold]\n"
                 f"[dim]Vault chunks:[/dim]    [bold]{docs_count}[/bold] [dim](embed: {ef_label})[/dim]\n"
                 f"[dim]Active model:[/dim]    [bold]{agent.current_model_label}[/bold] [dim]({active})[/dim]\n"
-                f"[dim]Session cost:[/dim]    [yellow]~${cost:.5f}[/yellow]"
+                f"[dim]Session cost:[/dim]    [yellow]~${cost:.5f}[/yellow]{unpriced_note}"
             )
             trace = agent.last_turn_trace
             if trace:
+                # Response-scoped marker; a critic/planner-only fallback shows
+                # as a dim turn-level note instead of relabeling the answer.
+                if trace.get("response_fallback_used"):
+                    fb_marker = " [yellow](fallback)[/yellow]"
+                elif trace.get("turn_had_any_fallback"):
+                    fb_marker = " [dim](fallback elsewhere in turn)[/dim]"
+                else:
+                    fb_marker = ""
                 console.print(
                     f"[dim]Last turn:[/dim]       requested=[bold]{trace['requested_role']}[/bold] "
                     f"-> actual=[bold]{trace['provider']}:{trace['model']}[/bold]"
-                    f"{' [yellow](fallback)[/yellow]' if trace.get('fallback_used') else ''} "
+                    f"{fb_marker} "
                     f"[dim]({trace['calls']} LLM call(s), "
                     f"{trace['input_tokens']} in / {trace['output_tokens']} out)[/dim]"
                 )

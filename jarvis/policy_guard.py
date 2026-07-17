@@ -52,16 +52,26 @@ class PolicyDecision:
     requires_confirmation: bool
     allowed: bool          # False => hard veto (kill switch) — never even offer confirmation
     reason: str = ""
+    # Patch 1.1: per-CALL side-effect class. Mirrors ToolSpec.side_effect_type
+    # except on the mixed read/write external tools (_READ_ACTIONS), where a
+    # read action resolves to "external_read" — so a gate keyed on "did this
+    # call write externally" (EXTERNAL_WRITES_ENABLED=false) stops denying
+    # `gmail read` / `calendar list` along with `send`/`create`. "unknown"
+    # when no ToolSpec is registered for the tool.
+    side_effect_type: str = "unknown"
 
 
-def _resolve_risk(tool_name: str, args: dict[str, Any], spec: ToolSpec) -> tuple[int, bool]:
-    """Return (effective_risk_level, effective_requires_confirmation) for this
-    specific call, applying the per-action read-action downgrade."""
+def _resolve_risk(tool_name: str, args: dict[str, Any], spec: ToolSpec) -> tuple[int, bool, str]:
+    """Return (effective_risk_level, effective_requires_confirmation,
+    effective_side_effect_type) for this specific call, applying the
+    per-action read-action downgrade."""
     action = str(args.get("action", "")).strip().lower()
     read_actions = _READ_ACTIONS.get(tool_name)
     if read_actions and action in read_actions:
-        return 1, False
-    return spec.risk_level, spec.requires_confirmation
+        # _READ_ACTIONS only lists tools whose ToolSpec is external_write —
+        # their documented pure-read actions are, per call, external READS.
+        return 1, False, "external_read"
+    return spec.risk_level, spec.requires_confirmation, spec.side_effect_type
 
 
 def evaluate(tool_name: str, args: dict[str, Any], settings: "Settings") -> PolicyDecision:
@@ -82,16 +92,18 @@ def evaluate(tool_name: str, args: dict[str, Any], settings: "Settings") -> Poli
             reason="no ToolSpec registered for this tool -- defaulting to confirm",
         )
 
-    risk_level, requires_confirmation = _resolve_risk(tool_name, args or {}, spec)
+    risk_level, requires_confirmation, side_effect_type = _resolve_risk(tool_name, args or {}, spec)
 
     if requires_confirmation and risk_level >= _KILL_SWITCH_RISK_THRESHOLD and not kill_switch.is_enabled():
         why = kill_switch.reason() or "no reason given"
         return PolicyDecision(
             tool_name, action, risk_level, requires_confirmation, allowed=False,
             reason=f"kill switch is off ({why})",
+            side_effect_type=side_effect_type,
         )
 
-    return PolicyDecision(tool_name, action, risk_level, requires_confirmation, allowed=True)
+    return PolicyDecision(tool_name, action, risk_level, requires_confirmation, allowed=True,
+                          side_effect_type=side_effect_type)
 
 
 # ── Human-readable descriptions (CLI text, TTS, graph interrupt payload) ──────

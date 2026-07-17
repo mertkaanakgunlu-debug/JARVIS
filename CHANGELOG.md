@@ -6,6 +6,79 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Stabilizasyon Patch 1.1: dış review düzeltmeleri] — 2026-07-16
+
+Stabilizasyon sprintinin (aşağıda) dış incelemesi (ChatGPT-5.6, sprint commit'i `c7f2b63`
+üzerinde) 9 maddelik bir düzeltme listesi çıkardı — 1 P0 + 8 P1. Her iddia önce kodda tek tek
+doğrulandı (dokuzu da gerçek), sonra sıralı uygulandı. **24 yeni test (242/242 pytest yeşil),
+ruff temiz**, artı canlı smoke (aşağıda).
+
+- **P0 — `--profile test` gerçek `JARVIS_HOME`'u devralabiliyordu**: `__main__.py`'deki
+  `os.environ.setdefault(...)`, işletim sisteminde global `JARVIS_HOME` tanımlıysa temp home
+  yerine ONU kullanıyordu — "gerçek veriye dokunmaz" garantisi tam da o değişkeni kullanan
+  kurulumlarda sessizce bozuluyordu. Artık her zaman taze `mkdtemp`; tekrarlanabilir dizin
+  isteyen (CI) için yeni, test-only `JARVIS_TEST_HOME` değişkeni (production değişkeniyle
+  karıştırılamaz, açık opt-in). Eski davranışı bilerek koruyan test tersine çevrildi.
+- **Reset artık per-session telemetriyi de sıfırlıyor** (`_reset_state_sync`):
+  `_last_turn_trace`, `_last_turn_used_pro` ve `_pending_confirmations` lock altında
+  temizleniyor — önceden `/status` reset'ten sonra ARŞİVLENMİŞ session'ın modelini göstermeye
+  devam ediyordu ve reset-öncesi bir confirmation id yeni session'a resume edilebilirdi.
+  Kullanıcının `/model` pin'i (`_active_model_id`) bilerek korunuyor (tercih, session state'i değil).
+- **External-write koruması per-action oldu**: `PolicyDecision`'a per-CALL `side_effect_type`
+  alanı eklendi (`_READ_ACTIONS`'taki read aksiyonları "external_read" olarak çözülüyor);
+  `make_confirmation_node`'un `EXTERNAL_WRITES_ENABLED=false` gate'i statik `ToolSpec` yerine
+  bunu kullanıyor. Önceden `gmail read`/`calendar list`/`drive download` da bloklanıyordu —
+  test profili tam da egzersiz etmesi gereken read path'lere kördü. `gmail send`/`calendar
+  create`/Spotify yine hard-deny.
+- **`CLOUD_POLICY=explicit` background extractor'ları da kapatıyor**:
+  `cloud_extractors_enabled` `!= "off"` yerine `== "auto"` — `explicit`'in vaadi "cloud yalnız
+  kullanıcı AÇIKÇA seçtiğinde"; manuel pin konuşmanın cevap modeline izindir, arka plan
+  fact/entity/finance/summary/todo/triage/pdf_vision/deep_research Gemini çağrılarına değil.
+  Ana router'ın explicit/pin davranışı değişmedi.
+- **AI Studio artık koşulsuz bedava sayılmıyor**: yeni `Settings.ai_studio_billing_mode`
+  (`free|paid|unknown`, default `unknown`) — bir Developer-API anahtarının free mi paid mi
+  olduğu provider adından bilinemez (bu reponun kendi anahtarı kredisi tükenmiş PAID çıktı).
+  `_Tier.billable: bool` → `_Tier.billing: str`; metadata `jarvis_billing` (+ türetilmiş
+  `jarvis_billable`); `UsageTracker.record(billing=...)` üç durumlu: `paid` fiyatlanır (yalnız
+  `provider=="vertex"` flash/pro_turns sayacını artırır — gcp_quota RPD takibi Vertex'e özel),
+  `free` 0$, `unknown` tokenlar `unpriced_tokens_in/out`'ta birikir ve `/status`
+  (`session_unpriced_tokens`) + `/budget` raporunda görünür — asla sessizce 0$ varsayılmaz.
+- **`fallback_used` response/turn olarak ayrıldı** (`turn_summary`):
+  `response_fallback_used` (görünür cevabı fallback tier mi yazdı — etiketi bu sürer) vs
+  `turn_had_any_fallback` (turn'ün herhangi bir yerinde hata/tier>0 var mıydı). Critic'in
+  fallback'i artık cevabı "(fallback)" diye yanlış etiketlemiyor; `fallback_used` anahtarı
+  eski istemciler için response-scoped alias olarak duruyor. CLI `/status` critic-only
+  fallback'i soluk "(fallback elsewhere in turn)" notuyla gösteriyor.
+- **Confirmation resume artık trace'i güncelliyor**: `_pending_confirmations` bare `config`
+  yerine `{"config", "recorder"}` saklıyor; `resume_and_stream()` bittiğinde aynı recorder'dan
+  `turn_summary()` alıp `_last_turn_trace`'e yazıyor — önceden onaydan geçen bir turn'ün
+  `/status` başlığı hep BİR ÖNCEKİ turn'ü gösteriyordu.
+- **Legacy generic-429 graph rebuild kaldırıldı** (`chat()`): router-öncesi kalıntı — herhangi
+  bir tool'un (Tavily dahil) "429" içeren hatasında grafı AI Studio'ya rebuild edip TÜM turn'ü
+  yeniden çalıştırıyordu (başarılı tool side-effect'lerini tekrarlama riski) ve
+  `CLOUD_POLICY=off` altında router'ın reddedeceği bir geçişi duyuruyordu. Per-invocation
+  fallback tek yerde: `_compose(...).with_fallbacks()`. Artık ölü olan `_using_fallback` alanı
+  ve etiket suffix'i tamamen söküldü.
+- **Background task origin-session'a sabitlendi** (`background_turn`): `origin_session_id`
+  girişte yakalanıyor; iş bittiğinde aktif session değişmişse (reset/switch) sonuç canlı
+  konuşmaya DEĞİL, origin session'ın store'una (kendi taze `turn_idx` bucket'ına) yazılıyor;
+  episodic memory de origin'e tag'leniyor. Kullanıcı sonucu TaskExecutor'ın tamamlanma
+  bildirimiyle görüyor — session contamination kapandı.
+- **Küçükler**: zero-token çağrılar artık `by_provider.calls`'ta sayılıyor (+
+  `unreported_calls` işareti) — gerçek bir invocation, provider usage raporlamadı diye
+  defterden düşmüyor; `/status`'a `vertex_configured` + `cloud_calls_allowed` alanları eklendi
+  (`vertex_active` yanıltıcı adıyla eski istemciler için duruyor); `.env.example`'a
+  `AI_STUDIO_BILLING_MODE` + `JARVIS_TEST_HOME` belgelendi.
+- **Canlı doğrulama** (`--api --profile test --port 8131` + Invoke-RestMethod): `/status` yeni
+  alanlarla doğru (policy=off altında `cloud_calls_allowed:false`); gerçek local turn →
+  `actual_provider:"ollama"`, maliyet 0$, `turn_had_any_fallback:false`; içerikli session'da
+  `/reset` → HTTP 200 VE sonrasında trace alanları null (patch'in kendi düzeltmesinin canlı
+  kanıtı); reset'in summarizer'ı degraded listesine düştü (cloud gate çalışıyor).
+- **Kapsam dışı bırakılanlar** (review'un düşük öncelikli notlarından): `local` rolünün
+  "kesin lokal" semantiği (fast/local/realtime hâlâ alias — sprint 2'nin routing işi);
+  8 direct-Gemini modülünün gateway migration'ı (sprint 3); pre-first-turn model etiketinin
+  policy-körlüğü (kozmetik, sprint 2'deki `_is_trivially_simple` işiyle birlikte ele alınmalı).
+
 ## [Stabilizasyon sprinti: Runtime Truth + Reset + Test Isolation] — 2026-07-16
 
 Canlı manuel test oturumu (owner + Claude, aynı gün) 7 bug ortaya çıkardı: model etiketi rolden

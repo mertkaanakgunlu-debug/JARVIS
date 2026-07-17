@@ -97,8 +97,12 @@ def test_cloud_extractors_enabled_false_under_off():
     assert cloud_extractors_enabled(_settings(cloud_policy="off")) is False
 
 
-def test_cloud_extractors_enabled_true_under_explicit_and_auto():
-    assert cloud_extractors_enabled(_settings(cloud_policy="explicit")) is True
+def test_cloud_extractors_enabled_only_under_auto():
+    """Patch 1.1: `explicit` means "cloud only when the USER explicitly picked
+    a cloud model" -- a background extractor has no user pin to point at, so
+    it must be gated off under explicit exactly like under off. Only `auto`
+    (routing decides freely) enables the direct-Gemini helpers."""
+    assert cloud_extractors_enabled(_settings(cloud_policy="explicit")) is False
     assert cloud_extractors_enabled(_settings(cloud_policy="auto")) is True
 
 

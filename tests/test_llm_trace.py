@@ -61,6 +61,8 @@ def test_ollama_call_traced_with_actual_provider():
     assert summary["provider"] == "ollama"
     assert summary["requested_role"] == "reasoning"
     assert summary["fallback_used"] is False
+    assert summary["response_fallback_used"] is False
+    assert summary["turn_had_any_fallback"] is False
 
 
 # ── F2: primary fails, fallback answers → fallback_used=True ─────────────────
@@ -84,7 +86,46 @@ def test_failed_primary_then_fallback_success_marks_fallback_used():
     assert summary["provider"] == "ollama"
     assert summary["model"] == "qwen2.5:7b-instruct"
     assert summary["fallback_used"] is True
+    assert summary["response_fallback_used"] is True
+    assert summary["turn_had_any_fallback"] is True
     assert summary["billable"] is False
+
+
+# ── Patch 1.1: response-scoped vs turn-scoped fallback ────────────────────────
+
+def test_critic_fallback_does_not_mark_the_response_as_fallback():
+    """The exact review scenario: the agent's primary (tier 0) authored the
+    visible answer just fine; only the CRITIC's chain fell back (its tier-0
+    Vertex call died, its tier-1 Ollama call judged instead). The label must
+    keep naming the agent's primary with no "(fallback)" -- that flag is
+    response-scoped -- while turn_had_any_fallback still reports the turn-
+    level degradation."""
+    rec = LlmTraceRecorder(requested_role="fast")
+
+    rid_agent = uuid4()  # agent primary: fine
+    rec.on_chat_model_start({}, None, run_id=rid_agent,
+                            metadata=_start_meta("ollama", "qwen2.5:7b-instruct",
+                                                 tier=0, node="agent"))
+    rec.on_llm_end(_llm_result(), run_id=rid_agent)
+
+    rid_c0 = uuid4()  # critic primary: dies
+    rec.on_chat_model_start({}, None, run_id=rid_c0,
+                            metadata=_start_meta("vertex", "gemini-2.5-pro",
+                                                 billable=True, tier=0, node="critic"))
+    rec.on_llm_error(RuntimeError("503 UNAVAILABLE"), run_id=rid_c0)
+
+    rid_c1 = uuid4()  # critic fallback: judges
+    rec.on_chat_model_start({}, None, run_id=rid_c1,
+                            metadata=_start_meta("ollama", "qwen2.5:7b-instruct",
+                                                 tier=1, node="critic"))
+    rec.on_llm_end(_llm_result(), run_id=rid_c1)
+
+    summary = rec.turn_summary()
+    assert summary["provider"] == "ollama"
+    assert summary["model"] == "qwen2.5:7b-instruct"
+    assert summary["response_fallback_used"] is False
+    assert summary["fallback_used"] is False, "the back-compat alias is response-scoped too"
+    assert summary["turn_had_any_fallback"] is True
 
 
 def test_all_tiers_failed_returns_none_summary():
@@ -93,6 +134,57 @@ def test_all_tiers_failed_returns_none_summary():
     rec.on_chat_model_start({}, None, run_id=rid, metadata=_start_meta("vertex", "g", tier=0))
     rec.on_llm_error(RuntimeError("down"), run_id=rid)
     assert rec.turn_summary() is None, "no successful call -> no lie, keep the old label"
+
+
+# ── Patch 1.1: three-state billing plumbing ───────────────────────────────────
+
+class _UsageSpy:
+    def __init__(self):
+        self.rows: list[dict] = []
+
+    def record(self, **kwargs):
+        self.rows.append(kwargs)
+
+
+def test_jarvis_billing_metadata_reaches_usage_record():
+    usage = _UsageSpy()
+    rec = LlmTraceRecorder(usage=usage)
+    rid = uuid4()
+    md = _start_meta("aistudio", "gemini-2.5-flash")
+    md["jarvis_billing"] = "unknown"
+    rec.on_chat_model_start({}, None, run_id=rid, metadata=md)
+    rec.on_llm_end(_llm_result(), run_id=rid)
+
+    assert rec.traces[0].billing == "unknown"
+    assert rec.traces[0].billable is False
+    assert usage.rows[0]["billing"] == "unknown"
+
+
+def test_legacy_billable_bool_maps_to_paid_or_free():
+    """Metadata stamped before the billing field existed (bool only) must map
+    paid/free -- not collapse into unknown/unpriced."""
+    rec = LlmTraceRecorder()
+    rid1, rid2 = uuid4(), uuid4()
+    rec.on_chat_model_start({}, None, run_id=rid1,
+                            metadata=_start_meta("vertex", "g", billable=True))
+    rec.on_llm_end(_llm_result(), run_id=rid1)
+    rec.on_chat_model_start({}, None, run_id=rid2,
+                            metadata=_start_meta("ollama", "q", billable=False))
+    rec.on_llm_end(_llm_result(), run_id=rid2)
+
+    assert rec.traces[0].billing == "paid" and rec.traces[0].billable is True
+    assert rec.traces[1].billing == "free" and rec.traces[1].billable is False
+
+
+def test_call_with_no_identity_metadata_is_billing_unknown():
+    """A real call whose metadata carries no jarvis_* identity at all must be
+    tracked as unknown (unpriced), never silently asserted free."""
+    rec = LlmTraceRecorder()
+    rid = uuid4()
+    rec.on_chat_model_start({}, None, run_id=rid, metadata={})
+    rec.on_llm_end(_llm_result(), run_id=rid)
+    assert rec.traces[0].billing == "unknown"
+    assert rec.turn_summary()["billing"] == "unknown"
 
 
 # ── node preference: the agent node's call names the turn ─────────────────────
@@ -183,7 +275,31 @@ def test_get_llm_tiers_carry_metadata():
     tail_md = llm.fallbacks[-1].config.get("metadata", {})
     assert primary_md["jarvis_provider"] == "aistudio"
     assert primary_md["jarvis_tier_index"] == 0
+    # Patch 1.1: AI Studio's rate class defaults to "unknown" (a key can be
+    # free OR paid), so billable-for-certain is False but the authoritative
+    # billing field says unknown, not free.
+    assert primary_md["jarvis_billing"] == "unknown"
     assert primary_md["jarvis_billable"] is False
     assert tail_md["jarvis_provider"] == "ollama"
     assert tail_md["jarvis_tier_index"] == 1
+    assert tail_md["jarvis_billing"] == "free"
     assert tail_md["jarvis_billable"] is False
+
+
+def test_get_llm_aistudio_paid_mode_marks_tier_billable():
+    from jarvis.config import Settings
+    from jarvis.providers import get_llm
+
+    settings = Settings(
+        _env_file=None,
+        gemini_api_key="fake-key",
+        cloud_tier="aistudio",
+        cloud_policy="auto",
+        ai_studio_billing_mode="paid",
+    )
+    llm = get_llm("reasoning", settings)
+    from langchain_core.runnables import RunnableWithFallbacks
+    assert isinstance(llm, RunnableWithFallbacks)
+    primary_md = llm.runnable.config.get("metadata", {})
+    assert primary_md["jarvis_billing"] == "paid"
+    assert primary_md["jarvis_billable"] is True

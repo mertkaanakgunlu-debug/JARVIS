@@ -383,7 +383,6 @@ def make_confirmation_node(settings):
     from langgraph.types import interrupt as _interrupt
     from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
     from jarvis import audit_log, policy_guard
-    from jarvis.tool_registry import get_spec
 
     async def confirmation_node(state: JarvisState) -> dict:
         last_ai: AIMessage | None = None
@@ -441,15 +440,19 @@ def make_confirmation_node(settings):
         # Stabilization sprint -- --profile test's structural guarantee.
         # Same hard-stop shape as the kill switch above (no interrupt, no
         # execution, no matter what confirmation_gate_enabled says), narrower
-        # in scope: only tools whose ToolSpec.side_effect_type is
-        # "external_write" (gmail send, calendar create/delete, Drive
-        # upload/share/delete, ...) -- local writes/shell/python stay
-        # reachable so tool-calling itself remains testable under the profile.
+        # in scope: only calls that actually WRITE externally (gmail send,
+        # calendar create/delete, Drive upload/share/delete, ...) -- local
+        # writes/shell/python stay reachable so tool-calling itself remains
+        # testable under the profile. Patch 1.1: keyed on the per-CALL
+        # PolicyDecision.side_effect_type, not the static ToolSpec -- the
+        # mixed read/write tools (gmail/calendar/drive/itu_mail) are spec'd
+        # external_write wholesale, and the old static check denied their
+        # read-only actions (gmail read, calendar list) too, making the test
+        # profile unable to exercise exactly the read paths it should.
         if not getattr(settings, "external_writes_enabled", True):
             blocked = [
                 tc for tc in last_ai.tool_calls
-                if (spec := get_spec(tc.get("name", ""))) is not None
-                and spec.side_effect_type == "external_write"
+                if decisions[tc.get("id")].side_effect_type == "external_write"
             ]
             if blocked:
                 for tc in blocked:

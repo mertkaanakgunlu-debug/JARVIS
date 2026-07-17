@@ -242,6 +242,9 @@ class StatusResponse(BaseModel):
     vault_chunks: int
     model: str
     session_cost_usd: float
+    # Legacy name (kept for older Electron HUD / Flutter clients): actually
+    # means "Vertex is CONFIGURED" (cloud_tier + project set), not "cloud
+    # calls can happen" — prefer vertex_configured + cloud_calls_allowed.
     vertex_active: bool
     # Stabilization sprint — runtime truth fields. None before the first
     # completed foreground turn; `model`/`session_cost_usd` stay for older
@@ -249,10 +252,20 @@ class StatusResponse(BaseModel):
     requested_role: str | None = None
     actual_provider: str | None = None
     actual_model: str | None = None
+    # Response-scoped (patch 1.1): did a fallback tier author the visible
+    # answer? turn_had_any_fallback is the turn-wide health view.
     fallback_used: bool | None = None
+    turn_had_any_fallback: bool | None = None
     cloud_policy: str = "auto"
-    # Features currently running in degraded (no-LLM) mode because
-    # CLOUD_POLICY=off disabled their direct-Gemini call — see
+    # Patch 1.1 — billing truth: tokens whose rate is unknowable this session
+    # (AI Studio key, ai_studio_billing_mode=unknown). Nonzero means
+    # session_cost_usd is a lower bound, not the whole spend picture.
+    session_unpriced_tokens: int = 0
+    # Patch 1.1 — clearer replacements for vertex_active's overloaded name.
+    vertex_configured: bool | None = None
+    cloud_calls_allowed: bool | None = None
+    # Features currently running in degraded (no-LLM) mode because the cloud
+    # policy (off/explicit) disabled their direct-Gemini call — see
     # jarvis/providers.degraded_features().
     degraded: list[str] = []
 
@@ -786,6 +799,7 @@ async def status(request: Request):
     from jarvis.providers import degraded_features
     agent = get_agent()
     trace = agent.last_turn_trace or {}
+    policy = getattr(agent.settings, "cloud_policy", "auto")
     return StatusResponse(
         session_id=agent.session_id,
         memory_turns=agent.memory.count(),
@@ -797,7 +811,14 @@ async def status(request: Request):
         actual_provider=trace.get("provider"),
         actual_model=trace.get("model"),
         fallback_used=trace.get("fallback_used"),
-        cloud_policy=getattr(agent.settings, "cloud_policy", "auto"),
+        turn_had_any_fallback=trace.get("turn_had_any_fallback"),
+        cloud_policy=policy,
+        session_unpriced_tokens=agent.usage.session_unpriced_tokens,
+        vertex_configured=agent.settings.use_vertex,
+        cloud_calls_allowed=(
+            policy == "auto"
+            or (policy == "explicit" and agent.settings.pin_cloud_model)
+        ),
         degraded=degraded_features(),
     )
 

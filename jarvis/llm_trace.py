@@ -8,7 +8,7 @@ manual-test session proved the label could be wrong on every single turn.
 The fix has two halves:
 1. jarvis/providers/get_llm() stamps identity metadata onto every tier via
    with_config(metadata={"jarvis_provider": ..., "jarvis_model": ...,
-   "jarvis_billable": ..., "jarvis_tier_index": ...}) — declared at
+   "jarvis_billing": ..., "jarvis_tier_index": ...}) — declared at
    construction, never guessed from a model-name string.
 2. This LlmTraceRecorder rides the per-turn callbacks list (next to
    _HudEventCallback) and turns each REAL chat-model invocation into one
@@ -35,7 +35,8 @@ class LlmCallTrace:
     """One real LLM invocation, as observed at the callback layer."""
     provider: str        # "ollama" | "vertex" | "aistudio" | "unknown"
     model: str
-    billable: bool
+    billable: bool       # derived: billing == "paid" (kept for display/back-compat)
+    billing: str         # "free" | "paid" | "unknown" — authoritative (patch 1.1)
     tier_index: int      # 0 = the chain's primary; >0 = a fallback tier answered
     node: str            # langgraph node ("agent"/"critic"/"planner") if exposed, else ""
     latency_ms: float
@@ -63,10 +64,20 @@ class LlmTraceRecorder(BaseCallbackHandler):
     def on_chat_model_start(self, serialized, messages, *, run_id=None,
                             metadata=None, **kwargs) -> None:
         md = metadata or {}
+        billing = md.get("jarvis_billing")
+        if billing is None:
+            # Pre-billing-mode metadata (a stamped bool but no mode) maps
+            # paid/free; a call with NO identity metadata at all is
+            # "unknown" — its tokens get tracked as unpriced rather than
+            # silently asserted free (patch 1.1).
+            if "jarvis_billable" in md:
+                billing = "paid" if md["jarvis_billable"] else "free"
+            else:
+                billing = "unknown"
         self._pending[str(run_id)] = {
             "provider": md.get("jarvis_provider", "unknown"),
             "model": md.get("jarvis_model", ""),
-            "billable": bool(md.get("jarvis_billable", False)),
+            "billing": billing,
             "tier_index": int(md.get("jarvis_tier_index", 0)),
             "node": md.get("langgraph_node", ""),
             "started": time.monotonic(),
@@ -84,10 +95,12 @@ class LlmTraceRecorder(BaseCallbackHandler):
         info = self._pending.pop(str(run_id), None)
         started = info.get("started") if info else None
         tokens_in, tokens_out = self._extract_usage(response)
+        billing = (info or {}).get("billing", "unknown")
         trace = LlmCallTrace(
             provider=(info or {}).get("provider", "unknown"),
             model=(info or {}).get("model", ""),
-            billable=bool((info or {}).get("billable", False)),
+            billable=billing == "paid",
+            billing=billing,
             tier_index=int((info or {}).get("tier_index", 0)),
             node=(info or {}).get("node", ""),
             latency_ms=(time.monotonic() - started) * 1000.0 if started else 0.0,
@@ -103,7 +116,7 @@ class LlmTraceRecorder(BaseCallbackHandler):
                     model=trace.model,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
-                    billable=trace.billable,
+                    billing=trace.billing,
                 )
             except Exception:
                 pass  # accounting must never break the turn
@@ -112,10 +125,12 @@ class LlmTraceRecorder(BaseCallbackHandler):
         info = self._pending.pop(str(run_id), None)
         if info is None:
             return
+        billing = info.get("billing", "unknown")
         self.traces.append(LlmCallTrace(
             provider=info.get("provider", "unknown"),
             model=info.get("model", ""),
-            billable=bool(info.get("billable", False)),
+            billable=billing == "paid",
+            billing=billing,
             tier_index=int(info.get("tier_index", 0)),
             node=info.get("node", ""),
             latency_ms=(time.monotonic() - info["started"]) * 1000.0,
@@ -154,18 +169,38 @@ class LlmTraceRecorder(BaseCallbackHandler):
         calls judge, they don't author the reply); falls back to the last
         successful call when node metadata isn't exposed. None if nothing
         succeeded — callers keep their previous label rather than lying.
+
+        Patch 1.1 — fallback is reported at two scopes, because they answer
+        different questions:
+          response_fallback_used — did a fallback tier author the VISIBLE
+            answer (final.tier_index > 0)? This drives the model label; a
+            critic call failing over elsewhere in the turn must not relabel
+            an answer the local primary actually wrote as "(fallback)".
+          turn_had_any_fallback — did ANY call in the turn fail or run on a
+            tier > 0? The health view: "something in this turn didn't go
+            through its primary."
+        `fallback_used` is kept as an alias of response_fallback_used for
+        pre-split readers (Electron HUD / Flutter /status consumers).
         """
         ok_calls = [t for t in self.traces if t.ok]
         if not ok_calls:
             return None
         agent_calls = [t for t in ok_calls if t.node == "agent"]
         final = (agent_calls or ok_calls)[-1]
+        response_fallback_used = final.tier_index > 0
+        turn_had_any_fallback = (
+            any(t.tier_index > 0 for t in ok_calls)
+            or any(not t.ok for t in self.traces)
+        )
         return {
             "requested_role": self.requested_role,
             "provider": final.provider,
             "model": final.model,
             "billable": final.billable,
-            "fallback_used": any(t.tier_index > 0 for t in ok_calls) or any(not t.ok for t in self.traces),
+            "billing": final.billing,
+            "fallback_used": response_fallback_used,
+            "response_fallback_used": response_fallback_used,
+            "turn_had_any_fallback": turn_had_any_fallback,
             "calls": len(self.traces),
             "input_tokens": sum(t.input_tokens for t in ok_calls),
             "output_tokens": sum(t.output_tokens for t in ok_calls),

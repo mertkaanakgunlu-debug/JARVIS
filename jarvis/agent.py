@@ -7,7 +7,6 @@ Public API (preserved from pydantic-ai version):
   .switch_model(model_id) -> str
   .switch_session(session_id) -> int
   .reset()
-  ._using_fallback  (bool)
   ._cloud_model     (str — display label)
 
 cli.py and voice.py import JarvisAgent and AVAILABLE_MODELS from here.
@@ -410,7 +409,6 @@ class JarvisAgent:
         # (pdf_cache/plots/reports) and all stores land under it.
         self.workspace = paths.jarvis_home().resolve()
         self._env_block = _build_env_block(self.workspace)
-        self._using_fallback = False
         self._active_model_id: str | None = None
         # Faz 1: which role (fast/local vs reasoning) served the most recent
         # turn — None before the first turn. Drives _cloud_model's per-turn
@@ -525,28 +523,32 @@ class JarvisAgent:
                 "vertex": "Vertex",
                 "aistudio": "AI Studio",
             }.get(trace["provider"], trace["provider"])
-            fb = ", fallback" if trace.get("fallback_used") else ""
+            # Response-scoped on purpose (patch 1.1): the label describes the
+            # call that authored the visible answer -- a critic/planner call
+            # elsewhere in the turn falling back must not relabel the answer
+            # itself as "(fallback)". turn_had_any_fallback stays visible in
+            # /status for the turn-wide view.
+            fb = ", fallback" if trace.get("response_fallback_used") else ""
             return f"{trace['model']} ({display}{fb})"
 
-        suffix = " (fallback)" if self._using_fallback else ""
         s = self._effective_settings
 
         if self._last_turn_used_pro is None:
             if self._active_model_id:
-                return _label_for(self._active_model_id) + suffix
+                return _label_for(self._active_model_id)
             if s.use_vertex:
-                return _label_for(f"vertex/{s.vertex_model_fast}") + suffix
-            return s.cloud_model_label + suffix
+                return _label_for(f"vertex/{s.vertex_model_fast}")
+            return s.cloud_model_label
 
         if self._last_turn_used_pro:
             if s.use_vertex:
-                return f"{s.vertex_model_primary} (Vertex, reasoning){suffix}"
-            return f"{s.cloud_model_fallback} (AI Studio, reasoning){suffix}"
+                return f"{s.vertex_model_primary} (Vertex, reasoning)"
+            return f"{s.cloud_model_fallback} (AI Studio, reasoning)"
 
         if self._active_model_id and s.pin_cloud_model:
-            return _label_for(self._active_model_id) + suffix
+            return _label_for(self._active_model_id)
 
-        return f"{s.local_model} (Ollama, local){suffix}"
+        return f"{s.local_model} (Ollama, local)"
 
     @property
     def current_model_label(self) -> str:
@@ -556,8 +558,9 @@ class JarvisAgent:
     def last_turn_trace(self) -> dict | None:
         """The last foreground turn's actual provider/model rollup (or None).
 
-        Keys: requested_role, provider, model, billable, fallback_used,
-        calls, input_tokens, output_tokens — see LlmTraceRecorder.turn_summary.
+        Keys: requested_role, provider, model, billable, billing,
+        fallback_used, response_fallback_used, turn_had_any_fallback, calls,
+        input_tokens, output_tokens — see LlmTraceRecorder.turn_summary.
         """
         return self._last_turn_trace
 
@@ -580,6 +583,16 @@ class JarvisAgent:
             self.session_id = self.session_store.new_session()
             self._history = []
             self._turn = 0
+            # Stabilization patch 1.1: per-session telemetry must not leak
+            # into the fresh session -- without these, /status kept showing
+            # the ARCHIVED session's provider/model/fallback rollup, and a
+            # pre-reset confirmation id could resume its interrupted graph
+            # into (and write history against) the new session. The user's
+            # explicit model pin (_active_model_id) deliberately survives:
+            # it's a preference, not per-session state.
+            self._last_turn_trace = None
+            self._last_turn_used_pro = None
+            self._pending_confirmations.clear()
         return old_session_id, had_content
 
     def reset(self) -> None:
@@ -671,7 +684,6 @@ class JarvisAgent:
             self._graph = new_graph
             self._effective_settings = new_settings
             self._active_model_id = model_id
-            self._using_fallback = False
         return _label_for(model_id)
 
     # ── Entity extraction (fire-and-forget) ────────────────────────────────────
@@ -954,30 +966,20 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._pending_confirmations[conf_id] = config
+                self._pending_confirmations[conf_id] = {
+                    "config": config, "recorder": recorder,
+                }
                 event_bus.confirmation_required(conf_id, payload)
                 raise ConfirmationRequired(conf_id, payload) from exc
-            except Exception as exc:
-                msg = str(exc)
-                if not self._using_fallback and ("PerDay" in msg or "RequestsPerDay" in msg or "429" in msg):
-                    print("\n[JARVIS] Quota hit — falling back to AI Studio Flash.")
-                    self._using_fallback = True
-                    import copy
-                    # BUG-22: base the fallback on _effective_settings (which
-                    # reflects any prior switch_model()), not the original
-                    # construction-time self.settings — otherwise this silently
-                    # reverts a manually-chosen model back to the startup default.
-                    fb_settings = copy.copy(self._effective_settings)
-                    fb_settings.cloud_tier = "aistudio"
-                    fb_settings.cloud_model = self._effective_settings.cloud_model_fallback
-                    self._graph = build_graph(
-                        fb_settings, self.workspace, self.memory, self._checkpointer,
-                        extra_tools=self._mcp.tools,  # Faz 5: don't drop already-connected MCP tools
-                    )
-                    self._effective_settings = fb_settings
-                    result = await self._graph.ainvoke(state, config=config)
-                else:
-                    raise
+            # Patch 1.1: the pre-router "if '429' in str(exc): rebuild the
+            # graph on AI Studio Flash and re-run the whole turn" block that
+            # used to live here is gone. It predated the provider router --
+            # per-invocation fallback is _compose(...).with_fallbacks()'s job
+            # now (jarvis/providers) -- and it was actively wrong three ways:
+            # a "429" from ANY tool (Tavily, ...) matched it; under
+            # CLOUD_POLICY=off it announced a cloud switch the router would
+            # then refuse; and re-running the full graph re-executed any tool
+            # side effects that had already succeeded in the failed attempt.
 
             response = result.get("response", "")
             if not response:
@@ -990,9 +992,8 @@ class JarvisAgent:
             # Runtime truth: label the turn with the provider that ACTUALLY
             # answered (per-tier callback metadata), not the requested role.
             # Usage is recorded live by the recorder's on_llm_end callback
-            # (one UsageTracker.record per real LLM call, including a quota-
-            # fallback's re-invocation above, which reuses the same config)
-            # -- no post-hoc rescan of result["messages"] needed anymore.
+            # (one UsageTracker.record per real LLM call) -- no post-hoc
+            # rescan of result["messages"] needed anymore.
             trace = recorder.turn_summary()
             if trace:
                 self._last_turn_trace = trace
@@ -1115,7 +1116,9 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._pending_confirmations[conf_id] = config
+                self._pending_confirmations[conf_id] = {
+                    "config": config, "recorder": recorder,
+                }
                 event_bus.confirmation_required(conf_id, payload)
                 yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
             except (asyncio.CancelledError, GeneratorExit):
@@ -1193,10 +1196,15 @@ class JarvisAgent:
         """
         from langgraph.types import Command
 
-        config = self._pending_confirmations.pop(conf_id, None)
-        if config is None:
+        pending = self._pending_confirmations.pop(conf_id, None)
+        if pending is None:
             yield "[ERROR: confirmation session expired or not found]"
             return
+        config = pending["config"]
+        # The recorder chat()/chat_stream() registered in config["callbacks"]
+        # before the interrupt -- the resumed half of the turn keeps feeding
+        # it, so its rollup below is the WHOLE turn's, not just the tail's.
+        recorder = pending.get("recorder")
 
         # BUG-8: same turn-serialization as chat()/chat_stream() — this
         # resumes and finishes the SAME turn that chat_stream() started
@@ -1233,6 +1241,15 @@ class JarvisAgent:
                 return
 
             full_response = "".join(chunks)
+
+            # Patch 1.1: without this, a confirmed turn's /status headline
+            # kept showing the PREVIOUS turn's provider -- chat()/chat_stream()
+            # never got to their own turn_summary() call (the interrupt raised
+            # first), and this method didn't roll the recorder up either.
+            if recorder is not None:
+                resumed_trace = recorder.turn_summary()
+                if resumed_trace:
+                    self._last_turn_trace = resumed_trace
 
             # Rebuild history from checkpointer
             try:
@@ -1385,11 +1402,21 @@ class JarvisAgent:
         the user's next live turn has it as context and it survives a
         session_store reload -- "confirm-or-notify, not silent execution"
         cuts both ways: a background result must be visible later, just not
-        while it's still running.
+        while it's still running. Patch 1.1: "real history" means the session
+        that SUBMITTED the task (origin_session_id, pinned at entry) -- if a
+        /reset or session switch happened mid-task, the result is persisted
+        into that origin session's store instead and the live conversation is
+        left alone (only the task-completion notification fires).
         """
         await self.connect_mcp_tools()  # no-op after the first real connect
 
-        ctx = self._context_builder.build(user_query, session_id=self.session_id)
+        # Patch 1.1: pin the session this task belongs to NOW. The user can
+        # /reset or /session-switch while the (long) task runs -- the result
+        # must land in the session that ASKED for it, never whichever one
+        # happens to be live at completion time (session contamination).
+        origin_session_id = self.session_id
+
+        ctx = self._context_builder.build(user_query, session_id=origin_session_id)
         system_prompt = _load_system_prompt(
             self.settings, ctx.memory_ctx, "tr",
             self._env_block, user_query, ctx.entities_block,
@@ -1444,16 +1471,34 @@ class JarvisAgent:
         # append this result into the *real* history, same shared-state
         # invariant _state_lock protects everywhere else (BUG-8).
         from langchain_core.messages import AIMessage
+        exchange = [
+            HumanMessage(content=f"[Background task] {user_query}"),
+            AIMessage(content=response),
+        ]
         await self._acquire_state_lock()
         try:
-            self._history = self._history + [
-                HumanMessage(content=f"[Background task] {user_query}"),
-                AIMessage(content=response),
-            ]
-            self.session_store.save_turn(self.session_id, self._history, self._turn)
+            if self.session_id == origin_session_id:
+                self._history = self._history + exchange
+                self.session_store.save_turn(origin_session_id, self._history, self._turn)
+            else:
+                # The conversation moved on (reset / session switch) while
+                # this ran. Persist into the ORIGIN session's store -- in its
+                # own fresh turn_idx bucket, past whatever that session last
+                # saved -- so the result is retrievable via /session, and
+                # leave the live conversation completely untouched. The user
+                # still hears about it through TaskExecutor's completion
+                # notification (ws/FCM), same as always.
+                origin_history = (
+                    self.session_store.load_history(origin_session_id) + exchange
+                )
+                self.session_store.save_turn(
+                    origin_session_id,
+                    origin_history,
+                    self.session_store.last_turn_idx(origin_session_id) + 1,
+                )
         finally:
             self._state_lock.release()
 
-        self.memory.store("user", user_query, self.session_id)
-        self.memory.store("assistant", response, self.session_id)
+        self.memory.store("user", user_query, origin_session_id)
+        self.memory.store("assistant", response, origin_session_id)
         return response

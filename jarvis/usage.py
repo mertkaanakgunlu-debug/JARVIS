@@ -1,9 +1,15 @@
 """Session-level token and cost tracker (Faz 5).
 
-Accumulates tokens per model, estimates Vertex AI cost, and persists a running
-total across sessions in data/usage.json so /budget shows lifetime spend.
+Accumulates tokens per model, estimates Gemini cost for paid calls, and
+persists a running total across sessions in data/usage.json so /budget shows
+lifetime spend. Patch 1.1: cost is keyed on the caller-declared three-state
+`billing` class ("free"/"paid"/"unknown"); "unknown" tokens (an AI Studio key
+whose tier hasn't been declared) accumulate as unpriced_tokens_* instead of
+being silently asserted $0.
 
-Pricing: Vertex AI Gemini, standard context window (<=200K tokens), May 2026.
+Pricing: Gemini, standard context window (<=200K tokens), May 2026 — applied
+to any billing="paid" call (Vertex, or AI Studio with
+ai_studio_billing_mode=paid).
 Flash input $0.075/1M, output $0.30/1M.
 Pro input $1.25/1M, output $10.00/1M.
 """
@@ -34,17 +40,28 @@ def _empty_totals() -> dict:
         "flash_turns": 0,
         "pro_turns": 0,
         "cost_usd": 0.0,
-        "by_provider": {},  # provider -> {"calls", "tokens_in", "tokens_out"}
+        # Patch 1.1: tokens billed at an UNKNOWN rate (AI Studio key whose
+        # free/paid tier hasn't been declared via ai_studio_billing_mode) —
+        # counted here and surfaced, never silently priced as $0.
+        "unpriced_tokens_in": 0,
+        "unpriced_tokens_out": 0,
+        "by_provider": {},  # provider -> {"calls", "tokens_in", "tokens_out"[, "unreported_calls"]}
     }
 
 
-def _bump_provider(d: dict, provider: str, tokens_in: int, tokens_out: int) -> None:
+def _bump_provider(d: dict, provider: str, tokens_in: int, tokens_out: int,
+                   *, reported: bool = True) -> None:
     entry = d.setdefault("by_provider", {}).setdefault(
         provider, {"calls": 0, "tokens_in": 0, "tokens_out": 0}
     )
     entry["calls"] += 1
     entry["tokens_in"] += tokens_in
     entry["tokens_out"] += tokens_out
+    if not reported:
+        # The provider returned no usage metadata for this real call — the
+        # call still counts, its token load is just invisible. Tracked so a
+        # "0 tokens" readout can be told apart from "0 calls" (patch 1.1).
+        entry["unreported_calls"] = entry.get("unreported_calls", 0) + 1
 
 
 class UsageTracker:
@@ -96,21 +113,29 @@ class UsageTracker:
         model: str,
         tokens_in: int,
         tokens_out: int,
-        billable: bool,
+        billing: str,
     ) -> None:
         """Record one real LLM invocation and update persistent totals.
 
-        Stabilization sprint: cost is now driven by the CALLER-DECLARED
-        `billable` flag (stamped at tier construction in
-        jarvis/providers/__init__.py — vertex=True, ollama/aistudio=False),
-        not guessed from whether "pro" appears in the model name. Before this,
-        a local Ollama turn's model id ("qwen2.5:7b-instruct", no "pro"
-        substring) was priced as Gemini Flash -- every local-only turn showed
-        a nonzero cost. flash_turns/pro_turns, which gcp_quota.py uses
-        specifically for Vertex RPD-quota tracking, now count billable Vertex
-        calls only (previously any Gemini-tier-looking model id, including
-        Ollama's) -- by_provider below gives total call/token visibility
-        across all providers without polluting that Vertex-specific counter.
+        `billing` is the CALLER-DECLARED three-state rate class, stamped at
+        tier construction in jarvis/providers/__init__.py (vertex="paid",
+        ollama="free", aistudio=Settings.ai_studio_billing_mode) — never
+        guessed from the model name (the old "pro" substring guess priced
+        local Ollama turns as Gemini Flash):
+          paid    — priced from _PRICING; provider=="vertex" also bumps
+                    flash_turns/pro_turns, which gcp_quota.py uses for VERTEX
+                    RPD-quota tracking specifically (a paid AI Studio call is
+                    priced but must not pollute that Vertex counter).
+          free    — recorded, costs 0.
+          unknown — recorded, cost NOT asserted; tokens accumulate in
+                    unpriced_tokens_in/out so /status /budget can show them
+                    (patch 1.1 — an AI Studio key may be free OR paid and the
+                    provider name can't tell you which).
+
+        A zero-token call (provider reported no usage metadata) still counts:
+        by_provider.calls increments and the entry's unreported_calls marks it
+        — a real invocation must never vanish from the call ledger just
+        because its provider skipped usage reporting (patch 1.1).
 
         BUG-usage (pre-existing, unchanged): self._total is re-read fresh from
         disk right before merging this call's delta in, narrowing (not
@@ -118,38 +143,52 @@ class UsageTracker:
         processes (CLI + `--api`) would otherwise hit -- see kill_switch.py/
         audit_log.py for the same accepted tradeoff elsewhere in this repo.
         """
-        if not (tokens_in or tokens_out):
-            return
+        reported = bool(tokens_in or tokens_out)
         cost = 0.0
         turn_key = None
-        if billable:
+        if billing == "paid":
             tier = _model_tier(model)
             rates = _PRICING[tier]
             cost = tokens_in * rates["in"] + tokens_out * rates["out"]
-            turn_key = f"{tier}_turns"
+            if provider == "vertex":
+                turn_key = f"{tier}_turns"
+        unpriced_in = tokens_in if billing == "unknown" else 0
+        unpriced_out = tokens_out if billing == "unknown" else 0
 
         # Session counters are process-local by design (reset per JarvisAgent
         # instantiation) -- no cross-process sharing, safe to mutate directly.
         self._session["tokens_in"] += tokens_in
         self._session["tokens_out"] += tokens_out
         self._session["cost_usd"] += cost
+        self._session["unpriced_tokens_in"] = self._session.get("unpriced_tokens_in", 0) + unpriced_in
+        self._session["unpriced_tokens_out"] = self._session.get("unpriced_tokens_out", 0) + unpriced_out
         if turn_key:
             self._session[turn_key] = self._session.get(turn_key, 0) + 1
-        _bump_provider(self._session, provider, tokens_in, tokens_out)
+        _bump_provider(self._session, provider, tokens_in, tokens_out, reported=reported)
 
         with self._lock:
             self._total = self._load_total()
             self._total["tokens_in"] += tokens_in
             self._total["tokens_out"] += tokens_out
             self._total["cost_usd"] += cost
+            self._total["unpriced_tokens_in"] = self._total.get("unpriced_tokens_in", 0) + unpriced_in
+            self._total["unpriced_tokens_out"] = self._total.get("unpriced_tokens_out", 0) + unpriced_out
             if turn_key:
                 self._total[turn_key] = self._total.get(turn_key, 0) + 1
-            _bump_provider(self._total, provider, tokens_in, tokens_out)
+            _bump_provider(self._total, provider, tokens_in, tokens_out, reported=reported)
             self._save_total()
 
     @property
     def session_cost(self) -> float:
         return self._session["cost_usd"]
+
+    @property
+    def session_unpriced_tokens(self) -> int:
+        """Tokens this session whose rate is unknowable (billing="unknown") —
+        in + out combined. Nonzero means session_cost is a LOWER bound, not
+        the whole truth; /status surfaces this next to the cost figure."""
+        return (self._session.get("unpriced_tokens_in", 0)
+                + self._session.get("unpriced_tokens_out", 0))
 
     @property
     def total_cost(self) -> float:
@@ -161,12 +200,19 @@ class UsageTracker:
         t = self._total
 
         def _fmt(label: str, d: dict) -> list[str]:
-            return [
+            rows = [
                 f"  Tokens  in : [cyan]{d['tokens_in']:>10,}[/cyan]",
                 f"  Tokens out : [cyan]{d['tokens_out']:>10,}[/cyan]",
                 f"  Flash turns: [dim]{d.get('flash_turns',0):>3}[/dim]   Pro turns: [dim]{d.get('pro_turns',0):>3}[/dim]",
                 f"  Est. cost  : [yellow]${d['cost_usd']:.5f}[/yellow] [dim](~${d['cost_usd']*100:.3f} cents)[/dim]",
             ]
+            unpriced = d.get("unpriced_tokens_in", 0) + d.get("unpriced_tokens_out", 0)
+            if unpriced:
+                rows.append(
+                    f"  Unpriced   : [magenta]{unpriced:>10,}[/magenta] tok "
+                    "[dim](AI Studio billing mode unknown -- NOT in the cost above)[/dim]"
+                )
+            return rows
 
         def _fmt_providers(d: dict) -> list[str]:
             by_provider = d.get("by_provider") or {}

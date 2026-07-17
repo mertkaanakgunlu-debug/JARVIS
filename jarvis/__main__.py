@@ -31,7 +31,16 @@ if _prescan_test_profile():
     # (see jarvis/paths.py); CLOUD_POLICY=off + EXTERNAL_WRITES_ENABLED=false
     # give the structural zero-cloud / zero-external-side-effect guarantee.
     os.environ["JARVIS_SKIP_DOTENV"] = "1"
-    os.environ.setdefault("JARVIS_HOME", tempfile.mkdtemp(prefix="jarvis-e2e-"))
+    # ALWAYS a fresh temp home -- never inherit a pre-set JARVIS_HOME. An
+    # operator whose real installation uses JARVIS_HOME globally would
+    # otherwise aim an "isolated" test run straight at the production
+    # stores (the exact failure this profile exists to prevent). The one
+    # deliberate escape hatch is the test-only JARVIS_TEST_HOME variable:
+    # explicit opt-in for a stable/repeatable test dir (CI), impossible to
+    # confuse with the production variable.
+    os.environ["JARVIS_HOME"] = (
+        os.environ.get("JARVIS_TEST_HOME") or tempfile.mkdtemp(prefix="jarvis-e2e-")
+    )
     os.environ["CLOUD_POLICY"] = "off"
     os.environ["EXTERNAL_WRITES_ENABLED"] = "false"
 else:
@@ -81,7 +90,9 @@ def main() -> None:
         help=(
             "test: isolated E2E profile for manual/scripted testing -- real .env "
             "is never read, a fresh temp JARVIS_HOME replaces data/vault (see "
-            "jarvis/paths.py), CLOUD_POLICY=off (zero cloud LLM calls), and "
+            "jarvis/paths.py; a pre-set JARVIS_HOME is deliberately ignored -- "
+            "set JARVIS_TEST_HOME for a stable test dir), CLOUD_POLICY=off "
+            "(zero cloud LLM calls), and "
             "EXTERNAL_WRITES_ENABLED=false (email/calendar/Drive sends are hard-"
             "denied before the confirmation gate). Must be decided before argv "
             "parsing even runs -- see _prescan_test_profile() above."

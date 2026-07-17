@@ -95,6 +95,37 @@ class TestPerActionDowngrade:
         assert d.requires_confirmation is False  # spotify itself is no-confirm by spec
 
 
+class TestPerActionSideEffectType:
+    """Patch 1.1: PolicyDecision carries a per-CALL side_effect_type so gates
+    keyed on "did this call write externally" (EXTERNAL_WRITES_ENABLED=false)
+    can tell `gmail read` apart from `gmail send` -- the static ToolSpec marks
+    the whole tool external_write and used to get both denied."""
+
+    def test_read_action_on_mixed_tool_resolves_to_external_read(self):
+        d = policy_guard.evaluate("gmail", {"action": "read"}, settings=None)
+        assert d.side_effect_type == "external_read"
+        d = policy_guard.evaluate("google_calendar", {"action": "list"}, settings=None)
+        assert d.side_effect_type == "external_read"
+
+    def test_write_action_on_mixed_tool_stays_external_write(self):
+        d = policy_guard.evaluate("gmail", {"action": "send"}, settings=None)
+        assert d.side_effect_type == "external_write"
+        d = policy_guard.evaluate("google_calendar", {"action": "create"}, settings=None)
+        assert d.side_effect_type == "external_write"
+
+    def test_single_class_tools_mirror_their_spec(self):
+        assert policy_guard.evaluate("spotify", {"action": "play"}, settings=None) \
+            .side_effect_type == "external_write"
+        assert policy_guard.evaluate("file_read", {}, settings=None) \
+            .side_effect_type != "external_write"
+
+    def test_unregistered_tool_is_unknown_not_external_write(self):
+        # Fail-safe posture lives in requires_confirmation (True), not in
+        # pretending to know the side-effect class.
+        d = policy_guard.evaluate("totally_made_up_tool_xyz", {}, settings=None)
+        assert d.side_effect_type == "unknown"
+
+
 class TestKillSwitch:
     """Kill switch vetoes L3+requires_confirmation calls only -- an emergency
     stop for JARVIS acting on the outside world, not a full halt on local

@@ -39,6 +39,7 @@ def _run_probe(extra_env: dict | None = None) -> dict:
     import os as _os
     env = dict(_os.environ)
     env.pop("JARVIS_HOME", None)  # never inherit the test runner's own value
+    env.pop("JARVIS_TEST_HOME", None)
     env.pop("CLOUD_POLICY", None)
     env.pop("JARVIS_SKIP_DOTENV", None)
     if extra_env:
@@ -70,10 +71,25 @@ def test_profile_test_settings_reflect_isolation_not_real_env():
     assert data["settings_gemini_api_key"] == ""
 
 
-def test_profile_test_honors_pre_set_jarvis_home():
-    """JARVIS_HOME uses setdefault, not unconditional overwrite -- an
-    operator-provided stable location (CI, repeatable runs) must survive."""
-    data = _run_probe(extra_env={"JARVIS_HOME": "C:\\Temp\\my-fixed-e2e-home"})
+def test_profile_test_ignores_pre_set_jarvis_home():
+    """P0 (patch 1.1) -- the old setdefault INHERITED a pre-set JARVIS_HOME,
+    so an operator whose real installation sets it globally would have aimed
+    an "isolated" test run straight at the production stores. --profile test
+    must always seed a fresh temp home, no matter what's already in the env."""
+    data = _run_probe(extra_env={"JARVIS_HOME": "C:\\Temp\\my-production-home"})
+    assert data["home"] != "C:\\Temp\\my-production-home"
+    assert "jarvis-e2e-" in (data["home"] or ""), "expected a fresh mkdtemp home"
+
+
+def test_profile_test_honors_explicit_test_home_only():
+    """The deliberate escape hatch for a stable/repeatable test dir (CI) is
+    the test-only JARVIS_TEST_HOME variable -- explicit opt-in that cannot be
+    confused with the production JARVIS_HOME, which stays ignored even when
+    both are set."""
+    data = _run_probe(extra_env={
+        "JARVIS_HOME": "C:\\Temp\\my-production-home",
+        "JARVIS_TEST_HOME": "C:\\Temp\\my-fixed-e2e-home",
+    })
     assert data["home"] == "C:\\Temp\\my-fixed-e2e-home"
 
 

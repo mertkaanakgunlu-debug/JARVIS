@@ -51,8 +51,14 @@ class _FakeAgent:
             )
         )
         self.saved_turns: list[tuple] = []
+        # Patch 1.1: background_turn's origin-session path also reads the
+        # origin's stored history/turn counter when the live session moved on.
+        self.origin_store_history: list = []
+        self.origin_last_turn_idx = 0
         self.session_store = SimpleNamespace(
-            save_turn=lambda sid, hist, turn: self.saved_turns.append((sid, list(hist), turn))
+            save_turn=lambda sid, hist, turn: self.saved_turns.append((sid, list(hist), turn)),
+            load_history=lambda sid, limit=20: list(self.origin_store_history),
+            last_turn_idx=lambda sid: self.origin_last_turn_idx,
         )
         self.stored_memories: list[tuple] = []
         self.memory = SimpleNamespace(
@@ -134,6 +140,64 @@ async def test_background_turn_uses_isolated_thread_id_not_main_session_turn():
     thread_id = seen_config["configurable"]["thread_id"]
     assert thread_id.startswith(f"{agent.session_id}-task-")
     assert thread_id != f"{agent.session_id}-t{agent._turn}"
+
+
+@pytest.mark.asyncio
+async def test_background_result_lands_in_origin_session_after_midflight_reset():
+    """Patch 1.1 (session-contamination race): the user /reset (or switched
+    sessions) while the task ran. The result must be persisted into the
+    session that SUBMITTED the task -- in a fresh turn_idx bucket past that
+    session's last save -- and the LIVE conversation must stay completely
+    untouched (the task-completion notification is the only thing the new
+    session sees)."""
+    agent = _FakeAgent()
+    agent.origin_store_history = [HumanMessage(content="earlier turn")]
+    agent.origin_last_turn_idx = 3
+    invoke_started = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def slow_ainvoke(state, config):
+        invoke_started.set()
+        await proceed.wait()
+        return {"response": "done late", "messages": []}
+    agent._graph = SimpleNamespace(ainvoke=slow_ainvoke)
+
+    task = asyncio.create_task(JarvisAgent.background_turn(agent, "long research job"))
+    await invoke_started.wait()
+
+    # Mid-flight reset: a new session becomes live.
+    agent.session_id = "sess2-after-reset"
+    agent._history = []
+    agent._turn = 0
+
+    proceed.set()
+    result = await task
+
+    assert result == "done late"
+    assert agent._history == [], "the live (post-reset) conversation must stay untouched"
+    assert len(agent.saved_turns) == 1
+    sid, hist, turn = agent.saved_turns[0]
+    assert sid == "sess1", "the result must be persisted into the ORIGIN session"
+    assert turn == 4, "a fresh bucket past the origin's last turn_idx, never bucket-0 of the new session"
+    assert any("long research job" in getattr(m, "content", "") for m in hist)
+    assert hist[-1].content == "done late"
+    assert all(sid == "sess1" for _, _, sid in agent.stored_memories), \
+        "episodic memory must tag the origin session too"
+
+
+@pytest.mark.asyncio
+async def test_background_turn_same_session_keeps_existing_behavior():
+    """No reset mid-task: the pair still lands in the live history and is
+    saved under the (unchanged) live session id, exactly as before."""
+    agent = _FakeAgent()
+    agent._turn = 2
+    agent._graph = _immediate_graph("quick result")
+
+    await JarvisAgent.background_turn(agent, "small job")
+
+    assert len(agent._history) == 2
+    sid, _hist, turn = agent.saved_turns[0]
+    assert sid == "sess1" and turn == 2
 
 
 @pytest.mark.asyncio

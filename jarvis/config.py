@@ -133,6 +133,16 @@ class Settings(BaseSettings):
     # Existing setups: add CLOUD_POLICY=auto to .env to restore prior behavior.
     cloud_policy: Literal["off", "explicit", "auto"] = "off"
 
+    # Patch 1.1: what an AI Studio (Gemini Developer API) call costs. A key
+    # can be free-tier OR paid (prepaid credits / pay-as-you-go) and the
+    # provider name alone can't tell you which -- this repo's own key turned
+    # out to be a PAID one with depleted credits while the code hardcoded
+    # aistudio=free. unknown (default) = tokens tracked as "unpriced" and
+    # surfaced in /status /budget, never silently asserted $0; free = $0;
+    # paid = priced with the same Gemini table usage.py applies to Vertex.
+    # Set AI_STUDIO_BILLING_MODE=free in .env once the key's tier is known.
+    ai_studio_billing_mode: Literal["free", "paid", "unknown"] = "unknown"
+
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"

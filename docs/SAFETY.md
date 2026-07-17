@@ -139,12 +139,16 @@ exact action tables.
 
 - New `Settings.external_writes_enabled` (default `True`, no behavior change for normal runs).
   When `False` — set automatically by `python -m jarvis --profile test` — `make_confirmation_node`
-  hard-denies any tool call whose `ToolSpec.side_effect_type == "external_write"` (gmail, calendar,
-  Drive, ITU mail, Spotify) **before it ever reaches the interrupt**, same "no prompt, no execution"
-  shape as the kill switch above, just narrower in scope (external writes only — local
-  writes/shell/python stay reachable so tool-calling itself remains testable under the profile).
-  Exists specifically so a scripted/CI test run can never accidentally send a real email or touch a
-  real calendar, without needing a human to answer a confirmation prompt that isn't there.
+  hard-denies any tool call that would write externally (gmail send, calendar create/delete, Drive
+  upload/share/delete, ITU mail send, Spotify) **before it ever reaches the interrupt**, same
+  "no prompt, no execution" shape as the kill switch above, just narrower in scope (external writes
+  only — local writes/shell/python stay reachable so tool-calling itself remains testable under the
+  profile). Patch 1.1 (2026-07-16): the gate is keyed on the per-CALL
+  `PolicyDecision.side_effect_type` — the mixed read/write tools' read actions resolve to
+  `"external_read"` and pass, so `gmail read` / `calendar list` / `drive download` still work under
+  the profile (the original static `ToolSpec` check denied those too). Exists specifically so a
+  scripted/CI test run can never accidentally send a real email or touch a real calendar, without
+  needing a human to answer a confirmation prompt that isn't there.
 - Unrelated to the gate itself, but relevant to trusting what you see while testing it: the model
   label and cost shown in `/status`/`current_model_label` used to be derived from the *requested*
   role, not the provider that actually answered — a turn served by the Ollama fallback could still
