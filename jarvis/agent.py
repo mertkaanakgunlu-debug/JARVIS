@@ -1078,13 +1078,46 @@ class JarvisAgent:
             # then refuse; and re-running the full graph re-executed any tool
             # side effects that had already succeeded in the failed attempt.
 
+            # Faz 3 live A/B finding: on this LangGraph version, a dynamic
+            # interrupt() under non-streaming ainvoke() does NOT raise
+            # GraphInterrupt to the caller -- the invocation RETURNS normally
+            # with the pending interrupt under "__interrupt__". The except
+            # branch above never fired for /chat, so the confirmation payload
+            # was silently lost (latent since Faz 4: the streaming CLI/voice
+            # paths raise and were the only ones ever live-verified). Handle
+            # the value-style surface too, identically.
+            pending_interrupts = result.get("__interrupt__") or []
+            if pending_interrupts:
+                event_bus.state("idle")
+                try:
+                    payload = pending_interrupts[0].value
+                except Exception:
+                    payload = {}
+                conf_id = str(uuid.uuid4())
+                self._pending_confirmations[conf_id] = {
+                    "config": config, "recorder": recorder,
+                }
+                event_bus.confirmation_required(conf_id, payload)
+                raise ConfirmationRequired(conf_id, payload)
+
             response = result.get("response", "")
             if not response:
+                # Fallback: last AI text FROM THIS TURN only. Scanning the
+                # whole message list reached back into replayed history and
+                # returned a PREVIOUS turn's answer verbatim -- the "echo"
+                # failure observed live in both manual rounds (D10/C8).
                 from langchain_core.messages import AIMessage
-                for m in reversed(result.get("messages", [])):
+                new_msgs = result.get("messages", [])[len(initial_messages):]
+                for m in reversed(new_msgs):
                     if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
                         response = m.content
                         break
+            if not response:
+                response = (
+                    "Bu turn bir cevap üretemeden kesildi (onay bekleyen veya "
+                    "engellenen araç çağrıları olabilir). Lütfen isteği "
+                    "yeniden veya daha net ifade ederek deneyin."
+                )
 
             # Runtime truth: label the turn with the provider that ACTUALLY
             # answered (per-tier callback metadata), not the requested role.
@@ -1517,6 +1550,18 @@ class JarvisAgent:
                 # (_schedule_memory_extraction et al.).
                 return ProactiveOutcome(kind="none")
 
+            # Faz 3 finding: non-streaming ainvoke surfaces a dynamic
+            # interrupt as result["__interrupt__"] instead of raising on this
+            # LangGraph version -- same confirm-or-notify handling.
+            pending_interrupts = result.get("__interrupt__") or []
+            if pending_interrupts:
+                try:
+                    payload = pending_interrupts[0].value
+                except Exception:
+                    payload = {}
+                tools = [t.get("name", "?") for t in (payload or {}).get("tools", [])]
+                return ProactiveOutcome(kind="needs_confirmation", tools=tools or ["gated action"])
+
             response = result.get("response", "")
             if not response:
                 from langchain_core.messages import AIMessage
@@ -1619,6 +1664,16 @@ class JarvisAgent:
             except Exception:
                 payload = {}
             raise ConfirmationRequired(str(uuid.uuid4()), payload) from exc
+        # Faz 3 finding: value-style interrupt surface (see chat()) -- a
+        # background task cannot resolve a confirmation either way, so the
+        # same clear failure as the raise path.
+        pending_interrupts = result.get("__interrupt__") or []
+        if pending_interrupts:
+            try:
+                payload = pending_interrupts[0].value
+            except Exception:
+                payload = {}
+            raise ConfirmationRequired(str(uuid.uuid4()), payload)
 
         response = result.get("response", "")
         if not response:

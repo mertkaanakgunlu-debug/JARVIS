@@ -211,6 +211,7 @@ def _make_local(settings: "Settings", max_output_tokens: int) -> _Tier:
         base_url=settings.ollama_api_url,
         api_key="ollama",  # required by the SDK, ignored by Ollama
         max_tokens=max_output_tokens,
+        temperature=getattr(settings, "local_temperature", 0.0),  # Faz 3: deterministic tool calling + A/B reproducibility
         timeout=120,  # generous — first call after a swap may need to load the model into VRAM
         stream_usage=True,  # ask for usage in streams (Ollama /v1 include_usage) so traces get real token counts
     )

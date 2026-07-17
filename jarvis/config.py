@@ -165,7 +165,23 @@ class Settings(BaseSettings):
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     groq_model_fallback: str = "llama-3.3-70b-versatile"
     ollama_base_url: str = "http://localhost:11434"
-    local_model: str = "qwen2.5:7b-instruct"
+    # Faz 3 A/B (2026-07-17): default flipped qwen2.5:7b-instruct → qwen3:8b.
+    # Under the identical 16-scenario manual suite (temp=0, same scoped-tool
+    # subsets, --profile test), qwen2.5:7b produced ZERO real tool calls —
+    # every "dosyayı oluşturdum / maili gönderdim" was hallucinated text that
+    # never reached the tool layer (no audit rows, no file on disk), which is
+    # worse than failing: the safety gates never even engage. qwen3:8b issued
+    # real, well-formed calls (file_write actually wrote, shell_run's dir
+    # actually ran) so the external-write gate, shell deny-list, SSRF guard
+    # and kill switch were exercised end-to-end for the first time. Fits the
+    # 8 GB RTX 4070 Laptop VRAM. Slower per turn (more tokens, no thinking
+    # channel), acceptable for correctness this much higher.
+    local_model: str = "qwen3:8b"
+    # Faz 3 (model A/B): deterministic decoding for the local tier — 0.0 is
+    # both the reproducible-benchmark condition (the A/B protocol requires
+    # identical decoding across candidates) and standard practice for
+    # tool-calling agents; ChatOpenAI's implicit 0.7 default was neither.
+    local_temperature: float = 0.0
     embed_model: str = "nomic-embed-text"
     cloud_model: str = "gemini-2.5-pro"          # primary model for all user-facing responses
     cloud_model_pro: str = "gemini-2.5-pro"     # critic/planner (same tier, kept for Vertex compat)

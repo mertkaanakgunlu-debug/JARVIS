@@ -17,19 +17,26 @@ async def graph_stream_to_text(
     state: dict,
     config: dict,
 ) -> AsyncGenerator[str, None]:
-    """Yield text deltas from the agent node's final response.
+    """Yield text deltas from the answer-producing nodes' responses.
 
     Skips tool-call chunks (these have tool_call_chunks but no text content).
-    Skips messages from non-agent nodes (tools, critic).
+    Skips messages from non-answer nodes (tools, critic, planner).
 
-    BUG-12: when the critic requests a revision, the "agent" node runs a second
-    time in the same turn (up to one retry — see route_from_critic's
-    revise_count < 2 cap) — both the draft and the revision are tagged
-    langgraph_node="agent", so the node-name filter alone can't tell them apart.
-    Without a separator the reconstructed text is the draft immediately
-    followed by the revision, garbled with no boundary. metadata["langgraph_step"]
-    (a real, populated key — see langgraph's pregel/_algo.py) increments between
-    the two passes, so a change in it marks the boundary.
+    Faz 2B: the final user-facing answer of a tool turn now comes from the
+    "compose" node (bare model), not the tool-bound "agent" — live incident
+    during the Faz 3 A/B: an approved shell_run executed fine but the resumed
+    stream was EMPTY because this filter only knew "agent". Both are streamed:
+    agent covers conversation/no-tool turns (agent → critic directly) plus
+    any pre-tool prose, compose covers tool-turn finals and revisions.
+
+    BUG-12: when the critic requests a revision, the answering node runs a
+    second time in the same turn (up to one retry — see route_from_critic's
+    revise_count < 2 cap) — both passes carry the same langgraph_node, so the
+    node-name filter alone can't tell them apart. Without a separator the
+    reconstructed text is the draft immediately followed by the revision,
+    garbled with no boundary. metadata["langgraph_step"] (a real, populated
+    key — see langgraph's pregel/_algo.py) increments between the two passes,
+    so a change in it marks the boundary.
     """
     last_step: int | None = None
     async for chunk, metadata in graph.astream(
@@ -37,7 +44,7 @@ async def graph_stream_to_text(
         config,
         stream_mode="messages",
     ):
-        if metadata.get("langgraph_node") != "agent":
+        if metadata.get("langgraph_node") not in ("agent", "compose"):
             continue
         if not isinstance(chunk, AIMessageChunk):
             continue
