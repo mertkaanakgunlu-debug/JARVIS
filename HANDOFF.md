@@ -63,6 +63,37 @@ dosya sistemi:
 3. **`graph_stream_to_text` yalnız "agent" node'unu stream ediyordu** → Sprint 2 sonrası onaylanan
    `shell_run` boş stream dönüyordu. "compose" da stream ediliyor.
 
+## YENİ — ham kanıtları incelerken bulunan 2 bug (DÜZELTİLMEDİ, sonraki oturuma)
+
+Owner "hangi sorguya ne yanıt verdi, kendim teyit etmeliyim" dedi → `test_output/` klasörü
+oluşturuldu (16 test × 6 koşum, okunaklı sorgu/yanıt + ham `audit_log.jsonl` + gerçekten oluşan
+dosyalar; bkz. `test_output/README.md`). Bu inceleme önceki kabul raporundaki bir hatayı ortaya
+çıkardı:
+
+1. **B6 (grafik) testi 3 koşumda da (03/05/06) gerçekte hiç başarılı olmadı** — model kendi
+   verdiği sayıları (1,4,9,16) bir dosyaya yazmadan `plot_data`'yı var olmayan bir path'e
+   (`jarvis_test.csv` / `workspace`) referansla çağırdı; araç doğru şekilde
+   `[ERROR] Data file not found` döndürdü; `data/plots/` hiçbir home'da hiç oluşmadı. Buna
+   rağmen JARVIS kullanıcıya *"Grafik başarıyla oluşturuldu, `line_graph.png` mevcut"* dedi —
+   tamamen halüsinasyon. Önceki "gerçek tool-call üretimi ≈ %100" iddiam bu yüzden yanlıştı:
+   **15/16, B6 hariç.**
+2. **Audit log'un kendisi de bu başarısızlığı yanlış logluyor** — `[jarvis/agent.py:128](jarvis/agent.py:128)`
+   `_record_execution_end`'de `out_s = str(output)`; `output` burada bir ham string değil bir
+   `ToolMessage` **nesnesi**, `str()`'i `"content='[ERROR]...' name=... "` ile başlıyor, yani
+   `out_s.startswith("[ERROR]")` hiç eşleşmiyor ve `ok` hep `True` kalıyor. Bu Faz 4'ten kalma,
+   bu oturumda yazılmamış ama fark edilmemiş bir kod — **Faz 1B'nin kendi dedup/ledger mantığını
+   etkilemiyor** (`jarvis/graph/tool_accounting.py`'nin `tool_message_ok()` gerçek
+   `ToolMessage.content`'e doğrudan bakıyor, doğru). Düzeltme: `_record_execution_end`'e
+   `output.content` alanını (varsa) tercih eden bir kontrol eklemek.
+3. **`shell_run` `--profile test` izolasyonuna dahil değil** — `[jarvis/graph/tools.py:63-68](jarvis/graph/tools.py:63)`,
+   `file_read`/`file_write`/`file_list`'in aksine `workspace` parametresi almıyor;
+   `shell_tools.run()` doğrudan process'in gerçek çalışma dizininde (repo kökü) çalışıyor,
+   `JARVIS_HOME`'a taşınmıyor. Canlı kanıt: test home'unda "dir" istendiğinde gerçek proje kökü
+   (`.venv`, `Jarvis.rar`, `CLAUDE.md`) listelendi. Zararsız `dir` gibi komutlarda sorun
+   yaratmadı ama izolasyon garantisinin sınırı — düzeltilmedi, owner'ın kararı bekleniyor.
+
+Ham kanıtlar + commit: `9e2a049` (`test: add manual test evidence`).
+
 Testler: `tests/test_interrupt_surface.py` (3).
 
 ## Kabul turu (16 senaryo, qwen3:8b default)
