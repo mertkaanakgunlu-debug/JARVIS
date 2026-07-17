@@ -43,6 +43,9 @@ if _prescan_test_profile():
     )
     os.environ["CLOUD_POLICY"] = "off"
     os.environ["EXTERNAL_WRITES_ENABLED"] = "false"
+    # Faz 2.2: record every tool call (L1 reads included) to data/tool_trace.jsonl
+    # so the eval oracle can verify the right tool actually ran. Test-only.
+    os.environ["JARVIS_TOOL_TRACE"] = "1"
 else:
     # Load .env before any settings are read
     from dotenv import load_dotenv

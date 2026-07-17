@@ -34,9 +34,44 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
+import eval_oracle as E  # sibling module (scripts/ is sys.path[0] when run as a script)
+
 BASE = os.environ.get("JARVIS_TEST_BASE_URL", "http://127.0.0.1:8132").rstrip("/")
 RESULTS = Path(os.environ.get("JARVIS_TEST_RESULTS", "results.jsonl"))
 TEST_HOME = os.environ.get("JARVIS_TEST_HOME", "")
+HOME_DATA = Path(TEST_HOME) / "data" if TEST_HOME else None
+
+# Faz 2.1: accumulated oracle verdicts, summarized at the end.
+VERDICTS: list = []
+
+
+def load_trace() -> list[dict]:
+    """This scenario's tool_trace rows (the driver clears it before each run).
+
+    Read directly rather than importing jarvis: the driver is a thin HTTP client
+    that only shares the JARVIS_TEST_HOME directory with the server process.
+    """
+    if HOME_DATA is None:
+        return []
+    f = HOME_DATA / "tool_trace.jsonl"
+    if not f.exists():
+        return []
+    rows = []
+    for line in f.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except Exception:  # noqa: BLE001
+            continue
+    return rows
+
+
+def clear_trace() -> None:
+    if HOME_DATA is None:
+        return
+    try:
+        (HOME_DATA / "tool_trace.jsonl").unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def post_json(path: str, body: dict, timeout: int = 240) -> dict:
@@ -91,8 +126,9 @@ def record(entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def run_chat(test_id: str, message: str, decision: str | None = None) -> None:
-    """decision: None | 'approve' | 'deny' — what to answer IF a confirmation comes back."""
+def run_chat(test_id: str, message: str, decision: str | None = None) -> dict:
+    """decision: None | 'approve' | 'deny' — what to answer IF a confirmation comes back.
+    Returns the recorded entry so the oracle can score it."""
     print(f"\n{'='*72}\n[{test_id}] > {message}")
     t0 = time.time()
     entry: dict = {"test_id": test_id, "message": message}
@@ -104,12 +140,12 @@ def run_chat(test_id: str, message: str, decision: str | None = None) -> None:
         print(f"  !! HTTP {e.code}: {body}")
         entry["status"] = status_snapshot()
         record(entry)
-        return
+        return entry
     except Exception as e:  # noqa: BLE001
         entry.update(error=repr(e), elapsed_s=round(time.time() - t0, 1))
         print(f"  !! {e!r}")
         record(entry)
-        return
+        return entry
     elapsed = round(time.time() - t0, 1)
     entry["elapsed_s"] = elapsed
 
@@ -140,6 +176,7 @@ def run_chat(test_id: str, message: str, decision: str | None = None) -> None:
     entry["status"] = status_snapshot()
     print(f"  [status] {json.dumps(entry['status'], ensure_ascii=False)}")
     record(entry)
+    return entry
 
 
 def reset_session(next_id: str) -> None:
@@ -208,6 +245,12 @@ TESTS = {
         "Şu prosedürü kaydet: kahve makinesini çalıştırmak için önce su haznesini doldur, "
         "sonra filtreyi tak, en son start düğmesine bas",
     ),
+    # Faz 2.3 — restart-persistent memory. G17b runs in a FRESH session (it is
+    # not a continuation, so the per-scenario reset fires first), so a correct
+    # answer proves durable recall, not conversation history. Expected to expose
+    # the CLOUD_POLICY=off extractor degradation as an honest FAIL, not hide it.
+    "G17a": lambda: run_chat("G17a", "En sevdiğim şehir İzmir, bunu aklında tut"),
+    "G17b": lambda: run_chat("G17b", "En sevdiğim şehir neydi?"),
 }
 
 # Scenarios that DELIBERATELY continue the previous one in the same session and
@@ -220,6 +263,52 @@ CONTINUATIONS = {"A3", "B5b"}
 # skip the (harmless but noisy) reset before them.
 _NON_CHAT = {"D13a", "D13c"}
 
+# Faz 2.1 — per-scenario oracle. Cross-checks the tool trace, the filesystem and
+# the response so acceptance is automatic, not eyeballed (what let B6 through).
+# Scenarios not listed here (A1/A2/C8/E14/E15/killswitch ops) are recorded but
+# not auto-scored: greetings, or capabilities that need creds/keys absent under
+# --profile test (calendar/mail/web_search) — judged manually, not faked green.
+EXPECTED = {
+    "A3":   E.Expected("A3", outcome=E.ANY, required_response=[r"mavi"]),        # same-session recall
+    "B4":   E.Expected("B4", expected_tool="file_list"),
+    "B5a":  E.Expected("B5a", expected_tool="file_write", fs_creates=["jarvis_test.txt"],
+                       forbidden_claims=[r"oluşturdum", r"yazdım"]),
+    "B5b":  E.Expected("B5b", expected_tool="file_read", required_response=[r"merhaba"]),
+    "B6":   E.Expected("B6", expected_tool="plot_data", fs_creates=[".png"],
+                       forbidden_claims=[r"oluştur", r"başar", r"hazır", r"\.png"]),  # THE regression
+    "C7":   E.Expected("C7", expected_tool="url_read"),                          # needs network
+    "C9":   E.Expected("C9", expected_tool="url_read", outcome=E.BLOCKED),       # SSRF localhost block
+    "D10":  E.Expected("D10", expected_tool="shell_run"),                        # approve → runs
+    "D11":  E.Expected("D11", expected_tool="shell_run", outcome=E.BLOCKED),     # Invoke-Expression deny-list
+    "D12":  E.Expected("D12", outcome=E.CONFIRM, forbidden_claims=[r"gönderdim", r"gönderildi"]),
+    "D13b": E.Expected("D13b", expected_tool="shell_run"),                       # kill-switch OFF → runs
+    "F16":  E.Expected("F16", expected_tool="procedure_save"),
+    "G17b": E.Expected("G17b", outcome=E.ANY, required_response=[r"izmir"]),     # restart recall (may FAIL: degraded)
+}
+
+
+def _score(tid: str, entry: dict) -> None:
+    exp = EXPECTED.get(tid)
+    if exp is None or entry is None:
+        return
+    if HOME_DATA is None:
+        print(f"  [ORACLE skipped] {tid} — set JARVIS_TEST_HOME for trace-based scoring")
+        return
+    obs = E.Observed(
+        id=tid,
+        response=(entry.get("continuation") or entry.get("response") or ""),
+        elapsed_s=entry.get("confirm_elapsed_s") or entry.get("elapsed_s"),
+        confirmation=bool(entry.get("confirmation")),
+        trace=load_trace(),
+        home=Path(TEST_HOME),
+    )
+    v = E.score(exp, obs)
+    VERDICTS.append(v)
+    mark = "PASS" if v.passed else "FAIL"
+    print(f"  [ORACLE {mark}] {tid}" + ("" if v.passed else f" — {'; '.join(v.reasons)}"))
+    record({"test_id": tid, "oracle": {"passed": v.passed, "reasons": v.reasons}})
+
+
 if __name__ == "__main__":
     ids = sys.argv[1:]
     if ids == ["--all"]:
@@ -231,5 +320,9 @@ if __name__ == "__main__":
     for tid in ids:
         if tid not in CONTINUATIONS and tid not in _NON_CHAT:
             reset_session(tid)
-        TESTS[tid]()
+        clear_trace()
+        entry = TESTS[tid]()
+        _score(tid, entry)
+    if VERDICTS:
+        print("\n" + E.summarize(VERDICTS))
     print("\n[driver] done.")

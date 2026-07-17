@@ -47,6 +47,7 @@ from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
 from jarvis import audit_log               # Faz 4
+from jarvis import tool_trace               # Faz 2.2: test-profile L1 tool trace
 from jarvis import paths                   # JARVIS_HOME isolation root
 from jarvis.llm_trace import LlmTraceRecorder  # runtime truth: actual provider per turn
 from jarvis.tool_registry import get_spec  # Faz 4
@@ -91,6 +92,7 @@ class _HudEventCallback(BaseCallbackHandler):
     def __init__(self, transport: str = "unknown") -> None:
         self._transport = transport
         self._audit_pending: dict[str, tuple[str, int]] = {}  # run_id -> (tool_name, risk_level)
+        self._trace_pending: dict[str, dict] = {}  # run_id -> {tool, args} for ALL tools (test trace)
         self._llm_start_times: dict[str, float] = {}  # run_id -> time.monotonic() at on_llm_start
 
     def on_tool_start(self, serialized: dict, input_str: Any, **kwargs: Any) -> None:
@@ -109,15 +111,36 @@ class _HudEventCallback(BaseCallbackHandler):
                 "execution_start", tool=name, risk_level=spec.risk_level,
                 transport=self._transport, args_preview=str(input_str)[:200],
             )
+        # Faz 2.2: trace EVERY tool (L1 included) when the test profile enabled it.
+        if run_id is not None and tool_trace.is_enabled():
+            self._trace_pending[str(run_id)] = {"tool": name, "args": str(input_str)[:200]}
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         s = str(output)[:160]
         if any(kw in s.lower() for kw in ("chroma", "vector", "recall", "memory", "retrieved")):
             event_bus.tool_call(s, kind="note")
         self._record_execution_end(output, kwargs.get("run_id"))
+        self._trace_end(output, kwargs.get("run_id"))
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
         self._record_execution_end(error, kwargs.get("run_id"), ok=False)
+        self._trace_end(error, kwargs.get("run_id"), ok=False)
+
+    def _trace_end(self, output: Any, run_id: Any, ok: bool | None = None) -> None:
+        """Faz 2.2 — write the every-tool trace entry (test profile only)."""
+        if run_id is None:
+            return
+        pending = self._trace_pending.pop(str(run_id), None)
+        if pending is None:
+            return
+        content = getattr(output, "content", output)
+        if ok is None:
+            ok = getattr(output, "status", None) != "error" and not content_is_failure(content)
+        tool_trace.record(
+            tool=pending["tool"], args=pending["args"], ok=ok,
+            transport=self._transport,
+            content_head=(content if isinstance(content, str) else str(content))[:200],
+        )
 
     def _record_execution_end(self, output: Any, run_id: Any, ok: bool | None = None) -> None:
         if run_id is None:
