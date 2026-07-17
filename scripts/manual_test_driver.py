@@ -142,6 +142,24 @@ def run_chat(test_id: str, message: str, decision: str | None = None) -> None:
     record(entry)
 
 
+def reset_session(next_id: str) -> None:
+    """Archive the current conversation and start a fresh session (POST /reset).
+
+    Faz 1.5 — every scenario runs in its own session so one turn can't echo a
+    previous one's answer (live incident D13b: the kill-switch shell turn reused
+    D10's reply instead of re-issuing the call, invalidating the kill-switch
+    evidence). Continuation scenarios (A3 recalls A2, B5b reads B5a's file) are
+    exempt — see CONTINUATIONS. The kill-switch FILE state (data/kill_switch.json)
+    is independent of the session, so resetting never clears it.
+    """
+    try:
+        post_json("/reset", {})
+        print(f"[reset] fresh session before {next_id}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[reset] WARNING before {next_id}: {e!r}")
+        record({"test_id": "reset", "before": next_id, "error": repr(e)})
+
+
 def trip_killswitch(enabled: bool) -> None:
     if not TEST_HOME:
         print("[killswitch] JARVIS_TEST_HOME set degil — D13a/D13c atlandi "
@@ -192,6 +210,16 @@ TESTS = {
     ),
 }
 
+# Scenarios that DELIBERATELY continue the previous one in the same session and
+# must NOT get a fresh session before them (Faz 1.5): A3 recalls the fact A2
+# stated; B5b reads the file B5a created. Everything else — including D13b, the
+# kill-switch shell turn — resets first so it can't echo an earlier answer.
+CONTINUATIONS = {"A3", "B5b"}
+
+# Reset talks to the chat session; the kill-switch file ops don't use it, so
+# skip the (harmless but noisy) reset before them.
+_NON_CHAT = {"D13a", "D13c"}
+
 if __name__ == "__main__":
     ids = sys.argv[1:]
     if ids == ["--all"]:
@@ -201,5 +229,7 @@ if __name__ == "__main__":
         print(f"usage: manual_test_driver.py --all | {' '.join(TESTS)}")
         sys.exit(2 if unknown else 0)
     for tid in ids:
+        if tid not in CONTINUATIONS and tid not in _NON_CHAT:
+            reset_session(tid)
         TESTS[tid]()
     print("\n[driver] done.")

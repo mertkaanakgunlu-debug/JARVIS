@@ -24,6 +24,7 @@ import re
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from jarvis.graph.state import JarvisState
+from jarvis.graph.tool_router import ToolRoute  # Faz 1.4: history-echo guard reads the turn's route
 
 # Import lazily to avoid circular imports when ws module is not yet initialised
 def _bus():
@@ -232,6 +233,29 @@ def make_compose_node(settings=None):
         role = "reasoning" if state.get("use_pro_agent", False) else "fast"
         llm = _bare(role)
         invocation = list(state["messages"])
+
+        # Faz 1.4 — history-echo / claim-on-failure guard. The bare composer can
+        # echo a PRIOR turn's "dosyayı oluşturdum" answer (it survives in the
+        # compacted history) with no tool running this turn, or gloss a tool that
+        # FAILED this turn as success (the B6 hallucination). completed_tool_
+        # fingerprints is reset per turn (agent.py), so an empty one on a tool-
+        # routed turn means nothing actually succeeded now. Forbid any completion
+        # claim in that case. Node-local SystemMessage only — never returned into
+        # graph state (same discipline as the critic feedback below).
+        route = ToolRoute.from_dict(state.get("tool_route"))
+        expected_tool = route is not None and route.primary_domain != "conversation"
+        nothing_succeeded = not (state.get("completed_tool_fingerprints") or [])
+        if expected_tool and nothing_succeeded:
+            invocation.append(SystemMessage(content=(
+                "No tool completed successfully in THIS turn. Do not state or imply "
+                "that any action (file created, email sent, chart drawn, command run, "
+                "calendar event added, etc.) was carried out or succeeded — earlier "
+                "turns in the history do NOT count as this turn's result. If a tool "
+                "failed, report the failure plainly; if none ran, either the request "
+                "still needs a tool call or you must ask the user for what's missing. "
+                "Never present a previous turn's success as if it happened now."
+            )))
+
         critique = (state.get("critique") or "").strip()
         if critique and state.get("critic_verdict") in ("revise", "redirect"):
             invocation.append(SystemMessage(content=(
