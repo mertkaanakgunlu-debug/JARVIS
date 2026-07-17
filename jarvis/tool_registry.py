@@ -35,7 +35,7 @@ mcp   — Faz 5: tools discovered at runtime from an external MCP server
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,14 @@ class ToolSpec:
     timeout_seconds: int = 60
     supports_background: bool = False
     description: str = ""   # one-line, used in docs/TOOLS.md
+    domain: str = ""        # Sprint 2 (Faz 2A) capability-router grouping —
+                            # assigned via _TOOL_DOMAINS below, NOT per-ctor;
+                            # "" is treated as "mcp" (quarantine) by the router.
+                            # category answers "what kind of thing is this?"
+                            # (risk/audit axis); domain answers "which user
+                            # intents should SEE it?" — external_api alone
+                            # lumps gmail+calendar+drive+spotify together,
+                            # which is exactly what a scoped subset can't do.
 
 
 TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
@@ -259,6 +267,50 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
 def get_spec(tool_name: str) -> ToolSpec | None:
     """Return the ToolSpec for *tool_name*, or None if not registered."""
     return TOOL_SPECS.get(tool_name)
+
+
+# ── Sprint 2 (Faz 2A): capability-router domain map ──────────────────────────
+# One place, not 36 ctor edits. Every STATIC tool must appear here — the
+# import-time check below fails loudly on a new tool that forgot to pick a
+# domain (silently landing in the "mcp" quarantine would just make the tool
+# invisible to routing, a confusing way to discover the omission). Dynamic
+# MCP specs are deliberately NOT here: domain="" ⇒ router treats as "mcp".
+_TOOL_DOMAINS: dict[str, str] = {
+    # files — local documents & filesystem
+    "file_read": "files", "file_write": "files", "file_list": "files",
+    "pdf_read": "files", "pdf_vision": "files", "excel_read": "files",
+    "csv_read": "files",
+    # web — outbound reads
+    "web_search": "web", "url_read": "web", "deep_web_research": "web",
+    "research": "web",
+    # mail / calendar / drive — split on purpose; see ToolSpec.domain comment
+    "gmail": "mail", "itu_mail": "mail",
+    "google_calendar": "calendar",
+    "google_drive": "drive",
+    # data — analysis, math, plotting, reports, content generation
+    "data_analyze": "data", "plot_data": "data", "report_write": "data",
+    "report_compile": "data", "report_compose": "data", "math_solve": "data",
+    "geo_math": "data", "write_content": "data",
+    # system — execution & machine control
+    "shell_run": "system", "python_run": "system", "generate_code": "system",
+    "gcp_quota": "system", "hud_panels": "system",
+    # tasks / media / finance / memory
+    "schedule": "tasks", "todo": "tasks",
+    "spotify": "media",
+    "finance": "finance",
+    "vault_search": "memory", "index_doc": "memory", "note_append": "memory",
+    # procedure — exposed only on explicit intent (see tool_router)
+    "procedure_save": "procedure",
+}
+
+TOOL_SPECS = {
+    name: replace(spec, domain=_TOOL_DOMAINS[name])
+    for name, spec in TOOL_SPECS.items()
+}
+
+_missing = set(_TOOL_DOMAINS) - set(TOOL_SPECS)
+if _missing:  # pragma: no cover — import-time wiring assertion
+    raise RuntimeError(f"_TOOL_DOMAINS names unknown tools: {sorted(_missing)}")
 
 
 def register_dynamic_spec(spec: ToolSpec) -> None:

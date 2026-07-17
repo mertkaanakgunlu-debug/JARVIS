@@ -26,8 +26,11 @@ async def test_empty_response_with_budget_remaining_redirects_for_a_retry():
 
     assert out["critic_verdict"] == "redirect"
     assert out["revise_count"] == 1
-    merged = {**state, **out, "messages": state["messages"] + out.get("messages", [])}
-    assert route_from_critic(merged) == "agent"
+    # Faz 2B: revisions regenerate through the BARE composer, not the
+    # tool-bound agent (and the critic no longer injects transcript messages).
+    assert "messages" not in out
+    merged = {**state, **out}
+    assert route_from_critic(merged) == "compose"
 
 
 async def test_empty_response_increments_revise_count_each_time():

@@ -53,26 +53,53 @@ def tool_message_ok(tm: ToolMessage | None) -> bool:
     return not content.lstrip().startswith(_FAILURE_PREFIXES)
 
 
+def _last_executed_round(msgs: list) -> tuple[AIMessage | None, dict[str, ToolMessage]]:
+    """The most recent AIMessage-with-tool_calls and its ToolMessage results."""
+    last_ai, last_ai_idx = None, -1
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+            last_ai, last_ai_idx = m, i
+            break
+    if last_ai is None:
+        return None, {}
+    results = {
+        m.tool_call_id: m
+        for m in msgs[last_ai_idx + 1:]
+        if isinstance(m, ToolMessage)
+    }
+    return last_ai, results
+
+
+def last_round_results(state: JarvisState) -> list[tuple[bool, bool]]:
+    """Per call of the last executed round: (ok, retryable).
+
+    retryable is parsed from safe_tools' [TOOL_ERROR] block (``retryable=true``)
+    — any other failure shape (stub, missing message) counts as non-retryable,
+    so the post-tool router never loops on a failure it can't reason about.
+    """
+    last_ai, results = _last_executed_round(state.get("messages") or [])
+    if last_ai is None:
+        return []
+    out: list[tuple[bool, bool]] = []
+    for tc in last_ai.tool_calls:
+        tm = results.get(tc.get("id", ""))
+        ok = tool_message_ok(tm)
+        content = "" if tm is None else (
+            tm.content if isinstance(tm.content, str) else str(tm.content)
+        )
+        retryable = "retryable=true" in content
+        out.append((ok, retryable))
+    return out
+
+
 def make_tool_result_accounting_node():
     """Node: promote succeeded calls to completed + append to the ledger."""
 
     async def tool_result_accounting(state: JarvisState) -> dict:
-        msgs = state.get("messages") or []
-        last_ai: AIMessage | None = None
-        last_ai_idx = -1
-        for i in range(len(msgs) - 1, -1, -1):
-            m = msgs[i]
-            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-                last_ai, last_ai_idx = m, i
-                break
+        last_ai, results = _last_executed_round(state.get("messages") or [])
         if last_ai is None:
             return {}
-
-        results: dict[str, ToolMessage] = {
-            m.tool_call_id: m
-            for m in msgs[last_ai_idx + 1:]
-            if isinstance(m, ToolMessage)
-        }
 
         completed = list(state.get("completed_tool_fingerprints") or [])
         ledger = list(state.get("tool_execution_ledger") or [])

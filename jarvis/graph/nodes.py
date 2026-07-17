@@ -1,14 +1,18 @@
-"""LangGraph node functions for JARVIS — Faz 2.
+"""LangGraph node functions for JARVIS — Faz 2 (topology reworked Sprint 2/Faz 2B).
 
 Nodes:
-  agent_node   — main ReAct executor (Gemini Flash / Vertex Flash)
-  planner_node — step-by-step plan generation (Gemini Pro, activated by /think)
-  critic_node  — quality scoring (Gemini Pro, max 2 revision loops)
+  agent_node   — tool-issuing executor; binds the TURN-SCOPED subset from
+                 state["tool_route"] (Faz 2A), bare for conversation turns
+  compose_node — BARE final-answer composer (Faz 2B) — no tool schemas bound,
+                 consumes critic feedback ephemerally
+  planner_node — step-by-step plan generation (activated by /think)
+  critic_node  — quality scoring (max 2 revision loops; feedback via state only)
 
 Routing:
-  route_from_start  — START → planner (needs_planning) or agent
-  route_from_agent  — tool calls → tools, else → critic
-  route_from_critic — accept/exhausted → END, revise/redirect → agent
+  route_from_start             — START → planner (needs_planning) or agent
+  route_from_agent             — tool calls → confirmation, else → critic
+  route_after_tool_accounting  — budgeted: compose (default) or agent (multi-step)
+  route_from_critic            — accept/exhausted → END, revise/redirect → compose
 """
 
 from __future__ import annotations
@@ -132,11 +136,17 @@ def _is_simple_exchange(user_query: str, response_text: str) -> bool:
 
 # ── Nodes ──────────────────────────────────────────────────────────────────────
 
-def make_agent_node(llm_fast_with_tools, llm_pro_with_tools=None, settings=None):
-    """Return an async node that picks Flash or Pro based on state["use_pro_agent"].
+def make_agent_node(tools: list, settings=None):
+    """Return an async node that binds a TURN-SCOPED tool subset (Faz 2A).
 
-    Faz 5: if use_pro_agent is True and a Pro model is available, route the agent
-    to Gemini Pro for complex queries; otherwise use the fast Flash model.
+    Pre-2A this received two pre-bound models carrying all ~36 schemas; the
+    live rounds showed the local model collapsing under exactly that load
+    (raw-JSON-as-text, answer echoing) while handling a handful of tools
+    fine. Now the node resolves state["tool_route"] → subset → a per-(role,
+    subset) model composed on demand via get_llm() (binding is a client-side
+    wrapper — no network) and cached for the process's life. conversation
+    routes get a BARE model (zero schemas); a missing route (background
+    paths, old checkpoints) falls back to the full pre-2A toolset.
 
     BUG-14 (Faz 4): the LLM call is wrapped in a timeout -- previously a
     wedged provider connection hung the whole turn (and, in voice mode, left
@@ -144,11 +154,26 @@ def make_agent_node(llm_fast_with_tools, llm_pro_with_tools=None, settings=None)
     distinct from ToolSpec.timeout_seconds, which only bounds tool execution,
     not the agent's own reasoning call.
     """
+    from jarvis.providers import get_llm
+    from jarvis.graph.tool_router import ToolRoute, select_tool_names
+
     timeout_sec = getattr(settings, "agent_llm_timeout_sec", 90.0) if settings is not None else 90.0
+    tools_by_name = {t.name: t for t in tools}
+    all_names = list(tools_by_name)
+    _bound_cache: dict[tuple[str, tuple[str, ...]], object] = {}
+
+    def _llm_for(role: str, subset_names: list[str]):
+        key = (role, tuple(subset_names))
+        if key not in _bound_cache:
+            subset = [tools_by_name[n] for n in subset_names if n in tools_by_name]
+            _bound_cache[key] = get_llm(role, settings, tools=subset or None)
+        return _bound_cache[key]
 
     async def agent_node(state: JarvisState) -> dict:
-        use_pro = state.get("use_pro_agent", False) and llm_pro_with_tools is not None
-        llm = llm_pro_with_tools if use_pro else llm_fast_with_tools
+        role = "reasoning" if state.get("use_pro_agent", False) else "fast"
+        route = ToolRoute.from_dict(state.get("tool_route"))
+        subset_names = select_tool_names(route, all_names)
+        llm = _llm_for(role, subset_names)
         try:
             response = await asyncio.wait_for(llm.ainvoke(state["messages"]), timeout=timeout_sec)
         except asyncio.TimeoutError:
@@ -180,6 +205,89 @@ def make_agent_node(llm_fast_with_tools, llm_pro_with_tools=None, settings=None)
 
     agent_node.__name__ = "agent_node"
     return agent_node
+
+
+def make_compose_node(settings=None):
+    """Tool-free response composer (Faz 2B).
+
+    Produces the final user-facing answer from the turn's transcript with a
+    BARE model — no tool schemas bound, so it structurally cannot re-issue
+    the call it just watched succeed (live incident F16: agent→procedure_save
+    →agent→procedure_save… ×10 until the recursion limit). Critic feedback is
+    consumed here as a node-local SystemMessage appended to THIS invocation
+    only — it is never returned into graph state, so no fake user/system
+    turns leak into the transcript (external review, item 9).
+    """
+    from jarvis.providers import get_llm
+
+    timeout_sec = getattr(settings, "agent_llm_timeout_sec", 90.0) if settings is not None else 90.0
+    _bare_cache: dict[str, object] = {}
+
+    def _bare(role: str):
+        if role not in _bare_cache:
+            _bare_cache[role] = get_llm(role, settings)
+        return _bare_cache[role]
+
+    async def compose_node(state: JarvisState) -> dict:
+        role = "reasoning" if state.get("use_pro_agent", False) else "fast"
+        llm = _bare(role)
+        invocation = list(state["messages"])
+        critique = (state.get("critique") or "").strip()
+        if critique and state.get("critic_verdict") in ("revise", "redirect"):
+            invocation.append(SystemMessage(content=(
+                "Revise your previous draft using this critique; reply with the "
+                f"improved answer only, never mention the critique: {critique}"
+            )))
+        try:
+            response = await asyncio.wait_for(llm.ainvoke(invocation), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            response = AIMessage(
+                content=(
+                    f"I'm sorry, the model didn't respond within {timeout_sec:.0f} seconds -- "
+                    "the provider may be unreachable or overloaded. Please try again."
+                )
+            )
+        text = response.content if isinstance(response.content, str) else str(response.content)
+        return {"messages": [response], "response": text}
+
+    compose_node.__name__ = "compose_node"
+    return compose_node
+
+
+def make_route_after_tool_accounting(settings=None):
+    """tool_result_accounting → 'compose' | 'agent' (Faz 2B).
+
+    Budgeted, deterministic — replaces the pre-2B unconditional tools→agent
+    edge (the structural cause of F16's loop) without collapsing every task
+    to a single tool round (the external review's objection to a blanket
+    tools→compose): multi-step-shaped turns (planner path, or a multi-domain
+    route like "PDF'teki toplantıları takvime ekle") may re-enter the agent
+    while the round budget lasts; everything else composes the answer.
+    """
+    max_rounds = getattr(settings, "max_tool_rounds_per_turn", 2) if settings is not None else 2
+
+    def route_after_tool_accounting(state: JarvisState) -> str:
+        from jarvis.graph.tool_accounting import last_round_results
+
+        if int(state.get("tool_rounds") or 0) >= max_rounds:
+            return "compose"
+        outcomes = last_round_results(state)
+        if not outcomes:
+            return "compose"
+        any_ok = any(ok for ok, _ in outcomes)
+        if any_ok:
+            route = state.get("tool_route") or {}
+            multi_step = bool(state.get("needs_planning")) or len(route.get("domains") or []) > 1
+            return "agent" if multi_step else "compose"
+        # nothing succeeded: one more round only if EVERY failure is
+        # transient (safe_tools' retryable=true) — identical-args retries are
+        # still blocked upstream by the Faz 1B fingerprint dedup, so a retry
+        # round must change something to execute at all.
+        if all(retryable for _, retryable in outcomes):
+            return "agent"
+        return "compose"
+
+    return route_after_tool_accounting
 
 
 def make_planner_node(llm_pro):
@@ -247,26 +355,21 @@ def make_critic_node(llm_pro):
                 "revise_count": revise_count,
             }
 
-        # Empty response with revision budget remaining: give the agent another
-        # attempt instead of accepting nothing. route_from_agent already routed
-        # here (not to tools), so an empty AIMessage.content is a genuinely blank
-        # final answer, not a legitimate mid-loop state.
+        # Empty response with revision budget remaining: give the composer
+        # another attempt instead of accepting nothing. Faz 2B: the critique
+        # travels ONLY in state — compose_node consumes it as a node-local
+        # SystemMessage; nothing is injected into the transcript anymore
+        # (the old fake "[Quality Critic — Redirect]" HumanMessage polluted
+        # history as a user turn that never happened).
         if not response_text:
-            new_revise_count = revise_count + 1
             return {
                 "critic_verdict": "redirect",
-                "critique": "Response was empty.",
+                "critique": (
+                    "The previous response was empty. Provide an actual answer "
+                    "to the user's query."
+                ),
                 "response": response_text,
-                "revise_count": new_revise_count,
-                "messages": [
-                    HumanMessage(
-                        content=(
-                            f"[Quality Critic — Redirect {new_revise_count}/2]\n"
-                            "Your previous response was empty. Please provide an actual "
-                            "answer to the user's query."
-                        )
-                    )
-                ],
+                "revise_count": revise_count + 1,
             }
 
         user_query = state.get("user_query", "")
@@ -305,28 +408,15 @@ def make_critic_node(llm_pro):
         except Exception:
             verdict, critique = "accept", ""
 
-        extra_messages: list = []
-        new_revise_count = revise_count
-
-        if verdict in ("revise", "redirect"):
-            new_revise_count = revise_count + 1
-            label = "Revision" if verdict == "revise" else "Redirect"
-            extra_messages = [
-                HumanMessage(
-                    content=(
-                        f"[Quality Critic — {label} {new_revise_count}/2]\n"
-                        f"{critique}\n\n"
-                        "Please revise your response addressing the above feedback."
-                    )
-                )
-            ]
+        # Faz 2B: no transcript injection — verdict/critique ride in state and
+        # compose_node applies them ephemerally (external review, item 9).
+        new_revise_count = revise_count + 1 if verdict in ("revise", "redirect") else revise_count
 
         return {
             "critic_verdict": verdict,
             "critique": critique,
             "response": response_text,
             "revise_count": new_revise_count,
-            "messages": extra_messages,
         }
 
     critic_node.__name__ = "critic_node"
@@ -349,12 +439,17 @@ def route_from_agent(state: JarvisState) -> str:
 
 
 def route_from_critic(state: JarvisState) -> str:
-    """accept / exhausted → END; revise/redirect → agent."""
+    """accept / exhausted → END; revise/redirect → compose (Faz 2B).
+
+    Revisions regenerate through the BARE composer, never back through the
+    tool-bound agent — a revision is a wording problem, not a reason to give
+    the model another shot at issuing tool calls.
+    """
     from langgraph.graph import END
     verdict = state.get("critic_verdict", "accept")
     revise_count = state.get("revise_count", 0)
     if verdict in ("revise", "redirect") and revise_count < 2:
-        return "agent"
+        return "compose"
     return END
 
 

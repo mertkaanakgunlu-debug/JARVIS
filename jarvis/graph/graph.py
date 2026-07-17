@@ -1,12 +1,15 @@
-"""LangGraph StateGraph builder for JARVIS — Faz 2.
+"""LangGraph StateGraph builder for JARVIS — Faz 2 (topology reworked Sprint 2).
 
-Graph topology:
+Graph topology (Faz 2B):
   START → route_from_start → planner (needs_planning=True) → agent
                            → agent (otherwise)
-  agent ↔ tools (tool-call loop)
-  agent → critic
+  agent → confirmation (tool calls) | critic (direct final answer)
+  confirmation → tools (approved) | agent (denied/blocked)
+  tools → tool_result_accounting → compose (default)
+                                 → agent   (multi-step shape + round budget left)
+  compose → critic
   critic → END (accept or revise_count >= 2)
-  critic → agent (revise/redirect, revise_count < 2)
+  critic → compose (revise/redirect, revise_count < 2 — bare regeneration)
 
 LLMs (Faz 1 — resolved via jarvis.providers.get_llm(role, settings)):
   fast role      — executor; Ollama local model primary, cloud Flash fallback
@@ -47,9 +50,11 @@ from jarvis.graph.tool_accounting import make_tool_result_accounting_node
 from jarvis.graph.state import JarvisState
 from jarvis.graph.nodes import (
     make_agent_node,
+    make_compose_node,
     make_confirmation_node,
     make_planner_node,
     make_critic_node,
+    make_route_after_tool_accounting,
     route_from_start,
     route_from_agent,
     route_from_confirmation,
@@ -154,18 +159,15 @@ def build_graph(
     if extra_tools:
         tools = [*tools, *extra_tools]
 
-    # Faz 1: role→provider router (jarvis/providers/) — fast is Ollama-primary
-    # with a cloud fallback; reasoning is cloud-first with local as its own
-    # last resort. Tools must be bound *before* get_llm() wraps a role in
-    # .with_fallbacks() (RunnableWithFallbacks has no bind_tools), so the
-    # tool-bound and bare reasoning variants are requested separately rather
-    # than binding tools onto the bare one after the fact — see that module's
-    # docstring for why the order matters.
-    llm_fast_with_tools = get_llm("fast", settings, tools=tools)
+    # Faz 2A: the agent node now composes its own per-(role, tool-subset)
+    # models on demand via get_llm() (see make_agent_node) — nothing binds
+    # all ~36 schemas up front anymore. Only the bare reasoning model for
+    # critic/planner is still built here. get_llm() keeps handling the
+    # bind-before-with_fallbacks ordering internally (RunnableWithFallbacks
+    # has no bind_tools — see that module's docstring).
     llm_pro = get_llm("reasoning", settings)                          # bare — critic/planner
-    llm_pro_with_tools = get_llm("reasoning", settings, tools=tools)   # Faz 5: reasoning agent for complex queries
 
-    agent_node = make_agent_node(llm_fast_with_tools, llm_pro_with_tools, settings)
+    agent_node = make_agent_node(tools, settings)
     confirmation_node = make_confirmation_node(settings)
     planner_node = make_planner_node(llm_pro)
     critic_node = make_critic_node(llm_pro)
@@ -179,6 +181,7 @@ def build_graph(
     builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
     builder.add_node("tool_result_accounting", make_tool_result_accounting_node())
+    builder.add_node("compose", make_compose_node(settings))
     builder.add_node("critic", critic_node)
 
     # START → planner (if /think) or directly to agent
@@ -204,16 +207,24 @@ def build_graph(
     )
     # Patch 1.2 (Faz 1B): completed-fingerprint/ledger bookkeeping happens
     # AFTER execution -- the only point that knows how a call actually ended.
-    # Faz 2B will retarget the accounting node's outgoing edge at the
-    # post_tool_router; until then it flows back to the agent as before.
     builder.add_edge("tools", "tool_result_accounting")
-    builder.add_edge("tool_result_accounting", "agent")
 
-    # critic → agent (revise) or END (accept / exhausted)
+    # Faz 2B: budgeted post-tool routing replaces the unconditional
+    # tools→agent edge (F16's structural loop). Multi-step-shaped turns may
+    # re-enter the tool-bound agent within the round budget; everything else
+    # goes to the BARE composer, which cannot re-issue tool calls at all.
+    builder.add_conditional_edges(
+        "tool_result_accounting",
+        make_route_after_tool_accounting(settings),
+        {"compose": "compose", "agent": "agent"},
+    )
+    builder.add_edge("compose", "critic")
+
+    # critic → compose (revise, bare regeneration) or END (accept / exhausted)
     builder.add_conditional_edges(
         "critic",
         route_from_critic,
-        {"agent": "agent", END: END},
+        {"compose": "compose", END: END},
     )
 
     return builder.compile(checkpointer=checkpointer)

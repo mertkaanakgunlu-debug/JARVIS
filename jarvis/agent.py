@@ -29,6 +29,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphInterrupt, GraphRecursionError
 
+from jarvis.graph.tool_router import classify_query
+
 from jarvis.config import Settings
 from jarvis.context_builder import ContextBuilder
 from jarvis.entity_extractor import extract_entities
@@ -182,42 +184,18 @@ class _HudEventCallback(BaseCallbackHandler):
 
 # ── System prompt helpers ──────────────────────────────────────────────────────
 
-_FLASH_TRIVIAL_SIGNALS = frozenset([
-    # Pure status lookups — no reasoning required
-    "hava", "weather", "saat kaç", "what time", "tarih ne", "what date",
-    "merhaba", "hello", "hi", "hey", "selam", "naber", "nasılsın",
-    "tamam", "ok", "teşekkür", "thanks", "thank you", "sağ ol",
-])
-
-_ANALYSIS_SIGNALS = frozenset([
-    # Any of these → definitely Pro
-    "analiz", "analyze", "araştır", "research", "karşılaştır", "compare",
-    "açıkla", "explain", "özetle", "summarize", "incele", "investigate",
-    "hesapla", "calculate", "derive", "prove", "derin", "deep",
-    "kapsamlı", "comprehensive", "ayrıntılı", "detailed", "rapor", "report",
-    "pdf", "xlsx", "xls", "csv", "docx",
-    "neden", "why", "nasıl", "how", "ne zaman", "when",
-    "bugün ne var", "bugün", "today", "takvim", "calendar",
-    "görevlerim", "todo", "yapılacak", "mail", "e-posta", "email",
-    "spotify", "çal", "play", "drive", "dosya", "file",
-])
-
-
-def _is_trivially_simple(query: str, needs_planning: bool) -> bool:
-    """Return True only for queries so simple that Flash is fully adequate.
-
-    Pro is the default; this is the narrow exception path.
-    Criteria: very short query, no analysis/tool signals, pure social/status.
-    """
-    if needs_planning:
-        return False
-    q = query.lower().strip()
-    words = q.split()
-    if len(words) > 8:
-        return False
-    if any(sig in q for sig in _ANALYSIS_SIGNALS):
-        return False
-    return any(sig in q for sig in _FLASH_TRIVIAL_SIGNALS)
+# Sprint 2 (Faz 2A): _is_trivially_simple() and its two substring signal sets
+# are retired — jarvis.graph.tool_router.classify_query() is the single query
+# classifier now. The old function was cloud-first (Pro default, docstring
+# said so) in direct conflict with the local-first pivot, and its bare
+# `sig in q` probes false-positived on Turkish morphology ("ok" in "çok",
+# "hi" in "tarihi", "hey" in "heyecanlıyım").
+def _route_query(query: str, needs_planning: bool):
+    """One place for every entry point: classify + derive the role choice.
+    conversation ⇒ fast role, zero tools; anything tool-shaped (or /think)
+    ⇒ reasoning role. Returns (route, use_pro_agent)."""
+    route = classify_query(query)
+    return route, needs_planning or route.primary_domain != "conversation"
 
 
 def _build_env_block(workspace: Path) -> str:
@@ -994,7 +972,7 @@ class JarvisAgent:
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
-        use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
+        tool_route, use_pro_agent = _route_query(clean_input, needs_planning)
 
         # BUG-8: serialize the whole turn — self._history/_turn/session_id are
         # read at the start and written back at the end; a concurrent caller
@@ -1036,6 +1014,9 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": transport,
+                # Sprint 2 (Faz 2A): the deterministic capability route — the
+                # agent node binds only this subset's schemas for the turn.
+                "tool_route": tool_route.to_dict(),
                 # Patch 1.2 (Faz 1B): explicit per-turn reset of the
                 # tool-accounting fields. A fresh thread_id already isolates
                 # the checkpointer per turn, but safety counters get an
@@ -1164,7 +1145,7 @@ class JarvisAgent:
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
-        use_pro_agent = not _is_trivially_simple(clean_input, needs_planning)
+        tool_route, use_pro_agent = _route_query(clean_input, needs_planning)
 
         # BUG-8: serialize the whole turn (see chat() for why) — held across
         # the yields too, since the generator can sit parked mid-stream while
@@ -1205,6 +1186,9 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": transport,
+                # Sprint 2 (Faz 2A): the deterministic capability route — the
+                # agent node binds only this subset's schemas for the turn.
+                "tool_route": tool_route.to_dict(),
                 # Patch 1.2 (Faz 1B): explicit per-turn reset of the
                 # tool-accounting fields. A fresh thread_id already isolates
                 # the checkpointer per turn, but safety counters get an
@@ -1479,7 +1463,7 @@ class JarvisAgent:
         try:
             await self.connect_mcp_tools()  # no-op after the first real connect
             needs_planning = False
-            use_pro_agent = not _is_trivially_simple(prompt, needs_planning)
+            tool_route, use_pro_agent = _route_query(prompt, needs_planning)
             state = {
                 "messages": [
                     SystemMessage(content=_proactive_system_prompt(self.settings)),
@@ -1496,6 +1480,12 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": f"monitor-{source}",
+                # Faz 2A: a background check gets the same scoped subset as a
+                # live turn — Faz 7's live incident (an unrelated
+                # procedure_save hallucinated during a proactive email check)
+                # becomes structurally unlikely when the model never sees that
+                # schema in the first place.
+                "tool_route": tool_route.to_dict(),
             }
             # Usage IS recorded for a proactive turn (real tokens were really
             # spent) — only the foreground /status label is left untouched
@@ -1593,7 +1583,7 @@ class JarvisAgent:
             ctx.past_sessions_block, ctx.open_todos_block,
             ctx.facts_block, ctx.procedure_block,
         )
-        use_pro_agent = not _is_trivially_simple(user_query, False)
+        tool_route, use_pro_agent = _route_query(user_query, False)
         state = {
             "messages": [SystemMessage(content=system_prompt), HumanMessage(content=user_query)],
             "user_query": user_query,
@@ -1607,6 +1597,7 @@ class JarvisAgent:
             "critic_verdict": "",
             "critique": "",
             "transport": transport,
+            "tool_route": tool_route.to_dict(),  # Faz 2A: scoped subset
         }
         # Usage IS recorded for a background turn — only the foreground
         # /status label is left untouched (same rule as proactive_turn).

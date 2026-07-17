@@ -25,6 +25,11 @@ class JarvisState(TypedDict):
                           # | "api" | "api-stream" | "api-upload" | "task-async" — set by
                           # JarvisAgent.chat()/chat_stream(); audit_log's provenance tag
 
+    # Sprint 2 (Faz 2A): the turn's capability route as a plain dict
+    # (ToolRoute.to_dict()) — the agent node binds only this subset's schemas.
+    # Absent/empty ⇒ full pre-router toolset (background paths, old checkpoints).
+    tool_route: dict
+
     # ── Patch 1.2 (Faz 1B): deterministic per-turn tool-execution accounting ──
     # All five are reset explicitly in the initial state of every turn (each
     # turn also gets a fresh thread_id, so nothing leaks via the checkpointer)
