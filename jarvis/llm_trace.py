@@ -43,6 +43,32 @@ class LlmCallTrace:
     input_tokens: int
     output_tokens: int
     ok: bool
+    # Faz 3.2 — latency diagnostics for the thinking-on/off A/B. ttft_ms is
+    # None (not 0) for non-streaming calls (/chat's ainvoke path never fires
+    # on_llm_new_token) — an honest "not measured", not a fabricated value
+    # equal to total latency. cold_start is a process-lifetime proxy ("first
+    # completed call to this provider+model since the process started"), not
+    # a guarantee — Ollama can also evict a model from VRAM after its own
+    # keep_alive idles out mid-process, which this cannot see without polling
+    # /api/ps. Good enough to separate "first turn is slow because of model
+    # load" from "first turn is slow because of thinking" without pretending
+    # to a precision the API doesn't expose (Ollama's /v1 usage has no
+    # reasoning-token breakdown — verified live, 2026-07-18).
+    ttft_ms: float | None = None
+    cold_start: bool = False
+
+
+# Faz 3.2 — process-lifetime "have we completed a call to this (provider,
+# model) tier before?" set. Module-level (not per-recorder — a fresh
+# LlmTraceRecorder is constructed every turn, cold-start is a process
+# concept). Naturally resets per process, which matches the harness: the
+# server under test is its own process, so the first scenario's first call
+# is genuinely cold. reset_cold_start_tracking() exists for tests.
+_seen_tiers: set[tuple[str, str]] = set()
+
+
+def reset_cold_start_tracking() -> None:
+    _seen_tiers.clear()
 
 
 class LlmTraceRecorder(BaseCallbackHandler):
@@ -74,13 +100,20 @@ class LlmTraceRecorder(BaseCallbackHandler):
                 billing = "paid" if md["jarvis_billable"] else "free"
             else:
                 billing = "unknown"
+        provider = md.get("jarvis_provider", "unknown")
+        model = md.get("jarvis_model", "")
+        tier_key = (provider, model)
+        cold = tier_key not in _seen_tiers
+        _seen_tiers.add(tier_key)
         self._pending[str(run_id)] = {
-            "provider": md.get("jarvis_provider", "unknown"),
-            "model": md.get("jarvis_model", ""),
+            "provider": provider,
+            "model": model,
             "billing": billing,
             "tier_index": int(md.get("jarvis_tier_index", 0)),
             "node": md.get("langgraph_node", ""),
             "started": time.monotonic(),
+            "cold_start": cold,
+            "ttft": None,  # Faz 3.2: set by on_llm_new_token if the call streams
         }
 
     def on_llm_start(self, serialized, prompts, *, run_id=None,
@@ -89,6 +122,13 @@ class LlmTraceRecorder(BaseCallbackHandler):
         # plain-LLM hook; keyed on run_id so double delivery can't dupe.
         if str(run_id) not in self._pending:
             self.on_chat_model_start(serialized, None, run_id=run_id, metadata=metadata)
+
+    def on_llm_new_token(self, token, *, run_id=None, **kwargs) -> None:
+        # Faz 3.2 — TTFT: only fires on the astream() path (voice/streaming
+        # chat); /chat's ainvoke() never calls this, so ttft stays None there.
+        info = self._pending.get(str(run_id))
+        if info is not None and info.get("ttft") is None:
+            info["ttft"] = (time.monotonic() - info["started"]) * 1000.0
 
     # ── end/error: finalize the trace ─────────────────────────────────────────
     def on_llm_end(self, response, *, run_id=None, **kwargs) -> None:
@@ -107,6 +147,8 @@ class LlmTraceRecorder(BaseCallbackHandler):
             input_tokens=tokens_in,
             output_tokens=tokens_out,
             ok=True,
+            ttft_ms=(info or {}).get("ttft"),
+            cold_start=bool((info or {}).get("cold_start", False)),
         )
         self.traces.append(trace)
         if self._usage is not None:
@@ -137,6 +179,8 @@ class LlmTraceRecorder(BaseCallbackHandler):
             input_tokens=0,
             output_tokens=0,
             ok=False,
+            ttft_ms=info.get("ttft"),
+            cold_start=bool(info.get("cold_start", False)),
         ))
 
     # ── extraction ────────────────────────────────────────────────────────────
@@ -204,4 +248,11 @@ class LlmTraceRecorder(BaseCallbackHandler):
             "calls": len(self.traces),
             "input_tokens": sum(t.input_tokens for t in ok_calls),
             "output_tokens": sum(t.output_tokens for t in ok_calls),
+            # Faz 3.2 — the call that authored the visible response: its own
+            # latency/TTFT/cold-start, so "first 'merhaba' took 40s" can be read
+            # as cold-load-heavy (cold_start=True, latency high, output_tokens
+            # low) vs thinking-heavy (output_tokens high) instead of guessed at.
+            "latency_ms": final.latency_ms,
+            "ttft_ms": final.ttft_ms,
+            "cold_start": final.cold_start,
         }

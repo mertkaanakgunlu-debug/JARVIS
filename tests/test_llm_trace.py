@@ -16,7 +16,7 @@ from uuid import uuid4
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
-from jarvis.llm_trace import LlmTraceRecorder
+from jarvis.llm_trace import LlmTraceRecorder, reset_cold_start_tracking
 
 
 def _start_meta(provider: str, model: str, *, billable=False, tier=0, node=""):
@@ -284,6 +284,101 @@ def test_get_llm_tiers_carry_metadata():
     assert tail_md["jarvis_tier_index"] == 1
     assert tail_md["jarvis_billing"] == "free"
     assert tail_md["jarvis_billable"] is False
+
+
+# ── Faz 3.2: TTFT + cold-start diagnostics ────────────────────────────────────
+
+def test_first_call_to_a_tier_is_cold_next_is_warm():
+    reset_cold_start_tracking()
+    rec = LlmTraceRecorder()
+    rid1, rid2 = uuid4(), uuid4()
+    rec.on_chat_model_start({}, None, run_id=rid1, metadata=_start_meta("ollama", "qwen3:8b"))
+    rec.on_llm_end(_llm_result(), run_id=rid1)
+    rec.on_chat_model_start({}, None, run_id=rid2, metadata=_start_meta("ollama", "qwen3:8b"))
+    rec.on_llm_end(_llm_result(), run_id=rid2)
+
+    assert rec.traces[0].cold_start is True
+    assert rec.traces[1].cold_start is False
+
+
+def test_cold_start_tracking_is_per_tier_not_global():
+    reset_cold_start_tracking()
+    rec = LlmTraceRecorder()
+    rid1, rid2 = uuid4(), uuid4()
+    rec.on_chat_model_start({}, None, run_id=rid1, metadata=_start_meta("ollama", "qwen3:8b"))
+    rec.on_llm_end(_llm_result(), run_id=rid1)
+    # a different model on the same provider is a distinct tier -> still cold
+    rec.on_chat_model_start({}, None, run_id=rid2, metadata=_start_meta("ollama", "qwen2.5:7b-instruct"))
+    rec.on_llm_end(_llm_result(), run_id=rid2)
+
+    assert rec.traces[0].cold_start is True
+    assert rec.traces[1].cold_start is True
+
+
+def test_cold_start_survives_across_recorder_instances():
+    """cold_start is a PROCESS concept: a fresh recorder is built every turn
+    (see class docstring), so warmth learned in turn 1 must carry into turn 2's
+    recorder — that's the whole point (harness process = one "session")."""
+    reset_cold_start_tracking()
+    rec1 = LlmTraceRecorder()
+    rid1 = uuid4()
+    rec1.on_chat_model_start({}, None, run_id=rid1, metadata=_start_meta("ollama", "qwen3:8b"))
+    rec1.on_llm_end(_llm_result(), run_id=rid1)
+
+    rec2 = LlmTraceRecorder()  # next turn's recorder
+    rid2 = uuid4()
+    rec2.on_chat_model_start({}, None, run_id=rid2, metadata=_start_meta("ollama", "qwen3:8b"))
+    rec2.on_llm_end(_llm_result(), run_id=rid2)
+
+    assert rec2.traces[0].cold_start is False
+
+
+def test_ttft_none_when_call_never_streamed():
+    """/chat's ainvoke() path never fires on_llm_new_token -- ttft_ms must stay
+    an honest None, not a fabricated 0 or a copy of total latency."""
+    reset_cold_start_tracking()
+    rec = LlmTraceRecorder()
+    rid = uuid4()
+    rec.on_chat_model_start({}, None, run_id=rid, metadata=_start_meta("ollama", "q"))
+    rec.on_llm_end(_llm_result(), run_id=rid)
+    assert rec.traces[0].ttft_ms is None
+
+
+def test_ttft_captured_on_first_token_only(monkeypatch):
+    import jarvis.llm_trace as lt
+    reset_cold_start_tracking()
+    # Only 3 ticks: the ttft-is-not-None guard means a SECOND token never
+    # calls monotonic() at all (no redundant syscall per token) -- so "rhaba"
+    # below consumes none of these.
+    clock = iter([100.0, 100.2, 100.9])  # start, tok1, on_llm_end
+    monkeypatch.setattr(lt.time, "monotonic", lambda: next(clock))
+    rec = LlmTraceRecorder()
+    rid = uuid4()
+    rec.on_chat_model_start({}, None, run_id=rid, metadata=_start_meta("ollama", "q"))
+    rec.on_llm_new_token("Me", run_id=rid)
+    rec.on_llm_new_token("rhaba", run_id=rid)  # second token must NOT move ttft
+    rec.on_llm_end(_llm_result(), run_id=rid)
+
+    assert abs(rec.traces[0].ttft_ms - 200.0) < 1e-6  # 100.2 - 100.0
+    assert abs(rec.traces[0].latency_ms - 900.0) < 1e-6  # 100.9 - 100.0
+
+
+def test_turn_summary_surfaces_latency_ttft_cold_start(monkeypatch):
+    import jarvis.llm_trace as lt
+    reset_cold_start_tracking()
+    clock = iter([100.0, 100.15, 100.6])
+    monkeypatch.setattr(lt.time, "monotonic", lambda: next(clock))
+    rec = LlmTraceRecorder(requested_role="fast")
+    rid = uuid4()
+    rec.on_chat_model_start({}, None, run_id=rid,
+                            metadata=_start_meta("ollama", "qwen3:8b", node="agent"))
+    rec.on_llm_new_token("t", run_id=rid)
+    rec.on_llm_end(_llm_result(), run_id=rid)
+
+    summary = rec.turn_summary()
+    assert summary["cold_start"] is True
+    assert abs(summary["ttft_ms"] - 150.0) < 1e-6
+    assert abs(summary["latency_ms"] - 600.0) < 1e-6
 
 
 def test_get_llm_aistudio_paid_mode_marks_tier_billable():

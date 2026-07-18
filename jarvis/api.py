@@ -268,6 +268,13 @@ class StatusResponse(BaseModel):
     # policy (off/explicit) disabled their direct-Gemini call — see
     # jarvis/providers.degraded_features().
     degraded: list[str] = []
+    # Faz 3.2 — the response-authoring call's own latency diagnostics, so a
+    # thinking-on/off A/B run can separate cold-load from thinking from real
+    # generation instead of eyeballing one wall-clock number. None before the
+    # first completed foreground turn, same as the runtime-truth fields above.
+    last_latency_ms: float | None = None
+    last_ttft_ms: float | None = None
+    last_call_cold_start: bool | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -820,6 +827,9 @@ async def status(request: Request):
             or (policy == "explicit" and agent.settings.pin_cloud_model)
         ),
         degraded=degraded_features(),
+        last_latency_ms=trace.get("latency_ms"),
+        last_ttft_ms=trace.get("ttft_ms"),
+        last_call_cold_start=trace.get("cold_start"),
     )
 
 

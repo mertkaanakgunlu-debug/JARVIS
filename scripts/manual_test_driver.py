@@ -117,6 +117,8 @@ def status_snapshot() -> dict:
         "turn_had_any_fallback", "session_cost_usd", "session_unpriced_tokens",
         "cloud_policy", "cloud_calls_allowed", "vertex_configured", "degraded",
         "model",
+        # Faz 3.2 — latency diagnostics for the thinking-on/off A/B.
+        "last_latency_ms", "last_ttft_ms", "last_call_cold_start",
     ]
     return {k: s.get(k) for k in keys if k in s}
 
