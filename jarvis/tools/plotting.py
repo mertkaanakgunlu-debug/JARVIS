@@ -19,9 +19,24 @@ if TYPE_CHECKING:
 
 SUPPORTED_KINDS = {"line", "scatter", "bar", "hist", "box", "violin", "heatmap"}
 
+# Round 3 — inline-data guardrails. data_json comes straight out of a model's
+# tool call, so a hallucinated or runaway generation could otherwise hand
+# pandas/matplotlib an arbitrarily large or arbitrarily nested payload on the
+# owner's machine. A chart a human will look at never legitimately needs more
+# than this; anything bigger belongs in a CSV via the file path.
+MAX_INLINE_BYTES = 256 * 1024
+MAX_INLINE_ROWS = 10_000
+MAX_INLINE_COLS = 100
+
 
 def _safe_filename(s: str) -> str:
     return re.sub(r"[^\w\-.]", "_", s)
+
+
+def _first_nested(values: list) -> bool:
+    """True if any element is itself a container — inline data is strictly
+    flat columns of primitives; nested structures are rejected, not coerced."""
+    return any(isinstance(v, (dict, list)) for v in values)
 
 
 def frame_from_inline(data_json: str, x: str, y: str) -> tuple["pd.DataFrame | None", str, str, str]:
@@ -38,7 +53,17 @@ def frame_from_inline(data_json: str, x: str, y: str) -> tuple["pd.DataFrame | N
 
     Returns ``(df, x, y, error)``; ``error`` is "" on success, else an
     ``[ERROR] ...`` string and ``df`` is None.
+
+    Guardrails (round 3): at most ``MAX_INLINE_BYTES`` of JSON text,
+    ``MAX_INLINE_ROWS`` rows and ``MAX_INLINE_COLS`` columns; values must be
+    flat primitives (no nested objects/arrays). Larger data goes through a
+    CSV/Excel ``path`` instead.
     """
+    if len(data_json.encode("utf-8", errors="ignore")) > MAX_INLINE_BYTES:
+        return None, x, y, (
+            f"[ERROR] data_json exceeds the {MAX_INLINE_BYTES // 1024} KB inline limit. "
+            "Pass a CSV/Excel file via path for data this large."
+        )
     try:
         parsed = json.loads(data_json)
     except Exception as exc:
@@ -52,6 +77,10 @@ def frame_from_inline(data_json: str, x: str, y: str) -> tuple["pd.DataFrame | N
     if isinstance(parsed, list):
         if not parsed:
             return None, x, y, "[ERROR] data_json array is empty."
+        if len(parsed) > MAX_INLINE_ROWS:
+            return None, x, y, f"[ERROR] data_json has {len(parsed)} rows; the inline limit is {MAX_INLINE_ROWS}."
+        if _first_nested(parsed):
+            return None, x, y, "[ERROR] data_json array must contain only numbers/strings, not nested objects or arrays."
         df = pd.DataFrame({"y": parsed})
         df.insert(0, "x", range(len(df)))
         return df, (x or "x"), (y or "y"), ""
@@ -59,6 +88,16 @@ def frame_from_inline(data_json: str, x: str, y: str) -> tuple["pd.DataFrame | N
     if isinstance(parsed, dict):
         if not parsed:
             return None, x, y, "[ERROR] data_json object is empty."
+        if len(parsed) > MAX_INLINE_COLS:
+            return None, x, y, f"[ERROR] data_json has {len(parsed)} columns; the inline limit is {MAX_INLINE_COLS}."
+        for k, v in parsed.items():
+            if isinstance(v, dict):
+                return None, x, y, f"[ERROR] data_json column {k!r} is a nested object; columns must be flat lists of numbers/strings."
+            if isinstance(v, list):
+                if len(v) > MAX_INLINE_ROWS:
+                    return None, x, y, f"[ERROR] data_json column {k!r} has {len(v)} rows; the inline limit is {MAX_INLINE_ROWS}."
+                if _first_nested(v):
+                    return None, x, y, f"[ERROR] data_json column {k!r} contains nested objects/arrays; values must be flat numbers/strings."
         try:
             df = pd.DataFrame({k: (v if isinstance(v, list) else [v]) for k, v in parsed.items()})
         except Exception as exc:

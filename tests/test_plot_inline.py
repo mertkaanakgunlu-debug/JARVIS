@@ -47,6 +47,41 @@ def test_inline_bad_json():
     assert df is None and err.startswith("[ERROR]")
 
 
+# ── Round 3 guardrails: data_json is model-generated, so it gets hard limits ──
+
+def test_inline_rejects_oversize_payload():
+    big = "[" + ",".join(["1"] * 200_000) + "]"  # ~400 KB of JSON text
+    df, _, _, err = frame_from_inline(big, "", "")
+    assert df is None and err.startswith("[ERROR]") and "KB" in err
+
+
+def test_inline_rejects_too_many_rows():
+    import json
+    df, _, _, err = frame_from_inline(json.dumps(list(range(10_001))), "", "")
+    assert df is None and "10000" in err.replace(",", "")
+
+    too_long_col = json.dumps({"y": list(range(10_001))})
+    df2, _, _, err2 = frame_from_inline(too_long_col, "", "")
+    assert df2 is None and err2.startswith("[ERROR]")
+
+
+def test_inline_rejects_too_many_columns():
+    import json
+    df, _, _, err = frame_from_inline(json.dumps({f"c{i}": [1] for i in range(101)}), "", "")
+    assert df is None and "columns" in err
+
+
+def test_inline_rejects_nested_structures():
+    df, _, _, err = frame_from_inline('[{"a": 1}, {"a": 2}]', "", "")
+    assert df is None and err.startswith("[ERROR]")
+
+    df2, _, _, err2 = frame_from_inline('{"y": [[1, 2], [3, 4]]}', "", "")
+    assert df2 is None and "nested" in err2
+
+    df3, _, _, err3 = frame_from_inline('{"meta": {"a": 1}}', "", "")
+    assert df3 is None and "nested" in err3
+
+
 # ── plot_data tool: inline → real PNG under the workspace ────────────────────
 
 def _plot_tool(tmp_path):

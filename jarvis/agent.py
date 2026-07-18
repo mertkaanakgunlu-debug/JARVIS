@@ -78,6 +78,30 @@ class ProactiveOutcome:
 
 # ── HUD activity feed callback ────────────────────────────────────────────────
 
+# Faz 2.2 round 3 — the test trace's args preview is key-redacted before it
+# hits disk. tool_trace writes whenever JARVIS_TOOL_TRACE=1, which anyone can
+# export outside --profile test, so email bodies, file contents and
+# credentials must never persist through it. Key-based on purpose (not value
+# sniffing): deterministic under test. Known limit: a non-dict input arrives
+# as one opaque string and is truncated but NOT scanned — a secret embedded
+# in a plain-string arg is out of this helper's scope.
+_TRACE_REDACT_KEYS = (
+    "password", "passwd", "token", "api_key", "apikey", "secret",
+    "credential", "authorization", "body", "content", "message",
+)
+
+
+def redact_tool_args(input_str: Any) -> str:
+    """200-char args preview for tool_trace, sensitive keys masked."""
+    if isinstance(input_str, dict):
+        preview = {
+            k: ("<redacted>" if any(s in str(k).lower() for s in _TRACE_REDACT_KEYS) else v)
+            for k, v in input_str.items()
+        }
+        return str(preview)[:200]
+    return str(input_str)[:200]
+
+
 class _HudEventCallback(BaseCallbackHandler):
     """Non-blocking LangChain callback → pushes tool/LLM events to the HUD feed.
 
@@ -113,7 +137,7 @@ class _HudEventCallback(BaseCallbackHandler):
             )
         # Faz 2.2: trace EVERY tool (L1 included) when the test profile enabled it.
         if run_id is not None and tool_trace.is_enabled():
-            self._trace_pending[str(run_id)] = {"tool": name, "args": str(input_str)[:200]}
+            self._trace_pending[str(run_id)] = {"tool": name, "args": redact_tool_args(input_str)}
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
         s = str(output)[:160]

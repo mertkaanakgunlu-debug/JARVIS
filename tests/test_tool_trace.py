@@ -60,3 +60,35 @@ def test_callback_writes_nothing_when_disabled(monkeypatch, jarvis_home):
     cb.on_tool_start({"name": "web_search"}, {"query": "x"}, run_id="rid3")
     cb.on_tool_end(ToolMessage(content="ok", tool_call_id="rid3"), run_id="rid3")
     assert tool_trace.load() == []
+
+
+# ── Round 3: the args preview is key-redacted before it hits disk ─────────────
+# JARVIS_TOOL_TRACE can be exported outside --profile test, so email bodies,
+# file contents and credentials must never persist through the trace.
+
+def test_callback_redacts_sensitive_args(monkeypatch, jarvis_home):
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    monkeypatch.setattr(agent_mod.event_bus, "tool_call", lambda *a, **k: None)
+    cb = _HudEventCallback(transport="test")
+
+    cb.on_tool_start(
+        {"name": "gmail"},
+        {"action": "send", "to": "a@b.c", "subject": "hi", "body": "SECRET-BODY"},
+        run_id="rid4",
+    )
+    cb.on_tool_end(ToolMessage(content="[ERROR] no creds", tool_call_id="rid4"), run_id="rid4")
+
+    row = tool_trace.load()[-1]
+    assert "SECRET-BODY" not in row["args"]
+    assert "<redacted>" in row["args"]
+    assert "a@b.c" in row["args"], "non-sensitive keys must stay readable for the oracle"
+
+
+def test_redact_helper_masks_by_key_not_position():
+    from jarvis.agent import redact_tool_args
+
+    out = redact_tool_args({"path": "x.txt", "content": "gizli metin", "api_key": "AKIA123"})
+    assert "gizli metin" not in out and "AKIA123" not in out
+    assert "x.txt" in out
+    # Non-dict input: truncated, not scanned (documented limit).
+    assert redact_tool_args("plain-string-arg") == "plain-string-arg"
