@@ -117,3 +117,49 @@ def test_non_matching_title_is_not_treated_as_duplicate(monkeypatch):
 
     assert "SKIPPED" not in result
     assert capture.get("insert_body", {}).get("summary") == "Team sync"
+
+
+# ── audit-outcome regression (live-found 2026-07-18) ─────────────────────────
+#
+# calendar_control used [Calendar] to prefix BOTH success ("Event created")
+# and failure (missing credentials, validation errors) -- content_is_failure()
+# can't add "[Calendar]" to _FAILURE_PREFIXES without misjudging real
+# successes too, so these calls were silently logged ok:true in the audit,
+# even after the Faz 1.1 fix (which correctly reads .content, but still needs
+# a real failure-shaped prefix to recognize). Errors now use [ERROR].
+
+def test_missing_credentials_returns_error_prefix(monkeypatch):
+    def _raise(settings):
+        raise RuntimeError("Google Calendar credentials not found at 'x'.")
+    monkeypatch.setattr(cal, "_get_service", _raise)
+
+    result = cal.calendar_control(action="list", settings=_settings("Europe/Istanbul"))
+
+    assert result.startswith("[ERROR]")
+    from jarvis.graph.tool_accounting import content_is_failure
+    assert content_is_failure(result) is True
+
+
+def test_validation_error_returns_error_prefix(monkeypatch):
+    fake_service = _FakeService({}, items=[])
+    monkeypatch.setattr(cal, "_get_service", lambda settings: fake_service)
+
+    result = cal.calendar_control(action="create", settings=_settings("Europe/Istanbul"))  # no title/date
+
+    assert result.startswith("[ERROR]")
+
+
+def test_successful_create_still_uses_calendar_prefix_not_error(monkeypatch):
+    """The fix must not turn genuine successes into failures."""
+    capture: dict = {}
+    fake_service = _FakeService(capture, items=[])
+    monkeypatch.setattr(cal, "_get_service", lambda settings: fake_service)
+
+    result = cal.calendar_control(
+        action="create", title="Team sync", date="2026-07-20", time="14:00",
+        settings=_settings("Europe/Istanbul"),
+    )
+
+    assert result.startswith("[Calendar] Event created")
+    from jarvis.graph.tool_accounting import content_is_failure
+    assert content_is_failure(result) is False

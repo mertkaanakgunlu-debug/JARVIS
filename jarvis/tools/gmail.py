@@ -147,7 +147,10 @@ def gmail_control(
     try:
         service = _get_service(settings)
     except RuntimeError as e:
-        return f"[Gmail] {e}"
+        # [ERROR] (not [Gmail]) -- see calendar.py's identical comment: [Gmail]
+        # also prefixes normal success output, so it can't join
+        # _FAILURE_PREFIXES without misjudging real successes too.
+        return f"[ERROR] {e}"
 
     action = action.lower().strip()
 
@@ -170,7 +173,7 @@ def gmail_control(
 
         elif action == "search":
             if not query:
-                return "[Gmail] Provide a 'query' for search (Gmail search syntax)."
+                return "[ERROR] Provide a 'query' for search (Gmail search syntax)."
             results = (
                 service.users()
                 .messages()
@@ -188,13 +191,13 @@ def gmail_control(
 
         elif action == "read":
             if not message_id:
-                return "[Gmail] Provide 'message_id' to read. Use list_unread or search first."
+                return "[ERROR] Provide 'message_id' to read. Use list_unread or search first."
             full = service.users().messages().get(userId="me", id=message_id, format="full").execute()
             return f"[Gmail] Message:\n{_fmt_message(full, full=True)}"
 
         elif action == "send":
             if not to or not subject or not body:
-                return "[Gmail] 'to', 'subject', and 'body' are required to send an email."
+                return "[ERROR] 'to', 'subject', and 'body' are required to send an email."
             profile = service.users().getProfile(userId="me").execute()
             sender_email = profile.get("emailAddress", "me")
 
@@ -210,7 +213,7 @@ def gmail_control(
 
         elif action == "reply":
             if not message_id or not body:
-                return "[Gmail] 'message_id' and 'body' are required to reply."
+                return "[ERROR] 'message_id' and 'body' are required to reply."
             original = service.users().messages().get(userId="me", id=message_id, format="full").execute()
             headers = {h["name"].lower(): h["value"] for h in original.get("payload", {}).get("headers", [])}
             reply_to = headers.get("reply-to") or headers.get("from", "")
@@ -242,13 +245,13 @@ def gmail_control(
 
         elif action == "trash":
             if not message_id:
-                return "[Gmail] Provide 'message_id' to trash."
+                return "[ERROR] Provide 'message_id' to trash."
             service.users().messages().trash(userId="me", id=message_id).execute()
             return f"[Gmail] Message {message_id} moved to trash."
 
         elif action == "mark_read":
             if not message_id:
-                return "[Gmail] Provide 'message_id' to mark as read."
+                return "[ERROR] Provide 'message_id' to mark as read."
             service.users().messages().modify(
                 userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]}
             ).execute()
@@ -256,9 +259,9 @@ def gmail_control(
 
         else:
             return (
-                f"[Gmail] Unknown action '{action}'. "
+                f"[ERROR] Unknown action '{action}'. "
                 "Valid: list_unread | search | read | send | reply | trash | mark_read"
             )
 
     except Exception as e:
-        return f"[Gmail] Error: {e}"
+        return f"[ERROR] {e}"

@@ -162,7 +162,12 @@ def calendar_control(
     try:
         service = _get_service(settings)
     except RuntimeError as e:
-        return f"[Calendar] {e}"
+        # [ERROR] (not [Calendar]) so the audit's content_is_failure() sees
+        # this as a real failure -- [Calendar] also prefixes normal success
+        # output ("Event created: ..."), so it can never be added to
+        # _FAILURE_PREFIXES without misjudging real successes too (live-found
+        # 2026-07-18: a missing-credentials E14 call was logged ok:true).
+        return f"[ERROR] {e}"
 
     action = action.lower().strip()
 
@@ -193,7 +198,7 @@ def calendar_control(
 
         elif action == "search":
             if not query:
-                return "[Calendar] Provide a 'query' to search for."
+                return "[ERROR] Provide a 'query' to search for."
             now = datetime.now(timezone.utc)
             result = (
                 service.events()
@@ -219,14 +224,14 @@ def calendar_control(
             # ── Batch create: create multiple events in a single tool call ──────
             # events_json: '[{"title":"..","date":"..","time":"..","duration_minutes":120,"description":"..","location":".."},...]'
             if not events_json:
-                return "[Calendar] 'events_json' is required for batch_create."
+                return "[ERROR] 'events_json' is required for batch_create."
             try:
                 import json as _json
                 items = _json.loads(events_json)
                 if not isinstance(items, list):
-                    return "[Calendar] 'events_json' must be a JSON array."
+                    return "[ERROR] 'events_json' must be a JSON array."
             except Exception as exc:
-                return f"[Calendar] Could not parse events_json: {exc}"
+                return f"[ERROR] Could not parse events_json: {exc}"
 
             results = []
             for item in items:
@@ -245,7 +250,7 @@ def calendar_control(
 
         elif action == "create":
             if not title or not date:
-                return "[Calendar] 'title' and 'date' are required to create an event."
+                return "[ERROR] 'title' and 'date' are required to create an event."
 
             tz_name = getattr(settings, "calendar_timezone", "Europe/Istanbul")
             start_dt = _parse_date(date)
@@ -317,7 +322,7 @@ def calendar_control(
 
         elif action == "delete":
             if not event_id and not query:
-                return "[Calendar] Provide 'event_id' or 'query' to find the event to delete."
+                return "[ERROR] Provide 'event_id' or 'query' to find the event to delete."
 
             if not event_id:
                 now = datetime.now(timezone.utc)
@@ -347,7 +352,7 @@ def calendar_control(
 
         elif action == "update":
             if not event_id:
-                return "[Calendar] 'event_id' is required for update. Use search/list to find it."
+                return "[ERROR] 'event_id' is required for update. Use search/list to find it."
 
             ev = service.events().get(calendarId="primary", eventId=event_id).execute()
             old_title = ev.get("summary", "")
@@ -378,9 +383,9 @@ def calendar_control(
 
         else:
             return (
-                f"[Calendar] Unknown action '{action}'. "
+                f"[ERROR] Unknown action '{action}'. "
                 "Valid: list | create | delete | search | update."
             )
 
     except Exception as e:
-        return f"[Calendar] Error: {e}"
+        return f"[ERROR] {e}"
