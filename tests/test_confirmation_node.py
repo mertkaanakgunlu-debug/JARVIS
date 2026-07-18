@@ -215,6 +215,57 @@ async def test_external_writes_disabled_allows_drive_download(isolated_cwd):
     assert result["confirmation_result"] == "approved"
 
 
+# ── Round 3: pre-execution blocks leave policy_decision trace rows ────────────
+# Both block paths below return stub ToolMessages without ever running a tool,
+# so the on_tool_start/on_tool_end callbacks (tool_trace's normal writers)
+# never fire — confirmation_node itself must write the row, or the eval
+# oracle's BLOCKED verdicts (D12/D13b) have nothing structural to check.
+
+@pytest.mark.asyncio
+async def test_external_write_block_writes_policy_decision_trace(isolated_cwd, monkeypatch):
+    from jarvis import tool_trace
+
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    node = make_confirmation_node(_settings(external_writes_enabled=False))
+    state = _state_with_tool_call("gmail", "cli-text", {"action": "send", "to": "x@example.com"})
+
+    result = await node(state)
+
+    assert result["confirmation_result"] == "denied"
+    rows = [r for r in tool_trace.load() if r.get("event") == "policy_decision"]
+    assert rows, "expected a policy_decision trace row for the pre-execution block"
+    assert rows[-1]["tool"] == "gmail"
+    assert rows[-1]["outcome"] == "blocked_external_writes_disabled"
+    assert rows[-1]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_veto_writes_policy_decision_trace(isolated_cwd, monkeypatch):
+    """enabled=False IS the tripped emergency stop (disable() == trip): the
+    L3 shell_run must be vetoed before execution AND leave the trace row the
+    corrected D13b expectation checks."""
+    from jarvis import kill_switch, tool_trace
+
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    kill_switch.disable("test trip")
+    try:
+        node = make_confirmation_node(_settings())
+        state = _state_with_tool_call("shell_run", "cli-text", {"command": "dir"})
+
+        result = await node(state)
+
+        assert result["confirmation_result"] == "denied"
+        rows = [r for r in tool_trace.load() if r.get("event") == "policy_decision"]
+        assert rows, "expected a policy_decision trace row for the kill-switch veto"
+        assert rows[-1]["tool"] == "shell_run"
+        assert rows[-1]["outcome"] == "blocked_kill_switch"
+    finally:
+        # kill_switch keeps a module-level last-good cache as a read-failure
+        # fallback — re-arm THROUGH the module (not by deleting the file) so
+        # no later test in this process can inherit the trip via that cache.
+        kill_switch.enable()
+
+
 @pytest.mark.asyncio
 async def test_external_writes_enabled_default_true_no_behavior_change(isolated_cwd, monkeypatch):
     """Normal runs (the field's default) must be completely unaffected --

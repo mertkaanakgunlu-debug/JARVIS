@@ -501,7 +501,7 @@ def make_confirmation_node(settings):
     """
     from langgraph.types import interrupt as _interrupt
     from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
-    from jarvis import audit_log, policy_guard
+    from jarvis import audit_log, policy_guard, tool_trace
     from jarvis.graph.tool_accounting import tool_call_fingerprint
 
     async def confirmation_node(state: JarvisState) -> dict:
@@ -659,6 +659,19 @@ def make_confirmation_node(settings):
         vetoed = [tc for tc in last_ai.tool_calls if not decisions[tc.get("id")].allowed]
         if vetoed:
             veto_reason = decisions[vetoed[0].get("id")].reason
+            # A veto happens before any tool executes, so the on_tool_start/end
+            # callbacks — and with them tool_trace's execution rows — never
+            # fire. This policy_decision row is the only structural evidence of
+            # the block the eval oracle can read; without it a BLOCKED verdict
+            # would have to trust the model's own response text (the exact
+            # failure mode the oracle exists to close).
+            for tc in vetoed:
+                d = decisions[tc.get("id")]
+                tool_trace.record(
+                    event="policy_decision", tool=d.tool, action=d.action,
+                    risk_level=d.risk_level, ok=False, transport=transport,
+                    outcome="blocked_kill_switch", reason=veto_reason,
+                )
             stub_msgs = [
                 ToolMessage(
                     content=f"[BLOCKED: {veto_reason}]",
@@ -698,6 +711,15 @@ def make_confirmation_node(settings):
                     audit_log.record(
                         "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
                         transport=transport, outcome="blocked_external_writes_disabled",
+                        reason="EXTERNAL_WRITES_ENABLED=false",
+                    )
+                    # Same reason as the kill-switch veto above: pre-execution
+                    # block, no tool callbacks, so the trace row here is the
+                    # oracle's only structural block evidence (D12).
+                    tool_trace.record(
+                        event="policy_decision", tool=d.tool, action=d.action,
+                        risk_level=d.risk_level, ok=False, transport=transport,
+                        outcome="blocked_external_writes_disabled",
                         reason="EXTERNAL_WRITES_ENABLED=false",
                     )
                 stub_msgs = [
