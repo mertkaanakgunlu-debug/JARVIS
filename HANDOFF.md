@@ -3,84 +3,72 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-18 (2. oturum) — round-3 ölçüm düzeltmeleri; A/B artık güvenilir
+## Last session: 2026-07-18 (3. oturum) — TAM A/B KOŞULDU: thinking-off default DOĞRULANDI
 
-**Bağlam:** Owner, son push'un üçüncü tur dış review'unu verdi. Üç P0 iddiası da kodda
-doğrulandı ve düzeltildi; A/B koşusunu yanıltacak ölçüm hatası kalmadı. **3 commit,
-`langgraph-migration`. 417/417 pytest yeşil (405→417), ruff temiz (harness scriptleri dahil).**
-`7a980d8` yapısal blok kanıtı + D13b · `6755c66` turn_summary compose · `b1a6959` hardening.
+**Bağlam:** Round-3 ölçüm düzeltmeleri sonrası owner "testleri yap" dedi; 16 senaryo × 5 tur ×
+2 konfig (thinking off `LOCAL_REASONING_EFFORT=none` vs on `""`) canlı A/B bu oturumda koşuldu.
+**Sonuç: doğruluk BİREBİR AYNI (60/65 vs 60/65), thinking-off konuşma turnlerinde 3-6x hızlı,
+run başına duvar süresi ~%25 kısa → default `none` KALIYOR.** 421/421 pytest, ruff temiz.
 
-## Bu oturumda ne yapıldı
+## A/B sonuçları (özet — tam rapor `C:\Temp\jarvis-ab\results\ab_report.md`)
 
-1. **P0 — D13b oracle beklentisi TERSTİ** (`scripts/manual_test_driver.py`): eski beklenti
-   "kill-switch OFF → runs" diyerek `enabled=False`'u "özellik kapalı" okumuştu. Kill-switch
-   semantiği tam tersi: `enabled=False` = trip edilmiş acil stop (`disable()` == trip) → D13b'de
-   L3 `shell_run` VETO edilmeli. Eski haliyle çalışan kill switch FAIL, bozuk olan PASS skorluyordu.
-   Artık `outcome=BLOCKED` + `expected_tool="shell_run"`.
-2. **P0 — pre-execution bloklar yapısal kanıt bırakıyor** (`jarvis/graph/nodes.py`):
-   confirmation_node'un kill-switch vetosu ve external-write bloku tool callback'lerine hiç
-   düşmediği için trace'e görünmüyordu; oracle response-regex'e düşüyordu ("devre dışı" YAZAN
-   model, hiç tool çağırmadan D12'yi geçebiliyordu). İki blok noktası artık
-   `event="policy_decision"` + `outcome="blocked_*"` trace satırı yazıyor;
-   `eval_oracle._blocked_signal` YALNIZ yapısal kanıta bakıyor (policy satırı veya
-   `[BLOCKED]/[DENIED]` execution satırı), response-text fallback silindi; `expected_tool`
-   blok kanıtını hedef tool'a scope'luyor. İzole seam-check ile uçtan uca doğrulandı
-   (gerçek node → gerçek trace dosyası → driver'ın gerçek EXPECTED girdileri; kanıtsız tur FAIL).
-3. **P0/P1 — `turn_summary()` yanlış çağrıyı seçiyordu** (`jarvis/llm_trace.py`): "agent"
-   tercihli seçim, tool turn'lerinde `/status`'un latency/TTFT/cold-start/model etiketini
-   görünür cevabı yazan **compose** çağrısı yerine tool-SELECTION çağrısına bağlıyordu —
-   thinking A/B'nin en çok ölçmesi gereken senaryolarda. Artık compose > agent > any;
-   tool'suz sohbet turn'leri (compose çağrısı yok) değişmedi.
-4. **Hardening:** tool_trace args preview'u key-redaksiyonlu (password/token/api_key/secret/
-   body/content/... → `<redacted>`; sonuç `content_head` bilerek dokunulmadı — oracle'ın
-   `[BLOCKED]`/`[ERROR]` tespiti ona bakıyor; `audit_log.args_preview` da bilerek tam — L2+,
-   forensik amaç). `plot_data` inline limitleri: 256 KB / 10k satır / 100 kolon / düz
-   primitifler (nested reddi). CI ruff kapsamına `scripts/eval_oracle.py` +
-   `scripts/manual_test_driver.py` eklendi (ters D13b tam da lint/test görmeyen beklenti
-   tablosunda saklanmıştı). `.env.example`'a `LOCAL_REASONING_EFFORT` rollback bloğu.
-5. **G17 dürüst etiketlendi:** --all içinde cross-session recall testi (yalnız /reset;
-   server restart YOK). Gerçek restart testi driver'da zaten mümkün, iki ayrı invokasyonla:
-   `manual_test_driver.py G17a` → server'ı kapat → aynı `JARVIS_TEST_HOME` ile aç →
-   `manual_test_driver.py G17b`.
+- **Oracle:** 13 skorlu senaryonun 12'si her iki konfigde de 5/5. Tek FAIL iki konfigde de
+  G17b (0/5) — offline'da memory extractor degraded (dokümante-beklenen; thinking'le ilgisiz).
+  **Nitelik notu:** G17b'de model "hatırlamıyorum" demek yerine şehir UYDURUYOR (İstanbul/vb.) —
+  kalıcı hafıza işine girdi olarak not edildi.
+- **Latency (warm LLM medyan, görünür cevabı yazan çağrı):** A1 892ms→4819ms, A3 1472→8889,
+  G17b 2648→10315, D13b 5723→16098 (off→on). Tool-ağırlıklı turnler (B4/B5a/B6/D10/F16) ~eşit
+  (tool süresi domine ediyor). Run medyanı: 349s (off) vs 438s (on).
+- Koşum artifact'leri: `C:\Temp\jarvis-ab\` (results/*.jsonl ×10, logs/driver_*.out, ab_report.md).
+
+## Bu oturumda ayrıca — canlı koşunun yakaladığı 2 gerçek bug (`f367989`)
+
+1. **Kill switch BOM-körü idi (güvenlik):** `_load()` düz `utf-8` okuyordu; BOM'lu state
+   dosyasında (PS 5.1 `Out-File -Encoding utf8` yazımı) `json.loads` patlayıp sessizce stale
+   cache'e/default'a düşüyordu. İki yön de kötü: dışarıdan yazılmış TRIP görünmez kalabilirdi
+   (acil stop sessizce devre dışı); stale trip yeni run'ın D10'unu vetoladı (canlıda yaşandı).
+   Fix: `utf-8-sig` + iki yönlü regresyon testi.
+2. **C9'un SSRF reddi `[ERROR]` prefix'liydi:** policy reddi olduğu halde oracle'ın
+   `[BLOCKED]/[DENIED]` konvansiyonunda değildi — doğru çalışan blok FAIL skorluyordu. Fix:
+   `[BLOCKED] Refusing...` (shell deny-list + MCP browser guard ile aynı); bozuk-URL girdi
+   hatası bilinçli `[ERROR]` kaldı. Testli.
+
+## Yeni harness dosyaları (repoda, Faz 4 challenger'lar için hazır)
+
+- `scripts/ab_run_config.ps1` — tek konfig × N tam driver koşusu orkestratörü (izole server
+  başlat/bekle/koştur/kapat; kill-switch re-arm; ASCII-only — PS 5.1 BOM'suz .ps1'i ANSI okur).
+- `scripts/ab_launch_server.py` — `LOCAL_REASONING_EFFORT`'u os.environ'dan geçiren launcher
+  (Win32 env bloğu boş string'i SİLER; boş değer ancak böyle geçer — canlıda doğrulandı).
+- `scripts/ab_analyze.py` — çoklu-konfig oracle matrisi + latency medyanları + FAIL raporu.
+- Koşum: `powershell -File scripts\ab_run_config.ps1 -Config off -Effort none -Runs 5` →
+  `-Config on -Effort "" -Runs 5` → `python scripts/ab_analyze.py`.
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Faz 3.3 — thinking on/off A/B (EN ÖNCELİKLİ, CANLI).** Ölçüm engelleri kalktı. Beklenti
-   değişikliklerine dikkat: D13b artık BLOCKED bekliyor; D12/D13b policy_decision satırıyla
-   kanıtlanıyor; latency/TTFT compose'dan geliyor. Koşum (öncekiyle aynı):
-   ```powershell
-   ollama serve            # ayrı pencere (zaten çalışıyor olabilir)
-   $env:JARVIS_TEST_HOME = "C:\...\stable-test-home"
-   $env:JARVIS_TEST_RESULTS = "C:\...\ab_off.jsonl"
-   python -m jarvis --api --profile test --port 8132     # terminal 1
-   python scripts/manual_test_driver.py --all             # terminal 2 → ORACLE x/y özeti
-   # thinking-ON turu: server'ı LOCAL_REASONING_EFFORT="" ile başlat, ab_on.jsonl'e yaz
-   ```
-   16 senaryo × 5'er tur × 2 konfig. Doğruluk düşerse tek env var ile rollback.
-2. **Faz 4 — challenger'lar** (A/B bittikten sonra): `qwen3.5:9b` Q4_K_M, `ministral-3:8b`
-   Q4_K_M — aynı oracle harness'la. `config.local_model` yalnız kazanan varsa değişir.
-3. **Bilinçli ertelenenler (review'un orta maddeleri):**
-   - **Yapısal history-echo invariantı** — compose guard'ı hâlâ prompt seviyesinde (talimata
-     uymayan model teknik olarak eski cevabı üretebilir). Review'un önerisi: tool-routed
-     turn'de ne başarılı tool ne yapılandırılmış block/clarify kararı varsa compose'a
-     gidilmesin (agent'a dön veya deterministik "işlem yapılmadı" cevabı). Graph routing
-     değişikliği — kendi oturumunu hak ediyor.
-   - **G17 gerçek restart otomasyonu** — prosedür belgelendi (yukarıda), driver server
-     process'ini yönetmiyor; owner isterse iki-invokasyon manuel akış yeterli.
-   - **Domain closure E2E yarısı** — 13 domain "membership closure" (doğru domain + tool
-     görünürlüğü) testli; tool'un gerçekten çağrıldığı/argümanların doğruluğu/çok-adımlı
-     tamamlanma canlı A/B'nin işi. Raporlarken "membership closure geçti" de, "closure" değil.
-4. **`main` merge YAPMA** — A/B doğrulaması bitmeden değil (owner kararı).
+1. **Reviewer'ın bağımsız diff review'u bekliyor** (round-3 commit'leri + bu oturumun
+   `f367989`+docs commit'leri). Owner'ın süreci: GitHub'daki `langgraph-migration` diff'ini
+   dış reviewer'a veriyor. **`main` merge bu onaydan sonra** (owner kararı).
+2. **Faz 4 — challenger'lar (CANLI):** `qwen3.5:9b` Q4_K_M, `ministral-3:8b` Q4_K_M —
+   `ollama pull` + aynı harness (`-Config qwen35` vb.; server'ı farklı `LOCAL_MODEL` ile
+   başlatmak için ab_launch_server'a env eklemek ya da .env üzerinden). Karşılaştırma:
+   `python scripts/ab_analyze.py C:\Temp\jarvis-ab off qwen35`. `config.local_model` yalnız
+   net kazanan varsa değişir; Türkçe kalitesi owner judgment.
+3. **Bilinçli ertelenenler (değişmedi):** yapısal history-echo invariantı (compose guard hâlâ
+   prompt-level; graph routing değişikliği ayrı oturum); G17 gerçek restart otomasyonu
+   (iki-invokasyon prosedürü driver'da belgeli); domain closure'ın E2E yarısı (A/B bunu
+   kısmen kapattı: 13 skorlu senaryo canlıda tool-çağrısı düzeyinde doğrulanıyor).
+4. **Kalıcı hafıza (G17b):** offline extractor degraded + model uyduruyor — ayrı iş kalemi;
+   `stoic-spence` worktree'sindeki rolling-summarization bu bağlamda değerlendirilebilir.
 
 ## Ortam / komutlar
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pytest                                   # 417 test, offline
-ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py   # CI ile aynı kapsam
+pytest                                   # 421 test, offline
+ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py   # CI kapsamı
 ```
-Env vars: `JARVIS_TOOL_TRACE` (test profilinde otomatik 1; artık args key-redaksiyonlu),
-`LOCAL_REASONING_EFFORT` (default `none`; `""` → thinking on; artık `.env.example`'da).
-Ollama 0.32.1, qwen3:8b (thinking cap'li) + qwen2.5:7b mevcut.
+Env: `LOCAL_REASONING_EFFORT` default `none` (A/B ile doğrulandı; `""` → thinking on),
+`JARVIS_TOOL_TRACE` (test profilinde otomatik; args key-redaksiyonlu). Ollama 0.32.1;
+qwen3:8b + qwen2.5:7b-instruct + nomic-embed-text mevcut.
 
 ## Değişmeyen taşınan işler
 - 8 direct-Gemini modülün shared gateway'e migrasyonu (Sprint 3) — kapsam dışı.

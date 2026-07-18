@@ -27,7 +27,17 @@ latency/TTFT/label artık görünür cevabı yazan çağrıdan (A/B'nin ölçtü
 tool_trace args key-redaksiyonu, `plot_data` inline limitleri (256KB/10k satır/100
 kolon/düz primitifler), CI ruff'ı harness scriptlerini de linliyor, `.env.example`'a
 `LOCAL_REASONING_EFFORT`. **417 pytest yeşil, ruff temiz**; policy-trace→oracle zinciri
-izole seam-check ile uçtan uca doğrulandı. Tam 16×5 A/B hâlâ YAPILMADI — sıradaki iş.
+izole seam-check ile uçtan uca doğrulandı.
+
+**Oturum 3 — TAM A/B KOŞULDU (16 senaryo × 5 tur × 2 konfig, canlı):** doğruluk birebir
+aynı (**60/65 vs 60/65**; tek FAIL iki konfigde de G17b — offline extractor degraded),
+thinking-off konuşma turnlerinde **3-6x hızlı** (A1 warm LLM 892ms vs 4819ms), run duvar
+süresi ~%25 kısa → **`LOCAL_REASONING_EFFORT=none` default'u DOĞRULANDI.** Canlı koşu iki
+gerçek bug daha yakaladı: (1) kill_switch BOM-körü okuma — BOM'lu state dosyası sessizce
+stale cache'e düşürüyordu; dıştan TRIP görünmez kalabilirdi → `utf-8-sig`; (2) `fetch_url`
+SSRF reddi `[ERROR]` prefix'liydi → `[BLOCKED]` (oracle C9 artık gerçek bloku görüyor).
+Harness repoya alındı: `scripts/ab_run_config.ps1` + `ab_launch_server.py` + `ab_analyze.py`
+(Faz 4 challenger koşuları aynı altyapıyı kullanacak). **421 pytest yeşil.**
 
 ## [Patch 1.2 + Sprint 2 + model A/B: kabiliyet regresyonu] — 2026-07-17
 
