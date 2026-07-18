@@ -91,7 +91,13 @@ def fetch_url(url: str, settings: "Settings", max_chars: int = _MAX_CHARS) -> st
 
     blocked, why = _is_blocked_url(url)
     if blocked:
-        return f"[ERROR] Refusing to fetch this URL ({why}): {url}"
+        # [BLOCKED], not [ERROR]: this is a policy refusal, not a fetch
+        # failure -- same convention as shell_run's deny-list and the MCP
+        # browser guard ("[BLOCKED: ...] Refusing to navigate"), and the
+        # structural signal the eval oracle's BLOCKED verdicts key on (C9's
+        # SSRF block was invisible to it under the old prefix, live-found
+        # 2026-07-18).
+        return f"[BLOCKED] Refusing to fetch this URL ({why}): {url}"
 
     if settings.firecrawl_api_key:
         result = _firecrawl_fetch(url, settings.firecrawl_api_key, max_chars)

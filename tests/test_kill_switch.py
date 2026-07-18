@@ -76,3 +76,31 @@ def test_corrupt_file_falls_back_to_default(isolated_cwd):
     # Must not raise, and must fail toward *some* deterministic state rather
     # than crash the caller (policy_guard.evaluate() is on every L3 call).
     assert kill_switch.is_enabled() in (True, False)
+
+
+def test_bom_prefixed_state_file_is_still_read(isolated_cwd):
+    """Live incident (2026-07-18 A/B harness): PowerShell 5.1's
+    `Out-File -Encoding utf8` writes UTF-8 WITH a BOM. The loader read with
+    plain utf-8, json.loads() choked on the BOM, and the silent fallback
+    (stale cache / default) meant an external writer's TRIP could be
+    invisible -- the emergency stop's worst possible failure mode -- and an
+    external re-arm could leave a stale trip vetoing everything. Both
+    directions must survive a BOM.
+    """
+    path = isolated_cwd / "data" / "kill_switch.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # A BOM'd TRIP must actually trip (safety-critical direction).
+    path.write_text(
+        json.dumps({"enabled": False, "reason": "bom trip", "changed_at": "x"}),
+        encoding="utf-8-sig",
+    )
+    assert kill_switch.is_enabled() is False
+    assert kill_switch.reason() == "bom trip"
+
+    # A BOM'd RE-ARM must clear it even through a warm cache holding the trip.
+    path.write_text(
+        json.dumps({"enabled": True, "reason": "", "changed_at": "y"}),
+        encoding="utf-8-sig",
+    )
+    assert kill_switch.is_enabled() is True

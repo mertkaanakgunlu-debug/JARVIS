@@ -51,7 +51,14 @@ def _load() -> dict[str, Any]:
     target = _path()
     if target.exists():
         try:
-            loaded = json.loads(target.read_text(encoding="utf-8"))
+            # utf-8-sig, not utf-8: reads plain UTF-8 unchanged AND tolerates a
+            # BOM. Live incident (2026-07-18 A/B harness): a state file written
+            # by PowerShell 5.1's `Out-File -Encoding utf8` carries a BOM,
+            # json.loads() choked on it, and the loader silently fell back to
+            # the stale in-memory cache / default -- meaning an external
+            # writer's TRIP could go invisible (emergency stop silently not
+            # stopped) and an external re-arm could leave a stale trip active.
+            loaded = json.loads(target.read_text(encoding="utf-8-sig"))
             if isinstance(loaded, dict) and "enabled" in loaded:
                 _cache = loaded
                 return _cache
