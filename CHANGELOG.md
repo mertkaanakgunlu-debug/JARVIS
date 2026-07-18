@@ -6,6 +6,29 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [GPT 2. tur planı + round-3 ölçüm düzeltmeleri] — 2026-07-18
+
+İki oturum. **Oturum 1** (GPT_Analysis 2. tur, onaylı plan): audit `ok` alanı `.content`
+üzerinden + kanonik failure-prefix'ler; `shell_run` workspace-cwd + cd-escape guard'ı;
+`plot_data` inline `data_json` (B6 kök nedeni); compose history-echo guard'ı; harness
+senaryo izolasyonu (/reset); **eval oracle** (`scripts/eval_oracle.py`, trace+fs+response
+birlikte) + `jarvis/tool_trace.py` (L1 dahil her çağrı, `JARVIS_TOOL_TRACE` gated);
+router diacritic folding (`grafik ciz`, `Drivea yukle` artık doğru domain'e düşüyor);
+qwen3 thinking-off (`LOCAL_REASONING_EFFORT=none`, ~14x hız, tool-call regresyonu yok);
+TTFT + cold-start enstrümantasyonu; Calendar/Gmail hata yolları `[ERROR]` standardında.
+
+**Oturum 2** (round-3 review, A/B öncesi ölçüm hataları): **D13b oracle beklentisi
+tersti** — `enabled=False` trip DEMEKTİR; çalışan kill switch FAIL, bozuk olan PASS
+skorluyordu → BLOCKED'a çevrildi. **Pre-execution bloklar artık yapısal kanıt bırakıyor**:
+confirmation_node kill-switch vetosu ve external-write blokunda `policy_decision` trace
+satırı yazıyor; oracle'ın response-regex fallback'i kaldırıldı (yalnız "devre dışı" YAZAN
+model artık geçemez). **`turn_summary()` compose>agent tercihli** — tool turn'lerinde
+latency/TTFT/label artık görünür cevabı yazan çağrıdan (A/B'nin ölçtüğü şey). Ayrıca:
+tool_trace args key-redaksiyonu, `plot_data` inline limitleri (256KB/10k satır/100
+kolon/düz primitifler), CI ruff'ı harness scriptlerini de linliyor, `.env.example`'a
+`LOCAL_REASONING_EFFORT`. **417 pytest yeşil, ruff temiz**; policy-trace→oracle zinciri
+izole seam-check ile uçtan uca doğrulandı. Tam 16×5 A/B hâlâ YAPILMADI — sıradaki iş.
+
 ## [Patch 1.2 + Sprint 2 + model A/B: kabiliyet regresyonu] — 2026-07-17
 
 **Bağlam:** Owner "eskiden takvime ekleme gibi işleri yapıyordu, şimdi yapamıyor" dedi. Teşhis
