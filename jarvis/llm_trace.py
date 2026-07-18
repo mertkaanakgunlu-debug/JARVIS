@@ -209,10 +209,19 @@ class LlmTraceRecorder(BaseCallbackHandler):
     def turn_summary(self) -> dict | None:
         """The turn's headline: which provider/model produced the visible text.
 
-        Prefers the last successful call from the "agent" node (critic/planner
-        calls judge, they don't author the reply); falls back to the last
-        successful call when node metadata isn't exposed. None if nothing
-        succeeded — callers keep their previous label rather than lying.
+        Prefers, in order: the last successful "compose" call, then the last
+        "agent" call, then the last successful call of any node (metadata not
+        exposed). Faz 2B topology: on any turn that ran tools (agent → tools →
+        accounting → compose) or was revised by the critic, the BARE composer
+        authors the text the user actually sees; only no-tool conversational
+        turns end critic→END with the agent's own text and no compose call.
+        Round 3 fix (2026-07-18): preferring "agent" outright attributed
+        tool-turn latency/TTFT/cold-start — and the model label — to the
+        tool-SELECTION call instead of the call that wrote the visible answer,
+        skewing the thinking-on/off A/B on exactly the tool scenarios it most
+        needs to measure. critic/planner calls judge, they don't author, so
+        they are never preferred. None if nothing succeeded — callers keep
+        their previous label rather than lying.
 
         Patch 1.1 — fallback is reported at two scopes, because they answer
         different questions:
@@ -229,8 +238,9 @@ class LlmTraceRecorder(BaseCallbackHandler):
         ok_calls = [t for t in self.traces if t.ok]
         if not ok_calls:
             return None
+        compose_calls = [t for t in ok_calls if t.node == "compose"]
         agent_calls = [t for t in ok_calls if t.node == "agent"]
-        final = (agent_calls or ok_calls)[-1]
+        final = (compose_calls or agent_calls or ok_calls)[-1]
         response_fallback_used = final.tier_index > 0
         turn_had_any_fallback = (
             any(t.tier_index > 0 for t in ok_calls)

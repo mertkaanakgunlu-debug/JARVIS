@@ -208,6 +208,37 @@ def test_turn_summary_prefers_agent_node_over_critic():
     assert summary["calls"] == 2
 
 
+def test_turn_summary_prefers_compose_over_agent_on_tool_turns():
+    """Round 3 fix: on a tool turn (agent → tools → accounting → compose) the
+    BARE compose node authors the visible answer — the agent call only
+    selected tools. The label and the latency/TTFT/cold-start diagnostics
+    must come from the compose call, or the thinking-on/off A/B reads the
+    wrong invocation on exactly the tool scenarios it exists to measure.
+    Distinct model labels per node make the choice observable."""
+    rec = LlmTraceRecorder(requested_role="fast")
+
+    rid_agent = uuid4()  # tool-selection call, ran first
+    rec.on_chat_model_start({}, None, run_id=rid_agent,
+                            metadata=_start_meta("ollama", "agent-tool-selection", node="agent"))
+    rec.on_llm_end(_llm_result(200, 30), run_id=rid_agent)
+
+    rid_compose = uuid4()  # authored the visible answer
+    rec.on_chat_model_start({}, None, run_id=rid_compose,
+                            metadata=_start_meta("ollama", "compose-authored", node="compose"))
+    rec.on_llm_end(_llm_result(300, 80), run_id=rid_compose)
+
+    rid_critic = uuid4()  # judges after compose; must never win the label
+    rec.on_chat_model_start({}, None, run_id=rid_critic,
+                            metadata=_start_meta("vertex", "critic-judge",
+                                                 billable=True, node="critic"))
+    rec.on_llm_end(_llm_result(), run_id=rid_critic)
+
+    summary = rec.turn_summary()
+    assert summary["model"] == "compose-authored"
+    assert summary["latency_ms"] == rec.traces[1].latency_ms
+    assert summary["calls"] == 3
+
+
 # ── de-dup + latency plumbing ─────────────────────────────────────────────────
 
 def test_on_llm_start_fallback_does_not_double_register():
