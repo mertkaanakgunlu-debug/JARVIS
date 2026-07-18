@@ -191,7 +191,11 @@ class Settings(BaseSettings):
     # qwen3 replaced qwen2.5 — did not regress). Applied to the routine local
     # role (fast/local/realtime) only; the reasoning-role local fallback keeps
     # full thinking. Set "" (or "default") to restore thinking for A/B runs.
-    # NOTE: still to be confirmed across the full oracle A/B (16 scenarios ×5).
+    # CONFIRMED by the full oracle A/B (2026-07-18, 16 scenarios x 5 runs per
+    # config, scripts/ab_run_config.ps1): accuracy IDENTICAL (60/65 both; the
+    # only fail is G17b in both configs — offline extractor degradation, not
+    # thinking), while thinking-off is 3-6x faster on conversational turns
+    # (A1 ~0.9s vs ~4.8s LLM latency) and ~25% faster full-run wall time.
     local_reasoning_effort: str = "none"
     embed_model: str = "nomic-embed-text"
     cloud_model: str = "gemini-2.5-pro"          # primary model for all user-facing responses
