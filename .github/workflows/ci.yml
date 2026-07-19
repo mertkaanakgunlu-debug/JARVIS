@@ -32,12 +32,13 @@ jobs:
           pip install -r requirements-lock.txt
           pip install ruff
 
-      # eval_oracle.py and manual_test_driver.py are the acceptance
-      # instrument (scenario expectations + scoring), so they're linted like
-      # first-class code. NOT scripts/ wholesale: auth_setup.py has a
+      # eval_oracle.py, manual_test_driver.py, ab_analyze.py and
+      # ab_launch_server.py are the acceptance instrument (scenario
+      # expectations + scoring + the A/B orchestration), so they're linted
+      # like first-class code. NOT scripts/ wholesale: auth_setup.py has a
       # pre-existing unrelated F541.
       - name: Lint (ruff)
-        run: ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py
+        run: ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py
 
       - name: Test (pytest)
         run: pytest

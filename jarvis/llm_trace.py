@@ -258,6 +258,11 @@ class LlmTraceRecorder(BaseCallbackHandler):
             "calls": len(self.traces),
             "input_tokens": sum(t.input_tokens for t in ok_calls),
             "output_tokens": sum(t.output_tokens for t in ok_calls),
+            # 2026-07-19 (Faz 4 metrics): every LLM call's latency summed, so
+            # a driver's e2e wall-clock minus this ≈ tool + overhead time.
+            "total_llm_ms": sum(
+                t.latency_ms for t in self.traces if t.latency_ms is not None
+            ),
             # Faz 3.2 — the call that authored the visible response: its own
             # latency/TTFT/cold-start, so "first 'merhaba' took 40s" can be read
             # as cold-load-heavy (cold_start=True, latency high, output_tokens

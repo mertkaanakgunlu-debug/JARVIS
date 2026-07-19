@@ -275,6 +275,13 @@ class StatusResponse(BaseModel):
     last_latency_ms: float | None = None
     last_ttft_ms: float | None = None
     last_call_cold_start: bool | None = None
+    # 2026-07-19 Faz 4 (model-selection metrics): whole-turn LLM aggregates —
+    # token counts for verbosity/thinking comparisons, call count and summed
+    # LLM ms so the driver's e2e wall-clock splits into LLM vs tool/overhead.
+    last_turn_llm_calls: int | None = None
+    last_turn_input_tokens: int | None = None
+    last_turn_output_tokens: int | None = None
+    last_turn_llm_total_ms: float | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -830,6 +837,10 @@ async def status(request: Request):
         last_latency_ms=trace.get("latency_ms"),
         last_ttft_ms=trace.get("ttft_ms"),
         last_call_cold_start=trace.get("cold_start"),
+        last_turn_llm_calls=trace.get("calls"),
+        last_turn_input_tokens=trace.get("input_tokens"),
+        last_turn_output_tokens=trace.get("output_tokens"),
+        last_turn_llm_total_ms=trace.get("total_llm_ms"),
     )
 
 

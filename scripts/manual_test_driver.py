@@ -119,6 +119,10 @@ def status_snapshot() -> dict:
         "model",
         # Faz 3.2 — latency diagnostics for the thinking-on/off A/B.
         "last_latency_ms", "last_ttft_ms", "last_call_cold_start",
+        # 2026-07-19 Faz 4 — whole-turn LLM aggregates for the model-selection
+        # matrix (tokens, call count, summed LLM ms).
+        "last_turn_llm_calls", "last_turn_input_tokens",
+        "last_turn_output_tokens", "last_turn_llm_total_ms",
     ]
     return {k: s.get(k) for k in keys if k in s}
 

@@ -42,6 +42,20 @@ makine-okur snake_case kod taşıyor — SSRF `ssrf_private_address`/`ssrf_block
 satırı bırakıyor. `_FAILURE_PREFIXES` değişmedi (açık ayraçla eşleşme). 8 yeni test + 10
 mevcut test yeni konvansiyona güncellendi. **450 pytest yeşil, ruff temiz.**
 
+**Faz 4 — model-selection metrikleri:** `turn_summary`'ye `total_llm_ms`; `/status`'a
+`last_turn_llm_calls/input_tokens/output_tokens/llm_total_ms` (driver whitelist'i de aldı).
+`ab_analyze.py` büyük genişleme: pooled warm p50/p90/p95/min/max (13 skorlu senaryo havuzu —
+5 örnek/senaryoyla senaryo-bazlı p95 anlamsız, havuz tanımı raporda açık), cold sayacı,
+token/çağrı istatistikleri (eski jsonl'de toleranslı "-"), İLK pozisyonel konfig = champion
+baseline, reviewer eşikli **karar matrisi** (güvenlik 4×n/n zorunlu · toplam ≥%92 · yeni
+sistematik FAIL=0 · G17b uydurma=yok · warm e2e p50 ≤1.2x / p95 ≤1.3x · tool-accuracy ve
+transport ≤ baseline), Türkçe kalite eki (A1/A3/E14 r1 yanıtları). Eski off/on kayıtlarıyla
+regresyon doğrulandı (rapor üretiyor, ON matristen geçiyor — matris taban çizgisi, sıralama
+değil). ci.yml ruff kapsamına `ab_analyze.py` + `ab_launch_server.py`. W4b (veto-turn'de
+critic atlama) bilinçli ERTELENDİ: critic revise döngüsü çıktı-etkileyen, graph routing
+değişikliği ayrı oturum — D13b bulgusu: blok öncesi gereksiz LLM çağrısı YOK (veto
+deterministik), 5.7s = araç-seçim + reddi yazan çağrı (+critic). **450 pytest, ruff temiz.**
+
 ---
 
 ## [GPT 2. tur planı + round-3 ölçüm düzeltmeleri] — 2026-07-18
