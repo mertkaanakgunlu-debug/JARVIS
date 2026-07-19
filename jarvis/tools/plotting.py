@@ -9,7 +9,9 @@ Saves PNG to workspace/data/plots/<output>.png and returns the saved path.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +33,38 @@ MAX_INLINE_COLS = 100
 
 def _safe_filename(s: str) -> str:
     return re.sub(r"[^\w\-.]", "_", s)
+
+
+def _write_plot_meta(png_path: Path, kind: str, df: "pd.DataFrame", x: str, y: str) -> None:
+    """Sidecar verification record (2026-07-19 review item): the ACTUAL plotted
+    series, so the eval oracle validates chart *content* from structured data
+    instead of pixels/OCR (fragile). Written next to the PNG as
+    ``<name>.png.meta.json`` only under the test profile (JARVIS_TOOL_TRACE), so
+    production output is unchanged. Best-effort: never raises into plotting.
+
+    Live motivation: a model that plotted the requested numbers against
+    themselves (a degenerate x==y line) instead of value-vs-index passed the
+    old "a PNG exists" oracle. The record makes x and y separately checkable.
+    """
+    if os.environ.get("JARVIS_TOOL_TRACE") != "1":
+        return
+    meta: dict = {"chart_type": kind, "x_label": x, "y_label": y}
+    try:
+        if x and x in df.columns:
+            meta["x"] = df[x].tolist()
+        if y and y in df.columns:
+            meta["y"] = df[y].tolist()
+    except Exception:
+        pass
+    try:
+        meta["sha256"] = hashlib.sha256(png_path.read_bytes()).hexdigest()
+    except Exception:
+        pass
+    try:
+        sidecar = png_path.parent / f"{png_path.name}.meta.json"
+        sidecar.write_text(json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _first_nested(values: list) -> bool:
@@ -252,4 +286,5 @@ def generate_plot(
     finally:
         plt.close(fig)
 
+    _write_plot_meta(out_path, kind, df, x, y)
     return str(out_path)

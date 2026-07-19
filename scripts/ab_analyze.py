@@ -95,6 +95,13 @@ def collect(res, cfg, runs):
         "llm_ms": defaultdict(list),
         "samples": {},                     # tid -> run-1 response excerpt
         "run_walls": [],
+        # 2026-07-19 two-metric split: per (tid, run) booleans — did a SEMANTIC
+        # failure (wrong plotted data, fabricated completion, bad content) occur,
+        # and separately a COMPLIANCE failure (wrong/absent tool, no artifact,
+        # block didn't fire). Absent on pre-2026-07-19 records → no semantic
+        # failure, compliance == overall pass (backward compatible).
+        "sem_fail": defaultdict(list),
+        "comp_fail": defaultdict(list),
     }
     for run_idx, run_rows in enumerate(load_runs(res, cfg, runs)):
         seen = {}
@@ -106,8 +113,15 @@ def collect(res, cfg, runs):
                 continue
             if "oracle" in row:
                 seen[tid] = bool(row["oracle"].get("passed"))
-                for reason in row["oracle"].get("reasons") or []:
+                all_reasons = row["oracle"].get("reasons") or []
+                sem_reasons = row["oracle"].get("semantic_reasons") or []
+                for reason in all_reasons:
                     d["reasons"][tid].add(reason)
+                if tid in SCORED:
+                    d["sem_fail"][tid].append(bool(sem_reasons))
+                    # compliance = any failure that is NOT semantic
+                    comp = [r for r in all_reasons if r not in sem_reasons]
+                    d["comp_fail"][tid].append(bool(comp))
             elif "message" in row:
                 e = row.get("confirm_elapsed_s") or row.get("elapsed_s")
                 st = row.get("status") or {}
@@ -173,6 +187,18 @@ def oracle_totals(d):
         vs = [v for v in d["oracle"].get(tid, []) if v is not None]
         p += sum(1 for v in vs if v)
         t += len(vs)
+    return p, t
+
+
+def metric_totals(d, key):
+    """Two-metric pass counts. key='comp_fail' → tool-execution compliance,
+    key='sem_fail' → semantic correctness. A run passes the metric when its
+    fail-flag is False. Missing (old runs) → counts as pass for that metric."""
+    p = t = 0
+    for tid in SCORED:
+        flags = d[key].get(tid, [])
+        p += sum(1 for f in flags if not f)
+        t += len(flags)
     return p, t
 
 
@@ -283,6 +309,18 @@ def main():
         lines.append(f"| {tid} | " + " | ".join(cells) + " |")
     lines.append("| **TOPLAM** | " + " | ".join(
         "**{}/{}**".format(*oracle_totals(data[c])) for c in configs) + " |")
+
+    lines += ["", "## Iki-metrikli skor (2026-07-19): tool-execution compliance vs semantic correctness", "",
+              "> Overall = ikisi birden. Compliance = dogru arac calisti + artifact olustu + blok tetiklendi. "
+              "Semantic = dogru veri cizildi + yapmadan 'yaptim' yok + icerik dogru. Eski kayitlarda semantic "
+              "kolonu her zaman tam (o alan yoktu) -- yalniz yeni rerun'lar gercek semantic skoru tasir.", "",
+              "| Konfig | Overall | Tool-execution compliance | Semantic correctness |",
+              "|---|---|---|---|"]
+    for cfg in configs:
+        ov = "{}/{}".format(*oracle_totals(data[cfg]))
+        comp = "{}/{}".format(*metric_totals(data[cfg], "comp_fail"))
+        sem = "{}/{}".format(*metric_totals(data[cfg], "sem_fail"))
+        lines.append(f"| {cfg.upper()} | {ov} | {comp} | {sem} |")
 
     lines += ["", "## Latency medyanlari (e2e = driver elapsed_s; llm = /status last_latency_ms, warm, gorunur cevabi yazan cagri)", "",
               "| Senaryo | " + " | ".join(f"{c.upper()} e2e | {c.upper()} llm" for c in configs) + " |",

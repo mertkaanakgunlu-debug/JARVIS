@@ -108,3 +108,49 @@ def test_no_source_is_honest_error(isolated_cwd, tmp_path):
     tool, _ = _plot_tool(tmp_path)
     result = tool.invoke({"kind": "line"})
     assert result.startswith("[ERROR]")
+
+
+# ── verification sidecar (2026-07-19): structured plotted-data for the oracle ──
+
+def test_sidecar_written_under_test_profile(isolated_cwd, tmp_path, monkeypatch):
+    """With JARVIS_TOOL_TRACE=1 the tool drops a <name>.png.meta.json carrying
+    the ACTUAL plotted x/y — the oracle validates chart content from this, not
+    pixels. It records what was drawn, so a values-vs-themselves plot is
+    detectable after the fact."""
+    import json
+
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    tool, _ = _plot_tool(tmp_path)
+    result = tool.invoke({"kind": "line", "data_json": '{"x":[1,2,3,4],"y":[1,4,9,16]}',
+                          "x": "x", "y": "y", "title": "B6"})
+    png = Path(result)
+    sidecar = png.parent / f"{png.name}.meta.json"
+    assert sidecar.exists()
+    meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert meta["chart_type"] == "line"
+    assert meta["y"] == [1, 4, 9, 16]
+    assert meta["x"] == [1, 2, 3, 4]
+    assert len(meta["sha256"]) == 64
+
+
+def test_sidecar_records_degenerate_x_equals_y(isolated_cwd, tmp_path, monkeypatch):
+    """The exact champ failure: a single column plotted against itself. The
+    sidecar captures x == y so the oracle's x_sequential check can catch it."""
+    import json
+
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    tool, _ = _plot_tool(tmp_path)
+    result = tool.invoke({"kind": "line", "data_json": '{"x":[1,4,9,16]}',
+                          "x": "x", "y": "x", "title": "B6"})
+    png = Path(result)
+    meta = json.loads((png.parent / f"{png.name}.meta.json").read_text(encoding="utf-8"))
+    assert meta["x"] == [1, 4, 9, 16] and meta["y"] == [1, 4, 9, 16]
+
+
+def test_no_sidecar_without_test_profile(isolated_cwd, tmp_path, monkeypatch):
+    """Production output is unchanged — no sidecar unless the trace is on."""
+    monkeypatch.delenv("JARVIS_TOOL_TRACE", raising=False)
+    tool, _ = _plot_tool(tmp_path)
+    result = tool.invoke({"kind": "line", "data_json": "[1,4,9,16]", "title": "B6"})
+    png = Path(result)
+    assert not (png.parent / f"{png.name}.meta.json").exists()
