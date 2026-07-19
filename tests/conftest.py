@@ -37,11 +37,15 @@ def isolated_cwd(tmp_path, monkeypatch):
     fresh isolated tmp_path with no data/kill_switch.json yet would silently
     inherit a *different* test's cached state instead of the true on-disk-
     absent default. See jarvis/kill_switch.py's _load() docstring for why the
-    cache exists at all (last-resort fallback for a transient read failure).
+    cache exists at all (fallback for a missing state file after a healthy
+    read). Same reason for resetting _unreadable_warned, its once-per-episode
+    CRITICAL-log latch: a corruption test must not silently mute the next
+    test's expected log.
     """
     monkeypatch.chdir(tmp_path)
     import jarvis.kill_switch as kill_switch
     monkeypatch.setattr(kill_switch, "_cache", None)
+    monkeypatch.setattr(kill_switch, "_unreadable_warned", False)
     return tmp_path
 
 
@@ -64,4 +68,5 @@ def jarvis_home(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_HOME", str(home))
     import jarvis.kill_switch as kill_switch
     monkeypatch.setattr(kill_switch, "_cache", None)
+    monkeypatch.setattr(kill_switch, "_unreadable_warned", False)
     return home

@@ -52,6 +52,15 @@ exact action tables.
   the point is an emergency stop that works even if the interactive loop asking questions is itself
   the thing behaving badly. Checked first, inside `confirmation_node`, before the gate's own
   enabled/disabled state is even consulted.
+- **Kill switch failure policy (2026-07-19 hardening)**: a state file that *exists but cannot be
+  read/parsed* (torn write, encoding damage, wrong schema) is treated as **TRIPPED — fail-closed**,
+  with a once-per-episode CRITICAL log and a structured `audit_log` event
+  (`kill_switch_state_unreadable`), instead of the old silent fallback to the stale in-memory cache
+  or the armed default (both silent directions were the 2026-07-18 BOM incident). A *missing* file
+  is not corruption: cold-start default stays armed-off `enabled=True` (fresh install), and deleting
+  the file mid-run does not silently re-arm a live trip (last known-good cache answers). The
+  synthetic trip is never cached, so a fixed file — or `/killswitch on|off`, which rewrites a valid
+  file even over a corrupt one — takes effect on the very next call.
 
 ## What Faz 4 changed (previously: "Known gap")
 

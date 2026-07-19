@@ -6,6 +6,21 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Merge-öncesi review sertleştirmesi] — 2026-07-19
+
+Dış reviewer'ın A/B raporu kabulü sonrası merge-öncesi iş listesi uygulanıyor.
+
+**Faz 1 — kill switch fail-safe:** VAR-ama-okunamaz/bozuk state dosyası artık **FAIL-CLOSED**
+(sentetik trip; cache'lenmez → düzelen dosya anında geçerli) — eski davranış sessizce stale
+cache/armed default'a düşüyordu (BOM olayının iki sessiz yönü). Eksik dosya fresh-install
+default'u olarak `enabled=True` kalır; dosyayı silmek warm trip'i sessizce re-arm etmez.
+Episode başına 1 `logger.critical` + yapısal audit eventi (`kill_switch_state_unreadable`).
+`_save(state)` imzası: bozuk dosyada `/killswitch on|off` artık geçerli dosyayı yeniden yazar
+(operatör kurtarma yolu). 12 yeni failure-mode testi (truncated/empty/anahtarsız/IO-error/
+silme/eşzamanlı okuma-yazma/log-latch/audit). **433 pytest yeşil, ruff temiz.**
+
+---
+
 ## [GPT 2. tur planı + round-3 ölçüm düzeltmeleri] — 2026-07-18
 
 İki oturum. **Oturum 1** (GPT_Analysis 2. tur, onaylı plan): audit `ok` alanı `.content`
