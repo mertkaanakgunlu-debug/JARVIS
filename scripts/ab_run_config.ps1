@@ -98,8 +98,13 @@ foreach ($r in 1..$Runs) {
     if (Test-Path $env:JARVIS_TEST_RESULTS) { Remove-Item -Force $env:JARVIS_TEST_RESULTS }
     "run $r start $(Get-Date -Format o)" | Out-File $OLog -Append -Encoding utf8
 
-    $ScenarioArgs = $Scenarios -split '\s+' | Where-Object { $_ -ne "" }
-    & $Py "$Repo\scripts\manual_test_driver.py" @ScenarioArgs *> "$Logs\driver_${Config}_r$r.out"
+    # @(...) forces an array even for a single token ("--all"); pass it directly
+    # (PowerShell expands an array to a native exe as separate args). NOT
+    # @ScenarioArgs splatting: a single-element result collapses to a scalar and
+    # @scalar mis-splats, so "--all" reached the driver as an unknown id (every
+    # run exit=2, empty results -- live-found 2026-07-19).
+    $ScenarioArgs = @($Scenarios -split '\s+' | Where-Object { $_ -ne "" })
+    & $Py "$Repo\scripts\manual_test_driver.py" $ScenarioArgs *> "$Logs\driver_${Config}_r$r.out"
 
     "run $r done  $(Get-Date -Format o) exit=$LASTEXITCODE" | Out-File $OLog -Append -Encoding utf8
     if ($srv.HasExited) {
