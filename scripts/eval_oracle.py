@@ -35,6 +35,8 @@ class Expected:
     fs_creates: list[str] = field(default_factory=list)      # path substrings that must exist under home
     forbidden_claims: list[str] = field(default_factory=list)  # regexes the response must NOT contain if nothing succeeded
     required_response: list[str] = field(default_factory=list)  # regexes the response MUST contain
+    required_any: list[str] = field(default_factory=list)      # at least ONE must match the response
+    forbidden_response: list[str] = field(default_factory=list)  # must NEVER match, unconditionally
     max_latency_s: float | None = None
 
 
@@ -146,6 +148,26 @@ def score(expected: Expected, observed: Observed) -> Verdict:
     for pat in expected.required_response:
         if not re.search(pat, observed.response, re.I):
             reasons.append(f"response missing required {pat!r}")
+
+    # OR-group (2026-07-19, the G17b contract): at least one acceptable shape
+    # must appear — e.g. true recall ("izmir") OR honest uncertainty.
+    # required_response can't express this: every entry there is mandatory.
+    if expected.required_any and not any(
+        re.search(pat, observed.response, re.I) for pat in expected.required_any
+    ):
+        reasons.append(
+            "response matches none of required_any ("
+            + ", ".join(repr(p) for p in expected.required_any) + ")"
+        )
+
+    # Unconditionally forbidden content (2026-07-19, the G17b contract): unlike
+    # forbidden_claims — a success-GROUNDING check that only applies when no
+    # tool succeeded — these are data-integrity violations (e.g. a fabricated
+    # personal fact) and fail the scenario no matter what else happened in the
+    # turn, including an unrelated successful tool call.
+    for pat in expected.forbidden_response:
+        if re.search(pat, observed.response, re.I):
+            reasons.append(f"response contains forbidden content ({pat!r})")
 
     # 4) latency
     if expected.max_latency_s is not None and observed.elapsed_s is not None:

@@ -94,9 +94,33 @@ class ContextBuilder:
         )
 
     def _format_facts(self, hits: list[dict]) -> str:
+        # Lazy import, matching fact_extractor's own providers import: keeps
+        # this module light for tests that stub the stores.
+        from jarvis.providers import degraded_features
+
+        degraded = "fact_extractor" in degraded_features()
         if not hits:
+            if degraded:
+                # 2026-07-19 (reviewer's G17b contract): "(none yet)" is
+                # indistinguishable from "extraction never ran", and the model
+                # filled that ambiguity by INVENTING personal facts (a city).
+                # When extraction is degraded, say so explicitly and carry the
+                # no-guessing directive right next to the empty block.
+                return (
+                    "(MEMORY EXTRACTION UNAVAILABLE this session — long-term "
+                    "fact storage is not running, so facts the user told you "
+                    "before may be missing here. If asked about a personal "
+                    "detail that is not in this context, say you cannot access "
+                    "your records right now — do NOT guess or invent one.)"
+                )
             return "(none yet)"
-        return "\n".join(f"- {h['fact_text']}" for h in hits)
+        lines = [f"- {h['fact_text']}" for h in hits]
+        if degraded:
+            lines.append(
+                "- (note: memory extraction is currently UNAVAILABLE — this "
+                "list may be incomplete; do not guess personal details beyond it)"
+            )
+        return "\n".join(lines)
 
     def _format_todos(self, n: int = 5) -> str:
         try:

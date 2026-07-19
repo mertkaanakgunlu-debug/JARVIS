@@ -19,6 +19,18 @@ Episode başına 1 `logger.critical` + yapısal audit eventi (`kill_switch_state
 (operatör kurtarma yolu). 12 yeni failure-mode testi (truncated/empty/anahtarsız/IO-error/
 silme/eşzamanlı okuma-yazma/log-latch/audit). **433 pytest yeşil, ruff temiz.**
 
+**Faz 2 — G17b kişisel-veri uydurma yasağı (reviewer'ın ana tezi):** üç katman. (1)
+Deterministik: `context_builder._format_facts` artık `degraded_features()`'ı sorguluyor —
+fact extractor degraded iken facts block "(none yet)" yerine açık "MEMORY EXTRACTION
+UNAVAILABLE + do NOT guess" markeri taşıyor ("hiç kayıt yok" ile "extractor çalışmadı"
+artık ayırt ediliyor; modelin şehir uydurduğu belirsizlik buydu). (2) Kalıcı prompt kuralı:
+`05_memory_policy.md` "Memory honesty" — kişisel bilgiler yalnız facts block/tool
+çıktısından, yoksa "kayıtlarımda yok", asla tahmin. (3) Oracle sözleşmesi: `Expected`'a
+`required_any` (OR-grubu) + `forbidden_response` (KOŞULSUZ yasak — `forbidden_claims`'in
+aksine tool başarısından bağımsız) alanları; G17b artık "izmir VEYA dürüst belirsizlik"
+ister, İzmir-dışı her şehir adı (hedge'li uydurma dahil) kesin FAIL. 9 yeni test.
+**442 pytest yeşil, ruff temiz.**
+
 ---
 
 ## [GPT 2. tur planı + round-3 ölçüm düzeltmeleri] — 2026-07-18
