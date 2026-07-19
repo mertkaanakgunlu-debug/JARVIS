@@ -56,6 +56,19 @@ critic atlama) bilinçli ERTELENDİ: critic revise döngüsü çıktı-etkileyen
 değişikliği ayrı oturum — D13b bulgusu: blok öncesi gereksiz LLM çağrısı YOK (veto
 deterministik), 5.7s = araç-seçim + reddi yazan çağrı (+critic). **450 pytest, ruff temiz.**
 
+**Faz 5 ön-koşu — canlı yakalanan izolasyon açığı (smoke koşusu, 2026-07-19):**
+`jarvis/tools/files.py`'nin mutlak-yol sınırı (`_HOME`) modül import zamanında sabitlenen
+GERÇEK `~` dizinini kullanıyordu — `JARVIS_HOME` (test/eval izolasyonu) hiç görülmüyordu.
+Smoke koşusunun B5a senaryosu, model mutlak bir OneDrive-Desktop yolu verince, izole test
+home'u yerine owner'ın GERÇEK Desktop'ına dosya yazdı (MEMORY.md'nin isolate-test-data-paths
+olayıyla aynı sınıf, yeni bir alt sistemde). Fix: `_effective_home()` — `JARVIS_HOME` set
+iken o dizin mutlak-yol erişiminin TEK sınırı olur (gerçek home tamamen dışarıda kalır);
+set değilken (üretim) eski davranış (gerçek Desktop/Documents erişimi) değişmez. Ayrıca
+B5a'nın `forbidden_claims` regex'i kalıp ("oluşturdum"/"yazdım") modelin çoğul "-duk/-dık"
+ifadesini yakalamıyordu (aynı koşuda fark edildi) — kök yerine gövdeye genişletildi. 4 yeni
+test (izole yazma/okuma engeli + üretimde davranış değişmediği). Sızan dosya (bilinen
+içerik/zaman damgasıyla doğrulanıp) temizlendi. **453 pytest yeşil, ruff temiz.**
+
 ---
 
 ## [GPT 2. tur planı + round-3 ölçüm düzeltmeleri] — 2026-07-18

@@ -79,3 +79,59 @@ def test_read_missing_file_raises_file_not_found(tmp_path):
     ws.mkdir()
     with pytest.raises(FileNotFoundError):
         files.read("does_not_exist.txt", ws)
+
+
+# ── JARVIS_HOME bounds the absolute-path escape hatch (2026-07-19) ───────────
+
+
+def test_jarvis_home_bounds_absolute_writes(tmp_path, monkeypatch):
+    """Live incident (smoke eval, 2026-07-19): with JARVIS_HOME redirecting a
+    test/eval run, the model passed an absolute OneDrive-Desktop path and
+    file_write landed a file on the owner's REAL Desktop. Under JARVIS_HOME,
+    the redirected home is the whole world; the real user profile must be
+    out of bounds."""
+    jarvis_home = (tmp_path / "jhome").resolve()
+    ws = jarvis_home / "workspace"
+    ws.mkdir(parents=True)
+    monkeypatch.setenv("JARVIS_HOME", str(jarvis_home))
+    real_home = (tmp_path / "realhome").resolve()
+    (real_home / "Desktop").mkdir(parents=True)
+    monkeypatch.setattr(files, "_HOME", real_home)
+
+    with pytest.raises(PermissionError):
+        files.write(str(real_home / "Desktop" / "jarvis_test.txt"), "x", ws)
+
+    # Inside the redirected home stays allowed (absolute path form).
+    msg = files.write(str(jarvis_home / "notes" / "ok.txt"), "x", ws)
+    assert "ok.txt" in msg
+
+
+def test_jarvis_home_bounds_absolute_reads_too(tmp_path, monkeypatch):
+    """Same boundary for reads — an isolated run must not read the real
+    user profile either."""
+    jarvis_home = (tmp_path / "jhome").resolve()
+    ws = jarvis_home / "workspace"
+    ws.mkdir(parents=True)
+    monkeypatch.setenv("JARVIS_HOME", str(jarvis_home))
+    real_home = (tmp_path / "realhome").resolve()
+    secret = real_home / "Documents" / "secret.txt"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("s", encoding="utf-8")
+    monkeypatch.setattr(files, "_HOME", real_home)
+
+    with pytest.raises(PermissionError):
+        files.read(str(secret), ws)
+
+
+def test_without_jarvis_home_real_home_capability_unchanged(tmp_path, monkeypatch):
+    """Production shape (no JARVIS_HOME): Desktop/Documents under the real
+    home stay writable — the personal-assistant capability is intended."""
+    monkeypatch.delenv("JARVIS_HOME", raising=False)
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    fake_home = (tmp_path / "home").resolve()
+    (fake_home / "Desktop").mkdir(parents=True)
+    monkeypatch.setattr(files, "_HOME", fake_home)
+
+    msg = files.write(str(fake_home / "Desktop" / "note.txt"), "hello", ws)
+    assert "note.txt" in msg

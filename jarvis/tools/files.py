@@ -19,6 +19,29 @@ PROTECTED_WRITE_PREFIXES = (Path("jarvis") / "prompts" / "core",)
 _HOME = Path(os.path.expanduser("~")).resolve()
 
 
+def _effective_home() -> Path:
+    """The "user home" boundary for absolute-path access.
+
+    Production (no JARVIS_HOME): the real user profile — writing a note to
+    Desktop/Documents is an intended personal-assistant capability.
+
+    With JARVIS_HOME set (the --profile test entry point, the eval harness,
+    the jarvis_home fixture): that redirected home IS the whole world.
+    2026-07-19 live incident (smoke eval): the model passed an absolute
+    OneDrive-Desktop path and file_write landed a file on the owner's REAL
+    Desktop from inside an isolated test run — isolation must bound this
+    escape hatch, not just the data dirs. Resolved per call because the
+    profile sets JARVIS_HOME after import (same pattern as jarvis.paths).
+    """
+    env = os.environ.get("JARVIS_HOME")
+    if env:
+        try:
+            return Path(env).resolve()
+        except OSError:
+            pass
+    return _HOME
+
+
 def _is_within(child: Path, parent: Path) -> bool:
     return parent == child or parent in child.parents
 
@@ -27,13 +50,15 @@ def _resolve(path_str: str, workspace: Path) -> Path:
     """Resolve a relative or absolute path.
 
     Allows paths inside workspace (relative or absolute) and absolute paths
-    inside the user's home directory (Desktop, Documents, OneDrive, etc.).
+    inside the effective home directory — the real user home in production
+    (Desktop, Documents, OneDrive, etc.), or the JARVIS_HOME sandbox when
+    that redirection is active (see _effective_home).
     """
     raw = Path(path_str)
     p = raw.resolve() if raw.is_absolute() else (workspace / raw).resolve()
 
     ws_root = workspace.resolve()
-    if not (_is_within(p, ws_root) or _is_within(p, _HOME)):
+    if not (_is_within(p, ws_root) or _is_within(p, _effective_home())):
         raise PermissionError(
             f"Path '{path_str}' is outside the workspace and home directory."
         )
@@ -58,12 +83,12 @@ def read(path_str: str, workspace: Path) -> str:
 def _display_path(p: Path, workspace: Path) -> Path:
     """Best-effort relative path for user-facing messages.
 
-    `write()` accepts any path under the home directory, not just under
-    `workspace` (see `_resolve`), so `p.relative_to(workspace)` alone raises
-    ValueError for e.g. a Desktop/Documents target — fall back to home-relative,
-    then to the absolute path.
+    `write()` accepts any path under the effective home directory, not just
+    under `workspace` (see `_resolve`), so `p.relative_to(workspace)` alone
+    raises ValueError for e.g. a Desktop/Documents target — fall back to
+    home-relative, then to the absolute path.
     """
-    for base in (workspace, _HOME):
+    for base in (workspace, _effective_home()):
         try:
             return p.relative_to(base)
         except ValueError:

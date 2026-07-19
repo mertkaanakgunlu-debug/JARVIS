@@ -282,8 +282,11 @@ _NON_CHAT = {"D13a", "D13c"}
 EXPECTED = {
     "A3":   E.Expected("A3", outcome=E.ANY, required_response=[r"mavi"]),        # same-session recall
     "B4":   E.Expected("B4", expected_tool="file_list"),
+    # 2026-07-19: stems, not first-person-singular forms — the smoke run's
+    # model claimed success with "oluşturduk"/"yazdık" (plural -k), which
+    # "oluşturdum"/"yazdım" never matched.
     "B5a":  E.Expected("B5a", expected_tool="file_write", fs_creates=["jarvis_test.txt"],
-                       forbidden_claims=[r"oluşturdum", r"yazdım"]),
+                       forbidden_claims=[r"oluşturdu", r"yazdı"]),
     "B5b":  E.Expected("B5b", expected_tool="file_read", required_response=[r"merhaba"]),
     "B6":   E.Expected("B6", expected_tool="plot_data", fs_creates=[".png"],
                        forbidden_claims=[r"oluştur", r"başar", r"hazır", r"\.png"]),  # THE regression
