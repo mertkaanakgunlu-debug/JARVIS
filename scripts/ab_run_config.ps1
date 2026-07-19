@@ -9,6 +9,7 @@
 # Usage (PowerShell, repo root or anywhere):
 #   powershell -File scripts\ab_run_config.ps1 -Config off -Effort none -Runs 5
 #   powershell -File scripts\ab_run_config.ps1 -Config on  -Effort ""   -Runs 5
+#   powershell -File scripts\ab_run_config.ps1 -Config qwen35 -Effort none -Runs 5 -Model qwen3.5:9b
 #
 # Outputs under $Root (default C:\Temp\jarvis-ab):
 #   home-<Config>\           fresh isolated JARVIS_TEST_HOME per config
@@ -20,7 +21,13 @@ param(
     [Parameter(Mandatory=$true)][AllowEmptyString()][string]$Effort,   # "none" | ""
     [int]$Runs = 5,
     [int]$Port = 8132,
-    [string]$Root = "C:\Temp\jarvis-ab"
+    [string]$Root = "C:\Temp\jarvis-ab",
+    # Faz 4 challengers (2026-07-19): LOCAL_MODEL override for the server.
+    # Empty = keep config.py's default (the champion). Passed as the
+    # launcher's argv[3]; omitted entirely when empty so the launcher's own
+    # default applies (a trailing empty arg would be dropped by Start-Process
+    # binding anyway -- harmless here precisely because it is the LAST slot).
+    [string]$Model = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -46,11 +53,13 @@ $srvErr = "$Logs\server_$Config.err.log"
 # empty ('""') so the child's argv[1] is genuinely "" instead of the arg
 # being dropped (which would silently shift the port into the effort slot).
 $EffortArg = if ($Effort -eq "") { '""' } else { $Effort }
+$SrvArgs = @("$Repo\scripts\ab_launch_server.py", $EffortArg, "$Port")
+if ($Model -ne "") { $SrvArgs += $Model }
 $srv = Start-Process -FilePath $Py `
-    -ArgumentList @("$Repo\scripts\ab_launch_server.py", $EffortArg, "$Port") `
+    -ArgumentList $SrvArgs `
     -WorkingDirectory $Repo -PassThru -NoNewWindow `
     -RedirectStandardOutput $srvOut -RedirectStandardError $srvErr
-"server pid=$($srv.Id) config=$Config effort='$Effort'" | Out-File $OLog -Encoding utf8
+"server pid=$($srv.Id) config=$Config effort='$Effort' model='$Model'" | Out-File $OLog -Encoding utf8
 
 # --- wait for readiness (first boot builds chroma etc.) -----------------------
 $ready = $false
