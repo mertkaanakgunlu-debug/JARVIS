@@ -127,3 +127,37 @@ def test_gmail_calendar_token_paths_follow_home(jarvis_home):
     assert gmail._token_file() == jarvis_home / "data" / ".gmail_token.json"
     assert calendar._token_file() == jarvis_home / "data" / ".calendar_token.json"
     assert "JARVIS_HOME" in os.environ  # sanity: fixture actually set it
+
+
+def test_env_block_does_not_leak_real_home_under_jarvis_home(jarvis_home, monkeypatch):
+    """2026-07-19 context-leak fix: the system-prompt environment block must
+    not surface the REAL user profile path when running isolated. The block is
+    injected verbatim into the prompt; a live eval run leaked the owner's
+    OneDrive Desktop path this way and the model echoed it back in answers.
+    """
+    from jarvis import agent
+    from jarvis.tools import files
+
+    fake_real_home = (jarvis_home.parent / "REAL-USER-PROFILE").resolve()
+    (fake_real_home / "OneDrive" / "Desktop").mkdir(parents=True)
+    monkeypatch.setattr(files, "_HOME", fake_real_home)
+
+    block = agent._build_env_block(jarvis_home / "workspace")
+
+    assert "REAL-USER-PROFILE" not in block, "real profile leaked into the prompt"
+    assert str(jarvis_home) in block, "sandbox home should be the reported home"
+
+
+def test_env_block_uses_real_home_when_not_isolated(tmp_path, monkeypatch):
+    """Production shape (no JARVIS_HOME): the real Desktop path IS the intended
+    environment hint — the fix must not degrade normal use."""
+    from jarvis import agent
+    from jarvis.tools import files
+
+    monkeypatch.delenv("JARVIS_HOME", raising=False)
+    real_home = (tmp_path / "realhome").resolve()
+    (real_home / "OneDrive" / "Desktop").mkdir(parents=True)
+    monkeypatch.setattr(files, "_HOME", real_home)
+
+    block = agent._build_env_block(tmp_path / "workspace")
+    assert str(real_home) in block

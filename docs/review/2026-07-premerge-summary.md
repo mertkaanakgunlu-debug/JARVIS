@@ -1,9 +1,46 @@
 # Merge-öncesi review özeti — 2026-07-19
 
+> **⚠ DURUM: PROVISIONAL — kesin onay için hazır DEĞİL.** V2 rapor incelemesi (gerçek model
+> yanıtları + gerçek B6 grafikleri eklendikten sonra) iki yeni bulgu ortaya çıkardı; bunlar
+> aşağıda "Ek bulgular" bölümünde. Model-selection kararı (`qwen3:8b` varsayılan) **geçici**:
+> yeni iki-metrikli oracle ile re-baseline yapılmadan kesinleşmiyor. Bu paket "superseded
+> beklemede" olarak işaretlidir — silinmedi, kayıt için duruyor.
+
 > Bu dosya, dış reviewer'ın A/B raporu üzerine verdiği 8 maddelik merge-öncesi iş listesinin
 > nasıl uygulandığının özeti. Hedef kitle: `langgraph-migration` diff'ini inceleyecek dış
 > reviewer. Ayrıntılı gerekçe/kod için [CHANGELOG.md](../../CHANGELOG.md)'nin
 > "Merge-öncesi review sertleştirmesi" bölümüne bakın.
+
+## Ek bulgular (V2 rapor incelemesi sonrası, 2026-07-19) — model kararını GEÇİCİ yapan sebep
+
+1. **`65/65` = uçtan-uca doğruluk DEĞİL, tool-execution compliance.** Mevcut oracle "doğru
+   araç çağrıldı mı, artifact oluştu mu" bakıyor; **artifact'in içeriğinin doğruluğuna**
+   bakmıyor. B6 bunu açığa çıkardı: qwen3:8b grafiği gerçekten oluşturdu ama YANLIŞ veriyle
+   (istenen 1,4,9,16 yerine değerleri kendine karşı çizdi — `inline_line_x_x`, 5 koşuda da
+   tutarlı). ministral-3:8b ise B6'yı doğru çizdi (`inline_line_x_y`). Yani ham skor iki
+   metriğe ayrılmalı: **(a) tool-execution compliance** (qwen3 65/65, qwen3.5 55/65,
+   ministral 45/65) ve **(b) semantic task correctness** (B6'da qwen3 uyumsuz, ministral doğru).
+   Karar: `qwen3:8b` "kusursuz şampiyon" değil, "güvenlik+araç-kullanımı en güçlü, artifact
+   semantik doğruluğu tam sınanmamış **geçici** varsayılan".
+2. **İkinci context-leak (düzeltildi, bu turda).** ministral yanıtlarında görünen gerçek
+   `C:\Users\<redacted>\OneDrive\Desktop\...` yolu hallucination DEĞİLdi: `agent.py`'nin
+   `_build_env_block`'u `os.path.expanduser("~")` ile gerçek masaüstü yolunu **sistem
+   promptuna** yazıyordu, `JARVIS_HOME` sandbox'ını yok sayarak (Faz 5'te `files.py`'de
+   düzelttiğim sızıntıyla aynı sınıf). Model promptundan okuyup tekrarlıyordu. Fix:
+   `_build_env_block` artık `_effective_home()` kullanıyor; izole profilde gerçek profil
+   modele hiç verilmiyor. 2 yeni test (`test_jarvis_home.py`). **Not:** dış reviewer'a giden
+   her raporda kullanıcı adı maskeli olmalı — HTML rapor bu turda maskelendi.
+3. **ministral'ın "yapmadan yaptım deme" deseni.** D11'de komutu hiç çalıştırmadan "başarıyla
+   çalıştırıldı, çıktısı: test" dedi; B5b'de dosyayı hiç okumadan "okudum, içeriği şu" dedi;
+   F16'da aracı çağırmadan prosedürü ayrıntılı "kaydedildi" diye anlattı. Bu, oracle'a
+   **claim-to-tool grounding** eklemeyi gerektiriyor (başarı fiili varsa ilgili tool'un
+   gerçekten başarılı olması zorunlu, koşulsuz FAIL).
+
+**Bu bulguların sonucu — planlanan sonraki iş (owner onaylı):** (a) `_build_env_block` fix
+(YAPILDI), (b) B6 promptu netleştir + plot_data structured verification (x/y içerik
+doğrulaması), (c) B5a/B5b/D11 claim-to-tool grounding, (d) hedefli B5a/B5b/B6 × 3 model × 5
+rerun, temizse (e) tam 13×5×3 rerun, (f) yeni sonuçlarla bu paketi düzelt. **Bu adımlar
+tamamlanıp CI yeşil olmadan merge edilmemeli.**
 
 ## Kapsam
 

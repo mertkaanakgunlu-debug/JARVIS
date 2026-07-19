@@ -257,9 +257,22 @@ def _route_query(query: str, needs_planning: bool):
 
 def _build_env_block(workspace: Path) -> str:
     import os
-    home = Path(os.path.expanduser("~"))
-    desktop_candidates = [home / "OneDrive" / "Desktop", home / "Desktop"]
-    desktop = next((p for p in desktop_candidates if p.exists()), desktop_candidates[0])
+    # 2026-07-19 context-leak fix: under an isolated profile (JARVIS_HOME set:
+    # --profile test / the eval harness) the sandbox home is the whole world.
+    # This block is injected verbatim into the system prompt, so using the REAL
+    # os.path.expanduser("~") here leaked the owner's actual Desktop path
+    # (C:\Users\<user>\OneDrive\Desktop) into an "isolated" run's prompt -- the
+    # model then echoed it back in its answers (misdiagnosed as a hallucination
+    # until the raw prompt was inspected). Same expanduser("~")-ignores-
+    # JARVIS_HOME class as the files.py _effective_home fix; reuse that helper so
+    # the two can't drift.
+    from jarvis.tools.files import _effective_home
+    home = _effective_home()
+    if os.environ.get("JARVIS_HOME"):
+        desktop = home / "Desktop"  # sandbox-relative; never the real profile
+    else:
+        desktop_candidates = [home / "OneDrive" / "Desktop", home / "Desktop"]
+        desktop = next((p for p in desktop_candidates if p.exists()), desktop_candidates[0])
     return (
         f"\n\n## User environment (Windows)\n"
         f"- Home: `{home}`\n"
