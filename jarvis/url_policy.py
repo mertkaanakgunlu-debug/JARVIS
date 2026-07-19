@@ -35,25 +35,32 @@ def is_blocked_address(host: str) -> bool:
     )
 
 
-def is_blocked_url(url: str) -> tuple[bool, str]:
-    """Return (blocked, reason). reason is empty when not blocked."""
+def is_blocked_url(url: str) -> tuple[bool, str, str]:
+    """Return (blocked, reason, code). reason/code are empty when not blocked.
+
+    ``reason`` is the human-readable why; ``code`` is a stable snake_case
+    machine token (2026-07-19 review item: scoring/telemetry key on structure,
+    not on the user-facing string). Callers embed it as "[BLOCKED:<code>] ..."
+    so tool_accounting.parse_blocked_code can lift it into trace rows.
+    """
     try:
         parsed = urlparse(url)
     except Exception:
-        return True, "unparseable URL"
+        return True, "unparseable URL", "ssrf_unparseable_url"
     host = (parsed.hostname or "").lower()
     if not host:
-        return True, "no host in URL"
+        return True, "no host in URL", "ssrf_no_host"
     if host in _BLOCKED_HOSTNAMES:
-        return True, f"blocked host: {host}"
+        return True, f"blocked host: {host}", "ssrf_blocked_hostname"
     if is_blocked_address(host):
-        return True, f"blocked address: {host}"
+        return True, f"blocked address: {host}", "ssrf_private_address"
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
-        return False, ""  # let the real fetch surface the DNS failure
+        return False, "", ""  # let the real fetch surface the DNS failure
     for info in infos:
         resolved_ip = info[4][0]
         if is_blocked_address(resolved_ip):
-            return True, f"{host} resolves to a private/local address ({resolved_ip})"
-    return False, ""
+            return (True, f"{host} resolves to a private/local address ({resolved_ip})",
+                    "ssrf_private_address")
+    return False, "", ""

@@ -26,39 +26,46 @@ from jarvis.url_policy import is_blocked_url
 # ── jarvis/url_policy.py ──────────────────────────────────────────────────────
 
 def test_localhost_hostname_is_blocked():
-    blocked, why = is_blocked_url("http://localhost:8000/admin")
+    blocked, why, code = is_blocked_url("http://localhost:8000/admin")
     assert blocked
     assert "localhost" in why
+    assert code == "ssrf_blocked_hostname"
 
 
 def test_link_local_metadata_ip_is_blocked():
-    blocked, _ = is_blocked_url("http://169.254.169.254/latest/meta-data/")
+    blocked, _, code = is_blocked_url("http://169.254.169.254/latest/meta-data/")
     assert blocked
+    assert code == "ssrf_private_address"
 
 
 def test_private_lan_ip_is_blocked():
-    blocked, _ = is_blocked_url("http://192.168.1.1/")
+    blocked, _, code = is_blocked_url("http://192.168.1.1/")
     assert blocked
+    assert code == "ssrf_private_address"
 
 
 def test_loopback_ip_is_blocked():
-    blocked, _ = is_blocked_url("http://127.0.0.1:9000/")
+    blocked, _, code = is_blocked_url("http://127.0.0.1:9000/")
     assert blocked
+    assert code == "ssrf_private_address"
 
 
 def test_public_looking_ip_is_not_blocked():
-    blocked, why = is_blocked_url("http://93.184.216.34/")
+    blocked, why, code = is_blocked_url("http://93.184.216.34/")
     assert not blocked, why
+    assert code == ""
 
 
 def test_unparseable_url_is_blocked():
-    blocked, _ = is_blocked_url("not a url at all::::")
+    blocked, _, code = is_blocked_url("not a url at all::::")
     assert blocked
+    assert code in ("ssrf_unparseable_url", "ssrf_no_host")
 
 
 def test_url_with_no_host_is_blocked():
-    blocked, _ = is_blocked_url("file:///etc/passwd")
+    blocked, _, code = is_blocked_url("file:///etc/passwd")
     assert blocked
+    assert code == "ssrf_no_host"
 
 
 # ── mcp_integration.py: pinned version ───────────────────────────────────────

@@ -89,15 +89,15 @@ def fetch_url(url: str, settings: "Settings", max_chars: int = _MAX_CHARS) -> st
     if not url.startswith(("http://", "https://")):
         return f"[ERROR] Invalid URL (must start with http/https): {url}"
 
-    blocked, why = _is_blocked_url(url)
+    blocked, why, code = _is_blocked_url(url)
     if blocked:
-        # [BLOCKED], not [ERROR]: this is a policy refusal, not a fetch
+        # [BLOCKED:<code>], not [ERROR]: this is a policy refusal, not a fetch
         # failure -- same convention as shell_run's deny-list and the MCP
-        # browser guard ("[BLOCKED: ...] Refusing to navigate"), and the
-        # structural signal the eval oracle's BLOCKED verdicts key on (C9's
-        # SSRF block was invisible to it under the old prefix, live-found
-        # 2026-07-18).
-        return f"[BLOCKED] Refusing to fetch this URL ({why}): {url}"
+        # browser guard, and the structural signal the eval oracle's BLOCKED
+        # verdicts key on (C9's SSRF block was invisible under the old prefix,
+        # live-found 2026-07-18). The snake_case code (2026-07-19) is the
+        # machine-readable half; the rest of the string is presentation.
+        return f"[BLOCKED:{code}] Refusing to fetch this URL ({why}): {url}"
 
     if settings.firecrawl_api_key:
         result = _firecrawl_fetch(url, settings.firecrawl_api_key, max_chars)

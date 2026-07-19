@@ -120,7 +120,7 @@ async def _ssrf_guard_interceptor(request, handler):
         if url:
             from jarvis.url_policy import is_blocked_url
 
-            blocked, why = is_blocked_url(url)
+            blocked, why, code = is_blocked_url(url)
             if blocked:
                 from mcp.types import CallToolResult, TextContent
 
@@ -129,7 +129,7 @@ async def _ssrf_guard_interceptor(request, handler):
                     isError=True,
                     content=[TextContent(
                         type="text",
-                        text=f"[BLOCKED: {why}] Refusing to navigate to: {url}",
+                        text=f"[BLOCKED:{code}] Refusing to navigate to: {url} ({why})",
                     )],
                 )
     return await handler(request)

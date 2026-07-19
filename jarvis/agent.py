@@ -30,7 +30,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphInterrupt, GraphRecursionError
 
 from jarvis.graph.tool_router import classify_query
-from jarvis.graph.tool_accounting import content_is_failure  # Faz 1.1: shared outcome judgement
+from jarvis.graph.tool_accounting import (  # Faz 1.1: shared outcome judgement
+    content_is_failure,
+    parse_blocked_code,
+)
 
 from jarvis.config import Settings
 from jarvis.context_builder import ContextBuilder
@@ -160,10 +163,15 @@ class _HudEventCallback(BaseCallbackHandler):
         content = getattr(output, "content", output)
         if ok is None:
             ok = getattr(output, "status", None) != "error" and not content_is_failure(content)
+        head = content if isinstance(content, str) else str(content)
+        # 2026-07-19: lift the machine code out of "[BLOCKED:<code>]" results
+        # so the oracle can key on structure, not the user-facing string.
+        code = parse_blocked_code(head)
         tool_trace.record(
             tool=pending["tool"], args=pending["args"], ok=ok,
             transport=self._transport,
-            content_head=(content if isinstance(content, str) else str(content))[:200],
+            content_head=head[:200],
+            **({"reason_code": code} if code else {}),
         )
 
     def _record_execution_end(self, output: Any, run_id: Any, ok: bool | None = None) -> None:

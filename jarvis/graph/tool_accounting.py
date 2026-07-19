@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -67,6 +68,24 @@ def tool_message_ok(tm: ToolMessage | None) -> bool:
     if getattr(tm, "status", None) == "error":
         return False
     return not content_is_failure(tm.content)
+
+
+_BLOCKED_CODE_RE = re.compile(r"^\s*\[BLOCKED:([a-z0-9_]+)\]")
+
+
+def parse_blocked_code(content: Any) -> str | None:
+    """Machine-readable reason code from a '[BLOCKED:<code>] ...' result.
+
+    2026-07-19 review item 3: tool-level policy refusals (SSRF, shell
+    deny-list, workspace escape, MCP browser guard) carry a snake_case code
+    in the prefix so scoring/telemetry can key on structure instead of the
+    human-facing string. Returns None for legacy bare '[BLOCKED] ...' shapes
+    and for confirmation-node stubs ('[BLOCKED: free text]', with a space) —
+    those pre-execution blocks already leave structured policy_decision rows.
+    """
+    s = content if isinstance(content, str) else str(content)
+    m = _BLOCKED_CODE_RE.match(s)
+    return m.group(1) if m else None
 
 
 def _last_executed_round(msgs: list) -> tuple[AIMessage | None, dict[str, ToolMessage]]:
@@ -129,11 +148,13 @@ def make_tool_result_accounting_node():
             content = "" if tm is None else (
                 tm.content if isinstance(tm.content, str) else str(tm.content)
             )
+            code = parse_blocked_code(content)
             ledger.append({
                 "tool": name,
                 "fingerprint": fp,
                 "ok": ok,
                 "content_head": content[:_CONTENT_HEAD_CHARS],
+                **({"reason_code": code} if code else {}),
             })
 
         return {

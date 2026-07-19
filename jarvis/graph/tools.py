@@ -64,10 +64,10 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         """Run a PowerShell command (opening apps, checking state, running scripts — no destructive ops)."""
         safe, reason = shell_tools.is_safe(command)
         if not safe:
-            return f"[BLOCKED] {reason}. Please ask the user to run this manually."
+            return f"[BLOCKED:shell_denylist] {reason}. Please ask the user to run this manually."
         escapes, why = shell_tools.escapes_workspace(command, workspace)
         if escapes:
-            return f"[BLOCKED] {why}. Commands run inside the workspace only."
+            return f"[BLOCKED:workspace_escape] {why}. Commands run inside the workspace only."
         # cwd=workspace: a bare dir/ls lists the isolated home, not the repo
         # root (Faz 1.2 — the manual round's isolation leak).
         return shell_tools.run(command, cwd=workspace)

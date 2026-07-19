@@ -31,6 +31,17 @@ aksine tool başarısından bağımsız) alanları; G17b artık "izmir VEYA dür
 ister, İzmir-dışı her şehir adı (hedge'li uydurma dahil) kesin FAIL. 9 yeni test.
 **442 pytest yeşil, ruff temiz.**
 
+**Faz 3 — `[BLOCKED:reason_code]` yapısal blok durumu:** tool-seviyesi policy retleri artık
+makine-okur snake_case kod taşıyor — SSRF `ssrf_private_address`/`ssrf_blocked_hostname`/
+`ssrf_no_host`/`ssrf_unparseable_url` (`url_policy.is_blocked_url` 3-tuple oldu), shell
+`shell_denylist`/`workspace_escape`, MCP `mcp_browser_guard` kodu SSRF kodlarını kullanıyor.
+`tool_accounting.parse_blocked_code` kodu execution ledger + tool_trace satırlarına
+`reason_code` alanı olarak kaldırıyor; oracle `_blocked_signal` önce yapısal alana bakıyor,
+`[BLOCKED` prefix eşleşmesi yalnız legacy fallback. Confirmation-node stub'ları
+(`[BLOCKED: serbest metin]`) bilinçli kapsam dışı — onlar zaten yapısal `policy_decision`
+satırı bırakıyor. `_FAILURE_PREFIXES` değişmedi (açık ayraçla eşleşme). 8 yeni test + 10
+mevcut test yeni konvansiyona güncellendi. **450 pytest yeşil, ruff temiz.**
+
 ---
 
 ## [GPT 2. tur planı + round-3 ölçüm düzeltmeleri] — 2026-07-18

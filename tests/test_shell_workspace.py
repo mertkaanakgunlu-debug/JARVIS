@@ -72,5 +72,5 @@ def test_wrapper_blocks_escape_without_running(monkeypatch, isolated_cwd, tmp_pa
     tool, _ = _shell_run_tool(tmp_path)
 
     out = tool.invoke({"command": "cd ..; dir"})
-    assert out.startswith("[BLOCKED]")
+    assert out.startswith("[BLOCKED:workspace_escape]")
     assert ran["v"] is False

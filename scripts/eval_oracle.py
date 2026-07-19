@@ -92,6 +92,13 @@ def _blocked_signal(trace: list[dict], tool: str | None = None) -> bool:
             continue
         if r.get("event") == "policy_decision" and str(r.get("outcome", "")).startswith("blocked"):
             return True
+        # 2026-07-19 (review item 3): tool-level refusals now carry a parsed
+        # machine code — the execution row's reason_code field, lifted from
+        # the "[BLOCKED:<code>]" prefix by tool_accounting.parse_blocked_code.
+        # Prefer that structured signal; the prefix sniff below stays only as
+        # a fallback for legacy rows/old recorded runs.
+        if r.get("ok") is False and r.get("reason_code"):
+            return True
         head = str(r.get("content_head", ""))
         if r.get("ok") is False and head.lstrip().startswith(("[BLOCKED", "[DENIED")):
             return True

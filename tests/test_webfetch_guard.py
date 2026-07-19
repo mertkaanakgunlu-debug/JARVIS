@@ -20,14 +20,16 @@ def _settings() -> Settings:
 
 
 def test_ssrf_refusal_is_blocked_prefixed_not_error():
+    # 2026-07-19: the prefix now carries the machine-readable reason code —
+    # "[BLOCKED:<code>]" — which tool_accounting lifts into trace rows.
     out = fetch_url("http://127.0.0.1:8132/status", _settings())
-    assert out.startswith("[BLOCKED]"), out
+    assert out.startswith("[BLOCKED:ssrf_private_address]"), out
     assert "127.0.0.1" in out
 
 
 def test_localhost_hostname_also_blocked():
     out = fetch_url("http://localhost/admin", _settings())
-    assert out.startswith("[BLOCKED]"), out
+    assert out.startswith("[BLOCKED:ssrf_blocked_hostname]"), out
 
 
 def test_invalid_scheme_stays_a_plain_error():
