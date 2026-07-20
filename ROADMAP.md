@@ -36,6 +36,21 @@ Faz 1+2 = "hafıza + zeka" ilk bloğu (ikisi de yerel).
 
 ---
 
+## What's actually next: Agent Runtime rev.2 (started 2026-07-20)
+
+The table above (this file's original local-first plan) is now done or hardware-gated (Faz 6
+IoT is the only real remainder, blocked on hardware the owner doesn't have yet). The genuinely
+forward-looking work as of 2026-07-20 is a **separate** plan, kicked off after a dev-focused
+review of tool-calling reliability (context leakage, wrong tool args, fabricated success
+claims, run-to-run variance) — an execution-contract runtime so JARVIS uses *any* tool
+reliably, not new domain tools. Full plan (9 phases, **also numbered Faz 0-8 — do not confuse
+with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
+`C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
+Status: Faz 0 shipped 2026-07-20 (alpha capability allowlist); see [MEMORY.md](MEMORY.md)'s
+own "Agent Runtime rev.2" section and [HANDOFF.md](HANDOFF.md) for what's next.
+
+---
+
 ## Faz 0 — Hafıza-Kritik Stabilizasyon (minimal) ✅ done (2026-07-14)
 
 Only the data-integrity/concurrency subset that would corrupt the memory work in Faz 1-2. NOT

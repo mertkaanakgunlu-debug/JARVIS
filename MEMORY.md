@@ -548,6 +548,49 @@ state. Durable facts worth knowing beyond that session:
   lock` resolution — regenerate it after intentionally changing `requirements.txt` and confirming
   `pytest` is still green (see the file's own header).
 
+## Agent Runtime rev.2 (owner decision, 2026-07-20)
+
+A dev-focused GPT session reviewed the prior session's findings (context leakage, wrong tool
+args, fabricated success claims, run-to-run variance) and proposed fixing the common
+architectural root cause instead of patching each symptom — not new domain tools, a runtime
+contract that makes JARVIS reliably use *any* tool. A reviewer gave 14 revisions to the first
+draft (TaskContract missing, confirmation approving raw unvalidated args instead of a bound
+ExecutionRequest, idempotency wrongly deferred past the phase that claims "duplicate side
+effect: 0", `python_run` left as an accepted open hole while claiming alpha-readiness, no
+Workflow Runtime phase despite the alpha gate requiring long-workflow evidence). All 14 were
+applied. The approved plan (9 phases, 0-8) lives at
+`C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
+
+- **This initiative's Faz 0-8 is NOT [ROADMAP.md](ROADMAP.md)'s Faz 0-8** (the local-first
+  pivot, all done/deferred by hardware). Two unrelated plans happen to both use "Faz 0-8" —
+  code comments and docs always qualify it as "Agent Runtime rev.2, Faz N" for exactly this
+  reason. Don't assume a bare "Faz 0" reference in new code is either one without checking
+  which initiative the surrounding comment names.
+- **Faz 0 shipped 2026-07-20**: `jarvis/tool_registry.py`'s `ALPHA_STATUS_VALUES` (closed
+  5-value vocabulary) + `_ALPHA_STATUS` + `get_alpha_status()`. `python_run` is `"disabled"` —
+  removed from `make_tools()`'s returned list (the single chokepoint agent_node/ToolNode/the
+  router all read from) AND independently vetoed in `policy_guard.evaluate()` (defense in
+  depth against a stale pre-change checkpoint replaying the call). `shell_run` is
+  `"quarantined"` (still exposed). Every other tool defaults to `"shadow_validated"` —
+  documented as a Faz-1 destination, not a live signal; nothing measures shadow validation
+  yet. `PolicyDecision.veto_kind` distinguishes this veto from the kill-switch one so
+  confirmation_node's ack message names the real reason.
+- **The model-selection decision (`qwen3:8b` + `LOCAL_REASONING_EFFORT=none`) is provisional**,
+  per commit `a6a3426`'s own note: the 65/65 that decision rested on was tool-execution
+  compliance, not semantic correctness (the two-metric oracle that can tell them apart,
+  `b8463dc`, landed after that decision was made). A re-baseline under the two-metric oracle
+  hasn't run yet — deferred to the session that also runs Faz 0's baseline capture (same 5×13
+  A/B invocation closes both). Don't cite the qwen3:8b decision as settled until that re-run
+  happens; see [HANDOFF.md](HANDOFF.md) for the exact command.
+- **A second redaction gap found while reading the audit path** (not from GPT's review, found
+  independently re-reading `agent.py`): `tool_trace.record()` redacts sensitive arg keys via
+  `redact_tool_args()` (`agent.py:97-105`), but `audit_log.record()`'s `args_preview`/
+  `result_preview` (`agent.py:139,195`) and `tool_execution_ledger.content_head`
+  (`tool_accounting.py:156`, which reaches the LangGraph checkpointer's SQLite file) do not go
+  through any redaction. A `gmail send` body is masked in the trace and readable in the audit
+  log. Faz 1's planned redaction module is scoped to close this too, not just the envelope's
+  own new fields.
+
 ## Known permanently-true gotchas
 
 - `.env` is never committed (gitignored); `.env.example` is the template.

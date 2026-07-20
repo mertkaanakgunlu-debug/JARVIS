@@ -6,6 +6,46 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 0] — 2026-07-20
+
+Owner'ın GPT-analiz oturumundan gelen mimari plan (dış geliştirici bulguları + reviewer'ın
+14 maddelik revizyonu): mevcut sistemik sorunları (context leakage, yanlış tool argümanı,
+uydurma başarı iddiası, run-to-run değişkenlik) tek tek yamamak yerine ortak kök nedeni
+çözen bir "execution contract" runtime'ı. Tam plan (9 faz, 0-8):
+`C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
+
+**Bu plan kendi Faz 0-8 numaralandırmasını kullanıyor — [ROADMAP.md](ROADMAP.md)'nin Faz
+0-8'i (local-first pivot, hepsi done/deferred) ile KARIŞTIRILMAMALI.** Kod içi yorumlar ve bu
+girdi hep "Agent Runtime rev.2, Faz N" şeklinde açık niteleniyor, bare "Faz N" değil.
+
+**Faz 0 — alpha capability allowlist:** her tool artık açık bir statü taşıyor
+(`contract_enforced`/`shadow_validated`/`quarantined`/`disabled`/`explicitly_unverifiable`,
+`jarvis/tool_registry.py`'nin `ALPHA_STATUS_VALUES`). Bu oturumda yalnız iki canlı karar:
+`python_run` → **disabled** (sandbox'sız, keyfi uzunlukta Python script'i, `shell_run`'ın tek
+satır komutu gibi confirmation prompt'unda anlamlı incelenemez) — hem `make_tools()`'un dönen
+listesinden çıkarılarak (model şemasını hiç görmüyor) hem `policy_guard.evaluate()`'te bağımsız
+veto ile (savunma derinliği: eski bir checkpoint'ten gelen çağrı da bloklanır) iki ayrı yerde
+kapatıldı. `shell_run` → **quarantined** (yüzeyde kalıyor, ek denetim için işaretli). Diğer 34
+tool `shadow_validated`'a düşüyor — dürüstlük notu: bu bir HEDEF durum, Faz 1 canlanana kadar
+hiçbir shadow doğrulama gerçekte çalışmıyor.
+
+`PolicyDecision`'a yeni `veto_kind` alanı ("kill_switch" | "capability_disabled") —
+confirmation_node'un ack mesajı artık gerçek nedeni söylüyor, devre dışı bir capability için
+"kill switch kapalı" gibi yanlış bir mesaj göstermiyor.
+
+12 yeni test (`tests/test_alpha_capabilities.py`). **480 pytest yeşil (468 baseline + 12),
+ruff temiz.**
+
+Bu oturumda ayrıca: HANDOFF.md'nin "7 commit push edilmeli" rakamı yeniden doğrulandı ve
+düzeltildi — gerçek fark `origin/langgraph-migration`'a göre 4 commit'ti (aşağıdaki dört
+retroaktif girdi + bu Faz 0 commit'i, toplam 5, şimdi push edildi).
+
+**Sıradaki (Faz 1):** `jarvis/execution/` paketi — `TaskContract`, `PostconditionSpec`,
+`ExecutionEnvelope`, ortak redaksiyon katmanı (bu oturumda bulunan ek açık: `audit_log.record`
+`args_preview`/`result_preview`'i ham yazıyor, `tool_trace`'in redaksiyonu audit log'a
+uygulanmıyor — `agent.py:139,195`). Shadow mode, karar değiştirmez. 5×13 A/B baseline koşusu
+(iki-metrikli re-baseline, bkz. altta) SONRAKİ OTURUMA bırakıldı — [HANDOFF.md](HANDOFF.md).
+
 ## [Merge-öncesi review sertleştirmesi] — 2026-07-19
 
 Dış reviewer'ın A/B raporu kabulü sonrası merge-öncesi iş listesi uygulanıyor.
@@ -97,6 +137,28 @@ kararı):** ikisi de eşiği geçemedi.
 - **Karar:** `config.local_model` DEĞİŞMİYOR; `qwen3:8b` + `LOCAL_REASONING_EFFORT=none`
   varsayılan kalıyor. Ayrıntılı karar matrisi: `scripts/ab_analyze.py` çıktısı +
   [docs/review/2026-07-premerge-summary.md](docs/review/2026-07-premerge-summary.md).
+
+**Faz 7 — ikinci context-leak (aynı sınıf, farklı katman) + iki-metrikli oracle:** model-selection
+yanıtları incelenirken `agent._build_env_block`'un da GERÇEK Desktop yolunu (`~/OneDrive/Desktop`)
+`--profile test` altında bile system prompt'a yazdığı bulundu — `files.py`'nin `_effective_home()`
+fix'iyle AYNI `expanduser("~")`-`JARVIS_HOME`'u-görmüyor sınıfı, farklı bir katmanda. Model bunu
+yanıtlarında geri yansıtıyordu (önce hallüsinasyon sanıldı, ham prompt incelenince anlaşıldı). Fix:
+`_build_env_block` artık `files._effective_home()`'u yeniden kullanıyor. Bu commit ayrıca
+`docs/review/2026-07-premerge-summary.md`'yi **PROVISIONAL** işaretledi: 65/65, tool-execution
+compliance'tı, end-to-end doğruluk değil (B6 yanlış veriyi çizip geçti) — `qwen3:8b` kararı
+iki-metrikli re-baseline'a kadar geçici sayılmalı. 2 yeni test, 455 pytest.
+
+Onu kapatan **iki-metrikli oracle** (`plotting.py`'nin `<name>.png.meta.json` sidecar'ı +
+`Expected.plot_check`/`grounded_claims` + `Verdict.semantic_reasons`) bu oturumda geldi —
+compliance ile semantic correctness artık ayrı raporlanıyor (`ab_analyze.py`'nin Overall/
+tool-execution/semantic üç kolonu). 17 yeni test, **468 pytest yeşil, ruff temiz.**
+`ab_run_config.ps1`'e hızlı kısmi koşular için `-Scenarios` parametresi eklendi, ardından
+`@ScenarioArgs` splatting'in `--all`'ı skaler'e çöktürüp her koşuyu boş sonuçla exit 2 yaptığı
+bulgu düzeltildi (`@()` zorunlu array + direkt geçiş).
+
+**Not:** Yukarıdaki iki-metrikli oracle'ın gerektirdiği re-baseline (a6a3426'nın "PROVISIONAL"
+işaretini kapatacak 5×13 koşu) bu tarihte henüz koşulmadı — [HANDOFF.md](HANDOFF.md)'nin sonraki
+oturum listesinde.
 
 ---
 
