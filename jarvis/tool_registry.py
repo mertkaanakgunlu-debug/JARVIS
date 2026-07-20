@@ -323,6 +323,71 @@ def register_dynamic_spec(spec: ToolSpec) -> None:
     TOOL_SPECS[spec.name] = spec
 
 
+# ── Alpha capability allowlist (Agent Runtime rev.2, Faz 0) ──────────────────
+# Reviewer item #9: every capability exposed during the manual alpha must
+# carry an explicit status -- "args_schema=None and nobody decided" is not
+# an acceptable default. Kept as a standalone dict rather than a ToolSpec
+# field for now (same shape as _TOOL_DOMAINS above: one place, no per-ctor
+# edits) because Faz 1 is where ToolSpec itself grows new fields
+# (args_schema, postconditions, idempotency, contract_status, ...) -- adding
+# a field here too, ahead of that, would mean touching the frozen dataclass
+# twice. This dict is the seed that Faz 1 folds into ToolSpec.contract_status.
+#
+# Honesty note: "shadow_validated" below is the TARGET state once Faz 1's
+# execution envelope lands, not a live signal today -- nothing in this repo
+# yet measures or records shadow validation. Every tool not listed in
+# _ALPHA_STATUS defaults to "shadow_validated" for that reason: it is a
+# declared destination, not a claim that validation is currently happening.
+# The only two statuses that are true TODAY are "disabled" (python_run --
+# actually removed from make_tools()'s returned list, see graph/tools.py)
+# and "quarantined" (shell_run -- stays exposed, flagged for the extra
+# scrutiny future phases will add; not yet a behavioral difference beyond
+# the flag itself existing).
+ALPHA_STATUS_VALUES = frozenset({
+    "contract_enforced",       # full prepare/execute/postcondition pipeline (Faz 1-6 destination)
+    "shadow_validated",        # envelope produced and measured, decisions unchanged (Faz 1 destination)
+    "quarantined",             # exposed, but flagged for extra scrutiny / no expanded trust
+    "disabled",                # not exposed to the model at all -- structurally absent
+    "explicitly_unverifiable", # no deterministic postcondition exists for this capability's
+                                # notion of success (e.g. web_search) -- reported, not hidden
+})
+
+_ALPHA_STATUS: dict[str, str] = {
+    # python_run: unsandboxed, arbitrary-length Python in a subprocess. Unlike
+    # shell_run (a single command line a human can actually read before
+    # approving), a multi-line script cannot be meaningfully reviewed in a
+    # confirmation prompt. Disabled for the alpha surface, not sandboxed --
+    # see ToolSpec's own docstring above python_run's entry for why a sandbox
+    # is a separate, not-yet-built project. Enforced in two independent
+    # places (defense in depth, not redundancy for its own sake): removed
+    # from make_tools()'s returned list (graph/tools.py) so the model never
+    # sees its schema, AND vetoed in policy_guard.evaluate() (allowed=False)
+    # so a call somehow reaching the gate anyway -- a stale checkpoint
+    # recorded before this change, say -- is still hard-blocked.
+    "python_run": "disabled",
+    # shell_run: same L3/confirmation gate as python_run, but a single
+    # command line IS something a human can read and judge in the
+    # confirmation prompt before approving -- kept on the alpha surface,
+    # explicitly flagged for the extra scrutiny later phases add (owner may
+    # revisit this call; see the plan's open-questions section).
+    "shell_run": "quarantined",
+}
+
+_bad_values = {v for v in _ALPHA_STATUS.values() if v not in ALPHA_STATUS_VALUES}
+if _bad_values:  # pragma: no cover -- import-time wiring assertion
+    raise RuntimeError(f"_ALPHA_STATUS uses unknown status value(s): {sorted(_bad_values)}")
+_unknown_names = set(_ALPHA_STATUS) - set(TOOL_SPECS)
+if _unknown_names:  # pragma: no cover -- import-time wiring assertion
+    raise RuntimeError(f"_ALPHA_STATUS names unknown tools: {sorted(_unknown_names)}")
+
+
+def get_alpha_status(tool_name: str) -> str:
+    """This tool's alpha-allowlist status -- see ALPHA_STATUS_VALUES and the
+    module comment above _ALPHA_STATUS for what each value means and which
+    ones are live behavior today vs. a declared future destination."""
+    return _ALPHA_STATUS.get(tool_name, "shadow_validated")
+
+
 # Convenience views ──────────────────────────────────────────────────────────────
 
 def tools_at_risk(level: int) -> list[ToolSpec]:

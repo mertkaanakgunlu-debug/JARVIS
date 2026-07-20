@@ -654,11 +654,18 @@ def make_confirmation_node(settings):
                 transport=transport, outcome=outcome, reason=d.reason,
             )
 
-        # Kill switch veto -- hard stop, no interrupt, no matter what the
-        # gate's own enabled flag says.
+        # Hard veto -- no interrupt, no matter what the gate's own enabled
+        # flag says. Two independent veto paths share this shape (Agent
+        # Runtime rev.2, Faz 0 added the second): the kill switch (owner can
+        # lift it) and a disabled alpha capability (build-time decision, the
+        # kill switch does not touch it) — PolicyDecision.veto_kind tells
+        # them apart so the ack message names the right one instead of
+        # always blaming the kill switch.
         vetoed = [tc for tc in last_ai.tool_calls if not decisions[tc.get("id")].allowed]
         if vetoed:
             veto_reason = decisions[vetoed[0].get("id")].reason
+            veto_kind = decisions[vetoed[0].get("id")].veto_kind
+            outcome = "blocked_kill_switch" if veto_kind == "kill_switch" else "blocked_capability_disabled"
             # A veto happens before any tool executes, so the on_tool_start/end
             # callbacks — and with them tool_trace's execution rows — never
             # fire. This policy_decision row is the only structural evidence of
@@ -670,7 +677,7 @@ def make_confirmation_node(settings):
                 tool_trace.record(
                     event="policy_decision", tool=d.tool, action=d.action,
                     risk_level=d.risk_level, ok=False, transport=transport,
-                    outcome="blocked_kill_switch", reason=veto_reason,
+                    outcome=outcome, reason=veto_reason,
                 )
             stub_msgs = [
                 ToolMessage(
@@ -679,13 +686,20 @@ def make_confirmation_node(settings):
                 )
                 for tc in last_ai.tool_calls
             ]
-            ack_msg = HumanMessage(
-                content=(
+            if veto_kind == "kill_switch":
+                ack_text = (
                     f"The kill switch is currently off ({veto_reason}), so this action was "
                     "blocked before it could run. Do NOT retry it. Tell the user the kill "
                     "switch needs to be re-enabled first."
                 )
-            )
+            else:
+                ack_text = (
+                    f"This capability is disabled in this build ({veto_reason}), so this "
+                    "action was blocked before it could run. Do NOT retry it — no re-enable "
+                    "step exists for the user to take here. Tell the user this action is not "
+                    "available."
+                )
+            ack_msg = HumanMessage(content=ack_text)
             return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
 
         # Stabilization sprint -- --profile test's structural guarantee.

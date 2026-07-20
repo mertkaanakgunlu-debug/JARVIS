@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from jarvis import kill_switch
-from jarvis.tool_registry import ToolSpec, get_spec
+from jarvis.tool_registry import ToolSpec, get_alpha_status, get_spec
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
@@ -59,6 +59,14 @@ class PolicyDecision:
     # `gmail read` / `calendar list` along with `send`/`create`. "unknown"
     # when no ToolSpec is registered for the tool.
     side_effect_type: str = "unknown"
+    # Agent Runtime rev.2, Faz 0: which hard-veto path produced allowed=False,
+    # so callers (confirmation_node) can show the right message instead of
+    # always saying "the kill switch is off" — that sentence is actively
+    # wrong for a capability that's disabled by alpha policy, kill switch
+    # state notwithstanding. Only meaningful when allowed=False; default
+    # matches the only veto path that existed before this field did, so
+    # every pre-existing call site (kill-switch veto) needs no changes.
+    veto_kind: str = "kill_switch"  # "kill_switch" | "capability_disabled"
 
 
 def _resolve_risk(tool_name: str, args: dict[str, Any], spec: ToolSpec) -> tuple[int, bool, str]:
@@ -93,6 +101,21 @@ def evaluate(tool_name: str, args: dict[str, Any], settings: "Settings") -> Poli
         )
 
     risk_level, requires_confirmation, side_effect_type = _resolve_risk(tool_name, args or {}, spec)
+
+    # Agent Runtime rev.2, Faz 0: a "disabled" alpha-status capability is
+    # vetoed unconditionally -- independent of, and checked before, the kill
+    # switch below. Kill switch is a stop the OWNER can lift by re-arming it;
+    # "disabled" is a build-time decision (see tool_registry._ALPHA_STATUS)
+    # that re-arming the kill switch must not bypass. risk_level/
+    # requires_confirmation still reflect the tool's real classification
+    # (unchanged) -- only `allowed` and `veto_kind` differ from a normal
+    # confirm-required call, same pattern the kill-switch veto below uses.
+    if get_alpha_status(tool_name) == "disabled":
+        return PolicyDecision(
+            tool_name, action, risk_level, requires_confirmation, allowed=False,
+            reason="this capability is disabled for the manual-alpha build",
+            side_effect_type=side_effect_type, veto_kind="capability_disabled",
+        )
 
     if requires_confirmation and risk_level >= _KILL_SWITCH_RISK_THRESHOLD and not kill_switch.is_enabled():
         why = kill_switch.reason() or "no reason given"

@@ -38,7 +38,7 @@ from jarvis.gcp_quota import (                        # Faz 17
 )
 from jarvis.tools.geo_math_tool import geo_math_control  # Faz 18
 from jarvis.ws import event_bus                           # HUD show_hud signal
-from jarvis.tool_registry import TOOL_SPECS  # noqa: F401  # Phase 3 confirmation gate reads these
+from jarvis.tool_registry import TOOL_SPECS, get_alpha_status  # noqa: F401  # TOOL_SPECS: Phase 3 confirmation gate reads these
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -1155,7 +1155,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             event_bus.show_hud()
         return result
 
-    return [
+    all_tools = [
         shell_run, file_read, file_write, file_list,
         pdf_read, pdf_vision, excel_read, python_run, web_search,
         note_append, report_write, report_compile,
@@ -1175,3 +1175,12 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         hud_panels,              # HUD panel control
         procedure_save,          # Faz 2 — procedural memory
     ]
+    # Agent Runtime rev.2, Faz 0: a "disabled" alpha status means structurally
+    # absent from the model-visible surface, not just documented as off-limits
+    # -- this is the single chokepoint every consumer of make_tools() shares
+    # (agent_node's bound-schema subset, the ToolNode built over this same
+    # list, and the router's `available` pool all derive from what's returned
+    # here), so filtering once, at the source, closes all three at once. See
+    # jarvis/tool_registry.py's _ALPHA_STATUS comment for why python_run is
+    # the one entry here today.
+    return [t for t in all_tools if get_alpha_status(t.name) != "disabled"]
