@@ -1,8 +1,13 @@
 """LangGraph node functions for JARVIS — Faz 2 (topology reworked Sprint 2/Faz 2B).
 
 Nodes:
-  agent_node   — tool-issuing executor; binds the TURN-SCOPED subset from
-                 state["tool_route"] (Faz 2A), bare for conversation turns
+  agent_node             — tool-issuing executor; binds the TURN-SCOPED subset
+                            from state["tool_route"] (Faz 2A), bare for
+                            conversation turns
+  prepare_execution_node — Agent Runtime rev.2, Faz 2: risk-classifies each
+                            pending tool call and mints a signed, immutable
+                            ExecutionRequest per call BEFORE confirmation sees
+                            it (agent → prepare_execution → confirmation)
   compose_node — BARE final-answer composer (Faz 2B) — no tool schemas bound,
                  consumes critic feedback ephemerally
   planner_node — step-by-step plan generation (activated by /think)
@@ -10,7 +15,7 @@ Nodes:
 
 Routing:
   route_from_start             — START → planner (needs_planning) or agent
-  route_from_agent             — tool calls → confirmation, else → critic
+  route_from_agent             — tool calls → prepare_execution, else → critic
   route_after_tool_accounting  — budgeted: compose (default) or agent (multi-step)
   route_from_critic            — accept/exhausted → END, revise/redirect → compose
 """
@@ -20,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
+from datetime import datetime, timezone
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -455,10 +462,11 @@ def route_from_start(state: JarvisState) -> str:
 
 
 def route_from_agent(state: JarvisState) -> str:
-    """tool calls present → 'confirmation'; else → 'critic'."""
+    """tool calls present → 'prepare_execution' (Agent Runtime rev.2, Faz 2);
+    else → 'critic'."""
     last_msg = state["messages"][-1]
     if isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None):
-        return "confirmation"
+        return "prepare_execution"
     return "critic"
 
 
@@ -475,6 +483,117 @@ def route_from_critic(state: JarvisState) -> str:
     if verdict in ("revise", "redirect") and revise_count < 2:
         return "compose"
     return END
+
+
+# ── Agent Runtime rev.2, Faz 2 ──────────────────────────────────────────────
+
+# Best-effort resource identifier for the HMAC binding's target_resource
+# field -- NOT full per-tool canonical-path resolution (that needs the
+# tool's own workspace root, which no node currently has access to; a real
+# per-tool canonicalization pass is Faz 6 territory, alongside args_schema).
+# Picks the first recognizable resource-ish key present so two calls with
+# different targets bind to visibly different resources; falls back to the
+# bare capability name when none of these are present.
+_RESOURCE_ARG_KEYS = (
+    "path", "file_path", "script_path", "output", "file_id", "event_id",
+    "to", "url", "query", "title", "name",
+)
+
+
+def _resolve_target_resource(capability: str, args: dict) -> str:
+    for key in _RESOURCE_ARG_KEYS:
+        value = args.get(key)
+        if value:
+            return f"{capability}:{value}"
+    return capability
+
+
+def make_prepare_execution_node(settings=None):
+    """Return a node that mints one signed ExecutionRequest per pending tool
+    call (Agent Runtime rev.2, Faz 2, reviewer #2/#6) -- new routing:
+    agent → prepare_execution → confirmation.
+
+    Pipeline per call: capability resolve (get_spec) → normalize (pass-
+    through today -- no ToolSpec carries an args_schema yet, that's Faz 6)
+    → risk classify (policy_guard.evaluate) → best-effort canonical
+    resource (_resolve_target_resource) → TaskContract match (always
+    "no_contract" -- nothing produces one yet, reported honestly rather
+    than silently "verified") → sign. The result is an immutable
+    ExecutionRequest (jarvis.execution.request) that confirmation_node now
+    binds its approval to instead of raw tool_call args.
+
+    Deliberately calls policy_guard.evaluate() again here even though
+    confirmation_node ALSO calls it independently for its own pre-gate
+    (batch/turn limits, duplicate fingerprints, kill-switch veto, the
+    --profile test external-writes gate, the proactive-readonly gate):
+    evaluate() is a pure function of (tool_name, args, settings), so the two
+    calls can never diverge -- this keeps confirmation_node's already-
+    heavily-tested pre-gate logic completely untouched rather than
+    threading a second data path through it. A future phase may consolidate
+    to a single evaluation if the duplication ever becomes a real cost.
+
+    execution_id is minted FRESH every call (tool_call_id + a random
+    suffix), never reused across calls or turns -- this is what makes the
+    idempotency journal (jarvis.execution.idempotency) safe to key on it
+    directly: two independent requests can never collide here by
+    construction, so a journal hit only ever means a genuine replay of one
+    specific already-minted request (see idempotency.py's own docstring).
+
+    No pending tool call (last_ai is None) → {} -- same no-op convention
+    make_confirmation_node uses, so an old checkpoint or a direct-node unit
+    test that never runs this node leaves confirmation_node's behavior
+    completely unchanged (state["execution_requests"] simply absent).
+    """
+    from jarvis import policy_guard
+    from jarvis.execution import approval
+    from jarvis.execution.request import ExecutionRequest
+    from jarvis.graph.tool_accounting import tool_call_fingerprint
+    from jarvis.tool_registry import get_spec
+
+    ttl = getattr(settings, "approval_ttl_sec", 300) if settings is not None else 300
+
+    async def prepare_execution_node(state: JarvisState) -> dict:
+        last_ai: AIMessage | None = None
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                last_ai = msg
+                break
+        if last_ai is None:
+            return {}
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        requests: list[dict] = []
+        for tc in last_ai.tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args") or {}
+            spec = get_spec(name)
+            decision = policy_guard.evaluate(name, args, settings)
+
+            req = ExecutionRequest(
+                execution_id=f"{tc.get('id', 'call')}-{secrets.token_hex(6)}",
+                capability=name,
+                action=decision.action,
+                normalized_args_digest=tool_call_fingerprint(name, args),
+                target_resource=_resolve_target_resource(name, args),
+                risk_level=decision.risk_level,
+                requires_confirmation=decision.requires_confirmation,
+                allowed=decision.allowed,
+                side_effect_type=decision.side_effect_type,
+                idempotency=spec.idempotency if spec is not None else "none",
+                created_at=now_iso,
+                expiry=approval.new_expiry(ttl),
+                single_use_nonce=approval.new_nonce(),
+            )
+            requests.append({
+                "tool_call_id": tc.get("id", ""),
+                "request": req.model_dump(),
+                "signature": approval.sign(req),
+            })
+
+        return {"execution_requests": requests}
+
+    prepare_execution_node.__name__ = "prepare_execution_node"
+    return prepare_execution_node
 
 
 def make_confirmation_node(settings):
@@ -498,6 +617,18 @@ def make_confirmation_node(settings):
 
     Every risk_level >= 2 call gets a "decision" audit_log entry regardless
     of gate state, so the audit trail is complete even with the gate off.
+
+    Agent Runtime rev.2, Faz 2: right before the final approve (both the
+    post-interrupt "user_approved" path -- see the bottom of this function),
+    each confirmable call's ExecutionRequest (state["execution_requests"],
+    built by the new prepare_execution node upstream) is re-verified against
+    the CURRENT tool_call args and the idempotency journal: a signature/
+    digest/expiry mismatch (e.g. a repair changed the args after the user
+    was shown the prompt) or a replay of an already-committed execution_id
+    is denied instead of silently approved. No-ops per call when
+    prepare_execution never ran for it (old checkpoint / a test that calls
+    this node directly, as every pre-Faz-2 test in this suite does) --
+    confirmation_node's behavior is then unchanged from before this phase.
     """
     from langgraph.types import interrupt as _interrupt
     from langchain_core.messages import AIMessage, ToolMessage, HumanMessage
@@ -519,6 +650,13 @@ def make_confirmation_node(settings):
         decisions = {
             tc.get("id"): policy_guard.evaluate(tc.get("name", ""), tc.get("args", {}) or {}, settings)
             for tc in last_ai.tool_calls
+        }
+        # Agent Runtime rev.2, Faz 2: prepare_execution's signed
+        # ExecutionRequests for this same batch, if that node ran (absent for
+        # an old checkpoint or a direct-node unit test that skips straight to
+        # confirmation_node -- every read below tolerates that via .get()).
+        requests_by_id: dict[str, dict] = {
+            r["tool_call_id"]: r for r in (state.get("execution_requests") or [])
         }
 
         # ── Patch 1.2 (Faz 1B): deterministic pre-gate, BEFORE policy audit ──
@@ -804,11 +942,17 @@ def make_confirmation_node(settings):
         if not confirmable:
             return {"confirmation_result": "approved", **counter_updates}
 
-        # Interrupt — pauses the graph until resume_and_stream() is called
+        # Interrupt — pauses the graph until resume_and_stream() is called.
+        # execution_id (Agent Runtime rev.2, Faz 2), when present, names
+        # EXACTLY the ExecutionRequest this specific prompt is bound to --
+        # confirmation ← "TAM OLARAK bu ExecutionRequest onaylanır" (the
+        # plan's own words). None for old checkpoints / direct-node tests
+        # that never ran prepare_execution.
         tools_info = [
             {
                 "name": tc.get("name"), "args": tc.get("args", {}), "id": tc.get("id"),
                 "description": policy_guard.describe_call(tc.get("name", ""), tc.get("args", {}) or {}),
+                "execution_id": (requests_by_id.get(tc.get("id")) or {}).get("request", {}).get("execution_id"),
             }
             for tc in confirmable
         ]
@@ -850,6 +994,78 @@ def make_confirmation_node(settings):
                 "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
                 transport=transport, outcome="user_approved",
             )
+
+        # Agent Runtime rev.2, Faz 2 -- re-verify the approval right before
+        # handing off to "tools": closes the TOCTOU gap between "the user saw
+        # these args" and "these args actually execute" (a repair that
+        # changed the args between interrupt and resume must not silently run
+        # under the old yes), and refuses a replayed approval via the
+        # idempotency journal -- the plan's own acceptance test for this
+        # phase: "approve -> retry -> journal reddi". Skips per call when
+        # prepare_execution didn't produce an entry for it (old checkpoint /
+        # direct-node unit test) -- same backward-compat convention as every
+        # other new field in this node.
+        from jarvis.execution import approval as _approval, idempotency as _idempotency
+        from jarvis.execution.request import ExecutionRequest as _ExecutionRequest
+
+        for tc in confirmable:
+            entry = requests_by_id.get(tc.get("id"))
+            if entry is None:
+                continue
+            req = _ExecutionRequest(**entry["request"])
+            current_digest = tool_call_fingerprint(tc.get("name", ""), tc.get("args") or {})
+            ok, why = _approval.verify(req, entry["signature"], current_args_digest=current_digest)
+            if not ok:
+                audit_log.record(
+                    "decision", tool=req.capability, action=req.action, risk_level=req.risk_level,
+                    transport=transport, outcome="blocked_stale_approval", reason=why,
+                )
+                tool_trace.record(
+                    event="policy_decision", tool=req.capability, action=req.action,
+                    risk_level=req.risk_level, ok=False, transport=transport,
+                    outcome="blocked_stale_approval", reason=why,
+                )
+                stub_msgs = [
+                    ToolMessage(
+                        content=f"[BLOCKED: approval no longer valid -- {why}]",
+                        tool_call_id=t.get("id", ""),
+                    )
+                    for t in last_ai.tool_calls
+                ]
+                ack_msg = HumanMessage(content=(
+                    f"The approval for this action is no longer valid ({why}) -- most likely "
+                    "the arguments changed after the user was shown the confirmation prompt, "
+                    "or too much time passed. Do NOT assume it ran. Re-issue the call fresh so "
+                    "it can be shown to the user and approved again."
+                ))
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
+            if _idempotency.is_committed(req.execution_id):
+                audit_log.record(
+                    "decision", tool=req.capability, action=req.action, risk_level=req.risk_level,
+                    transport=transport, outcome="blocked_duplicate_execution",
+                    reason="execution_id already committed",
+                )
+                tool_trace.record(
+                    event="policy_decision", tool=req.capability, action=req.action,
+                    risk_level=req.risk_level, ok=False, transport=transport,
+                    outcome="blocked_duplicate_execution", reason="execution_id already committed",
+                )
+                stub_msgs = [
+                    ToolMessage(
+                        content="[BLOCKED: duplicate execution -- this action already ran once]",
+                        tool_call_id=t.get("id", ""),
+                    )
+                    for t in last_ai.tool_calls
+                ]
+                ack_msg = HumanMessage(content=(
+                    "This exact approved action already ran once and its side effect is "
+                    "already applied -- running it again was refused to avoid duplicating "
+                    "that side effect (e.g. sending the same email twice). Do NOT retry it; "
+                    "tell the user it already completed."
+                ))
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
+            _approval.consume(req)
+
         return {"confirmation_result": "approved", **counter_updates}
 
     confirmation_node.__name__ = "confirmation_node"

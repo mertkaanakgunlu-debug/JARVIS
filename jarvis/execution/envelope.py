@@ -58,32 +58,50 @@ def build_shadow_envelope(
     retryable: bool,
     error_code: str | None,
     execution_id: str,
+    timed_out: bool = False,
+    execution_may_still_be_running: bool = False,
+    worker_terminated: bool = False,
+    postconditions: list | None = None,
 ) -> ExecutionEnvelope:
     """Build one envelope from the same per-call data
     tool_result_accounting already computes (name, args, ok, content,
-    retryable, blocked-code). Faz 1 shadow-mode only: status is a simple
-    success/failed split -- this node never sees pre-execution blocks
-    (route_from_confirmation sends "denied" straight back to "agent",
-    bypassing tools/tool_result_accounting entirely), so "blocked" is not
-    yet reachable here; "partial"/"invalid_args"/"timed_out" need schema
-    validation (Faz 6) and real timeout wiring (Faz 3) that don't exist
-    yet. execution_id reuses the model's own tool_call_id -- available
-    today with no new ID scheme; Faz 2's prepare_execution node may mint a
-    more principled one once it exists. postconditions/artifacts/
-    side_effects/evidence stay empty and validation stays {} -- Faz 1
-    builds no postcondition runner, so leaving them populated would be a
-    silent "verified" that isn't true (see postcondition.py's honesty
-    note).
+    retryable, blocked-code). execution_id reuses the model's own
+    tool_call_id -- available today with no new ID scheme; Agent Runtime
+    rev.2, Faz 2's prepare_execution node mints its own, separate,
+    per-attempt id for approval binding (jarvis.execution.request) that is
+    deliberately NOT this one -- the two ids serve different purposes and
+    are never meant to be interchangeable. artifacts/side_effects/evidence
+    stay empty -- nothing in this repo populates them yet.
+
+    Faz 3: status now becomes "timed_out" (never "success"/"failed") when
+    timed_out=True -- timed_out takes precedence over ok, since a call that
+    timed out is neither a clean success nor a clean, ended failure.
+    execution_may_still_be_running/worker_terminated ride straight through
+    from tool_result_accounting's parse of the [TOOL_ERROR] block's own
+    fields (see safe_tools.format_tool_error) -- this function does not
+    re-derive them. postconditions defaults to [] (Faz 1's original
+    honesty note still applies: no caller, no verification claimed) but a
+    caller with real PostconditionResults (jarvis.execution.
+    postcondition_runner, Faz 3) can now pass them through.
     """
     from jarvis.execution.redaction import digest_args, redact_preview
+
+    if timed_out:
+        status: ExecutionStatus = "timed_out"
+    else:
+        status = "success" if ok else "failed"
 
     return ExecutionEnvelope(
         execution_id=execution_id,
         capability=tool_name,
-        status="success" if ok else "failed",
+        status=status,
         inputs_digest=digest_args(tool_name, args),
         normalized_output=redact_preview(content),
         error_code=error_code,
         retryable=retryable,
+        timed_out=timed_out,
+        execution_may_still_be_running=execution_may_still_be_running,
+        worker_terminated=worker_terminated,
+        postconditions=postconditions or [],
         created_at=datetime.now().isoformat(),
     )

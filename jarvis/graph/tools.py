@@ -38,7 +38,7 @@ from jarvis.gcp_quota import (                        # Faz 17
 )
 from jarvis.tools.geo_math_tool import geo_math_control  # Faz 18
 from jarvis.ws import event_bus                           # HUD show_hud signal
-from jarvis.tool_registry import TOOL_SPECS, get_alpha_status  # noqa: F401  # TOOL_SPECS: Phase 3 confirmation gate reads these
+from jarvis.tool_registry import TOOL_SPECS, get_alpha_status, get_spec  # noqa: F401  # TOOL_SPECS: Phase 3 confirmation gate reads these
 from jarvis.subagents.math import run_math
 from jarvis.subagents.writer import run_writer
 from jarvis.subagents.research import run_research
@@ -70,7 +70,10 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             return f"[BLOCKED:workspace_escape] {why}. Commands run inside the workspace only."
         # cwd=workspace: a bare dir/ls lists the isolated home, not the repo
         # root (Faz 1.2 — the manual round's isolation leak).
-        return shell_tools.run(command, cwd=workspace)
+        # Faz 3: ToolSpec.timeout_seconds now actually reaches the subprocess
+        # call instead of shell.py's own disconnected hardcoded constant.
+        spec = get_spec("shell_run")
+        return shell_tools.run(command, cwd=workspace, timeout=spec.timeout_seconds if spec else 120)
 
     @tool
     def file_read(path: str) -> str:
@@ -137,7 +140,8 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     def python_run(script_path: str) -> str:
         """Execute a Python script (use after generate_code produces a plot/analysis script)."""
         full = workspace / script_path if not Path(script_path).is_absolute() else Path(script_path)
-        return python_exec.run_script(full)
+        spec = get_spec("python_run")
+        return python_exec.run_script(full, timeout=spec.timeout_seconds if spec else 120)
 
     @tool
     def web_search(query: str) -> str:
@@ -158,7 +162,8 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     @tool
     def report_compile(tex_path: str) -> str:
         """Compile a .tex file to PDF via pdflatex. On failure, fix the LaTeX and retry."""
-        result = latex_compile(tex_path)
+        spec = get_spec("report_compile")
+        result = latex_compile(tex_path, timeout=spec.timeout_seconds if spec else 120)
         event_bus.show_hud()
         return result
 

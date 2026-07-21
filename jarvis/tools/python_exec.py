@@ -12,7 +12,7 @@ TIMEOUT_SECONDS = 60
 MAX_OUTPUT_CHARS = 4000
 
 
-def run_script(script_path: Path, cwd: Path | None = None) -> str:
+def run_script(script_path: Path, cwd: Path | None = None, timeout: float = TIMEOUT_SECONDS) -> str:
     """Execute a Python script and return its stdout + stderr.
 
     GPT-5.6 review remediation, Faz 6 (verdict #6, "worse than shell_run" --
@@ -23,6 +23,15 @@ def run_script(script_path: Path, cwd: Path | None = None) -> str:
     subprocess still has no resource/network restrictions; see docs/SAFETY.md
     "Known limits". Reuses shell.py's deny-list against the script's raw
     source text before ever executing it.
+
+    Agent Runtime rev.2, Faz 3: timeout now defaults to this module's own
+    constant (unchanged for any caller that doesn't pass one) but
+    jarvis/graph/tools.py's python_run wrapper passes ToolSpec.timeout_seconds
+    explicitly. subprocess.TimeoutExpired is deliberately NOT caught here
+    anymore (pre-Faz-3 this returned a bare "[ERROR] ... timeout" string that
+    bypassed the shared category=timeout/retryable=true/worker_terminated
+    reporting entirely) -- it propagates to safe_tools.py's shared exception
+    boundary, same as shell.py's run().
     """
     if not script_path.exists():
         return f"[ERROR] Script not found: {script_path}"
@@ -39,10 +48,10 @@ def run_script(script_path: Path, cwd: Path | None = None) -> str:
             cwd=str(cwd or script_path.parent),
             capture_output=True,
             text=True,
-            timeout=TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"[ERROR] Script exceeded {TIMEOUT_SECONDS}s timeout."
+        raise
     except Exception as exc:
         return f"[ERROR] Failed to run script: {exc}"
 

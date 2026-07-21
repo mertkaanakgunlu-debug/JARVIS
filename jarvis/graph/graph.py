@@ -1,9 +1,11 @@
 """LangGraph StateGraph builder for JARVIS — Faz 2 (topology reworked Sprint 2).
 
-Graph topology (Faz 2B):
+Graph topology (Agent Runtime rev.2, Faz 2 added prepare_execution):
   START → route_from_start → planner (needs_planning=True) → agent
                            → agent (otherwise)
-  agent → confirmation (tool calls) | critic (direct final answer)
+  agent → prepare_execution (tool calls) | critic (direct final answer)
+  prepare_execution → confirmation (unconditional -- mints a signed
+                       ExecutionRequest per pending call, see nodes.py)
   confirmation → tools (approved) | agent (denied/blocked)
   tools → tool_result_accounting → compose (default)
                                  → agent   (multi-step shape + round budget left)
@@ -53,6 +55,7 @@ from jarvis.graph.nodes import (
     make_compose_node,
     make_confirmation_node,
     make_planner_node,
+    make_prepare_execution_node,
     make_critic_node,
     make_route_after_tool_accounting,
     route_from_start,
@@ -168,6 +171,7 @@ def build_graph(
     llm_pro = get_llm("reasoning", settings)                          # bare — critic/planner
 
     agent_node = make_agent_node(tools, settings)
+    prepare_execution_node = make_prepare_execution_node(settings)
     confirmation_node = make_confirmation_node(settings)
     planner_node = make_planner_node(llm_pro)
     critic_node = make_critic_node(llm_pro)
@@ -177,10 +181,11 @@ def build_graph(
 
     builder = StateGraph(JarvisState)
     builder.add_node("agent", agent_node)
+    builder.add_node("prepare_execution", prepare_execution_node)
     builder.add_node("confirmation", confirmation_node)
     builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
-    builder.add_node("tool_result_accounting", make_tool_result_accounting_node(settings))
+    builder.add_node("tool_result_accounting", make_tool_result_accounting_node(settings, workspace))
     builder.add_node("compose", make_compose_node(settings))
     builder.add_node("critic", critic_node)
 
@@ -192,12 +197,15 @@ def build_graph(
     )
     builder.add_edge("planner", "agent")
 
-    # agent → confirmation (tool calls) or critic (final response)
+    # agent → prepare_execution (tool calls) or critic (final response)
     builder.add_conditional_edges(
         "agent",
         route_from_agent,
-        {"confirmation": "confirmation", "critic": "critic"},
+        {"prepare_execution": "prepare_execution", "critic": "critic"},
     )
+    # prepare_execution → confirmation is unconditional -- it only ever mints
+    # ExecutionRequests and signs them, never itself decides approve/deny.
+    builder.add_edge("prepare_execution", "confirmation")
 
     # confirmation → tools (approved) or agent (denied — LLM acknowledges)
     builder.add_conditional_edges(

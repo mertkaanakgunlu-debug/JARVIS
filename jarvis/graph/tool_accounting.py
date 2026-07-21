@@ -24,13 +24,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from jarvis.execution import idempotency
 from jarvis.execution.envelope import build_shadow_envelope
+from jarvis.execution.postcondition_runner import run_postconditions
 from jarvis.execution.redaction import redact_preview
 from jarvis.graph.state import JarvisState
+from jarvis.tool_registry import get_spec
 
 # A ToolMessage whose content starts with one of these did NOT succeed —
 # stubs injected by the confirmation node's block paths plus safe_tools'
@@ -90,6 +94,20 @@ def parse_blocked_code(content: Any) -> str | None:
     return m.group(1) if m else None
 
 
+def parse_timeout_flags(content: Any) -> tuple[bool, bool, bool]:
+    """Agent Runtime rev.2, Faz 3: (timed_out, execution_may_still_be_running,
+    worker_terminated) parsed out of a [TOOL_ERROR] block -- same plain
+    substring-check style as the existing retryable/blocked-code parses
+    above. See safe_tools.format_tool_error() for where these fields
+    actually get written."""
+    s = content if isinstance(content, str) else str(content)
+    return (
+        "category=timeout" in s,
+        "execution_may_still_be_running=true" in s,
+        "worker_terminated=true" in s,
+    )
+
+
 def _last_executed_round(msgs: list) -> tuple[AIMessage | None, dict[str, ToolMessage]]:
     """The most recent AIMessage-with-tool_calls and its ToolMessage results."""
     last_ai, last_ai_idx = None, -1
@@ -130,7 +148,7 @@ def last_round_results(state: JarvisState) -> list[tuple[bool, bool]]:
     return out
 
 
-def make_tool_result_accounting_node(settings=None):
+def make_tool_result_accounting_node(settings=None, workspace: Path | None = None):
     """Node: promote succeeded calls to completed + append to the ledger.
 
     Agent Runtime rev.2, Faz 1: also builds one ExecutionEnvelope per call
@@ -144,6 +162,30 @@ def make_tool_result_accounting_node(settings=None):
     returned dict is unchanged from pre-Faz-1 behavior, which is what lets
     existing callers (e.g. test_tool_limits.py) keep constructing this node
     with zero args.
+
+    Agent Runtime rev.2, Faz 2: also commits each SUCCEEDED call's
+    ExecutionRequest (built earlier by prepare_execution_node) into the
+    idempotency journal (jarvis.execution.idempotency) -- this is the only
+    node that knows a call actually succeeded, same reasoning given above
+    for completed_tool_fingerprints living here rather than in
+    confirmation_node. A pure disk side effect, not a new state key --
+    unconditional and independent of execution_contract_mode (approval
+    binding/idempotency sit outside that ladder, see prepare_execution_node's
+    docstring), and a no-op when state["execution_requests"] has no entry
+    for a call (old checkpoint / direct-node unit test that never ran
+    prepare_execution).
+
+    Agent Runtime rev.2, Faz 3: inside the SAME mode!="off" envelope block,
+    two more things now happen per call: (1) parse_timeout_flags() reads the
+    honest timeout fields safe_tools.format_tool_error() wrote into the
+    [TOOL_ERROR] block and feeds them to build_shadow_envelope(), so a timed-
+    out call's envelope status is "timed_out", not a plain "failed"; (2) if
+    this tool's ToolSpec declares any postconditions, run_postconditions()
+    evaluates them against `workspace` and attaches the results. workspace
+    is optional (defaults None, same "settings=None is tolerated" contract
+    as before) -- when absent, postcondition checks that need a path to
+    resolve report "unverified" rather than crashing (see
+    postcondition_runner.py's own path-resolution fallback).
     """
     mode = getattr(settings, "execution_contract_mode", "off") if settings is not None else "off"
 
@@ -155,6 +197,9 @@ def make_tool_result_accounting_node(settings=None):
         completed = list(state.get("completed_tool_fingerprints") or [])
         ledger = list(state.get("tool_execution_ledger") or [])
         envelopes = list(state.get("execution_envelopes") or []) if mode != "off" else None
+        requests_by_id = {
+            r["tool_call_id"]: r for r in (state.get("execution_requests") or [])
+        }
         for tc in last_ai.tool_calls:
             name = tc.get("name", "")
             args = tc.get("args") or {}
@@ -163,6 +208,10 @@ def make_tool_result_accounting_node(settings=None):
             ok = tool_message_ok(tm)
             if ok and fp not in completed:
                 completed.append(fp)
+            if ok:
+                entry = requests_by_id.get(tc.get("id", ""))
+                if entry is not None:
+                    idempotency.commit(entry["request"]["execution_id"], name, fp)
             content = "" if tm is None else (
                 tm.content if isinstance(tm.content, str) else str(tm.content)
             )
@@ -177,10 +226,23 @@ def make_tool_result_accounting_node(settings=None):
                 **({"reason_code": code} if code else {}),
             })
             if envelopes is not None:
+                timed_out, may_still_run, worker_terminated = parse_timeout_flags(content)
+                spec = get_spec(name)
+                postcondition_results = (
+                    run_postconditions(
+                        spec.postconditions, workspace=workspace, args=args, tool_result_content=content,
+                    )
+                    if spec is not None and spec.postconditions
+                    else []
+                )
                 envelopes.append(build_shadow_envelope(
                     tool_name=name, args=args, ok=ok, content=content,
                     retryable="retryable=true" in content, error_code=code,
                     execution_id=tc.get("id", ""),
+                    timed_out=timed_out,
+                    execution_may_still_be_running=may_still_run,
+                    worker_terminated=worker_terminated,
+                    postconditions=postcondition_results,
                 ).model_dump())
 
         out = {

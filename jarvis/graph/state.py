@@ -51,3 +51,14 @@ class JarvisState(TypedDict):
     # "off". Absent/empty under "off" (the default) -- old checkpoints
     # resume fine, same discipline as the five Patch-1.2 fields above.
     execution_envelopes: list[dict]
+
+    # Agent Runtime rev.2, Faz 2: one signed ExecutionRequest
+    # (jarvis/execution/request.py, .model_dump()'d) + its signature per
+    # PENDING tool call in the latest agent round, built by
+    # prepare_execution_node and consumed by confirmation_node right before
+    # its final approve. Unlike execution_envelopes (accumulates the whole
+    # turn's history), this is overwritten each round -- it only ever needs
+    # to describe the batch confirmation_node is currently deciding on.
+    # Absent when prepare_execution hasn't run (old checkpoints, direct-node
+    # unit tests) -- confirmation_node's new checks no-op in that case.
+    execution_requests: list[dict]

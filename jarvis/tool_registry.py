@@ -38,6 +38,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from jarvis.execution.postcondition import PostconditionSpec
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -116,6 +118,16 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         "file_write", "filesystem", 2, False, "local_write",
         timeout_seconds=30,
         description="Write or overwrite a file (creates parent dirs)",
+        # Agent Runtime rev.2, Faz 3: file_write is the one file-producing
+        # tool with an unambiguous, directly-checkable output path -- its
+        # own `path` argument IS the real destination (unlike plot_data's
+        # `output`, a filename STEM, or report_write's title-derived path).
+        # Other file-producing tools are deliberately left unattached this
+        # phase -- see postcondition_runner.py's module docstring for why.
+        postconditions=(
+            PostconditionSpec(kind="file_exists", params={"path_arg": "path"}, source="tool_contract"),
+            PostconditionSpec(kind="path_within_workspace", params={"path_arg": "path"}, source="policy"),
+        ),
     ),
     ToolSpec(
         "file_list", "filesystem", 1, False, "local_read",
@@ -444,6 +456,117 @@ def get_alpha_status(tool_name: str) -> str:
 # return for them.
 TOOL_SPECS = {
     name: replace(spec, contract_status=get_alpha_status(name))
+    for name, spec in TOOL_SPECS.items()
+}
+
+
+# ── Agent Runtime rev.2, Faz 3: timeout_class classification ─────────────────
+# Same "one place, import-time-checked" shape as _TOOL_DOMAINS/_ALPHA_STATUS
+# above. Every STATIC tool must appear here -- ToolSpec.timeout_class
+# defaulted to "cooperative_async" for every tool since Faz 1 (the loosest,
+# most-trusting class), which was honestly wrong for most of them; this is
+# the classification pass that makes the field a real signal instead of a
+# uniform guess. Judged from each tool's actual execution shape:
+#
+#   hard_process_timeout      -- spawns a real subprocess (shell_run,
+#                                 python_run, report_compile: pdflatex).
+#                                 timeout_seconds is now threaded into the
+#                                 underlying subprocess.run(timeout=...) call
+#                                 itself (jarvis/tools/shell.py, python_exec.py,
+#                                 latex.py) -- that inner call is what actually
+#                                 kills the child; the outer wrap in
+#                                 safe_tools.py is a defensive backstop only.
+#   cooperative_async         -- native `async def` @tool whose body awaits
+#                                 real I/O (the sub-agent bridges: math_solve/
+#                                 write_content/research/generate_code delegate
+#                                 to an LLM via ainvoke(); todo's blocking work
+#                                 is local SQLite, fast enough that this class
+#                                 is still the honest fit). asyncio.wait_for
+#                                 genuinely cancels these at their next await
+#                                 point.
+#   external_request_timeout -- blocks on a REMOTE network round-trip (a
+#                                 cloud API or IMAP/SMTP session) inside a
+#                                 sync @tool body, dispatched through ToolNode's
+#                                 executor thread. Honesty note: real
+#                                 client-level (per-library) timeouts are NOT
+#                                 wired this phase for any of these -- only the
+#                                 generic outer asyncio.wait_for bound applies,
+#                                 same enforcement shape as soft_thread_timeout
+#                                 (a timeout here stops the AWAIT, not the
+#                                 underlying socket call). Classified
+#                                 separately anyway because "should eventually
+#                                 get a real client-level timeout" is a
+#                                 meaningfully different backlog item than
+#                                 "runs local compute in a thread" -- collapsing
+#                                 the two would lose that distinction.
+#   soft_thread_timeout       -- everything else: local CPU/filesystem/SQLite/
+#                                 ChromaDB work in a sync @tool body. A timeout
+#                                 stops the AWAIT; the executor thread keeps
+#                                 running to completion in the background
+#                                 (execution_may_still_be_running=true is the
+#                                 honest report, not a bug).
+#
+# geo_math is a deliberately CONSERVATIVE call: its "analyze" action really is
+# cooperative (delegates to an async sub-agent), but every other action
+# (wave_simulate_2d, plot_contour, plot_3d_surface, plot_volume) runs heavy
+# SYNCHRONOUS compute directly inside the `async def` body with no await point
+# at all -- worse than soft_thread_timeout if taken literally (a genuinely long
+# call there blocks the whole event loop, not just one executor thread), but
+# there is no dedicated vocabulary slot for that failure mode and a full
+# refactor to run that compute in a real executor thread is out of scope for
+# this phase. soft_thread_timeout is the closest honest label available today.
+_TIMEOUT_CLASSES: dict[str, str] = {
+    # hard_process_timeout -- real subprocess spawns
+    "shell_run": "hard_process_timeout",
+    "python_run": "hard_process_timeout",
+    "report_compile": "hard_process_timeout",
+    # cooperative_async -- native async @tool, real await points
+    "math_solve": "cooperative_async",
+    "write_content": "cooperative_async",
+    "research": "cooperative_async",
+    "generate_code": "cooperative_async",
+    "todo": "cooperative_async",
+    # external_request_timeout -- remote network round-trip
+    "pdf_vision": "external_request_timeout",
+    "web_search": "external_request_timeout",
+    "url_read": "external_request_timeout",
+    "deep_web_research": "external_request_timeout",
+    "spotify": "external_request_timeout",
+    "google_calendar": "external_request_timeout",
+    "gmail": "external_request_timeout",
+    "google_drive": "external_request_timeout",
+    "itu_mail": "external_request_timeout",
+    "finance": "external_request_timeout",
+    "gcp_quota": "external_request_timeout",
+    # soft_thread_timeout -- local compute/filesystem/SQLite/ChromaDB
+    "file_read": "soft_thread_timeout",
+    "file_write": "soft_thread_timeout",
+    "file_list": "soft_thread_timeout",
+    "pdf_read": "soft_thread_timeout",
+    "excel_read": "soft_thread_timeout",
+    "csv_read": "soft_thread_timeout",
+    "data_analyze": "soft_thread_timeout",
+    "plot_data": "soft_thread_timeout",
+    "report_write": "soft_thread_timeout",
+    "report_compose": "soft_thread_timeout",
+    "note_append": "soft_thread_timeout",
+    "vault_search": "soft_thread_timeout",
+    "index_doc": "soft_thread_timeout",
+    "geo_math": "soft_thread_timeout",
+    "hud_panels": "soft_thread_timeout",
+    "schedule": "soft_thread_timeout",
+    "procedure_save": "soft_thread_timeout",
+}
+
+_missing_timeout_class = set(TOOL_SPECS) - set(_TIMEOUT_CLASSES)
+if _missing_timeout_class:  # pragma: no cover -- import-time wiring assertion
+    raise RuntimeError(f"_TIMEOUT_CLASSES missing tool(s): {sorted(_missing_timeout_class)}")
+_unknown_timeout_class_names = set(_TIMEOUT_CLASSES) - set(TOOL_SPECS)
+if _unknown_timeout_class_names:  # pragma: no cover -- import-time wiring assertion
+    raise RuntimeError(f"_TIMEOUT_CLASSES names unknown tools: {sorted(_unknown_timeout_class_names)}")
+
+TOOL_SPECS = {
+    name: replace(spec, timeout_class=_TIMEOUT_CLASSES[name])
     for name, spec in TOOL_SPECS.items()
 }
 

@@ -87,6 +87,18 @@ class Settings(BaseSettings):
         "off", "shadow", "enforce_read_only", "enforce_reversible", "enforce_all"
     ] = "off"
 
+    # Agent Runtime rev.2, Faz 2 (2026-07-21): how long a prepare_execution-
+    # minted ExecutionRequest's HMAC approval stays valid. Unlike
+    # execution_contract_mode above, approval binding itself is NOT part of
+    # the off/shadow/enforce_* ladder -- it tightens the existing confirmation
+    # gate (closing the TOCTOU gap between "user saw these args" and "these
+    # args actually execute"), the same always-on category as the kill switch
+    # and the Faz 1B duplicate-fingerprint pre-gate, not a new optional
+    # compliance layer. 300s is generous for an interactive approve/deny
+    # prompt while still bounding how long a stale, unanswered approval (e.g.
+    # sitting in a push notification) can remain executable.
+    approval_ttl_sec: int = 300
+
     # Faz 5: MCP client layer. Dedicated flags for the shipped Playwright
     # (browser automation) server -- flip mcp_playwright_enabled=True in .env,
     # no JSON needed. mcp_servers is the generic escape hatch for any other

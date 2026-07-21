@@ -98,13 +98,25 @@ def escapes_workspace(command: str, workspace: str | Path) -> tuple[bool, str]:
     return False, ""
 
 
-def run(command: str, *, confirmed: bool = False, cwd: str | Path | None = None) -> str:
+def run(
+    command: str, *, confirmed: bool = False, cwd: str | Path | None = None,
+    timeout: float = TIMEOUT_SECONDS,
+) -> str:
     """
     Execute a PowerShell command and return combined stdout+stderr.
     Raises ValueError for denied commands.
     Set confirmed=True when the CLI has already asked the user.
     cwd pins the working directory (the caller passes the tool workspace so a
     bare ``dir``/``ls`` lists the isolated home, not the process's real cwd).
+
+    Agent Runtime rev.2, Faz 3: timeout now defaults to this module's own
+    constant (unchanged behavior for any caller that doesn't pass one) but
+    jarvis/graph/tools.py's shell_run wrapper passes ToolSpec.timeout_seconds
+    explicitly -- previously that field was declared and never actually
+    applied here. subprocess.run's own timeout guarantees the child process
+    is killed on expiry and raises TimeoutExpired (deliberately NOT caught
+    here -- it propagates to safe_tools.py's shared exception boundary,
+    which recognizes it specifically and reports worker_terminated=true).
     """
     safe, reason = is_safe(command)
     if not safe:
@@ -114,7 +126,7 @@ def run(command: str, *, confirmed: bool = False, cwd: str | Path | None = None)
         ["powershell", "-NonInteractive", "-Command", command],
         capture_output=True,
         text=True,
-        timeout=TIMEOUT_SECONDS,
+        timeout=timeout,
         cwd=str(cwd) if cwd else None,
     )
     output = result.stdout + result.stderr

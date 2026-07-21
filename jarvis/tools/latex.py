@@ -39,12 +39,20 @@ def latex_write(title: str, body: str, reports_dir: Path) -> str:
     return str(tex_path)
 
 
-def latex_compile(tex_path: str | Path) -> str:
+def latex_compile(tex_path: str | Path, *, timeout: float = 120.0) -> str:
     """Compile a .tex file to PDF using pdflatex.
 
     Runs in a temp directory to avoid polluting the source dir with .aux/.log files.
     On success returns the path to the produced .pdf.
     On failure returns the last 60 lines of the .log file so the LLM can self-correct.
+
+    Agent Runtime rev.2, Faz 3: timeout (matching ToolSpec.timeout_seconds,
+    passed explicitly by jarvis/graph/tools.py's report_compile wrapper) is
+    split across the two pdflatex passes below rather than applied to each in
+    full -- the whole compile operation should be bounded by timeout total,
+    not up to 2x that. subprocess.TimeoutExpired is deliberately NOT caught
+    here; it propagates to safe_tools.py's shared exception boundary, same as
+    shell.py's run()/python_exec.py's run_script().
     """
     pdflatex = shutil.which("pdflatex")
     if not pdflatex:
@@ -75,13 +83,14 @@ def latex_compile(tex_path: str | Path) -> str:
         shutil.copy(tex_path, tmp_tex)
 
         # Run pdflatex twice (needed for TOC/references to resolve)
+        per_pass_timeout = timeout / 2
         for _ in range(2):
             proc = subprocess.run(
                 [pdflatex, "-interaction=nonstopmode", "-halt-on-error", tmp_tex.name],
                 cwd=tmp_path,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=per_pass_timeout,
             )
 
         pdf_tmp = tmp_tex.with_suffix(".pdf")

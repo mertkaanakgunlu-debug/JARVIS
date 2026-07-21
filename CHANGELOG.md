@@ -6,6 +6,116 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 3] — 2026-07-21
+
+**Timeout semantics.** `ToolSpec.timeout_seconds` was declared since Faz 1 (Phase 2, really) and
+never actually applied anywhere — `asyncio.wait_for` bounds every call now (`safe_tools.py`'s
+`_awrap_tool_call`), keyed off a new **`_TIMEOUT_CLASSES`** classification (`tool_registry.py`,
+same "one place, import-time-checked" shape as `_TOOL_DOMAINS`/`_ALPHA_STATUS`) covering all 36
+tools: `hard_process_timeout` (shell_run/python_run/report_compile — real subprocess spawns),
+`cooperative_async` (the native-async sub-agent bridges — real cancellation at the next await
+point), `external_request_timeout` (12 network-bound tools — honestly documented as NOT yet
+getting a real per-library client timeout, only the generic outer bound), `soft_thread_timeout`
+(everything else — local compute/filesystem/SQLite/ChromaDB). `geo_math` classified conservatively
+soft_thread_timeout despite being `async def`: most of its actions run heavy synchronous compute
+with no await point at all, worse than a blocked thread if taken literally (blocks the whole event
+loop) — documented, not fixed; a real fix needs an executor-thread refactor out of scope here.
+
+For the three subprocess-spawning tools, **the real fix lives inside the tool**, not the outer
+wrapper: `shell.py`/`python_exec.py`/`latex.py` now thread `ToolSpec.timeout_seconds` into their
+own `subprocess.run(timeout=...)` calls (previously hardcoded, disconnected module constants —
+shell_run's ToolSpec said 120s, the actual subprocess call used a hardcoded 30s). `python_exec.py`
+no longer catches `TimeoutExpired` itself (it used to return a bare `"[ERROR] ... timeout"` string
+that bypassed all structured reporting) — it now propagates to the shared exception boundary like
+the other two always did. `format_tool_error()` (`safe_tools.py`) reports two new honest fields
+whenever `category=="timeout"`: **`execution_may_still_be_running`** (false only for
+cooperative_async — real cancellation) and **`worker_terminated`** (true only for
+`subprocess.TimeoutExpired` specifically — the one exception type that *guarantees* Python killed
+the child). `ExecutionEnvelope.status` becomes `"timed_out"` (not a plain `"failed"`) when these
+fire — `timed_out` takes precedence over the ok/fail split.
+
+**Postcondition verification runner** (`jarvis/execution/postcondition_runner.py`, new) — Faz 1
+only defined `PostconditionSpec`'s shape; this is the actual evaluator for all 8 kinds
+(`file_exists`, `path_within_workspace`, `file_openable`, `artifact_hash_matches`,
+`row_count_matches`, `series_matches`, `exit_code_matches`, `record_exists`). Honesty discipline
+enforced throughout: no runnable check (missing params, no workspace, no manifest) → `unverified`,
+never silently `"verified"`. `series_matches` (the actual B6 shape — verifying a chart's plotted
+values) is fully implemented and unit-tested against a JSON sidecar manifest, but **not wired to
+any live tool** — nothing produces such a manifest yet (`plot_data`'s PNG has no sidecar) and no
+TaskContract extractor exists to supply `expected_y`; wiring it honestly needs both, out of scope
+here. Real specs are attached to exactly **one** tool this phase — `file_write`
+(`file_exists`+`path_within_workspace`, keyed off its own `path` arg) — the only file-producing
+tool whose output path is a direct, unambiguous call argument rather than derived/returned
+(plot_data's `output` is a filename stem; report_write's path comes from `title`). Wired into
+`tool_result_accounting` (which gained an optional `workspace` param, threaded from `graph.py`)
+inside the same `mode != "off"` block envelopes already live in — off mode runs zero new code,
+same rollback contract as Faz 1.
+
+**64 new tests** across 3 files (`test_timeout_enforcement.py`, 25 — including a real
+`asyncio.wait_for` cancellation through a compiled graph and real `subprocess.TimeoutExpired`
+from actual short-lived subprocesses, not mocks; `test_postcondition_runner.py`, 29 — all 8 kinds,
+verified/failed/unverified per kind, plus a SQL-injection defense-in-depth test for
+`record_exists`; `test_tool_accounting_postconditions.py`, 10). **673 pytest green (609+64), ruff
+clean.**
+
+Sıradaki: Faz 4 (verified response composition + claim audit) — `compose_node` reads from a
+`VerifiedExecutionSummary` instead of raw `ToolMessage`s.
+
+---
+
+## [Agent Runtime rev.2 — Faz 2] — 2026-07-21
+
+**Yeni node: `prepare_execution`** (`jarvis/graph/nodes.py`) — routing artık `agent →
+prepare_execution → confirmation` (eskiden doğrudan `agent → confirmation`, `graph.py`). Ajanın
+önerdiği her tool call için: capability resolve (`get_spec`) → normalize (bugün pass-through —
+hiçbir `ToolSpec` henüz `args_schema` taşımıyor, o Faz 6) → risk classify
+(`policy_guard.evaluate()` — confirmation_node'un kendi bağımsız çağrısıyla asla ayrışamaz, çünkü
+`evaluate()` saf bir fonksiyon) → best-effort `target_resource` (tanınan bir kaynak-benzeri arg
+varsa `capability:değer`, yoksa bare capability) → TaskContract match (dürüstçe hep `"no_contract"`
+— hiçbir şey henüz TaskContract üretmiyor) → imzala. Sonuç: değişmez bir `ExecutionRequest`
+(`jarvis/execution/request.py`, frozen pydantic model) + imza, `state["execution_requests"]`'e
+tool_call_id ile yazılıyor.
+
+**HMAC onay bağlama** (`jarvis/execution/approval.py`) — reviewer #2/#6. Process-local anahtar
+(`secrets.token_bytes(32)`, tek kullanıcılı yerel asistan için sertifika altyapısı gereksiz — bilinçli
+sonuç: bir process restart'ı bekleyen her onayı geçersiz kılar, `verify()` bunu düz bir
+signature_mismatch olarak görür ve çağıran "yeniden onay iste" der, çökmez). `sign()`/`verify()`
+`execution_id · capability · normalized_args_digest · target_resource · risk_level · expiry ·
+single_use_nonce` üzerinden — bu yedi alandan biri değişirse imza geçersiz. `confirmation_node`
+artık kullanıcı onayından SONRA, "tools"a geçmeden TAM ÖNCE, imzayı + **CANLI** tool_call
+argümanlarının digest'ini yeniden doğruluyor (TOCTOU kapanıyor — onay gösterildikten sonra bir
+repair argümanı değiştirmişse eski onay artık geçersiz) ve expiry (`Settings.approval_ttl_sec`,
+varsayılan 300s) kontrol ediyor.
+
+**Idempotency journal** (`jarvis/execution/idempotency.py`, SQLite, `kill_switch.py`/
+`audit_log.py`'nin "path'i her çağrıda taze çöz" deseni — bağlı bir bağlantı cache'lemek tam da
+isolate-test-data-paths hata sınıfını tekrar eder). Faz 2 kabulünün kendi cümlesi: **"approve →
+retry → journal reddi."** `execution_id` her tek çağrıda TAZE basılıyor (tool_call_id + rastgele
+suffix) — asla tool_call_id'den ya da args'tan türetilmiyor, bu yüzden iki BAĞIMSIZ istek asla
+çakışamaz (yapı itibariyle); journal'a bir isabet ancal AYNI zaten-basılmış isteğin gerçek bir
+replay'i anlamına gelir. `tool_result_accounting` bir çağrı GERÇEKTEN başarılı olduğunda commit
+ediyor (bunu bilen tek node); `confirmation_node` onaydan hemen önce `is_committed()` kontrol
+ediyor. Kapsam dışı bırakılan (dürüstçe belgeli): iki FARKLI isteğin (örn. modelin başka bir turda
+"aynı" maili tekrar göndermesi) semantik-duplikasyon tespiti — `ToolSpec.idempotency` bunun
+Faz 1'den kalan hedefi ("none" — hiçbir tool henüz sınıflandırılmadı); sıfır tool sınıflandırılmışken
+bu kontrolü şimdi inşa etmek egzersiz edecek hiçbir şeyi olmayan kod olurdu.
+
+**Geriye dönük uyumluluk, kanıtlanmış değil varsayılmış değil:** `confirmation_node`'un yeni
+kontrolleri `state["execution_requests"]` yoksa (eski checkpoint, ya da bu paketten ÖNCEKİ HER
+test'in yaptığı gibi node'u doğrudan çağıran bir unit test) tamamen no-op — mevcut 84 confirmation/
+tool-accounting/shadow-replay testi hiç değiştirilmeden yeşil kaldı.
+
+**50 yeni test** (`test_execution_request.py`, `test_execution_approval.py`,
+`test_execution_idempotency.py`, `test_prepare_execution_node.py`) — imza tamper/expiry/nonce
+matrisi, TOCTOU repair senaryosu, replay reddi, ve gerçek derlenmiş graph üzerinden bir
+interrupt→`Command(resume="approve")` round-trip'i (bu repodaki HİÇBİR önceki test bunu gerçek
+graph'a karşı yapmıyordu — hepsi `langgraph.types.interrupt`'ı mock'luyordu). **609 pytest yeşil
+(559+50), ruff temiz.**
+
+Sıradaki: Faz 3 (executor timeout semantiği + postcondition verification runner).
+
+---
+
 ## [Ölçüm düzeneği sertleştirme + Faz 1 kabulü] — 2026-07-21
 
 Faz 1'in kabul koşusu, **ölçüm düzeneğinin kendisinin bozuk olduğunu** ortaya çıkardı. Bu girdi
