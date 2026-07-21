@@ -39,6 +39,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from jarvis.execution.postcondition import PostconditionSpec
+from jarvis.execution import args_schemas  # Agent Runtime rev.2, Faz 6
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,7 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         "plot_data", "compute", 2, False, "local_write",
         timeout_seconds=60, supports_background=True,
         description="Generate a matplotlib/seaborn PNG and save to workspace",
+        args_schema=args_schemas.PlotDataArgs,
     ),
     ToolSpec(
         "report_write", "filesystem", 2, False, "local_write",
@@ -253,6 +255,7 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         "geo_math", "sub_agent", 2, False, "local_write",
         timeout_seconds=180, supports_background=True,
         description="GeoMathAgent: SymPy + Devito FDM + Plotly/PyVista visualisation",
+        args_schema=args_schemas.GeoMathArgs,
     ),
 
     # ── External APIs — reversible (L2) ──────────────────────────────────────────
@@ -260,31 +263,37 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         "spotify", "external_api", 2, False, "external_write",
         timeout_seconds=15,
         description="Play/pause/resume/next/previous/current via Spotify Web API",
+        args_schema=args_schemas.SpotifyArgs,
     ),
     ToolSpec(
         "hud_panels", "ui", 2, False, "none",
         timeout_seconds=5,
         description="Show/hide/toggle panels in the Electron HUD",
+        args_schema=args_schemas.HudPanelsArgs,
     ),
     ToolSpec(
         "schedule", "compute", 2, False, "local_write",
         timeout_seconds=10,
         description="Scheduled tasks and reminders stored in SQLite",
+        args_schema=args_schemas.ScheduleArgs,
     ),
     ToolSpec(
         "todo", "compute", 2, False, "local_write",
         timeout_seconds=30,
         description="To-do list with LLM priority analysis, stored in SQLite",
+        args_schema=args_schemas.TodoArgs,
     ),
     ToolSpec(
         "finance", "external_api", 2, False, "external_read",
         timeout_seconds=60, supports_background=True,
         description="Burgan Bank finance sync (Gmail read-only), summary, budget tracking",
+        args_schema=args_schemas.FinanceArgs,
     ),
     ToolSpec(
         "gcp_quota", "network", 1, False, "external_read",
         timeout_seconds=30,
         description="GCP Vertex AI quota status and usage tracking",
+        args_schema=args_schemas.GcpQuotaArgs,
     ),
 
     # ── External APIs — side-effect (L3) ─────────────────────────────────────────
@@ -292,21 +301,25 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         "google_calendar", "external_api", 3, True, "external_write",
         timeout_seconds=30,
         description="Google Calendar: list/search (L1 actions) + create/update/delete (L3 actions)",
+        args_schema=args_schemas.GoogleCalendarArgs,
     ),
     ToolSpec(
         "gmail", "external_api", 3, True, "external_write",
         timeout_seconds=30,
         description="Gmail: list/read/search (L1 actions) + send/reply/trash/mark_read (L3 actions)",
+        args_schema=args_schemas.GmailArgs,
     ),
     ToolSpec(
         "google_drive", "external_api", 3, True, "external_write",
         timeout_seconds=60, supports_background=True,
         description="Google Drive: search/read/download (L1 actions) + upload/share/delete (L3 actions)",
+        args_schema=args_schemas.GoogleDriveArgs,
     ),
     ToolSpec(
         "itu_mail", "external_api", 3, True, "external_write",
         timeout_seconds=30,
         description="ITU webmail IMAP/SMTP: list/read/search (L1 actions) + send/reply/trash (L3 actions)",
+        args_schema=args_schemas.ItuMailArgs,
     ),
 
     # ── Faz 2: cognitive memory ────────────────────────────────────────────────

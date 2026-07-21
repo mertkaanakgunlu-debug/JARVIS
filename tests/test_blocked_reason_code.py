@@ -8,7 +8,11 @@ user-facing text around the prefix stays presentation.
 """
 from __future__ import annotations
 
-from jarvis.graph.tool_accounting import content_is_failure, parse_blocked_code
+from jarvis.graph.tool_accounting import (
+    content_is_failure,
+    parse_blocked_code,
+    parse_invalid_args_field,
+)
 from scripts import eval_oracle as O
 
 
@@ -58,3 +62,27 @@ def test_oracle_prefix_fallback_still_works_for_legacy_rows():
     exp = O.Expected("C9", expected_tool="url_read", outcome=O.BLOCKED)
     row = {"tool": "url_read", "ok": False, "content_head": "[BLOCKED] Refusing"}
     assert O.score(exp, O.Observed("C9", response="engellendi", trace=[row])).passed
+
+
+# ── Agent Runtime rev.2, Faz 6: [INVALID_ARGS:<field>] -- same shape, no
+# producer yet (jarvis.execution.args_schemas defines schemas but nothing
+# wires them into the execution path this phase; see that module's
+# docstring). Parser built ahead of the producer, same precedent as Faz 1's
+# postcondition types predating Faz 3's runner. ───────────────────────────
+
+def test_parse_invalid_args_extracts_field_name():
+    assert parse_invalid_args_field("[INVALID_ARGS:path] provide either path or data_json") == "path"
+
+
+def test_parse_invalid_args_tolerates_leading_whitespace():
+    assert parse_invalid_args_field("  [INVALID_ARGS:kind] not supported") == "kind"
+
+
+def test_parse_invalid_args_returns_none_for_unrelated_content():
+    assert parse_invalid_args_field("[BLOCKED:ssrf_private_address] Refusing") is None
+    assert parse_invalid_args_field("normal successful output") is None
+    assert parse_invalid_args_field(None) is None
+
+
+def test_invalid_args_prefix_counts_as_failure():
+    assert content_is_failure("[INVALID_ARGS:path] provide either path or data_json") is True

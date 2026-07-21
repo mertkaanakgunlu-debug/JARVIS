@@ -6,6 +6,42 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 6, Part 1] — 2026-07-22
+
+**Typed schemas — definitions only, deliberately not wired anywhere yet.** New
+`jarvis/execution/args_schemas.py`: 12 pydantic models (shared `extra="forbid"` base, closing the
+plan's separate "unknown-field rejection" bullet for free) for the plan's own named priorities —
+`PlotDataArgs` (path XOR data_json cross-field validator, `kind: Literal[...]`) plus 11
+action-dispatch tools (`spotify`, `google_calendar`, `gmail`, `hud_panels`, `schedule`, `todo`,
+`google_drive`, `itu_mail`, `finance`, `gcp_quota`, `geo_math`), each with an `action:
+Literal[...]` extracted from that tool's **full dispatch chain**, not just its docstring. Two
+real, undocumented discoveries while doing that: `geo_math` accepts
+`analyze`/`reason`/`derive`/`explain` in a branch entirely separate from its own documented
+"Actions:" list, and `spotify_control` accepts `prev`/`back` as undocumented aliases for
+`previous`. Both captured correctly.
+
+Wired onto `TOOL_SPECS` (`tool_registry.py`) via `args_schema=` on each tool's original
+`ToolSpec(...)` call — verified to survive the three later `dataclasses.replace()` passes
+(domain, contract_status, timeout_class) that rebuild `TOOL_SPECS` after the base list. New
+`parse_invalid_args_field()` (`tool_accounting.py`, same shape as `parse_blocked_code`) plus
+`"[INVALID_ARGS"` added to `_FAILURE_PREFIXES` — no producer yet.
+
+**Deliberate scope cut:** no `@tool` function signature in `jarvis/graph/tools.py` was touched —
+the model still sees `action: str`, free text — and nothing validates against these schemas yet
+(`prepare_execution_node`'s own docstring has said "that's Faz 6" since Faz 2). Given how many
+non-obvious aliases turned up in just 2 of 12 tools, promoting an unverified-enough Literal onto
+a *live*, model-facing tool-calling schema was judged too risky to rush in the same pass as
+defining the schemas. Promoting verified Literals onto the real `@tool` signatures, wiring actual
+validation into `prepare_execution_node`, and designing the bounded-repair pipeline itself (the
+plan names the vocabulary — normalize/validate/one repair/alternative capability/explicit error —
+without specifying what "repair" concretely means across 30+ different tool arg shapes) are Part
+2, not started.
+
+**49 new tests** (`test_args_schemas.py`, `test_tool_registry_schemas.py`,
+`test_blocked_reason_code.py` +4). **841 pytest green (792+49), ruff clean.**
+
+---
+
 ## [Agent Runtime rev.2 — Faz 5] — 2026-07-22
 
 **Isolation & reproducibility.** Seven changes, all from the plan's own Faz 5 bullet list.

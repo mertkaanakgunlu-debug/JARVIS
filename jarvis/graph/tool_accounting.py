@@ -44,7 +44,10 @@ from jarvis.tool_registry import get_spec
 # their success branches use other glyphs (🗑 ⏸ ▶ ✏ ✓), so treating "⚠" as a
 # failure is correct for both the ledger and the audit callback that share
 # this tuple (the two used to diverge — see agent._record_execution_end).
-_FAILURE_PREFIXES = ("[TOOL_ERROR]", "[ERROR]", "[BLOCKED", "[DENIED", "[DUPLICATE", "⚠")
+# "[INVALID_ARGS" (Agent Runtime rev.2, Faz 6) has no producer yet -- added
+# now so the day one exists, this tuple doesn't need a synchronized second
+# change.
+_FAILURE_PREFIXES = ("[TOOL_ERROR]", "[ERROR]", "[BLOCKED", "[DENIED", "[DUPLICATE", "[INVALID_ARGS", "⚠")
 
 _CONTENT_HEAD_CHARS = 120
 
@@ -91,6 +94,24 @@ def parse_blocked_code(content: Any) -> str | None:
     """
     s = content if isinstance(content, str) else str(content)
     m = _BLOCKED_CODE_RE.match(s)
+    return m.group(1) if m else None
+
+
+_INVALID_ARGS_RE = re.compile(r"^\s*\[INVALID_ARGS:([a-zA-Z0-9_]+)\]")
+
+
+def parse_invalid_args_field(content: Any) -> str | None:
+    """Agent Runtime rev.2, Faz 6: machine-readable field name from an
+    '[INVALID_ARGS:<field>] ...' result -- same shape as parse_blocked_code
+    above. Nothing produces this prefix yet: schema validation is defined
+    in jarvis.execution.args_schemas (plot_data + the action-dispatch
+    tools) but not wired into the execution path this phase -- see that
+    module's own docstring for why. This parser exists so the vocabulary is
+    ready the moment something does, the same "define the shape before the
+    producer" precedent as Faz 1's postcondition types.
+    """
+    s = content if isinstance(content, str) else str(content)
+    m = _INVALID_ARGS_RE.match(s)
     return m.group(1) if m else None
 
 
