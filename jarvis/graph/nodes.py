@@ -225,10 +225,38 @@ def make_compose_node(settings=None):
     consumed here as a node-local SystemMessage appended to THIS invocation
     only — it is never returned into graph state, so no fake user/system
     turns leak into the transcript (external review, item 9).
+
+    Agent Runtime rev.2, Faz 4 — verified response composition. Reads
+    state["execution_envelopes"] (Faz 1, absent/empty whenever
+    execution_contract_mode="off" — its own rollback contract) into a
+    jarvis.execution.summary.VerifiedExecutionSummary. In any enforce_* mode:
+    raw ToolMessages are dropped from the LLM invocation in favor of a
+    deterministic, code-authored status block (the model can no longer
+    independently narrate whether a call succeeded), and — independent of
+    what the model actually said — the same facts are unconditionally
+    appended to the outgoing response whenever any operation did not cleanly
+    succeed. That unconditional append, not claim-text detection, is what
+    backs the phase's acceptance test ("an unverified operation claim does
+    not reach the user"); audit_claims() is logged alongside it as a
+    secondary, observation-only signal (see jarvis/execution/summary.py).
+    In "shadow" mode (and "off", trivially — summary is always None there)
+    neither the invocation nor the response is touched, only audit_claims is
+    computed and logged — this is the plan's "annotate, then enforce" step,
+    and it is what keeps this phase's off/shadow behavior covered by
+    test_shadow_replay_equivalence.py's bit-identical contract.
     """
     from jarvis.providers import get_llm
+    from langchain_core.messages import ToolMessage
+    from jarvis import audit_log
+    from jarvis.execution.summary import (
+        audit_claims,
+        build_verified_summary,
+        render_operation_status_for_model,
+        render_operation_status_for_user,
+    )
 
     timeout_sec = getattr(settings, "agent_llm_timeout_sec", 90.0) if settings is not None else 90.0
+    mode = getattr(settings, "execution_contract_mode", "off") if settings is not None else "off"
     _bare_cache: dict[str, object] = {}
 
     def _bare(role: str):
@@ -269,6 +297,21 @@ def make_compose_node(settings=None):
                 "Revise your previous draft using this critique; reply with the "
                 f"improved answer only, never mention the critique: {critique}"
             )))
+
+        # Agent Runtime rev.2, Faz 4 (see docstring above). envelopes_raw is
+        # only ever non-empty when execution_contract_mode != "off" (Faz 1's
+        # own gate in tool_result_accounting) -- the explicit mode check here
+        # (rather than relying on that upstream contract alone) guarantees
+        # "off" stays a true no-op, no new code path at all, even against a
+        # state dict built by hand (a direct-node unit test, an old
+        # checkpoint) that happens to carry envelopes anyway.
+        envelopes_raw = state.get("execution_envelopes") or []
+        summary = build_verified_summary(envelopes_raw) if (envelopes_raw and mode != "off") else None
+        enforce = mode.startswith("enforce_")
+        if summary is not None and enforce:
+            invocation = [m for m in invocation if not isinstance(m, ToolMessage)]
+            invocation.append(SystemMessage(content=render_operation_status_for_model(summary)))
+
         try:
             response = await asyncio.wait_for(llm.ainvoke(invocation), timeout=timeout_sec)
         except asyncio.TimeoutError:
@@ -279,6 +322,15 @@ def make_compose_node(settings=None):
                 )
             )
         text = response.content if isinstance(response.content, str) else str(response.content)
+
+        if summary is not None and mode != "off":
+            violations = audit_claims(text, summary)
+            if violations:
+                audit_log.record("claim_audit", mode=mode, enforced=enforce, reasons=violations)
+            if enforce and summary.any_failed:
+                text = f"{text}\n\n{render_operation_status_for_user(summary)}"
+                response = AIMessage(content=text)
+
         return {"messages": [response], "response": text}
 
     compose_node.__name__ = "compose_node"

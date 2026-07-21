@@ -6,6 +6,41 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 4] — 2026-07-22
+
+**Verified response composition + claim audit** (reviewer #4's own words: "the architecture's
+strongest fix"). `compose_node` (`jarvis/graph/nodes.py`) used to hand raw `ToolMessage` content
+to the composer LLM and trust it to correctly describe what happened — Faz 1.4's existing guard
+only caught the *all-failed* case; a **partial** success (2 tools, 1 succeeded, the model claims
+both did) sailed through uncaught.
+
+New `jarvis/execution/summary.py`: `VerifiedExecutionSummary`/`VerifiedOperation` collapse each
+`ExecutionEnvelope` into a single `display_status` by combining the tool's own self-reported
+`status` with an *independent* postcondition verdict (`severity="required"` only — a `warning`
+never downgrades a success). Five values: `confirmed`, `reported_success_unverified` (no
+independent check available — most of the 36 tools today), **`reported_success_verification_
+failed`** (the actual B6 shape — the tool says ok, independent verification disagrees), `failed`,
+`partial`. `any_failed` is the mechanism's trigger.
+
+`compose_node` reuses Faz 1's existing `execution_contract_mode` ladder (no new setting): `off`
+(default) is a byte-identical no-op — `summary` is never even built; `shadow` computes and logs
+a secondary, deliberately conservative TR/EN `audit_claims()` pattern check via `audit_log`
+without touching the invocation or response (preserves `test_shadow_replay_equivalence.py`'s
+bit-identical off/shadow contract); any `enforce_*` strips raw `ToolMessage`s from the LLM
+invocation in favor of a deterministic, code-authored status block (`render_operation_status_
+for_model`) and, independent of what the model actually said, **unconditionally appends** the
+same facts (`render_operation_status_for_user`) to the outgoing response whenever `any_failed` is
+true — this structural, envelope-driven append, not the regex claim detector, is what actually
+satisfies the phase's acceptance test ("an unverified operation claim does not reach the user").
+
+31 new tests (`test_execution_summary.py`, `test_verified_response_composition.py`) — including a
+direct proof that the unconditional append fires even when the secondary text-pattern audit stays
+silent. **704 pytest green (673+31), ruff clean.** Live shadow-traffic measurement (the plan's own
+"annotate before enforce" gate) has not been run — `execution_contract_mode` stays `"off"` by
+default, so this phase is fully inert in production today.
+
+---
+
 ## [Agent Runtime rev.2 — Faz 3] — 2026-07-21
 
 **Timeout semantics.** `ToolSpec.timeout_seconds` was declared since Faz 1 (Phase 2, really) and

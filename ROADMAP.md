@@ -49,7 +49,9 @@ with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
 Status: Faz 0-3 are done, committed, and pushed as of 2026-07-21 (commit `f4b7609`) — alpha
 capability allowlist, shadow ledger + redaction, `prepare_execution` + HMAC approval binding +
 idempotency journal, and real per-tool timeout enforcement + a postcondition verification
-runner. 673 pytest green, ruff clean. Faz 4 (verified response composition + claim audit) is
+runner. Faz 4 (verified response composition + claim audit) is built and tested as of
+2026-07-22 but **not yet committed** — same "owner approval pending" state Faz 2/3 sat in before
+`f4b7609`. 704 pytest green (673+31 new), ruff clean. Faz 5 (isolation & reproducibility) is
 next. See [MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and
 [HANDOFF.md](HANDOFF.md) for the current detail.
 
