@@ -46,13 +46,14 @@ claims, run-to-run variance) — an execution-contract runtime so JARVIS uses *a
 reliably, not new domain tools. Full plan (9 phases, **also numbered Faz 0-8 — do not confuse
 with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
 `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
-Status: Faz 0-5 are done and committed as of 2026-07-22 (Faz 0-3 pushed as `f4b7609`; Faz 4 —
-verified response composition — committed locally as `9c0ca15`; Faz 5 — isolation &
-reproducibility — committed locally as `5eae027`; neither pushed). Faz 6 ("typed schemas +
-bounded repair") Part 1 — real pydantic `args_schema` for the plan's 12 named-priority tools
+Status: Faz 0-6(Part 1) are done and committed as of 2026-07-22 (Faz 0-3 pushed as `f4b7609`;
+Faz 4 — verified response composition — committed locally as `9c0ca15`; Faz 5 — isolation &
+reproducibility — committed locally as `5eae027`; Faz 6 Part 1 — typed schema definitions —
+committed locally as `cb2b1a2`; none of the three pushed yet). Faz 6 ("typed schemas + bounded
+repair") Part 1 — real pydantic `args_schema` for the plan's 12 named-priority tools
 (`plot_data` + 11 action-dispatch tools), wired onto `TOOL_SPECS`, plus an
-`[INVALID_ARGS:<field>]` reason-code parser — is built and tested as of 2026-07-22 but **not yet
-committed**. **Deliberately not done in Part 1** (see [HANDOFF.md](HANDOFF.md) for why): no live
+`[INVALID_ARGS:<field>]` reason-code parser. **Deliberately not done in Part 1** (see
+[HANDOFF.md](HANDOFF.md) for why, Part 2 is next): no live
 `@tool` function signature was changed and nothing validates against these schemas yet — that
 wiring, plus the bounded-repair pipeline itself (still needs a concrete design, not just the
 plan's vocabulary), is Part 2. 841 pytest green (792+49 new), ruff clean. See

@@ -3,14 +3,14 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-22 (9. oturum, devamı) — FAZ 5 COMMIT'LENDİ, FAZ 6 KISIM 1 (TYPED SCHEMAS — TANIM, HENÜZ BAĞLANMADI) KODLANDI VE TEST EDİLDİ
+## Last session: 2026-07-22 (9. oturum, devamı) — FAZ 4/5/6-KISIM1 HEPSİ COMMIT'LENDİ (PUSH'LANMADI)
 
-**Durum tek cümlede:** Faz 5 owner isteğiyle commit'lendi (`5eae027`, push'lanmadı), ardından
-Faz 6'nın ("typed schemas + bounded repair") plan'ın kendi önceliklendirdiği kısmı — 12 tool için
-gerçek `args_schema` tanımı + `[INVALID_ARGS:<field>]` parser — kodlandı ve test edildi (**841
-pytest yeşil**, ruff temiz). **Bilinçli ve açık kapsam kararı: bu şemalar henüz HİÇBİR YERE
-BAĞLANMADI** — ne modelin gördüğü canlı `@tool` şemalarına, ne `prepare_execution_node`'un
-validation adımına. Sebebi aşağıda detaylı. **Henüz commit'lenmedi.**
+**Durum tek cümlede:** Bu oturumda Faz 4, Faz 5, ve Faz 6 Kısım 1 sırayla kodlandı, test edildi ve
+owner'ın her birinde ayrı ayrı verdiği açık "commit et" isteğiyle üç ayrı commit'te
+landed: `9c0ca15` (Faz 4), `5eae027` (Faz 5), `cb2b1a2` (Faz 6 Kısım 1 — yalnız `args_schema`
+TANIMLARI, henüz hiçbir yere bağlanmadı). **`langgraph-migration` `origin`'in 3 commit önünde,
+hiçbiri push'lanmadı** — yalnız commit istendi, push istenmedi. 841 pytest yeşil, ruff temiz.
+Faz 6 Kısım 1'in neden "tanımlandı ama bağlanmadı" olduğu aşağıda detaylı.
 
 ## Bu oturumda yapılanlar
 
@@ -66,8 +66,7 @@ Faz 1'in kendi sözü ("None = not yet typed (every tool today)") kademeli bir t
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Owner'ın Faz 6 Kısım 1 commit kararı bekliyor.**
-2. **Faz 6, Kısım 2 (asıl bağlama işi) — henüz YAPILMADI:**
+1. **Faz 6, Kısım 2 (asıl bağlama işi) — henüz YAPILMADI, sıradaki iş bu:**
    - Doğrulanmış `action: Literal[...]` kümelerini (artık dispatch zincirinden gerçek olarak
      doğrulanmış) `jarvis/graph/tools.py`'deki GERÇEK `@tool` fonksiyon imzalarına terfi ettirmek
      — bu, modelin gördüğü şemayı gerçekten sıkılaştırır (bugün yalnız iç `args_schema` bunu yapıyor,
@@ -82,13 +81,15 @@ Faz 1'in kendi sözü ("None = not yet typed (every tool today)") kademeli bir t
      `confirmation_node`'un mevcut `_reject_batch` deseniyle aynı şekil, YENİ bir "tek repair
      sayacı" icat etmeden. Owner'la bu yorumun doğru olup olmadığı teyit edilmeli.
    - `[INVALID_ARGS:<field>]`'ın gerçek bir üreticisi yok — yalnız parser hazır.
-3. Diğer Faz 5 kalan işleri (değişmedi): API'nin gerçek per-client conversation_id desteği yok;
+2. Diğer Faz 5 kalan işleri (değişmedi): API'nin gerçek per-client conversation_id desteği yok;
    `run_manifest.json`'ın prompt hash/registry version alanları boş; `plot_data` dışındaki artifact
    tool'ları run-scoped değil.
-4. Canlı A/B'nin B6 sorusu hâlâ açık (değişmedi). `gh` CLI yetkilendirmesi — owner aksiyonu
+3. Canlı A/B'nin B6 sorusu hâlâ açık (değişmedi). `gh` CLI yetkilendirmesi — owner aksiyonu
    bekliyor (değişmedi). Şampiyon 62/65 referansı kontamine (değişmedi).
-5. Bilinçli ertelenenler (değişmedi): W4b, `[BLOCKED]` sunum katmanı, qwen3.5/ministral-3
+4. Bilinçli ertelenenler (değişmedi): W4b, `[BLOCKED]` sunum katmanı, qwen3.5/ministral-3
    thinking-on, `stoic-spence` rolling summarization, `docs/ARCHITECTURE.md` orchestrator bölümü.
+5. **Push henüz yapılmadı** — `langgraph-migration` `origin`'in 3 commit önünde
+   (`9c0ca15`/`5eae027`/`cb2b1a2`). Owner isterse push'lanabilir.
 
 ## Ortam / komutlar
 ```powershell
