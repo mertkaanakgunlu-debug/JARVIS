@@ -73,11 +73,23 @@ _ALLOW_PARTIAL = False              # set by --allow-partial-debug
 
 
 def preflight() -> None:
-    """Verify the server is actually reachable at BASE before scoring anything.
+    """Verify we are talking to THE server the harness started, before scoring.
 
-    Cheap and decisive: the -Port incident produced 5 runs x 13 scenarios of
-    garbage in ~6 minutes; this check would have stopped it in two seconds with
-    the target URL printed.
+    Two checks, in order of strength:
+
+    1. Liveness -- something answers /status. Catches the -Port class outright
+       (5 runs x 13 scenarios of garbage in ~6 minutes; stopped in two seconds
+       with the target URL printed).
+    2. Identity -- the server echoes back the run nonce this harness minted.
+       Liveness alone is NOT enough: on 2026-07-20 a driver reached a
+       DIFFERENT, still-running JARVIS and scored 13 scenarios against it. That
+       server was perfectly alive. Only a value we generated can tell "the
+       right server" from "a server".
+
+    The identity check is skipped when JARVIS_TEST_RUN_ID is unset, so a manual
+    `python manual_test_driver.py B6` against a hand-started server still works
+    -- but ab_run_config.ps1 always sets it, so every orchestrated run is
+    checked.
     """
     try:
         get_json("/status", timeout=10)
@@ -93,7 +105,43 @@ def preflight() -> None:
         print("         result, it is a silent total loss.")
         print("=" * 72)
         sys.exit(EXIT_PREFLIGHT_FAILED)
-    print(f"[driver] preflight ok — {BASE}")
+
+    expected_run_id = os.environ.get("JARVIS_TEST_RUN_ID", "")
+    if not expected_run_id:
+        print(f"[driver] preflight ok — {BASE} (identity check SKIPPED: no "
+              f"JARVIS_TEST_RUN_ID; fine for a manual run, not for a benchmark)")
+        return
+
+    try:
+        ident = get_json("/internal/test-identity", timeout=10)
+    except Exception as e:  # noqa: BLE001
+        print("=" * 72)
+        print("[driver] IDENTITY CHECK FAILED — /internal/test-identity did not answer.")
+        print(f"         target : {BASE}")
+        print(f"         error  : {e!r}")
+        print("         Something is listening, but it is not a --profile test")
+        print("         JARVIS (the route only exists under JARVIS_TEST_MODE=1).")
+        print("         Most likely: an older server from a previous run is holding")
+        print("         this port. Scoring against it would produce a plausible,")
+        print("         entirely meaningless result -- exactly the 2026-07-20 incident.")
+        print("=" * 72)
+        sys.exit(EXIT_PREFLIGHT_FAILED)
+
+    got = str(ident.get("run_id", ""))
+    if got != expected_run_id:
+        print("=" * 72)
+        print("[driver] IDENTITY MISMATCH — wrong JARVIS instance on this port.")
+        print(f"         target   : {BASE}")
+        print(f"         expected : {expected_run_id}")
+        print(f"         answered : {got or '(empty)'}")
+        print(f"         its mode : {ident.get('mode')}  git: {ident.get('git_sha')}")
+        print("         This is a different server than the one this run started.")
+        print("=" * 72)
+        sys.exit(EXIT_PREFLIGHT_FAILED)
+
+    print(f"[driver] preflight ok — {BASE} "
+          f"[run_id={got[:8]}… mode={ident.get('mode')} "
+          f"cfg={ident.get('config_fingerprint')} git={ident.get('git_sha')}]")
 
 
 def load_trace() -> list[dict]:

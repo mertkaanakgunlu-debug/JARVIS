@@ -38,13 +38,16 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _run_driver(base_url: str, tmp_path: Path, scenario: str = "A1") -> subprocess.CompletedProcess:
+def _run_driver(base_url: str, tmp_path: Path, scenario: str = "A1",
+                run_id: str | None = None) -> subprocess.CompletedProcess:
     env = {
         **_clean_env(),
         "JARVIS_TEST_BASE_URL": base_url,
         "JARVIS_TEST_HOME": str(tmp_path / "home"),
         "JARVIS_TEST_RESULTS": str(tmp_path / "results.jsonl"),
     }
+    if run_id is not None:
+        env["JARVIS_TEST_RUN_ID"] = run_id
     return subprocess.run(
         [sys.executable, str(DRIVER), scenario],
         capture_output=True, text=True, timeout=120, env=env, cwd=str(REPO / "scripts"),
@@ -59,20 +62,41 @@ def _clean_env() -> dict:
 
 
 class _StubHandler(BaseHTTPRequestHandler):
-    """Answers /status so preflight passes; records every path it is asked for."""
-    paths: list = []
+    """Answers /status so preflight passes; records every path it is asked for.
 
-    def do_GET(self):  # noqa: N802
-        type(self).paths.append(("GET", self.path))
-        body = json.dumps({"model": "stub", "session_id": "stub"}).encode()
-        self.send_response(200)
+    `identity` is what it returns from /internal/test-identity: None means the
+    route 404s (an old or non-test server), a dict means it answers with that
+    payload (used to simulate the WRONG instance holding the port).
+    """
+    paths: list = []
+    identity: dict | None = None
+
+    def _json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):  # noqa: N802
+        type(self).paths.append(("GET", self.path))
+        if self.path.startswith("/internal/test-identity"):
+            if type(self).identity is None:
+                self._json(404, {"detail": "Not Found"})
+            else:
+                self._json(200, type(self).identity)
+            return
+        self._json(200, {"model": "stub", "session_id": "stub"})
+
     def log_message(self, *a):  # silence
         pass
+
+
+def _serve(port: int):
+    srv = HTTPServer(("127.0.0.1", port), _StubHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
 
 
 # ── the actual -Port regression ──────────────────────────────────────────────
@@ -235,6 +259,124 @@ def test_ps_wrapper_propagates_driver_failure_exit_code(tmp_path):
     assert data["driver_base_url"] == f"http://127.0.0.1:{port}", (
         "manifest must record the URL the driver was actually pointed at"
     )
+
+
+# ── instance identity: "a server" is not "THE server" ────────────────────────
+
+def test_identity_mismatch_is_refused(tmp_path):
+    """The 2026-07-20 incident, reproduced and now caught.
+
+    A perfectly alive JARVIS answers on the port -- just not the one this run
+    started. Liveness cannot tell the difference; the nonce can.
+    """
+    port = _free_port()
+    _StubHandler.paths = []
+    _StubHandler.identity = {"run_id": "some-other-run", "mode": "off",
+                             "config_fingerprint": "sha256:deadbeef", "git_sha": "0000000"}
+    srv = _serve(port)
+    try:
+        proc = _run_driver(f"http://127.0.0.1:{port}", tmp_path, run_id="the-run-we-started")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        _StubHandler.identity = None
+
+    assert proc.returncode == EXIT_PREFLIGHT_FAILED
+    assert "IDENTITY MISMATCH" in proc.stdout
+    assert "the-run-we-started" in proc.stdout and "some-other-run" in proc.stdout
+    assert "[A1]" not in proc.stdout, "nothing may be scored against the wrong instance"
+
+
+def test_missing_identity_route_is_refused(tmp_path):
+    """Something answers /status but has no test-identity route.
+
+    That is an old server, a production build, or something else entirely --
+    all of which would produce plausible, meaningless scores.
+    """
+    port = _free_port()
+    _StubHandler.paths = []
+    _StubHandler.identity = None  # route 404s
+    srv = _serve(port)
+    try:
+        proc = _run_driver(f"http://127.0.0.1:{port}", tmp_path, run_id="expected-run")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert proc.returncode == EXIT_PREFLIGHT_FAILED
+    assert "IDENTITY CHECK FAILED" in proc.stdout
+
+
+def test_identity_check_is_skipped_without_a_nonce(tmp_path):
+    """A hand-started manual run must still work -- but say the check was skipped."""
+    port = _free_port()
+    _StubHandler.paths = []
+    _StubHandler.identity = None
+    srv = _serve(port)
+    try:
+        proc = _run_driver(f"http://127.0.0.1:{port}", tmp_path)  # no run_id
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert "identity check SKIPPED" in proc.stdout
+    assert proc.returncode == EXIT_NO_SUCCESSFUL_CHAT  # got past preflight
+
+
+def test_identity_endpoint_leaks_no_filesystem_paths():
+    """A diagnostic surface must not become a reconnaissance one.
+
+    test_home is deliberately absent: the driver already knows its own, and a
+    path is exactly the sort of thing that should not be readable off an
+    endpoint.
+    """
+    from jarvis.api_routers import test_identity as ti
+    src = ti.__file__
+    import inspect
+    body = inspect.getsource(ti.test_identity)
+    for leak in ("test_home", "JARVIS_HOME", "home_dir"):
+        assert leak not in body, f"{leak} must not be exposed by /internal/test-identity ({src})"
+
+
+def test_identity_route_is_gated_on_test_mode():
+    """The route must not exist in a normal run."""
+    api_src = (REPO / "jarvis" / "api.py").read_text(encoding="utf-8", errors="replace")
+    assert 'os.environ.get("JARVIS_TEST_MODE") == "1"' in api_src, (
+        "the test-identity router must be mounted behind JARVIS_TEST_MODE"
+    )
+    main_src = (REPO / "jarvis" / "__main__.py").read_text(encoding="utf-8", errors="replace")
+    assert 'os.environ["JARVIS_TEST_MODE"] = "1"' in main_src
+    # ...and only from inside the --profile test pre-scan branch, never at top level.
+    assert main_src.index('os.environ["JARVIS_TEST_MODE"] = "1"') > main_src.index("if _prescan_test_profile():")
+
+
+def test_config_fingerprint_distinguishes_contract_mode():
+    """"Right port, right process, wrong configuration" must be detectable.
+
+    Scoring a shadow-mode run against an off-mode server is the subtlest form
+    of the wrong-instance bug -- the fingerprint is what makes it visible.
+    """
+    from types import SimpleNamespace
+    from jarvis.api_routers import test_identity as ti
+
+    base = dict(local_model="qwen3:8b", local_reasoning_effort="none",
+                cloud_policy="off", external_writes_enabled=False,
+                confirmation_gate_enabled=True)
+    ti._settings = SimpleNamespace(execution_contract_mode="off", **base)
+    off_fp = ti._config_fingerprint()
+    ti._settings = SimpleNamespace(execution_contract_mode="shadow", **base)
+    shadow_fp = ti._config_fingerprint()
+    ti._settings = None
+
+    assert off_fp != shadow_fp
+    assert off_fp.startswith("sha256:")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ab_run_config.ps1 is PowerShell/Windows")
+def test_ab_run_config_mints_a_per_run_nonce():
+    src = AB_SCRIPT.read_text(encoding="utf-8", errors="replace")
+    assert "$env:JARVIS_TEST_RUN_ID = $RunNonce" in src
+    assert "[guid]::NewGuid()" in src, "the nonce must be unguessable per run"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="ab_run_config.ps1 is PowerShell/Windows")

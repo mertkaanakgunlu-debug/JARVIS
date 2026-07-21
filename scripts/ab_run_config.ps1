@@ -62,6 +62,15 @@ $env:JARVIS_TEST_HOME = $Home_
 # unexplained isolated-run anomaly (see HANDOFF.md, 2026-07-20).
 $env:JARVIS_TEST_BASE_URL = "http://127.0.0.1:$Port"
 
+# Per-run identity nonce. Both children (server and driver) inherit it; the
+# driver refuses to score anything until the server echoes this exact value
+# back from /internal/test-identity. A liveness probe cannot distinguish "the
+# server I started" from "some other JARVIS still holding this port" -- and on
+# 2026-07-20 that difference silently cost a full config. A value only this run
+# knows can.
+$RunNonce = [guid]::NewGuid().ToString("N")
+$env:JARVIS_TEST_RUN_ID = $RunNonce
+
 # Run manifest: makes a results directory self-describing. Without it, a
 # results file records WHAT happened but nothing about the conditions -- which
 # commit, which mode, which port, which model. Reconstructing that after the
@@ -75,6 +84,7 @@ $modelVal = if ($Model -ne "") { $Model } else { "config.py default" }
 $effortVal = if ($Effort -eq "") { "(empty = thinking ON)" } else { $Effort }
 $manifest = [ordered]@{
     run_id                  = "$Config-$(Get-Date -Format yyyyMMdd-HHmmss)"
+    run_nonce               = $RunNonce
     config                  = $Config
     git_sha                 = $gitSha
     branch                  = $branch

@@ -46,6 +46,13 @@ if _prescan_test_profile():
     # Faz 2.2: record every tool call (L1 reads included) to data/tool_trace.jsonl
     # so the eval oracle can verify the right tool actually ran. Test-only.
     os.environ["JARVIS_TOOL_TRACE"] = "1"
+    # 2026-07-21: gates the test-only /internal/test-identity handshake
+    # (jarvis/api_routers/test_identity.py) so the A/B driver can prove it is
+    # talking to THE server the harness started, not merely to A server. Set
+    # here rather than read from --profile downstream so the route's existence
+    # is decided by the same single pre-scan that decides every other test-only
+    # isolation, and can never be switched on by a stray env var in a normal run.
+    os.environ["JARVIS_TEST_MODE"] = "1"
 else:
     # Load .env before any settings are read
     from dotenv import load_dotenv

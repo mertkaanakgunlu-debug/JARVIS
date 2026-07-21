@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -184,6 +185,9 @@ def _wire_routers(settings: Settings, agent: JarvisAgent) -> None:
     push_router.init_push(push_store, fcm)
     tasks_router.init_tasks(executor)
     system_router.init_system(settings)
+    if os.environ.get("JARVIS_TEST_MODE") == "1":
+        from jarvis.api_routers import test_identity as _ti
+        _ti.init_test_identity(settings)
 
     # Attach executor to agent for /chat async-heuristic
     agent._task_executor = executor
@@ -211,6 +215,14 @@ app.include_router(calendar_router.router, dependencies=[Depends(_check_auth)])
 app.include_router(vault_router.router,    dependencies=[Depends(_check_auth)])
 app.include_router(push_router.router,     dependencies=[Depends(_check_auth)])
 app.include_router(tasks_router.router,    dependencies=[Depends(_check_auth)])
+
+# Test-only instance handshake -- the route does not exist in a normal run.
+# JARVIS_TEST_MODE is set exclusively by __main__'s --profile test pre-scan, so
+# this is gated by the same decision as every other test-only isolation rather
+# than by a flag a production process could pick up by accident.
+if os.environ.get("JARVIS_TEST_MODE") == "1":
+    from jarvis.api_routers import test_identity as test_identity_router
+    app.include_router(test_identity_router.router)
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
