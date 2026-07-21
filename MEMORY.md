@@ -90,10 +90,20 @@
   separately hits the already-documented "prepayment credits depleted" 429 (below) on embedding
   calls too, not just chat — same known account-level state, not a new/different issue.
 - **GitHub remote configured 2026-07-15**: `origin` → `github.com/mertkaanakgunlu-debug/JARVIS`
-  (public). `main` is pushed and tracks `origin/main`; `langgraph-migration` is local-only (identical
-  commit to `main` as of the merge, not separately pushed — nothing is lost by that, all content is
-  on `main`). The 21 `claude/*` scratch worktree branches remain local-only, not pushed (deliberate
-  — they're slated for deletion, pending owner go-ahead, not for publishing).
+  (public). **Updated 2026-07-21:** both `main` and `langgraph-migration` are pushed and track their
+  origin counterparts. The earlier claim here that `langgraph-migration` was "local-only, identical
+  to `main`" is **no longer true** — active work has been committed and pushed on
+  `langgraph-migration` since, and `main` now trails it by 47 commits. `main` still has no commits
+  of its own (a catch-up would be a pure fast-forward), but "all content is on `main`" is false;
+  read `langgraph-migration` for current state. **4** `claude/*` scratch worktree branches remain
+  local-only and unpushed (down from 21 — 17 were verified fully-merged and deleted 2026-07-15;
+  see CLAUDE.md for the surviving four and why they weren't deleted).
+- **`gh` CLI authenticated 2026-07-21** as `mertkaanakgunlu-debug`, token in the OS keyring, scopes
+  `gist`/`read:org`/`repo`/`workflow`. Worth knowing because it is a *separate* credential store
+  from git's: git pushes via `credential.helper=manager` (Windows Credential Manager) and works
+  even when `gh` is logged out entirely. So "git push works" is NOT evidence that `gh` is
+  authenticated — Claude Code's PR-status feature reads `gh`, and reported a misleading
+  "authentication expired" when the real state was "never logged in" (no `hosts.yml` existed).
 - **Flutter SDK installed 2026-07-15** at `C:\flutter` via `git clone
   https://github.com/flutter/flutter.git -b stable --depth 1` (no official winget package exists —
   `winget search flutter` returns unrelated apps tagged "flutter", not the SDK itself), added to the
@@ -482,7 +492,8 @@ The north-star target came from an owner-commissioned research report
     (`policy_guard.evaluate()`) is already about to do far more expensive work (an LLM-gated tool
     call), and the whole point of checking live is that a kill-switch trip must be visible on the
     *next* call from a different, already-running process — that's the property caching broke.
-  - **New `tests/` suite is deliberately "minimal," not comprehensive** — 92 tests covering
+  - **New `tests/` suite is deliberately "minimal," not comprehensive** — 92 tests *at the time*
+    (559 today — this bullet describes what Faz 8 built, not current scope), covering
     `policy_guard`, `session_store` concurrency, the provider router (this is where the
     "offline-failover" claim now has a persisted test, not just a manual verification write-up),
     and one regression test per bug fixed this phase. Most tool modules (calendar/gmail/drive
@@ -575,21 +586,57 @@ applied. The approved plan (9 phases, 0-8) lives at
   documented as a Faz-1 destination, not a live signal; nothing measures shadow validation
   yet. `PolicyDecision.veto_kind` distinguishes this veto from the kill-switch one so
   confirmation_node's ack message names the real reason.
-- **The model-selection decision (`qwen3:8b` + `LOCAL_REASONING_EFFORT=none`) is provisional**,
-  per commit `a6a3426`'s own note: the 65/65 that decision rested on was tool-execution
-  compliance, not semantic correctness (the two-metric oracle that can tell them apart,
-  `b8463dc`, landed after that decision was made). A re-baseline under the two-metric oracle
-  hasn't run yet — deferred to the session that also runs Faz 0's baseline capture (same 5×13
-  A/B invocation closes both). Don't cite the qwen3:8b decision as settled until that re-run
-  happens; see [HANDOFF.md](HANDOFF.md) for the exact command.
-- **A second redaction gap found while reading the audit path** (not from GPT's review, found
-  independently re-reading `agent.py`): `tool_trace.record()` redacts sensitive arg keys via
-  `redact_tool_args()` (`agent.py:97-105`), but `audit_log.record()`'s `args_preview`/
-  `result_preview` (`agent.py:139,195`) and `tool_execution_ledger.content_head`
-  (`tool_accounting.py:156`, which reaches the LangGraph checkpointer's SQLite file) do not go
-  through any redaction. A `gmail send` body is masked in the trace and readable in the audit
-  log. Faz 1's planned redaction module is scoped to close this too, not just the envelope's
-  own new fields.
+- **Faz 1 shipped 2026-07-21** (commit `1a22d7f`): new `jarvis/execution/` package — `contract.py`
+  (`TaskContract`/`ExpectedOutcome`, shape only, no extractors yet), `postcondition.py`,
+  `envelope.py` (`ExecutionEnvelope` + `build_shadow_envelope()`), `redaction.py` (the shared layer,
+  see the redaction bullet below). `ToolSpec` gained 6 additive fields (`args_schema`,
+  `postconditions`, `idempotency`, `effect_scope`, `contract_status`, `timeout_class`) — **none
+  change live behavior yet**; they're Faz 3/6/7 destinations. `Settings.execution_contract_mode`
+  (`off|shadow|enforce_read_only|enforce_reversible|enforce_all`, default **off**) gates a shadow
+  ledger in `tool_result_accounting` that builds one envelope per tool call as a **pure observer**.
+- **How Faz 1's "shadow changes nothing" claim was actually proven — the method matters more than
+  the result.** A live 5×13 A/B **cannot** answer it: at n=5 per-scenario variance exceeds the
+  effect (champ 62/65, champ-shadow 59/65, ctl-off 59/65 — the two Faz-1 arms tied while losing
+  *different* scenarios). It was proven instead by a **deterministic replay**: the real compiled
+  graph driven by a **scripted model** (model variance zero by construction), the same 9 fixtures
+  run through `off` and `shadow`, requiring every externally observable outcome to match — tool
+  selection, raw args, results, user-visible response, filesystem side effects by content hash,
+  error text, counters, ledger. Only `execution_envelopes` may differ; volatile fields are stripped
+  by explicit allowlist, not a blanket ignore. **The test's discriminating power was verified by
+  mutation, not assumed** — injecting a shadow-only side effect turned 7 of the 9 red (the 2 that
+  stayed green are the ones where no tool runs, exactly where the mutation can't fire). It runs
+  against a real `SqliteSaver`, because shadow carries extra state *through the checkpointer* —
+  `checkpointer=None` would have skipped the very mechanism under test. Reach for this shape
+  (scripted model + mutation check) whenever a live score is too noisy to answer an
+  equivalence question.
+- **The model-selection decision (`qwen3:8b` + `LOCAL_REASONING_EFFORT=none`) is CONFIRMED**
+  (was provisional per `a6a3426`; the owed re-baseline ran 2026-07-20). Under the two-metric
+  oracle it scored **62/65**, beating the pre-two-metric 60/65: all four safety scenarios 5/5 and
+  the historically-flaky G17b clean. The two remaining findings (B6 3/5, F16 4/5) are live
+  confirmation of the hallucinated-tool-success pattern this whole initiative exists to fix
+  architecturally — not a reason to revisit the model. **Caveat: that 62/65 reference is slightly
+  contaminated** — a stray smoke run's requests landed inside its run 5 (see the harness entry
+  below). Re-run it if Faz 2+ needs a pristine baseline.
+- **The redaction gaps found while reading the audit path are CLOSED** (Faz 1, commit `1a22d7f`).
+  For history: `tool_trace.record()` already redacted sensitive arg keys, but `audit_log.record()`'s
+  `args_preview`/`result_preview`, `tool_trace`'s own `content_head`, and
+  `tool_execution_ledger.content_head` (which reaches the LangGraph checkpointer's SQLite file) did
+  not — a `gmail send` body was masked in the trace and readable in the audit log. All four now go
+  through `jarvis/execution/redaction.py`, the shared layer, which also adds **pattern-based**
+  redaction closing the old `redact_tool_args` hole where plain-string args were never scanned.
+- **A measurement harness can silently score against the WRONG JARVIS — assume nothing from a
+  clean exit code.** `ab_run_config.ps1 -Port` never reached `manual_test_driver.py` (it resolves
+  its target from `JARVIS_TEST_BASE_URL`, which the wrapper never set), so every non-default-port
+  run hit the default `8132` instead. Two distinct failures came from this: (a) if nothing was
+  listening, every scenario got ConnectionRefused and the run still wrote a full-size results file
+  and **exited 0**; (b) if a *previous* run's server was still up on 8132, the driver scored 13
+  scenarios against **that** server — a plausible, entirely meaningless result, which is what
+  produced the "isolated runs answer as Gemini 2.5 Pro" anomaly. Fixed 2026-07-21 plus guards
+  against the class: preflight before scoring, a transport-vs-semantic failure taxonomy (an
+  unreachable turn is *absent*, not *failed* — averaging it in understates the model), exit-code
+  propagation through the PS wrapper (it used to log the driver's exit code and return 0 anyway),
+  a per-run manifest, and `GET /internal/test-identity` (test-mode-only) proving the driver reached
+  **the** server with **the** config, not just *a* server.
 
 ## Known permanently-true gotchas
 
@@ -599,10 +646,12 @@ applied. The approved plan (9 phases, 0-8) lives at
 - `data/` (ChromaDB, SQLite DBs, OAuth token caches, uploads) is entirely gitignored.
 - `vault/conversations/*.md` (daily transcripts) are gitignored for privacy; the vault
   directory structure itself is tracked via `.gitkeep`.
-- `tests/` (pytest, added Faz 8, substantially extended in the 2026-07-15 GPT-5.6 remediation
-  session) is the automated test suite — 160 tests as of 2026-07-15, run with `pytest` from the
-  repo root. A handful are timing-sensitive and occasionally flake under full-suite load (see
-  HANDOFF.md) but always pass in isolation. Not exhaustive (most tool modules still have zero
+- `tests/` (pytest, added Faz 8, extended in the 2026-07-15 GPT-5.6 remediation session and again
+  through Agent Runtime rev.2) is the automated test suite — **559 tests as of 2026-07-21**
+  (was 160 on 2026-07-15), ~3 min, fully offline. Run `python -m pytest -q` from the repo root.
+  **`pytest-timeout` is not installed** — passing `--timeout=` is a usage error (exit 4), which
+  looks like a test failure but isn't. A handful are timing-sensitive and occasionally flake under
+  full-suite load but always pass in isolation. Not exhaustive (most tool modules still have zero
   coverage) — extend incrementally rather than reintroducing throwaway scratch scripts for anything
   touching shared logic.
 - **`asyncio.create_task()` only holds a *weak* reference to the returned task** — a task with no

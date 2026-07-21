@@ -6,6 +6,51 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Ölçüm düzeneği sertleştirme + Faz 1 kabulü] — 2026-07-21
+
+Faz 1'in kabul koşusu, **ölçüm düzeneğinin kendisinin bozuk olduğunu** ortaya çıkardı. Bu girdi
+o tamiratı ve Faz 1'in yerine geçen gerçek kabul testini kapsıyor (7 commit: `1a22d7f`..`9dd1405`).
+
+**Kök hata (`5941f63`):** `ab_run_config.ps1 -Port` driver'a hiç ulaşmıyordu (`JARVIS_TEST_BASE_URL`
+set edilmiyor, driver varsayılan 8132'ye gidiyordu). Varsayılan port dışındaki **her koşu sessizce
+0 alıyordu** — dolu görünen sonuç dosyası + `exit 0` + her satırda "trace tools=none". Bu, önceki
+oturumun "izole koşular Gemini 2.5 Pro diye cevaplıyor" anomalisinin de açıklaması: smoke koşusu
+8133'te sunucu başlatırken driver hâlâ açık olan şampiyon sunucusuna (8132) bağlanmış. Kanıt:
+smoke'un cevabı yalnız `home-champ`'ta var olan bir dosyayı listeliyor; `home-shadow-smoke`'ta hiç
+`audit_log.jsonl` yok. **Faz 1 kodu suçsuzdu.** Yan etki: o istekler şampiyon baseline'ın 5.
+run'ının içine düştü — **62/65 referansı küçük bir kontaminasyon taşıyor.**
+
+**Hata sınıfını kapatan korumalar (`5342e86`, `513eadd`, `aade56e`):**
+- `preflight()` — skorlamadan önce `GET /status`; başarısızsa exit 3.
+- Failure taxonomy: **semantik/tool hatası → geçerli ölçüm; transport/server hatası → ölçüm değil,
+  run geçersiz** (exit 5). Ulaşılamayan tur *başarısız* değil, **yok** — ortalamaya katmak modeli
+  sessizce kötü gösteriyordu. `HTTPError` kasten dışarıda: sunucu cevap verdi, koşu hâlâ ölçüm.
+- `.ps1` wrapper artık driver'ın verdiği kararı yutmuyor (eskiden exit kodunu log'a yazıp 0
+  dönüyordu — aynı sessiz-hata sınıfını bir katman yukarıda yeniden üretiyordu).
+- `results/manifest_<config>.json` — run_id, git_sha, branch, dirty, port, mode, model, effort,
+  scenarios, test_home, makine; sonda `status`/`valid_measurement`/`invalid_runs` ile finalize.
+- **Instance handshake:** `GET /internal/test-identity` (yalnız `JARVIS_TEST_MODE=1` ile mount)
+  run_id nonce, mode, config fingerprint, git_sha döndürür. Path **döndürmez** — teşhis yüzeyi
+  keşif yüzeyine dönüşmesin. Preflight artık "bir sunucu" değil "**bu** sunucu" kanıtlıyor.
+
+**Faz 1'in asıl kabul testi (`6796043`, `9dd1405`):** canlı A/B bu soruyu cevaplayamaz — n=5'te
+senaryo varyansı aranan etkiden büyük (`champ 62/65`, `champ-shadow 59/65`, `ctl-off 59/65`; iki
+Faz-1 config'i berabere ama **farklı** senaryoları kaybederek). Yerine **deterministik replay**:
+gerçek derlenmiş graph + **scripted model** (varyans inşaen sıfır), aynı fixture off ve shadow'dan
+geçiyor. 9 fixture; karşılaştırılan: tool seçimi, ham argümanlar, sonuçlar, kullanıcı cevabı,
+dosya sistemi yan etkileri (içerik hash'i), hata metni, sayaçlar, ledger. Farklı olmasına izin
+verilen: yalnız `execution_envelopes`. Volatil alanlar blanket ignore ile değil **açık allowlist**
+ile çıkarılıyor. Ayırt etme gücü **mutasyonla doğrulandı**: shadow-only bir yan etki enjekte
+edilince 9 vakadan 7'si kırmızıya döndü (yeşil kalan 2'si hiç tool çalışmayan vakalar). `9dd1405`
+testi **gerçek SqliteSaver** ile tekrarladı — `checkpointer=None` tam da doğrulanması gereken
+mekanizmayı atlıyordu. **Sonuç: off ve shadow dışarıdan birebir aynı; Faz 1 kabulü kapandı.**
+Bu, canlı B6 sorusunu tek başına kapatmıyor — runtime'ı şüpheli listesinden çıkarıp geriye **model
+nondeterminizmini** bırakıyor (Faz 2-4'ün hedefi).
+
+**559 pytest yeşil, ruff temiz.**
+
+---
+
 ## [Agent Runtime rev.2 — Faz 1] — 2026-07-20
 
 **Önce: şampiyon A/B baseline koşuldu ve analiz edildi** (`qwen3:8b`, `LOCAL_REASONING_EFFORT=none`,

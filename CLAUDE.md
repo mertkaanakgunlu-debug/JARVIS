@@ -18,9 +18,12 @@ owner's Windows PC, phone talks to it over the home network / Tailscale.
 - Python 3.13+, venv at `.venv/` (already populated — `.\.venv\Scripts\Activate.ps1`).
 - Canonical install is `pip install -r requirements.txt` — `pyproject.toml` has no dependency list.
 - Shell: this project's own scripts assume **PowerShell**, not bash.
-- A minimal pytest suite exists under `tests/` (added Faz 8, 2026-07-15) — run with `pytest`
-  from the repo root. Covers `policy_guard`, `session_store` concurrency, the provider
-  router's offline-failover behavior, and a regression test per Faz 8 bug fix. Not
+- A pytest suite exists under `tests/` (added Faz 8, 2026-07-15; **559 tests as of 2026-07-21**,
+  ~3 min offline) — run with `python -m pytest -q` from the repo root. Note `pytest-timeout` is
+  NOT installed, so `--timeout=` is a usage error. Covers `policy_guard`, `session_store`
+  concurrency, the provider router's offline-failover behavior, a regression test per Faz 8 bug
+  fix, and (Agent Runtime rev.2) the execution-contract types, the shared redaction layer, the
+  off-vs-shadow equivalence replay, and the A/B harness guards. Still not
   exhaustive — most tool modules still have no coverage; extend `tests/` rather than
   reintroducing ad-hoc throwaway scripts for anything that touches shared logic (safety
   kernel, stores, routing). **Before writing a test that constructs `SessionStore`,
@@ -40,10 +43,13 @@ python -m jarvis --monitor           # Background watcher only
 
 ## Branch / source-of-truth conventions
 
-- Active development branch: **`langgraph-migration`** — merged into `main` 2026-07-15 (pure
-  fast-forward; `main` had no commits of its own), and `main` is pushed to
-  `github.com/mertkaanakgunlu-debug/JARVIS`. Both branches point at the same commit; keep working
-  on `langgraph-migration` unless told otherwise.
+- Active development branch: **`langgraph-migration`** — keep working on it unless told otherwise.
+  Both it and `main` are pushed to `github.com/mertkaanakgunlu-debug/JARVIS`.
+  **They have NOT pointed at the same commit since 2026-07-15** — as of 2026-07-21 `main` is
+  **47 commits behind** `langgraph-migration` (everything from the two-metric oracle through
+  Agent Runtime rev.2 Faz 1 and the A/B harness hardening lives only on `langgraph-migration`).
+  `main` has no commits of its own, so catching it up is still a pure fast-forward whenever the
+  owner wants one; nothing is lost meanwhile, but don't read `main` as current.
 - `.claude/worktrees/*` are scratch branches from past Claude Code sessions — **never**
   treat them as canonical source. 17 of the original 21 were confirmed fully-merged into
   `langgraph-migration` (zero unique content) and deleted 2026-07-15. **4 remain**
