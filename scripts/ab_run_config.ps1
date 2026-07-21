@@ -62,6 +62,37 @@ $env:JARVIS_TEST_HOME = $Home_
 # unexplained isolated-run anomaly (see HANDOFF.md, 2026-07-20).
 $env:JARVIS_TEST_BASE_URL = "http://127.0.0.1:$Port"
 
+# Run manifest: makes a results directory self-describing. Without it, a
+# results file records WHAT happened but nothing about the conditions -- which
+# commit, which mode, which port, which model. Reconstructing that after the
+# fact cost real time this week (the champion baseline turned out to predate
+# the code it was being compared against, and nothing on disk said so).
+$gitSha = ""; $branch = ""
+try { $gitSha = (& git -C $Repo rev-parse --short HEAD) } catch { $gitSha = "unknown" }
+try { $branch = (& git -C $Repo rev-parse --abbrev-ref HEAD) } catch { $branch = "unknown" }
+$modeVal = if ($env:EXECUTION_CONTRACT_MODE) { $env:EXECUTION_CONTRACT_MODE } else { "off (config default)" }
+$modelVal = if ($Model -ne "") { $Model } else { "config.py default" }
+$effortVal = if ($Effort -eq "") { "(empty = thinking ON)" } else { $Effort }
+$manifest = [ordered]@{
+    run_id                  = "$Config-$(Get-Date -Format yyyyMMdd-HHmmss)"
+    config                  = $Config
+    git_sha                 = $gitSha
+    branch                  = $branch
+    dirty_worktree          = [bool](& git -C $Repo status --porcelain)
+    server_port             = $Port
+    driver_base_url         = $env:JARVIS_TEST_BASE_URL
+    execution_contract_mode = $modeVal
+    model                   = $modelVal
+    reasoning_effort        = $effortVal
+    scenarios               = $Scenarios
+    runs                    = $Runs
+    test_home               = $Home_
+    start_time              = (Get-Date -Format o)
+    machine                 = $env:COMPUTERNAME
+    os                      = [System.Environment]::OSVersion.VersionString
+}
+$manifest | ConvertTo-Json | Out-File "$Res\manifest_$Config.json" -Encoding utf8
+
 # --- start server -------------------------------------------------------------
 $srvOut = "$Logs\server_$Config.out.log"
 $srvErr = "$Logs\server_$Config.err.log"

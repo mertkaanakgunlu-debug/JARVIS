@@ -44,6 +44,47 @@ HOME_DATA = Path(TEST_HOME) / "data" if TEST_HOME else None
 # Faz 2.1: accumulated oracle verdicts, summarized at the end.
 VERDICTS: list = []
 
+# ── Harness integrity guards (2026-07-21) ────────────────────────────────────
+# A run that never reached the server used to look exactly like a run where the
+# model simply failed everything: exit 0, a full-size results file, every row
+# scored FAIL with "trace tools=none". That is how a whole A/B config was
+# silently lost (ab_run_config.ps1 started the server on -Port but never set
+# JARVIS_TEST_BASE_URL, so the driver kept talking to the 8132 default), and how
+# the 2026-07-20 session's "isolated runs answer as a cloud model with no tools"
+# anomaly was produced -- the driver was talking to a DIFFERENT, still-running
+# server. The rule now: a harness that cannot measure must exit non-zero and say
+# so, never emit a plausible-looking zero.
+EXIT_PREFLIGHT_FAILED = 3
+EXIT_NO_SUCCESSFUL_CHAT = 4
+
+_TRANSPORT_ERRORS: list[str] = []   # could not reach the server at all
+_CHAT_ATTEMPTS = 0                  # chat scenarios started
+_CHAT_OK = 0                        # chat scenarios that got ANY server response
+
+
+def preflight() -> None:
+    """Verify the server is actually reachable at BASE before scoring anything.
+
+    Cheap and decisive: the -Port incident produced 5 runs x 13 scenarios of
+    garbage in ~6 minutes; this check would have stopped it in two seconds with
+    the target URL printed.
+    """
+    try:
+        get_json("/status", timeout=10)
+    except Exception as e:  # noqa: BLE001
+        print("=" * 72)
+        print("[driver] PREFLIGHT FAILED — no JARVIS server answered /status.")
+        print(f"         target : {BASE}")
+        print(f"         error  : {e!r}")
+        print("         JARVIS_TEST_BASE_URL must point at the server you started.")
+        print("         (ab_run_config.ps1 -Port sets this for you; a hand-rolled")
+        print("          run on a non-default port must export it explicitly.)")
+        print("         Refusing to run: a scored run against no server is not a")
+        print("         result, it is a silent total loss.")
+        print("=" * 72)
+        sys.exit(EXIT_PREFLIGHT_FAILED)
+    print(f"[driver] preflight ok — {BASE}")
+
 
 def load_trace() -> list[dict]:
     """This scenario's tool_trace rows (the driver clears it before each run).
@@ -135,12 +176,16 @@ def record(entry: dict) -> None:
 def run_chat(test_id: str, message: str, decision: str | None = None) -> dict:
     """decision: None | 'approve' | 'deny' — what to answer IF a confirmation comes back.
     Returns the recorded entry so the oracle can score it."""
+    global _CHAT_ATTEMPTS, _CHAT_OK
+    _CHAT_ATTEMPTS += 1
     print(f"\n{'='*72}\n[{test_id}] > {message}")
     t0 = time.time()
     entry: dict = {"test_id": test_id, "message": message}
     try:
         resp = post_json("/chat", {"message": message, "language": "tr"})
     except urllib.error.HTTPError as e:
+        # The server DID answer (with an error) — reachable, so not a transport
+        # failure; still not a usable turn.
         body = e.read().decode("utf-8", errors="replace")[:1000]
         entry.update(error=f"HTTP {e.code}", body=body, elapsed_s=round(time.time() - t0, 1))
         print(f"  !! HTTP {e.code}: {body}")
@@ -148,10 +193,12 @@ def run_chat(test_id: str, message: str, decision: str | None = None) -> dict:
         record(entry)
         return entry
     except Exception as e:  # noqa: BLE001
+        _TRANSPORT_ERRORS.append(f"{test_id}: {e!r}")
         entry.update(error=repr(e), elapsed_s=round(time.time() - t0, 1))
         print(f"  !! {e!r}")
         record(entry)
         return entry
+    _CHAT_OK += 1
     elapsed = round(time.time() - t0, 1)
     entry["elapsed_s"] = elapsed
 
@@ -404,6 +451,7 @@ if __name__ == "__main__":
     if unknown or not ids:
         print(f"usage: manual_test_driver.py --all | {' '.join(TESTS)}")
         sys.exit(2 if unknown else 0)
+    preflight()
     for tid in ids:
         if tid not in CONTINUATIONS and tid not in _NON_CHAT:
             reset_session(tid)
@@ -412,4 +460,25 @@ if __name__ == "__main__":
         _score(tid, entry)
     if VERDICTS:
         print("\n" + E.summarize(VERDICTS))
+
+    # Fail-fast: a scored run where nothing ever reached the server is not a
+    # result. Exit non-zero so an orchestrator (and a human reading exit codes)
+    # cannot mistake it for "the model failed everything".
+    if _CHAT_ATTEMPTS and _CHAT_OK == 0:
+        print("=" * 72)
+        print(f"[driver] NO SUCCESSFUL CHAT — {_CHAT_ATTEMPTS} attempted, 0 answered.")
+        print(f"         target: {BASE}")
+        for err in _TRANSPORT_ERRORS[:5]:
+            print(f"         {err}")
+        if len(_TRANSPORT_ERRORS) > 5:
+            print(f"         ... and {len(_TRANSPORT_ERRORS) - 5} more")
+        print("         These results are NOT a measurement. Discard them.")
+        print("=" * 72)
+        sys.exit(EXIT_NO_SUCCESSFUL_CHAT)
+    if _TRANSPORT_ERRORS:
+        # Partial loss: still a run, but the scores are contaminated by turns
+        # that never happened -- say so loudly rather than averaging it away.
+        print(f"\n[driver] WARNING: {len(_TRANSPORT_ERRORS)}/{_CHAT_ATTEMPTS} chat "
+              f"scenarios failed at the transport layer (server unreachable). "
+              f"Scores below undercount by that much.")
     print("\n[driver] done.")
