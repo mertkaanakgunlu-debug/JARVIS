@@ -91,19 +91,20 @@ def run_deep_research(
         from langchain_core.messages import SystemMessage, HumanMessage
         from langchain_google_genai import ChatGoogleGenerativeAI
 
+        research_temperature = getattr(settings, "deep_research_temperature", 0.3)
         if settings.use_vertex:
             llm = ChatGoogleGenerativeAI(
                 model=settings.vertex_model_primary,
                 vertexai=True,
                 project=settings.google_cloud_project,
                 location=settings.google_cloud_region,
-                temperature=0.3,
+                temperature=research_temperature,
             )
         else:
             llm = ChatGoogleGenerativeAI(
                 model=settings.cloud_model_pro,
                 google_api_key=settings.gemini_api_key,
-                temperature=0.3,
+                temperature=research_temperature,
             )
 
         response = llm.invoke(

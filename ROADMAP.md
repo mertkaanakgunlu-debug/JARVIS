@@ -46,14 +46,16 @@ claims, run-to-run variance) — an execution-contract runtime so JARVIS uses *a
 reliably, not new domain tools. Full plan (9 phases, **also numbered Faz 0-8 — do not confuse
 with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
 `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
-Status: Faz 0-3 are done, committed, and pushed as of 2026-07-21 (commit `f4b7609`) — alpha
-capability allowlist, shadow ledger + redaction, `prepare_execution` + HMAC approval binding +
-idempotency journal, and real per-tool timeout enforcement + a postcondition verification
-runner. Faz 4 (verified response composition + claim audit) is built and tested as of
-2026-07-22 but **not yet committed** — same "owner approval pending" state Faz 2/3 sat in before
-`f4b7609`. 704 pytest green (673+31 new), ruff clean. Faz 5 (isolation & reproducibility) is
-next. See [MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and
-[HANDOFF.md](HANDOFF.md) for the current detail.
+Status: Faz 0-4 are done and committed as of 2026-07-22 (Faz 0-3 pushed as commit `f4b7609`;
+Faz 4 — verified response composition + claim audit — committed locally as `9c0ca15`, not yet
+pushed). Faz 5 (isolation & reproducibility — RunContext, removing silent session auto-resume,
+closing 2 Path.home() isolation bypasses + a permanent AST guard test, cross-session prompt
+blocks off under the eval profile, run_manifest.json, 4 hardcoded temperatures moved to
+Settings) is built and tested as of 2026-07-22 but **not yet committed** — same "owner approval
+pending" state every phase in this initiative sits in before its own commit. 743 pytest green
+(704+39 new), ruff clean. Faz 6 (typed schemas + bounded repair) is next. See
+[MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and [HANDOFF.md](HANDOFF.md) for the
+current detail.
 
 ---
 

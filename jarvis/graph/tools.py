@@ -24,6 +24,7 @@ from jarvis.tools.excel import read_excel
 from jarvis.tools import python_exec
 from jarvis.tools.data_analysis import read_csv_file, analyze_data
 from jarvis.tools.plotting import generate_plot, frame_from_inline
+from jarvis.run_context import RunContext
 from jarvis.tools.indexer import index_file
 from jarvis.tools.webfetch import fetch_url
 from jarvis.tools.deep_research import run_deep_research
@@ -273,7 +274,14 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             if not path.strip():
                 return "[ERROR] Provide either a data file `path` or inline `data_json`."
             full = workspace / path if not Path(path).is_absolute() else Path(path)
-        plots_dir = workspace / "data" / "plots"
+        # Agent Runtime rev.2, Faz 5: was workspace/data/plots -- a single
+        # flat, shared directory where two auto-named charts (empty
+        # `output`, e.g. two different "grafik çiz" turns with no explicit
+        # name) silently overwrote each other. plot_data has no per-turn
+        # state to key a shared run_id on (see RunContext.for_execution's
+        # own docstring for why), so each call gets its own fresh,
+        # collision-proof run directory instead.
+        plots_dir = RunContext.for_execution(workspace).artifact_dir
         result = generate_plot(full, kind, x, y, title, hue, output, plots_dir, df=df)
         event_bus.show_hud()
         return result

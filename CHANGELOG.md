@@ -6,6 +6,70 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 5] — 2026-07-22
+
+**Isolation & reproducibility.** Seven changes, all from the plan's own Faz 5 bullet list.
+
+**Two `Path.home()` isolation bypasses closed** (`jarvis/voice/vad.py`, `jarvis/voice/tts_piper.py`)
+— both were module-level constants frozen at import time, reading/writing the REAL
+`~/.cache/jarvis/...` even when `JARVIS_HOME` was set for test/eval isolation. New
+`jarvis.paths.cache_dir()` (same real-home-in-production / JARVIS_HOME-redirected-in-tests split
+as `jarvis.tools.files._effective_home`, an independent implementation on purpose — `paths.py`
+importing from `tools/files.py` would be backwards layering) fixes both, resolved per call. New
+**`tests/test_no_host_path_leak.py`** AST-scans every `jarvis/**/*.py` file for
+`expanduser`/`Path.home()`/`getcwd`/`"USERPROFILE"`, whitelisting exactly the two files that
+already implement a correct fallback (`jarvis/tools/files.py`, `jarvis/paths.py`) — a third
+bypass now fails CI immediately instead of waiting to be noticed.
+
+**Silent session auto-resume removed entirely** — `JarvisAgent.__init__` no longer calls
+`session_store.latest_session()` and guesses which session belongs to whoever is constructing it
+(a reproducibility hazard for a relaunched eval-harness server, and a privacy leak for a brand-new
+client). New `resume_session_id` kwarg + `SessionStore.session_exists()` to validate it before
+trusting it. `cli.py` now owns its own explicit continuity — a small JARVIS_HOME-aware
+`data/cli_last_session.txt`, read before construction and rewritten after `/session`/`/reset` —
+preserving its "continue where I left off" UX explicitly instead of via a silent guess. `api.py`
+gets no such convenience (there was never a per-client `conversation_id` mechanism to preserve),
+so every server (re)start now begins a fresh session — a real, deliberate behavior change for
+Electron/mobile clients, not silently absorbed.
+
+**Cross-session prompt blocks (facts/summaries/procedures) skipped under the eval profile** —
+`ContextBuilder.build()` no longer calls `recall_summaries`/`recall_facts`/`recall_procedures` at
+all when `JARVIS_TEST_MODE=1` (the flag `--profile test` already sets). `procedure_save` is a
+plain tool call independent of `CLOUD_POLICY`, so a fact/procedure written by one scenario in a
+long-lived A/B harness run could leak into a later, logically-independent scenario's prompt —
+plausibly the mechanism behind the already-known "champion 62/65 contaminated" finding.
+
+**4 hardcoded `ChatGoogleGenerativeAI` temperatures moved to `Settings`** (`finance_extractor`,
+`session_summarizer`, `deep_research`, `email_triage`) — values unchanged, now visible/tunable
+and reflected in `run_manifest.json` (below).
+
+**New `jarvis/run_context.py`** — `RunContext.for_turn()`/`for_execution()` +
+`write_run_manifest()`. `for_turn` reuses LangGraph's own thread_id string
+(`"{session_id}-t{turn}"}`) rather than a parallel ID scheme; `for_execution` mints a fresh,
+unique run for a plain `@tool` closure with no per-turn state access (native tools are bound once
+per process, not per turn). **`run_manifest.json` wired into both `chat()` and `chat_stream()`**
+— model/provider, temperature, tool subset, input digest, execution envelopes, transport, written
+after every turn. Honest gap: the plan's "prompt hash" and "registry version" fields are not
+populated — neither concept exists anywhere in this codebase yet. A real bug was caught wiring
+this into `chat_stream()`: its checkpoint-read `try/except` only assigned `checkpoint_tuple` on
+the happy path, so a `get_tuple()` failure would have left it undefined and crashed the new
+manifest code with `NameError` — fixed with a pre-init, locked in by a dedicated test.
+
+**`plot_data` moved off the shared flat `data/plots/` directory** onto a fresh
+`RunContext.for_execution()`-scoped one — the plan's own named example ("plot.png collides")
+is now fixed for the common case (two auto-named charts with nothing else to distinguish them).
+Full per-turn artifact grouping across multiple tool calls would need LangGraph's `InjectedState`
+(not introduced this phase); other artifact-producing tools (`report_write`, csv/excel output,
+`index_doc`, `note_append`) are untouched — same narrow-but-real scoping precedent as Faz 3's
+postcondition runner.
+
+**39 new tests** across `test_no_host_path_leak.py`, `test_jarvis_home.py`, `test_session_store.py`,
+`test_session_resume.py`, `test_context_builder.py`, `test_run_context.py`,
+`test_run_manifest_integration.py`, `test_plot_inline.py`. **743 pytest green (704+39), ruff
+clean**, full suite re-run after every meaningfully-sized change, not just once at the end.
+
+---
+
 ## [Agent Runtime rev.2 — Faz 4] — 2026-07-22
 
 **Verified response composition + claim audit** (reviewer #4's own words: "the architecture's

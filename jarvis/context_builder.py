@@ -13,6 +13,7 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -52,17 +53,33 @@ class ContextBuilder:
 
         session_id (Faz 2): scopes episodic recall (memory_ctx) to this
         session only, so raw past turns from other sessions never leak into
-        the current one. Facts and past-session summaries stay cross-session
-        by design — that's the whole point of those two layers.
+        the current one. Facts, past-session summaries and procedures stay
+        cross-session by design in normal use — that's the whole point of
+        those layers — EXCEPT under the --profile test / eval-harness
+        profile (Agent Runtime rev.2, Faz 5): a long-lived test process runs
+        many logically-independent scenarios back to back, so a fact/summary/
+        procedure written by an EARLIER scenario (procedure_save is a plain
+        tool call, not gated by CLOUD_POLICY, so this is a real live vector)
+        could silently leak into a LATER scenario's prompt within the same
+        run — an order-dependency the plan's own "isolation & reproducibility"
+        phase exists to close, and the likely mechanism behind the
+        already-known "champion 62/65 contaminated" finding (smoke requests
+        landed inside that run). Gated on JARVIS_TEST_MODE, the flag
+        __main__.py's --profile test prescan already sets — not a new
+        setting — so this can never fire in a normal, non-profile run.
         """
         memory_ctx = self._memory.recall(query, n=self.policy.recall_n, session_id=session_id)
-        past_hits = self._memory.recall_summaries(query, n=self.policy.recall_summaries_n)
-        fact_hits = self._memory.recall_facts(
-            query, n=self.policy.recall_facts_n, distance_max=self.policy.facts_distance_max,
-        )
-        procedure_hits = self._memory.recall_procedures(
-            query, n=1, distance_max=self.policy.procedure_distance_max,
-        )
+        eval_profile = os.environ.get("JARVIS_TEST_MODE") == "1"
+        if eval_profile:
+            past_hits, fact_hits, procedure_hits = [], [], []
+        else:
+            past_hits = self._memory.recall_summaries(query, n=self.policy.recall_summaries_n)
+            fact_hits = self._memory.recall_facts(
+                query, n=self.policy.recall_facts_n, distance_max=self.policy.facts_distance_max,
+            )
+            procedure_hits = self._memory.recall_procedures(
+                query, n=1, distance_max=self.policy.procedure_distance_max,
+            )
         return ContextData(
             memory_ctx=memory_ctx,
             past_sessions_block=self._format_past_sessions(past_hits),

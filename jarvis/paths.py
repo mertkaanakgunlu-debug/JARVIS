@@ -66,6 +66,28 @@ def resolve_project(p: Path | str) -> Path:
     return _PROJECT_ROOT / p
 
 
+def cache_dir() -> Path:
+    """Root for large, machine-level model/voice caches (Silero VAD weights,
+    Piper voices) -- Agent Runtime rev.2, Faz 5 (closes the two "Path.home()
+    bypass" findings in jarvis/voice/vad.py and jarvis/voice/tts_piper.py).
+
+    Deliberately NOT the same shape as data_dir(): those are large downloads
+    a developer expects to survive switching launch directories, not
+    per-run/per-workspace data, so the no-JARVIS_HOME default is the real OS
+    home (``~/.cache/jarvis``, downloaded once, reused regardless of cwd) --
+    matching jarvis.tools.files._effective_home's same real-home-in-
+    production / JARVIS_HOME-redirected-in-tests split, for the same reason.
+    JARVIS_HOME, when set (test isolation, the eval harness), still wins: an
+    isolated run must never read or write the developer's real cache, and
+    must never silently download a multi-MB model into it either. Read per
+    call, not cached at import -- same reason as jarvis_home() above.
+    """
+    env = os.environ.get("JARVIS_HOME", "").strip()
+    if env:
+        return Path(env) / ".cache" / "jarvis"
+    return Path.home() / ".cache" / "jarvis"
+
+
 def project_data_dir() -> Path:
     """data/ dir for files that must be found regardless of cwd (OAuth tokens).
 

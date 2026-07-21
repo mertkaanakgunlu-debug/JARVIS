@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -12,8 +13,38 @@ from rich.text import Text
 from rich.rule import Rule
 from rich.prompt import Prompt
 
+from jarvis import paths
 from jarvis.agent import JarvisAgent, AVAILABLE_MODELS, ConfirmationRequired
 from jarvis.config import Settings
+
+
+# ── Agent Runtime rev.2, Faz 5 ──────────────────────────────────────────────
+# JarvisAgent no longer silently auto-resumes the "most recently active"
+# session (see agent.py's own comment on this) -- the CLI is the one caller
+# that preserves that "continue where I left off" UX, but now explicitly:
+# it remembers its OWN last session id in a small JARVIS_HOME-aware file and
+# passes it as resume_session_id, instead of the agent guessing.
+def _cli_last_session_path() -> Path:
+    return paths.data_dir() / "cli_last_session.txt"
+
+
+def _read_last_session_id() -> str | None:
+    """Best-effort -- a missing/unreadable/corrupt file just means "start a
+    fresh session", never a startup failure."""
+    try:
+        text = _cli_last_session_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _write_last_session_id(session_id: str) -> None:
+    try:
+        path = _cli_last_session_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(session_id, encoding="utf-8")
+    except OSError:
+        pass
 
 BANNER = """[bold gold3]
      ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
@@ -378,6 +409,7 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
             # reset_async: SQLite archive runs in to_thread instead of
             # blocking this REPL's event loop mid-prompt.
             await agent.reset_async()
+            _write_last_session_id(agent.session_id)
             console.print(
                 f"[dim]Session [bold]{old_id}[/bold] archived. "
                 f"New session: [bold]{agent.session_id}[/bold][/dim]"
@@ -423,6 +455,7 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
                 continue
             try:
                 n = agent.switch_session(sid)
+                _write_last_session_id(agent.session_id)
                 console.print(
                     f"[gold3]✓[/gold3] Oturum yüklendi: [bold]{sid}[/bold] [dim]({n} mesaj)[/dim]"
                 )
@@ -1050,7 +1083,13 @@ def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> N
 
     # Start background monitor daemon if requested
     monitor_instance = None
-    agent = JarvisAgent(settings)  # init first so scheduler is available
+    agent = JarvisAgent(  # init first so scheduler is available
+        settings, resume_session_id=_read_last_session_id(),
+    )
+    # Covers both cases: a valid id was resumed (no-op, already correct) and
+    # no valid id existed so a fresh session was created (persist THIS one,
+    # so the next launch resumes it instead of repeating the same miss).
+    _write_last_session_id(agent.session_id)
 
     if monitor:
         from jarvis.monitor import JarvisMonitor

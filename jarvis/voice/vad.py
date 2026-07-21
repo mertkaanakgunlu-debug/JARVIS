@@ -32,13 +32,20 @@ _SILERO_VAD_URL = (
     f"https://raw.githubusercontent.com/snakers4/silero-vad/"
     f"{_SILERO_VAD_COMMIT}/src/silero_vad/data/silero_vad.onnx"
 )
-_DEFAULT_CACHE_PATH = Path.home() / ".cache" / "jarvis" / "silero_vad.onnx"
+
+
+def _default_cache_path() -> Path:
+    """Agent Runtime rev.2, Faz 5: resolved per call via jarvis.paths.cache_dir()
+    (JARVIS_HOME-aware), not a Path.home()-based module constant frozen at
+    import time -- the prior form bypassed test/eval isolation entirely."""
+    from jarvis.paths import cache_dir
+    return cache_dir() / "silero_vad.onnx"
 
 
 def ensure_silero_vad_model(cache_path: Path | None = None) -> Path:
     """Download Silero VAD's .onnx weights on first use (same lazy-cache pattern
     as faster-whisper/marker-pdf's existing model downloads). Returns the local path."""
-    path = cache_path or _DEFAULT_CACHE_PATH
+    path = cache_path or _default_cache_path()
     if path.exists() and path.stat().st_size > 0:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)

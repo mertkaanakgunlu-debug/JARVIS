@@ -1,7 +1,10 @@
 """JARVIS orchestrator — LangGraph-based (Faz 1).
 
 Public API (preserved from pydantic-ai version):
-  JarvisAgent(settings)
+  JarvisAgent(settings, resume_session_id=None)  # Faz 5: no more silent
+                                                  # auto-resume -- pass an
+                                                  # explicit id to continue
+                                                  # a specific past session
   .chat(user_input, detected_language) -> tuple[str, str]   # (response, model_label)
   .chat_stream(user_input, detected_language) -> AsyncGenerator[str, None]
   .switch_model(model_id) -> str
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import re
 import threading
@@ -54,6 +58,7 @@ from jarvis import audit_log               # Faz 4
 from jarvis import tool_trace               # Faz 2.2: test-profile L1 tool trace
 from jarvis import paths                   # JARVIS_HOME isolation root
 from jarvis.llm_trace import LlmTraceRecorder  # runtime truth: actual provider per turn
+from jarvis.run_context import RunContext, write_run_manifest  # Agent Runtime rev.2, Faz 5
 from jarvis.tool_registry import get_spec  # Faz 4
 from jarvis.mcp_integration import McpToolManager  # Faz 5
 
@@ -497,10 +502,30 @@ def _label_for(model_id: str) -> str:
     return model_id
 
 
+def _resolve_initial_session(
+    store: "SessionStore", resume_session_id: str | None,
+) -> tuple[str, list[Any], int]:
+    """Agent Runtime rev.2, Faz 5: the no-more-silent-auto-resume decision,
+    factored out of __init__ so it is directly unit-testable without
+    constructing a full JarvisAgent (this suite's established precedent for
+    __init__-adjacent logic — see test_reset_lifecycle.py's docstring: heavy
+    construction, so logic gets pulled out and tested against a minimal
+    stand-in instead). See __init__'s own comment for why the guess this
+    replaces was removed. Returns (session_id, history, turn_idx)."""
+    if resume_session_id and store.session_exists(resume_session_id):
+        history = store.load_history(resume_session_id, limit=20)
+        # BUG-11: resume this session's own turn counter too — restarting it
+        # at 0 would let the next turn reuse an old thread_id
+        # ("{session_id}-t1") and resurrect a stale LangGraph checkpoint.
+        turn = store.last_turn_idx(resume_session_id)
+        return resume_session_id, history, turn
+    return store.new_session(), [], 0
+
+
 # ── JarvisAgent ────────────────────────────────────────────────────────────────
 
 class JarvisAgent:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, resume_session_id: str | None = None) -> None:
         self.settings = settings
         # BUG-22: switch_model() used to build a local `new_settings` copy that
         # was never persisted anywhere but the compiled graph closure — a later
@@ -549,20 +574,29 @@ class JarvisAgent:
 
         self.usage = UsageTracker(paths.data_dir() / "usage.json")
 
-        # Faz 12-B: persistent session store — auto-resume last session
+        # Faz 12-B: persistent session store.
+        # Agent Runtime rev.2, Faz 5: silent auto-resume removed -- this used
+        # to unconditionally call session_store.latest_session() and guess
+        # "the most recently active session" belongs to whoever is
+        # constructing this agent. That guess made a process restart
+        # non-reproducible (an eval-harness/A/B server relaunch could
+        # silently inherit a prior manual smoke-test's session) and meant a
+        # brand-new client (a fresh Electron window, a fresh API caller)
+        # would transparently see someone else's conversation history. The
+        # default now is always a fresh session; resume_session_id is the
+        # explicit opt-in a caller uses to ask for continuity by name. Not
+        # trusted blindly -- an id from a stale/foreign persisted file (a
+        # deleted session, a different JARVIS_HOME) must not silently wedge
+        # session_id onto a row that doesn't exist. cli.py is the one caller
+        # that passes this today, to preserve its own "continue where I left
+        # off" UX (see its own _read_last_session_id()/_write_last_session_id()
+        # comments for how it persists which session that is); api.py passes
+        # nothing -- there is no existing per-client conversation_id
+        # mechanism to preserve, so every server (re)start begins fresh.
         self.session_store = SessionStore(paths.data_dir() / "sessions.db")
-        last = self.session_store.latest_session()
-        if last:
-            self.session_id = last
-            self._history: list[Any] = self.session_store.load_history(last, limit=20)
-            # BUG-11: resume this session's own turn counter too — restarting
-            # it at 0 would let the next turn reuse an old thread_id
-            # ("{session_id}-t1") and resurrect a stale LangGraph checkpoint.
-            self._turn: int = self.session_store.last_turn_idx(last)
-        else:
-            self.session_id = self.session_store.new_session()
-            self._history: list[Any] = []
-            self._turn: int = 0
+        self.session_id, self._history, self._turn = _resolve_initial_session(
+            self.session_store, resume_session_id,
+        )
 
         # Faz 13-C: scheduler store (same DB file, separate table)
         self.scheduler = SchedulerStore(paths.data_dir() / "sessions.db")
@@ -1217,6 +1251,23 @@ class JarvisAgent:
             self.session_store.save_turn(self.session_id, self._history, self._turn)
             if self._turn == 1:
                 self.session_store.set_topic_hint(self.session_id, clean_input[:60])
+
+            # Agent Runtime rev.2, Faz 5: run_manifest.json for replay. Honest
+            # gaps vs. the plan's full field list -- prompt hash and a
+            # "registry version" concept do not exist anywhere in this
+            # codebase yet, so they are not included here rather than faked.
+            # write_run_manifest() never raises (see its own docstring) --
+            # no try/except needed at this call site.
+            write_run_manifest(
+                RunContext.for_turn(self.workspace, self.session_id, self._turn),
+                model=(trace or {}).get("model"),
+                provider=(trace or {}).get("provider"),
+                temperature=self.settings.local_temperature,
+                tool_subset=tool_route.to_dict() if tool_route is not None else None,
+                input_digest=hashlib.sha256(clean_input.encode("utf-8")).hexdigest(),
+                execution_envelopes=result.get("execution_envelopes"),
+                transport=transport,
+            )
         finally:
             self._state_lock.release()
 
@@ -1382,6 +1433,11 @@ class JarvisAgent:
             # summary is what history keeps.) The checkpoint is read only for
             # the execution ledger.
             ledger: list[dict] = []
+            # Faz 5: pre-initialized (not just assigned inside the try) so a
+            # get_tuple() failure leaves this None, not undefined -- the
+            # run_manifest write below also reads this same variable, after
+            # the try/except has already exited.
+            checkpoint_tuple = None
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
                 if checkpoint_tuple:
@@ -1410,6 +1466,24 @@ class JarvisAgent:
             self.session_store.save_turn(self.session_id, self._history, self._turn)
             if self._turn == 1:
                 self.session_store.set_topic_hint(self.session_id, clean_input[:60])
+
+            # Agent Runtime rev.2, Faz 5: run_manifest.json for replay -- same
+            # honest field-coverage note as chat()'s own call. execution_
+            # envelopes are read off the SAME checkpoint_tuple already
+            # fetched above for the ledger, not a second checkpoint read.
+            envelopes = None
+            if checkpoint_tuple:
+                envelopes = checkpoint_tuple.checkpoint["channel_values"].get("execution_envelopes")
+            write_run_manifest(
+                RunContext.for_turn(self.workspace, self.session_id, self._turn),
+                model=(stream_trace or {}).get("model"),
+                provider=(stream_trace or {}).get("provider"),
+                temperature=self.settings.local_temperature,
+                tool_subset=tool_route.to_dict() if tool_route is not None else None,
+                input_digest=hashlib.sha256(clean_input.encode("utf-8")).hexdigest(),
+                execution_envelopes=envelopes,
+                transport=transport,
+            )
         finally:
             self._state_lock.release()
             if interrupted:

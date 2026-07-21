@@ -110,6 +110,30 @@ def test_no_source_is_honest_error(isolated_cwd, tmp_path):
     assert result.startswith("[ERROR]")
 
 
+# ── Agent Runtime rev.2, Faz 5: run-scoped output, no more collisions ───────
+
+def test_two_auto_named_charts_do_not_collide(isolated_cwd, tmp_path):
+    """The concrete bug this phase's own motivating example names: two charts
+    with nothing to distinguish their auto-generated filename stem (same
+    kind, no x/y columns, no explicit `output`) used to silently overwrite
+    each other under the old flat workspace/data/plots/ directory."""
+    tool, workspace = _plot_tool(tmp_path)
+    r1 = tool.invoke({"kind": "line", "data_json": "[1,4,9,16]", "title": "First"})
+    r2 = tool.invoke({"kind": "line", "data_json": "[1,4,9,16]", "title": "Second"})
+
+    assert not r1.startswith("[ERROR]") and not r2.startswith("[ERROR]")
+    p1, p2 = Path(r1), Path(r2)
+    assert p1 != p2, "two independent calls must not land on the same file"
+    assert p1.exists() and p2.exists(), "both PNGs must survive -- neither was overwritten"
+
+
+def test_plot_lands_under_run_scoped_artifact_dir(isolated_cwd, tmp_path):
+    tool, workspace = _plot_tool(tmp_path)
+    result = tool.invoke({"kind": "line", "data_json": "[1,4,9,16]", "title": "B6"})
+    png = Path(result)
+    assert (workspace / "data" / "runs").resolve() in png.resolve().parents
+
+
 # ── verification sidecar (2026-07-19): structured plotted-data for the oracle ──
 
 def test_sidecar_written_under_test_profile(isolated_cwd, tmp_path, monkeypatch):

@@ -166,6 +166,21 @@ class SessionStore:
             ).fetchone()
         return row["id"] if row else None
 
+    def session_exists(self, session_id: str) -> bool:
+        """Agent Runtime rev.2, Faz 5: lets a caller validate an explicit
+        resume id (e.g. JarvisAgent's resume_session_id) before trusting it
+        -- a stale/foreign id (deleted session, different JARVIS_HOME) must
+        fall back to a fresh session, not silently attach history writes to
+        a session_id with no row in this table. status is deliberately not
+        filtered here (unlike latest_session()) -- an explicit request to
+        resume a specific id should work even if it was archived; only the
+        old *guessing* behavior needed to stay within "active" sessions."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM sessions WHERE id=? LIMIT 1", (session_id,)
+            ).fetchone()
+        return row is not None
+
     def archive_session(self, session_id: str) -> None:
         with self._lock:
             self._conn.execute(

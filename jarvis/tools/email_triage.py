@@ -153,7 +153,7 @@ def triage_emails(
         model=triage_model_id,
         google_api_key=settings.gemini_api_key or None,
         max_output_tokens=256,
-        temperature=0,
+        temperature=getattr(settings, "email_triage_temperature", 0.0),
     )
 
     max_emails = min(max_emails, 30)

@@ -33,7 +33,12 @@ _PIPER_VOICE_NAMES: dict[str, str] = {
     "en": "en_US-lessac-medium",
 }
 
-_PIPER_CACHE_DIR = Path.home() / ".cache" / "jarvis" / "piper_voices"
+def _default_cache_dir() -> Path:
+    """Agent Runtime rev.2, Faz 5: resolved per call via jarvis.paths.cache_dir()
+    (JARVIS_HOME-aware), not a Path.home()-based module constant frozen at
+    import time -- the prior form bypassed test/eval isolation entirely."""
+    from jarvis.paths import cache_dir as _cache_dir
+    return _cache_dir() / "piper_voices"
 
 # ── edge-tts voice map (unchanged from the pre-Faz-3 voice.py) ────────────────
 _EDGE_VOICES: dict[str, str] = {
@@ -61,7 +66,7 @@ class PiperEngine:
     pattern as faster-whisper/marker-pdf's existing model downloads)."""
 
     def __init__(self, cache_dir: Path | None = None) -> None:
-        self._cache_dir = cache_dir or _PIPER_CACHE_DIR
+        self._cache_dir = cache_dir or _default_cache_dir()
         self._voices: dict[str, "PiperVoice"] = {}
 
     def supports(self, lang: str) -> bool:

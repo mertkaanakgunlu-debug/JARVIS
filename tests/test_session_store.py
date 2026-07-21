@@ -55,6 +55,29 @@ def test_new_session_is_latest_session(tmp_path):
     assert store.latest_session() == sid
 
 
+# ── Agent Runtime rev.2, Faz 5: session_exists() ────────────────────────────
+
+def test_session_exists_true_for_a_real_session(tmp_path):
+    store = _store(tmp_path)
+    sid = store.new_session()
+    assert store.session_exists(sid) is True
+
+
+def test_session_exists_false_for_an_unknown_id(tmp_path):
+    store = _store(tmp_path)
+    assert store.session_exists("never-created") is False
+
+
+def test_session_exists_true_even_when_archived(tmp_path):
+    """Unlike latest_session() (which only ever guesses among 'active'
+    sessions), an EXPLICIT resume request should still succeed against an
+    archived one -- archiving isn't deletion."""
+    store = _store(tmp_path)
+    sid = store.new_session()
+    store.archive_session(sid)
+    assert store.session_exists(sid) is True
+
+
 def test_save_turn_then_load_history_round_trips(tmp_path):
     store = _store(tmp_path)
     sid = store.new_session()

@@ -100,7 +100,7 @@ async def extract_transaction(
         llm = ChatGoogleGenerativeAI(
             model=model_id,
             google_api_key=getattr(settings, "gemini_api_key", ""),
-            temperature=0,
+            temperature=getattr(settings, "finance_extractor_temperature", 0.0),
         )
         structured = llm.with_structured_output(TransactionExtract)
         prompt = _EXTRACT_PROMPT.format(

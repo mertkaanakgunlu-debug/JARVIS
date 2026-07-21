@@ -54,7 +54,7 @@ async def summarize_session(messages: list, settings) -> str:
         model=getattr(settings, "triage_model", "gemini-2.5-flash"),
         google_api_key=settings.gemini_api_key,
         max_output_tokens=300,
-        temperature=0.2,
+        temperature=getattr(settings, "session_summarizer_temperature", 0.2),
     )
     result = await llm.ainvoke(_PROMPT + "\n\n" + body)
     return (result.content or "").strip()

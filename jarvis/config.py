@@ -231,6 +231,19 @@ class Settings(BaseSettings):
     triage_model: str = "gemini-2.5-flash"      # cheap model for bulk reading/classification pipelines
     cloud_tier: str = "flash"  # "vertex" | "aistudio" | "flash" (legacy alias)
 
+    # Agent Runtime rev.2, Faz 5 (reproducibility): these 4 cloud-extractor
+    # temperatures were hardcoded ChatGoogleGenerativeAI kwargs (finance_
+    # extractor.py, session_summarizer.py, tools/deep_research.py x2 — same
+    # value, one setting — tools/email_triage.py), invisible to run_manifest.json
+    # and impossible to tune without editing code. Two share triage_model but
+    # need distinct temperatures: email_triage's classification wants near-zero
+    # variance, session_summarizer's prose tolerates (and reads better with) a
+    # bit more. Values are the prior hardcoded ones, unchanged.
+    finance_extractor_temperature: float = 0.0
+    session_summarizer_temperature: float = 0.2
+    email_triage_temperature: float = 0.0
+    deep_research_temperature: float = 0.3
+
     # Vertex AI (Google Cloud credits — ADC via `gcloud auth application-default login`)
     google_cloud_project: str = ""
     google_cloud_region: str = "europe-west1"

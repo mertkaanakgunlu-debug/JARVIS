@@ -121,6 +121,33 @@ def test_workspace_derived_outputs_follow_home(jarvis_home, isolated_cwd):
     assert geo_math_tool._output_dir() == jarvis_home / "data" / "geo_math_outputs"
 
 
+def test_cache_dir_redirects_under_jarvis_home(jarvis_home):
+    """Agent Runtime rev.2, Faz 5: jarvis.paths.cache_dir() -- the fix for the
+    two Path.home()-based module constants in voice/vad.py and
+    voice/tts_piper.py that used to bypass isolation outright."""
+    assert paths.cache_dir() == jarvis_home / ".cache" / "jarvis"
+
+
+def test_cache_dir_falls_back_to_real_home_when_unset(monkeypatch):
+    """Unlike data_dir(), the no-JARVIS_HOME default is the real OS home, not
+    cwd -- large model downloads should survive switching launch directories
+    in normal (non-isolated) use."""
+    monkeypatch.delenv("JARVIS_HOME", raising=False)
+    assert paths.cache_dir() == Path.home() / ".cache" / "jarvis"
+
+
+def test_vad_cache_path_follows_jarvis_home(jarvis_home):
+    from jarvis.voice import vad
+
+    assert vad._default_cache_path() == jarvis_home / ".cache" / "jarvis" / "silero_vad.onnx"
+
+
+def test_piper_cache_dir_follows_jarvis_home(jarvis_home):
+    from jarvis.voice import tts_piper
+
+    assert tts_piper._default_cache_dir() == jarvis_home / ".cache" / "jarvis" / "piper_voices"
+
+
 def test_gmail_calendar_token_paths_follow_home(jarvis_home):
     from jarvis.tools import gmail, calendar
 
