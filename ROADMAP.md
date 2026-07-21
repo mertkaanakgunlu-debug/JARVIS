@@ -46,12 +46,12 @@ claims, run-to-run variance) — an execution-contract runtime so JARVIS uses *a
 reliably, not new domain tools. Full plan (9 phases, **also numbered Faz 0-8 — do not confuse
 with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
 `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
-Status: Faz 0 (alpha capability allowlist), Faz 1 (shadow ledger + redaction), Faz 2
-(`prepare_execution` node + HMAC approval binding + idempotency journal), and Faz 3 (real
-per-tool timeout enforcement + a postcondition verification runner) are all built and tested
-(673 pytest green) as of 2026-07-21 — not yet committed/pushed, owner approval pending. Faz 4
-(verified response composition + claim audit) is next. See [MEMORY.md](MEMORY.md)'s own "Agent
-Runtime rev.2" section and [HANDOFF.md](HANDOFF.md) for the current detail.
+Status: Faz 0-3 are done, committed, and pushed as of 2026-07-21 (commit `f4b7609`) — alpha
+capability allowlist, shadow ledger + redaction, `prepare_execution` + HMAC approval binding +
+idempotency journal, and real per-tool timeout enforcement + a postcondition verification
+runner. 673 pytest green, ruff clean. Faz 4 (verified response composition + claim audit) is
+next. See [MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and
+[HANDOFF.md](HANDOFF.md) for the current detail.
 
 ---
 

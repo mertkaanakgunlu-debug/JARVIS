@@ -3,13 +3,14 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-21 (8. oturum) — AGENT RUNTIME REV.2 FAZ 2+3 BİTTİ, PUSH BEKLİYOR
+## Last session: 2026-07-21 (8. oturum) — AGENT RUNTIME REV.2 FAZ 2+3 BİTTİ, COMMIT'LENDİ + PUSH'LANDI
 
 **Durum tek cümlede:** Faz 2 (`prepare_execution` + HMAC onay bağlama + idempotency journal) ve
-Faz 3 (timeout enforcement + postcondition verification runner) ikisi de **kodlandı, test edildi,
-673 pytest yeşil, ruff temiz — ama commit/push edilmedi**: bu oturum sahibin açık "commit et"
-talebi almadı, talimatlar commit'i yalnızca açıkça istendiğinde yapmamı söylüyor. Çalışan ağaç şu
-an her iki fazın değişiklikleriyle dolu (aşağıda liste). Sahip onaylarsa commit+push sıradaki adım.
+Faz 3 (timeout enforcement + postcondition verification runner) ikisi de **kodlandı, test edildi
+(673 pytest yeşil, ruff temiz), owner'ın açık isteğiyle tek commit'te birleştirildi ve push'landı**:
+commit `f4b7609`, `langgraph-migration` == `origin/langgraph-migration`. Çalışan ağaç temiz
+(yalnız `.claude/settings.local.json`'da bu oturumdan önce de duran, ilgisiz lokal izin
+eklemeleri var). Sıradaki iş Faz 4.
 
 ## Bu oturumda yapılanlar (Faz 3 — Faz 2 önceki handoff'ta zaten yazılıydı)
 
@@ -64,10 +65,7 @@ o alan zaten off/shadow karşılaştırmasından hariç.
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Bu oturumun (Faz 2 + Faz 3) değişikliklerini commit+push etmek — sahip onayı gerekiyor.**
-   Talimatlar commit'i yalnızca açıkça istendiğinde yapmamı söylüyor. Sahip onaylarsa: iki fazı ayrı
-   commit'ler olarak (plan dosyasında da ayrı fazlar), Faz 1'in commit zincirindeki üslupla, push.
-2. **Faz 4 — Verified response composition + claim audit.** Plan §Faz 4, reviewer'ın en güçlü
+1. **Faz 4 — Verified response composition + claim audit.** Plan §Faz 4, reviewer'ın en güçlü
    düzeltmesi. `compose_node` (`nodes.py:232`) artık ham `ToolMessage`'lardan değil,
    `ExecutionEnvelope[] → VerifiedExecutionSummary`'den beslenecek. Deterministik "operation
    status" bloğu koda gömülecek, modele bırakılmayacak. Claim extractor (TR/EN) kalır ama ikincil.
@@ -75,12 +73,12 @@ o alan zaten off/shadow karşılaştırmasından hariç.
    tool'dan 1'i başarılı, model ikisini de iddia ediyor — bugün geçiyor) yakalanıyor. **Dürüst
    risk:** yerel 8B modele yalnız özet verildiğinde nesir kalitesi düşebilir — Faz 1'in shadow modu
    burada da geçerli (`annotate` ile ölç, sonra `enforce`).
-3. **Canlı A/B'nin B6 sorusu hâlâ açık** (değişmedi) — deterministik replay + Faz 2/3 runtime'ı
+2. **Canlı A/B'nin B6 sorusu hâlâ açık** (değişmedi) — deterministik replay + Faz 2/3 runtime'ı
    temizledi, geriye model nondeterminizmi kaldı; interleaved deney önerisi hâlâ ertelenmiş.
-4. **`gh` CLI yetkilendirmesi — owner aksiyonu bekliyor** (değişmedi, 7. oturumdan).
-5. **Şampiyon 62/65 referansı kontamine** (değişmedi, 7. oturumdan).
-6. **Dış reviewer paketi** — `docs/review/2026-07-premerge-summary.md`, bu oturumda dokunulmadı.
-7. **Bilinçli ertelenenler (değişmedi + Faz 3'ün kendi yeni kalemleri):**
+3. **`gh` CLI yetkilendirmesi — owner aksiyonu bekliyor** (değişmedi, 7. oturumdan).
+4. **Şampiyon 62/65 referansı kontamine** (değişmedi, 7. oturumdan).
+5. **Dış reviewer paketi** — `docs/review/2026-07-premerge-summary.md`, bu oturumda dokunulmadı.
+6. **Bilinçli ertelenenler (değişmedi + Faz 3'ün kendi yeni kalemleri):**
    - W4b, `[BLOCKED]` sunum katmanı, qwen3.5/ministral-3 thinking-on, `stoic-spence` rolling
      summarization, `docs/ARCHITECTURE.md` orchestrator bölümü — hepsi önceki oturumlardan.
    - Faz 2'nin kapsam dışları: `target_resource` best-effort, TaskContract match hep
