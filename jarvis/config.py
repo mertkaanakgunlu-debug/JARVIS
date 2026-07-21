@@ -72,6 +72,21 @@ class Settings(BaseSettings):
     # runs are unaffected; only --profile test flips this.
     external_writes_enabled: bool = True
 
+    # Agent Runtime rev.2, Faz 1 (2026-07-20): execution-contract rollout
+    # ladder (plan section B, "Uc ilke" #3) -- off | shadow |
+    # enforce_read_only | enforce_reversible | enforce_all. Faz 1 only
+    # wires the off vs not-off distinction: tool_result_accounting
+    # (jarvis/graph/tool_accounting.py) builds one ExecutionEnvelope per
+    # tool call into state["execution_envelopes"] as a pure observer when
+    # this is anything but "off" -- no decision changes anywhere. The
+    # enforce_* values are accepted here for forward compatibility with
+    # Faz 2+ but behave identically to "shadow" until Faz 2 adds real
+    # gating on this field. Default "off": no new code path runs at all
+    # (Faz 1's own rollback contract).
+    execution_contract_mode: Literal[
+        "off", "shadow", "enforce_read_only", "enforce_reversible", "enforce_all"
+    ] = "off"
+
     # Faz 5: MCP client layer. Dedicated flags for the shipped Playwright
     # (browser automation) server -- flip mcp_playwright_enabled=True in .env,
     # no JSON needed. mcp_servers is the generic escape hatch for any other

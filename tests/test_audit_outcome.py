@@ -80,3 +80,36 @@ def test_raw_string_error_still_detected(monkeypatch):
     cb = _HudEventCallback(transport="test")
     _fire_end(cb, "r5", "[BLOCKED] denied pattern")
     assert _last_end_ok(records) is False
+
+
+# ── Agent Runtime rev.2, Faz 1 — args_preview/result_preview are now
+# redacted, not raw. Both used to be str(x)[:200] with no redaction at all,
+# even though the SAME input_str was already key-redacted for tool_trace
+# two lines below the args_preview call site (see agent.py's on_tool_start).
+
+def test_start_audit_args_preview_is_redacted(monkeypatch):
+    records = _capture(monkeypatch)
+    cb = _HudEventCallback(transport="test")
+
+    cb.on_tool_start(
+        {"name": "gmail"},
+        {"action": "send", "to": "a@b.c", "body": "SECRET-BODY"},
+        run_id="r6",
+    )
+
+    starts = [r for r in records if r["event"] == "execution_start"]
+    assert starts, "no execution_start record was written"
+    assert "SECRET-BODY" not in starts[-1]["args_preview"]
+    assert "a@b.c" in starts[-1]["args_preview"], "non-sensitive fields must stay readable"
+
+
+def test_end_audit_result_preview_is_redacted(monkeypatch):
+    records = _capture(monkeypatch)
+    cb = _HudEventCallback(transport="test")
+    _fire_end(cb, "r7", ToolMessage(
+        content="sent, Authorization: Bearer sk-abcdef1234567890ABCDEF echoed back",
+        tool_call_id="r7",
+    ))
+
+    ends = [r for r in records if r["event"] == "execution_end"]
+    assert "sk-abcdef1234567890ABCDEF" not in ends[-1]["result_preview"]

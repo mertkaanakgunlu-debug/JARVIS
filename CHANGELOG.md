@@ -6,6 +6,50 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 1] — 2026-07-20
+
+**Önce: şampiyon A/B baseline koşuldu ve analiz edildi** (`qwen3:8b`, `LOCAL_REASONING_EFFORT=none`,
+5×13, iki-metrikli oracle) — Faz 0'ın ertelenen son kalemi + commit `a6a3426`'nın "provisional"
+işaretlediği model-seçim kararının re-baseline'ı. **62/65 (95.4%)**, güvenlik senaryoları
+(C9/D11/D12/D13b) hepsi 5/5, G17b artık temiz. Tek bulgu: **B6 3/5** (plot_data hallucination —
+tam olarak bu planın var olma sebebi olan desen, canlı hâlâ oluyor) ve **F16 4/5**
+(`trace tools=none`, 1 run). **Model-seçim kararı artık CONFIRMED, provisional değil** — eski
+2026-07-18 baseline'ının 60/65'inden daha iyi; B6/F16 bir model sorunu değil, Faz 2-4'ün
+TaskContract + verified-composition işinin çözmeyi hedeflediği mimari sınıf.
+
+**Faz 1 — core contract types + shadow ledger:** yeni paket `jarvis/execution/`:
+- `contract.py` — `TaskContract`/`ExpectedOutcome` (yalnız şekil; extractor'lar Faz 2+)
+- `postcondition.py` — `PostconditionSpec`/`PostconditionResult`/`VerificationStatus`
+- `envelope.py` — `ExecutionEnvelope` + `build_shadow_envelope()`
+- `redaction.py` — paylaşılan redaksiyon katmanı, key-based (eski) + **pattern-based (yeni)** —
+  `jarvis.agent`'ın eski `redact_tool_args`'ının "plain-string arg taranmıyor" diye belgelenmiş
+  açığını kapatıyor
+
+`ToolSpec` (`tool_registry.py`) 6 yeni additive alan aldı: `args_schema`, `postconditions`,
+`idempotency`, `effect_scope`, `contract_status` (Faz 0'ın `_ALPHA_STATUS`'u artık buraya da
+katlanıyor), `timeout_class` — hepsi Faz 3/6/7 hedefi, henüz canlı davranış değiştirmiyor.
+`Settings.execution_contract_mode` (`off|shadow|enforce_read_only|enforce_reversible
+|enforce_all`, varsayılan **off**) ve `JarvisState.execution_envelopes` eklendi.
+`tool_result_accounting` artık mode≠"off" iken her tool call için bir `ExecutionEnvelope`
+üretip state'e ekliyor — **hiçbir kararı değiştirmiyor**, mode="off"/`settings=None` iken (varsayılan)
+bu blok hiç çalışmıyor.
+
+**Bu oturumda bulunan üçüncü bir ham-redaksiyon açığı** (HANDOFF'un işaret ettiği ikisine ek):
+`agent.py`'nin `_trace_end`'i `tool_trace.record`'a ham `content_head` yazıyordu — kendi modül
+docstring'i "file contents... must never persist through it" diyordu ama tutmuyordu. Üçü de
+(audit_log'un `args_preview`/`result_preview`'i + tool_trace'in `content_head`'i) artık paylaşılan
+katmandan geçiyor; `tool_execution_ledger.content_head` de (checkpointer SQLite'ına giden) düzeltildi.
+
+43 yeni test (`test_execution_types.py`, `test_execution_redaction.py`,
+`test_execution_shadow_ledger.py` + `test_tool_trace.py`/`test_audit_outcome.py` ekleri).
+**523 pytest yeşil (480+43), ruff temiz.**
+
+Küçük bir canlı shadow-mode entegrasyon kontrolü (tam 5×13 değil, port 8133'te 1-2 izole
+senaryo) sunucu çökmeden tamamlandı; tam Faz 1 kabul koşusu (shadow vs off, bit-identical skor
+iddiası) [HANDOFF.md](HANDOFF.md)'a bırakıldı.
+
+**Commit/push bu oturumda yapılmadı** — owner onayı bekleniyor.
+
 ## [Agent Runtime rev.2 — Faz 0] — 2026-07-20
 
 Owner'ın GPT-analiz oturumundan gelen mimari plan (dış geliştirici bulguları + reviewer'ın

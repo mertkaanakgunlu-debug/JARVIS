@@ -28,6 +28,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from jarvis.execution.envelope import build_shadow_envelope
+from jarvis.execution.redaction import redact_preview
 from jarvis.graph.state import JarvisState
 
 # A ToolMessage whose content starts with one of these did NOT succeed —
@@ -128,8 +130,22 @@ def last_round_results(state: JarvisState) -> list[tuple[bool, bool]]:
     return out
 
 
-def make_tool_result_accounting_node():
-    """Node: promote succeeded calls to completed + append to the ledger."""
+def make_tool_result_accounting_node(settings=None):
+    """Node: promote succeeded calls to completed + append to the ledger.
+
+    Agent Runtime rev.2, Faz 1: also builds one ExecutionEnvelope per call
+    into state["execution_envelopes"] when settings.execution_contract_mode
+    != "off" -- a pure OBSERVER, appended alongside the existing ledger,
+    changing no decision (nothing reads envelopes yet). Faz 1 only
+    distinguishes off vs not-off; every non-"off" value (shadow,
+    enforce_read_only, ...) behaves identically to "shadow" until Faz 2
+    adds real gating on this field. With settings=None or mode="off" (both
+    the default), the envelope block below never runs at all -- the
+    returned dict is unchanged from pre-Faz-1 behavior, which is what lets
+    existing callers (e.g. test_tool_limits.py) keep constructing this node
+    with zero args.
+    """
+    mode = getattr(settings, "execution_contract_mode", "off") if settings is not None else "off"
 
     async def tool_result_accounting(state: JarvisState) -> dict:
         last_ai, results = _last_executed_round(state.get("messages") or [])
@@ -138,9 +154,11 @@ def make_tool_result_accounting_node():
 
         completed = list(state.get("completed_tool_fingerprints") or [])
         ledger = list(state.get("tool_execution_ledger") or [])
+        envelopes = list(state.get("execution_envelopes") or []) if mode != "off" else None
         for tc in last_ai.tool_calls:
             name = tc.get("name", "")
-            fp = tool_call_fingerprint(name, tc.get("args") or {})
+            args = tc.get("args") or {}
+            fp = tool_call_fingerprint(name, args)
             tm = results.get(tc.get("id", ""))
             ok = tool_message_ok(tm)
             if ok and fp not in completed:
@@ -153,14 +171,25 @@ def make_tool_result_accounting_node():
                 "tool": name,
                 "fingerprint": fp,
                 "ok": ok,
-                "content_head": content[:_CONTENT_HEAD_CHARS],
+                # Faz 1: redacted, not raw -- this ledger rides in graph
+                # state through the SqliteSaver checkpointer.
+                "content_head": redact_preview(content, max_chars=_CONTENT_HEAD_CHARS),
                 **({"reason_code": code} if code else {}),
             })
+            if envelopes is not None:
+                envelopes.append(build_shadow_envelope(
+                    tool_name=name, args=args, ok=ok, content=content,
+                    retryable="retryable=true" in content, error_code=code,
+                    execution_id=tc.get("id", ""),
+                ).model_dump())
 
-        return {
+        out = {
             "completed_tool_fingerprints": completed,
             "tool_execution_ledger": ledger,
         }
+        if envelopes is not None:
+            out["execution_envelopes"] = envelopes
+        return out
 
     tool_result_accounting.__name__ = "tool_result_accounting"
     return tool_result_accounting

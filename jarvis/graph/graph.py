@@ -180,7 +180,7 @@ def build_graph(
     builder.add_node("confirmation", confirmation_node)
     builder.add_node("planner", planner_node)
     builder.add_node("tools", tools_node)
-    builder.add_node("tool_result_accounting", make_tool_result_accounting_node())
+    builder.add_node("tool_result_accounting", make_tool_result_accounting_node(settings))
     builder.add_node("compose", make_compose_node(settings))
     builder.add_node("critic", critic_node)
 

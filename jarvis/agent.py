@@ -29,6 +29,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphInterrupt, GraphRecursionError
 
+from jarvis.execution.redaction import redact_preview  # Agent Runtime rev.2, Faz 1
 from jarvis.graph.tool_router import classify_query
 from jarvis.graph.tool_accounting import (  # Faz 1.1: shared outcome judgement
     content_is_failure,
@@ -81,28 +82,20 @@ class ProactiveOutcome:
 
 # ── HUD activity feed callback ────────────────────────────────────────────────
 
-# Faz 2.2 round 3 — the test trace's args preview is key-redacted before it
-# hits disk. tool_trace writes whenever JARVIS_TOOL_TRACE=1, which anyone can
+# Faz 2.2 round 3 — the test trace's args preview is redacted before it hits
+# disk. tool_trace writes whenever JARVIS_TOOL_TRACE=1, which anyone can
 # export outside --profile test, so email bodies, file contents and
-# credentials must never persist through it. Key-based on purpose (not value
-# sniffing): deterministic under test. Known limit: a non-dict input arrives
-# as one opaque string and is truncated but NOT scanned — a secret embedded
-# in a plain-string arg is out of this helper's scope.
-_TRACE_REDACT_KEYS = (
-    "password", "passwd", "token", "api_key", "apikey", "secret",
-    "credential", "authorization", "body", "content", "message",
-)
-
-
+# credentials must never persist through it. Agent Runtime rev.2, Faz 1:
+# this used to be its own key-only, dict-only helper (a non-dict input was
+# truncated but never scanned — a secret embedded in a plain-string arg
+# survived). Now a thin wrapper over jarvis.execution.redaction, the one
+# shared redaction vocabulary also used by audit_log's previews below and
+# tool_accounting's ledger — kept as a named function since this module's
+# own on_tool_start call site and tests/test_tool_trace.py both reference
+# it directly.
 def redact_tool_args(input_str: Any) -> str:
-    """200-char args preview for tool_trace, sensitive keys masked."""
-    if isinstance(input_str, dict):
-        preview = {
-            k: ("<redacted>" if any(s in str(k).lower() for s in _TRACE_REDACT_KEYS) else v)
-            for k, v in input_str.items()
-        }
-        return str(preview)[:200]
-    return str(input_str)[:200]
+    """200-char args preview for tool_trace, sensitive keys/patterns masked."""
+    return redact_preview(input_str)
 
 
 class _HudEventCallback(BaseCallbackHandler):
@@ -136,7 +129,11 @@ class _HudEventCallback(BaseCallbackHandler):
             self._audit_pending[str(run_id)] = (name, spec.risk_level)
             audit_log.record(
                 "execution_start", tool=name, risk_level=spec.risk_level,
-                transport=self._transport, args_preview=str(input_str)[:200],
+                # Agent Runtime rev.2, Faz 1: was raw str(input_str)[:200] --
+                # a gmail send body or a file_write's content arg landed in
+                # the audit log unredacted, while this same input_str WAS
+                # already redacted for tool_trace two lines below.
+                transport=self._transport, args_preview=redact_preview(input_str),
             )
         # Faz 2.2: trace EVERY tool (L1 included) when the test profile enabled it.
         if run_id is not None and tool_trace.is_enabled():
@@ -170,7 +167,12 @@ class _HudEventCallback(BaseCallbackHandler):
         tool_trace.record(
             tool=pending["tool"], args=pending["args"], ok=ok,
             transport=self._transport,
-            content_head=head[:200],
+            # Agent Runtime rev.2, Faz 1: was raw head[:200] -- a tool's own
+            # result content (e.g. file_read's file body) landed in
+            # tool_trace.jsonl unredacted, contradicting this module's own
+            # docstring ("file contents and credentials must never persist
+            # through it").
+            content_head=redact_preview(head),
             **({"reason_code": code} if code else {}),
         )
 
@@ -187,12 +189,13 @@ class _HudEventCallback(BaseCallbackHandler):
         # every Calendar/Gmail credential error). Judge the real content with
         # the same canonical helper the execution ledger uses.
         content = getattr(output, "content", output)
-        out_s = content if isinstance(content, str) else str(content)
         if ok is None:
             ok = getattr(output, "status", None) != "error" and not content_is_failure(content)
         audit_log.record(
             "execution_end", tool=name, risk_level=risk_level,
-            transport=self._transport, ok=ok, result_preview=out_s[:200],
+            # Agent Runtime rev.2, Faz 1: was raw out_s[:200] -- see the
+            # args_preview fix above in on_tool_start for the same gap.
+            transport=self._transport, ok=ok, result_preview=redact_preview(content),
         )
 
     def on_llm_start(self, serialized: dict, prompts: list, **kwargs: Any) -> None:

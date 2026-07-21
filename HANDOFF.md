@@ -3,90 +3,122 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-20 (5. oturum) — GPT_Analysis.md İNCELENDİ, "AGENT RUNTIME rev.2" PLANI ONAYLANDI, FAZ 0 KODU GİTTİ
+## Last session: 2026-07-20 (6. oturum) — ŞAMPİYON BASELINE KOŞULDU + ANALİZ EDİLDİ, AGENT RUNTIME rev.2 FAZ 1 KODU GİTTİ (henüz commit/push edilmedi)
 
-**Bağlam:** Owner, önceki oturumdan sonra bir dış geliştirici GPT'ye gitti; o oturumun bulgularını
-(context leakage, B6 yanlış tool argümanı, uydurma başarı iddiası, run-to-run değişkenlik) ortak
-mimari kök nedenle çözecek bir plan istedi — yeni domain tool'u değil, **herhangi bir tool'u
-JARVIS'in güvenilir kullanmasını sağlayacak runtime sözleşmesi**. Repo kod okunarak incelendi
-(rev.1), sonra owner'ın GPT'ye götürdüğü rev.1 dış reviewer 14 maddelik revizyon verdi (özellikle:
-TaskContract eksikliği, confirmation'ın normalize-edilmemiş ham argümanı onaylaması, idempotency'nin
-P0 olmaması gerektiği halde Faz E'ye atılmış olması, `python_run`'ın "bilinen açık" diye
-bırakılamayacağı, Workflow Runtime fazının hiç yazılmamış olması). Tüm 14 madde işlenip **rev.2**
-plan onaylandı.
-
-**Plan dosyası:** `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`
-— 9 faz (0-8). **Bu numaralandırma [ROADMAP.md](ROADMAP.md)'nin kendi Faz 0-8'iyle (local-first
-pivot, hepsi done/deferred) KARIŞTIRILMAMALI** — ayrı bir inisiyatif, kod içi yorumlarda hep
-"Agent Runtime rev.2, Faz N" diye açık nitelenir.
+**Bağlam:** Önceki oturum (5.) Faz 0'ı gönderip iki iş bırakmıştı: (1) ertelenen 5×13 A/B
+baseline koşusu (Faz 0'ın son kalemi + `a6a3426`'nın "provisional" dediği model-seçim kararının
+re-baseline'ı), (2) sonra Agent Runtime rev.2 Faz 1. Bu oturum ikisini de sırayla yaptı.
 
 ## Bu oturumda yapılanlar
 
-1. **Repo durumu yeniden doğrulandı** (GPT'nin "commitleri otomatik doğru kabul etme" kuralı):
-   `pytest` **480** test topluyor artık (Faz 0'ın 12 yenisiyle; önceki HANDOFF'un "453"ü zaten
-   bayattı, gerçek baseline 468'di). `origin/langgraph-migration`'a göre fark **4 commit**'ti,
-   önceki HANDOFF'un "7" rakamı da bayatmış (o 7'nin çoğu zaten origin'deydi).
-2. **Faz 0 kod:** `jarvis/tool_registry.py`'a alpha-capability allowlist —
-   `ALPHA_STATUS_VALUES` (5 kapalı değer: contract_enforced/shadow_validated/quarantined/
-   disabled/explicitly_unverifiable) + `get_alpha_status()`. İki canlı karar: `python_run` →
-   **disabled** (`make_tools()`'un listesinden çıkarıldı VE `policy_guard.evaluate()`'te
-   bağımsız veto — iki ayrı savunma katmanı), `shell_run` → **quarantined**. `PolicyDecision`'a
-   `veto_kind` alanı (confirmation_node'un ack mesajı artık gerçek nedeni söylüyor). 12 yeni test.
-   **480 pytest yeşil, ruff temiz.**
-3. **Commit + push** (owner onayıyla, bu oturumda): 4 bekleyen commit + Faz 0'ın commit'i,
-   toplam 5, `origin/langgraph-migration`'a gitti (`792329e`). CI (`ci.yml`) push sonrası
-   commit `792329e` için tetiklendi, tamamlanması bu oturumda beklenmedi.
-4. **CHANGELOG.md geriye dönük dolduruldu** — 4 pushed-ama-hiç-yazılmamış commit'in içeriği
-   ("Merge-öncesi review sertleştirmesi" bölümüne eklendi: agent.py'nin env_block context-leak'i,
-   iki-metrikli oracle, `-Scenarios` param + splatting fix'i) + bugünün Faz 0 girdisi eklendi.
-
-## Önemli, taşınan bir bulgu: model-selection kararı hâlâ PROVISIONAL
-
-`a6a3426` (bu oturumda push edilen, ama önceki oturumda yazılmış commit) şunu not ediyor:
-**`qwen3:8b` + `LOCAL_REASONING_EFFORT=none` varsayılan kararı, iki-metrikli oracle'la bir
-re-baseline koşulana kadar geçicidir** — eski 65/65, tool-execution compliance'tı, semantic
-correctness değil (B6 yanlış veriyi çizip geçmişti). İki-metrikli oracle (`b8463dc`) o
-tarihten sonra geldi ama re-baseline hiç koşulmadı. **Sonraki oturumun 5×13 A/B koşusu bu
-re-baseline'ı da kapatacak** — sadece Faz 0'ın bookkeeping'i değil.
+1. **Şampiyon A/B baseline koşuldu ve analiz edildi** (`qwen3:8b`, `LOCAL_REASONING_EFFORT=none`,
+   5×13, port 8132, arka planda ~34 dakika sürdü — `.\scripts\ab_run_config.ps1 -Config champ
+   -Effort none -Runs 5`). Sonuç: **62/65 (95.4%)** — iki-metrikli oracle'da compliance 62/65,
+   semantic 63/65. Güvenlik senaryoları (C9/D11/D12/D13b) **hepsi 5/5**, G17b (geçmişte hep
+   fail eden kişisel-veri senaryosu) artık **5/5 temiz**. Tek gerçek bulgu kümesi: **B6 3/5**
+   (plot_data — "response claims success but no tool succeeded", tam olarak bu planın var
+   olma sebebi olan B6 hallucination deseni, canlı ve hâlâ oluyor) ve **F16 4/5** (procedure_save,
+   1 run'da `trace tools=none`). Rapor: `C:\Temp\jarvis-ab\results\ab_report.md`.
+   **Sonuç: model-seçim kararı artık PROVISIONAL değil — CONFIRMED.** 62/65, eski 2026-07-18
+   baseline'ının 60/65'inden daha iyi (o da iki config'te de yalnız G17b'den kaybediyordu, bu da
+   artık düzelmiş). B6/F16 bir model sorunu değil — Faz 2-4'ün TaskContract + verified-composition
+   işinin tam olarak çözmeyi hedeflediği mimari sınıf; bu koşu o işe canlı, güncel bir regresyon
+   referansı sağladı.
+   **Not:** `ab_analyze.py`'yi ilk çağırışım Git Bash'te ters eğik çizgi yutulması yüzünden sahte
+   ikinci bir "baseline" config'i üretti (gerçek `champ` verisi etkilenmedi) — PowerShell'den doğru
+   tekrarlandı. Bu script'i **PowerShell'den çalıştırın, Bash'ten değil** (Windows path'leri).
+2. **Agent Runtime rev.2 Faz 1 koda geçti** — yeni paket `jarvis/execution/`:
+   - `contract.py` — `TaskContract`/`ExpectedOutcome` (henüz hiçbir extractor yok, yalnız şekil)
+   - `postcondition.py` — `PostconditionSpec`/`PostconditionResult`/`VerificationStatus`
+   - `envelope.py` — `ExecutionEnvelope` + `build_shadow_envelope()`
+   - `redaction.py` — paylaşılan redaksiyon katmanı: key-based (eski) + **pattern-based (yeni)**
+     — `agent.redact_tool_args`'ın "plain-string taranmıyor" olarak belgelenmiş açığını kapatıyor
+   - `ToolSpec` (`tool_registry.py`) additive 6 yeni alan: `args_schema`, `postconditions`,
+     `idempotency`, `effect_scope`, `contract_status` (Faz 0'ın `_ALPHA_STATUS`'u artık buraya da
+     katlanıyor — `get_alpha_status()` değişmedi), `timeout_class`. Hiçbiri henüz canlı davranış
+     değiştirmiyor (Faz 3/6/7 hedefleri).
+   - `Settings.execution_contract_mode` (`off|shadow|enforce_read_only|enforce_reversible
+     |enforce_all`, varsayılan **off**). Faz 1 yalnız off/not-off ayrımını uyguluyor.
+   - `JarvisState.execution_envelopes` yeni alan.
+   - `tool_result_accounting` (Faz 1'in shadow ledger'ı) — mode≠"off" iken her tool call için bir
+     `ExecutionEnvelope` üretip state'e ekliyor, **hiçbir kararı değiştirmiyor**. mode="off" veya
+     `settings=None` iken bu blok hiç çalışmıyor (unit testle kanıtlı: `test_no_settings_produces_
+     no_envelopes_key`, `test_off_and_shadow_agree_on_every_pre_existing_field`).
+   - **HANDOFF'un işaret ettiği 3 ham-redaksiyon açığı kapatıldı** (hepsi `agent.py`): `on_tool_
+     start`'ın `audit_log` `args_preview`'i (:139 idi), `_record_execution_end`'in `result_
+     preview`'i (:195 idi), ve ayrıca kodu okurken bulunan **dördüncü bir açık**: `_trace_end`'in
+     `tool_trace.record`'a yazdığı `content_head` de ham'dı (kendi modül docstring'i "file
+     contents... must never persist through it" diyordu, tutmuyordu). `tool_accounting.py`'nin
+     `tool_execution_ledger.content_head`'i de düzeltildi (checkpointer SQLite'ına ham gidiyordu).
+   - `graph.py`: `make_tool_result_accounting_node()` artık `settings` alıyor.
+3. **43 yeni test** (`test_execution_types.py`, `test_execution_redaction.py`,
+   `test_execution_shadow_ledger.py`, + `test_tool_trace.py`/`test_audit_outcome.py`'ye ekler).
+   **523 pytest yeşil (480+43), ruff temiz.**
+4. **Küçük canlı shadow-mode kontrolü** (tam 5×13 değil — bkz. aşağıdaki "kalan iş"): port 8133'te
+   tek senaryo (`-Scenarios B6`, sonra `B4`) `EXECUTION_CONTRACT_MODE=shadow` ile koşuldu, sunucu
+   çökmeden tamamlandı. **Beklenmedik gözlem:** her iki izole tekli-senaryo koşusunda da model
+   "Gemini 2.5 Pro (cloud)" etiketiyle cevapladı ve `trace tools=none` — hiç tool çağrılmadı.
+   Kod-yolu analizi bunun Faz 1 değişikliğiyle **ilgisi olamayacağını** gösteriyor
+   (`tool_result_accounting`, `agent_node`'un hiç üretmediği bir tool call'ı işleyemez — üstteki
+   koddaki döngüye hiç girilmiyor). Şampiyon baseline'ın TAM 13-senaryo sırasındaki sonuçlarıyla
+   çelişmiyor de (B6 orada 3/5 gerçek plot_data çağrısıyla başarısız oluyor, F16'nın 1/5'i de
+   `trace tools=none`) — yani "tool çağrılmadı" nadiren ama gerçekten oluyor; izole tekli-senaryo
+   koşusunun HER SEFERİNDE bunu tetiklemesi muhtemelen CLAUDE.md/ROADMAP'te zaten bilinen açık
+   "pre-first-turn kozmetik model label" sınıfının bir uzantısı (izole koşu her zaman "session'ın
+   ilk turu" koşuluna düşüyor). **Faz 1 kodunu şüpheli görmüyorum ama kesin kanıt değil** —
+   sıradaki oturumun tam shadow 5×13'ü bunu da netleştirecek.
+5. **Commit/push YAPILMADI bu oturumda** — owner onayı bekleniyor (bkz. sıradaki iş #1).
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **5×13 A/B baseline koşusu — owner bu oturumda ertelemeyi seçti.** Faz 0'ın son kalemi
-   (Agent Runtime rev.2'nin sonraki fazlarını karşılaştıracağı referans) VE yukarıdaki
-   provisional model-selection kararının re-baseline'ı. Ollama'nın açık olduğunu önce doğrula
-   (oturumlar arası açık kalmıyor, MEMORY.md). Komut:
+1. **Commit + push onayı iste** — çalışan ağaçta: `jarvis/execution/` (yeni), `jarvis/agent.py`,
+   `jarvis/config.py`, `jarvis/graph/graph.py`, `jarvis/graph/state.py`,
+   `jarvis/graph/tool_accounting.py`, `jarvis/tool_registry.py`, 5 test dosyası (3 yeni + 2 ek).
+   `.claude/settings.local.json`'daki değişiklik muhtemelen commit'e dahil edilmemeli (lokal araç
+   izinleri) — kontrol et.
+2. **Faz 1'in kendi kabul kriteri hâlâ eksik: tam shadow-mode 5×13 koşusu.**
+   Bu oturum yalnız 2 izole tekli-senaryo denedi (yukarıya bkz.) — gerçek kabul şu:
    ```powershell
-   .\scripts\ab_run_config.ps1 -Config champ -Runs 5
-   python scripts\ab_analyze.py C:\Temp\jarvis-ab champ --runs 5
+   $env:EXECUTION_CONTRACT_MODE = "shadow"
+   .\scripts\ab_run_config.ps1 -Config champ-shadow -Effort none -Runs 5
+   python scripts\ab_analyze.py C:\Temp\jarvis-ab champ champ-shadow --runs 5
    ```
-2. **Baseline'dan sonra Agent Runtime rev.2'nin Faz 1'i:** `jarvis/execution/` paketi —
-   `TaskContract`, `PostconditionSpec`, `ExecutionEnvelope`, ortak redaksiyon katmanı. Bu
-   oturumda bulunan ek açık, Faz 1'in kapsamına zaten dahil: `agent.py`'nin `audit_log.record`
-   çağrıları (`:139` `args_preview`, `:195` `result_preview`) ham argüman yazıyor —
-   `tool_trace`'in `redact_tool_args()`'ı (`:97-105`) audit log'a hiç uygulanmıyor; bir
-   `gmail send` gövdesi trace'te maskeli, audit log'da açık. `tool_execution_ledger.content_head`
-   ([tool_accounting.py:156](jarvis/graph/tool_accounting.py)) de aynı durumda, checkpointer
-   SQLite'ına gidiyor.
-3. **Dış reviewer'ın önceki paketi hâlâ inceleniyor olabilir** — `docs/review/2026-07-premerge-
-   summary.md` üzerinden, owner süreci, bu oturumda dokunulmadı.
-4. **Bilinçli ertelenenler (önceki oturumdan, değişmedi):**
+   Beklenen: oracle skorları `champ`'a (62/65) **bit-identical**; envelope üretim oranı ölçülecek
+   bir yol yok henüz raporda (`ab_analyze.py` envelope'ları okumuyor — bunu ölçmenin en basit yolu
+   `home-champ-shadow\data\jarvis_checkpoints.db`'yi elle örneklemek, ya da Faz 1'in kabul testini
+   düşürüp yalnız "skorlar bit-identical + sunucu hiç çökmedi" ile yetinmek; owner'a sor).
+3. **Model-seçim kararı artık CONFIRMED — MEMORY.md/config.py'deki "provisional" notları
+   güncellenebilir** (bu oturumda `project_agent_runtime_rev2` hafıza dosyası zaten güncellendi).
+4. **Ardından Faz 2** — `prepare_execution` node (`agent → prepare_execution → confirmation`
+   routing değişikliği), approval binding (HMAC), idempotency journal. Plan dosyası:
+   `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`
+   §Faz 2.
+5. **Dış reviewer'ın önceki paketi hâlâ inceleniyor olabilir** — `docs/review/2026-07-premerge-
+     summary.md` üzerinden, owner süreci, bu oturumda dokunulmadı.
+6. **Bilinçli ertelenenler (değişmedi):**
    - W4b (veto-turn'de critic LLM atlaması) — graph routing değişikliği ayrı oturum gerektiriyor.
    - `[BLOCKED]` sunum katmanından kod soyma — ayrı iyileştirme.
    - qwen3.5/ministral-3'ün thinking-on kolu koşulmadı (owner kararıyla OFF-only kapsam).
-5. **Kalıcı hafıza (G17b'nin davranışsal yarısı):** `stoic-spence` worktree'sindeki rolling-
+7. **Kalıcı hafıza (G17b'nin davranışsal yarısı):** `stoic-spence` worktree'sindeki rolling-
    summarization hâlâ ayrı bir iş kalemi.
+8. **Flagged, ayrı oturum bekliyor** (spawn_task ile bu oturumda işaretlendi):
+   `docs/ARCHITECTURE.md`'nin orchestrator bölümü birkaç faz geride (Faz 2B topology, Faz 4
+   confirmation gate, Faz 3 model swap hiç yansımamış) — task_f540cef1.
 
 ## Ortam / komutlar
 ```powershell
 .\.venv\Scripts\Activate.ps1
-pytest                                   # 480 test, offline
+pytest                                   # 523 test, offline
 ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py
 ```
-Env: `LOCAL_REASONING_EFFORT` default `none`, `LOCAL_MODEL` default `qwen3:8b` — **karar
-provisional, bkz. üstteki bölüm**. Koşum artifact'leri: `C:\Temp\jarvis-ab\`.
+Env: `LOCAL_REASONING_EFFORT` default `none`, `LOCAL_MODEL` default `qwen3:8b` — **artık
+CONFIRMED, bkz. üstteki bölüm**. `EXECUTION_CONTRACT_MODE` default `off` (yeni, Faz 1).
+Koşum artifact'leri: `C:\Temp\jarvis-ab\` (`ab_analyze.py`'yi **PowerShell'den** çalıştırın —
+Git Bash Windows path'lerindeki ters eğik çizgileri yutuyor, canlı bulundu bu oturumda).
 
 ## Değişmeyen taşınan işler
 - 8 direct-Gemini modülün shared gateway'e migrasyonu (Sprint 3) — kapsam dışı.
 - 4 worktree branch read-through — ayrı go-ahead bekliyor (CLAUDE.md'de liste).
 - Electron/mobil confirmation render'ı — hâlâ yalnız CLI text+voice.
-- Pre-first-turn kozmetik model label — açık.
+- Pre-first-turn kozmetik model label — açık (bu oturumun izole-senaryo gözlemiyle muhtemelen
+  ilişkili, bkz. yukarı).

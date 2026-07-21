@@ -90,5 +90,18 @@ def test_redact_helper_masks_by_key_not_position():
     out = redact_tool_args({"path": "x.txt", "content": "gizli metin", "api_key": "AKIA123"})
     assert "gizli metin" not in out and "AKIA123" not in out
     assert "x.txt" in out
-    # Non-dict input: truncated, not scanned (documented limit).
+    # A plain string with no secret-shaped substring passes through as-is.
     assert redact_tool_args("plain-string-arg") == "plain-string-arg"
+
+
+def test_redact_helper_now_scans_plain_strings_too():
+    """Agent Runtime rev.2, Faz 1 (reviewer item #12): redact_tool_args used
+    to be key-based and dict-only -- a non-dict input was truncated but
+    never scanned, so a secret embedded in a plain-string argument survived
+    (this was a documented, deliberate limit, not an oversight). It now
+    delegates to jarvis.execution.redaction, which pattern-scans strings
+    too; this is the regression test proving that specific gap is closed."""
+    from jarvis.agent import redact_tool_args
+
+    leaked = redact_tool_args("curl -H 'Authorization: Bearer sk-abcdef1234567890ABCDEF' https://api.example.com")
+    assert "sk-abcdef1234567890ABCDEF" not in leaked

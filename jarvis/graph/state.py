@@ -44,3 +44,10 @@ class JarvisState(TypedDict):
     seen_tool_fingerprints: list[str]      # sha256(tool + canonical args) at policy time
     completed_tool_fingerprints: list[str]  # subset of seen that actually succeeded
     tool_execution_ledger: list[dict]  # {"tool", "fingerprint", "ok", "content_head"} per call
+
+    # Agent Runtime rev.2, Faz 1: one ExecutionEnvelope (jarvis/execution/
+    # envelope.py, .model_dump()'d) per tool call, built by
+    # tool_result_accounting when Settings.execution_contract_mode !=
+    # "off". Absent/empty under "off" (the default) -- old checkpoints
+    # resume fine, same discipline as the five Patch-1.2 fields above.
+    execution_envelopes: list[dict]

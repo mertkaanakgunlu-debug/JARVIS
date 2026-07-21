@@ -36,6 +36,7 @@ mcp   — Faz 5: tools discovered at runtime from an external MCP server
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,47 @@ class ToolSpec:
                             # intents should SEE it?" — external_api alone
                             # lumps gmail+calendar+drive+spotify together,
                             # which is exactly what a scoped subset can't do.
+
+    # ── Agent Runtime rev.2, Faz 1: additive fields, every one defaulted so
+    # none of the 36 existing ToolSpec(...) calls below need to change.
+    # Every field here is a declared FUTURE destination, not a live signal
+    # today (same honesty discipline as contract_status below) — nothing
+    # reads args_schema/postconditions/idempotency/effect_scope/
+    # timeout_class yet.
+    args_schema: type | None = None
+        # Faz 6 destination: a pydantic BaseModel class for structural
+        # argument validation. None = not yet typed (every tool today).
+    postconditions: tuple = ()
+        # tuple[jarvis.execution.postcondition.PostconditionSpec, ...] --
+        # Faz 3 destination (the postcondition runner). Empty = none
+        # declared yet for any tool.
+    idempotency: Literal["none", "natural", "keyed"] = "none"
+        # Faz 2 destination (idempotency journal keying, plan section C).
+        # "none" = not yet classified for any tool.
+    effect_scope: Literal["unclassified", "reversible", "irreversible"] = "unclassified"
+        # Faz 7 destination (compensation eligibility -- "yalniz kayitli
+        # gercek tersi olan islemlerde otomatik telafi"). Deliberately NOT
+        # derived from side_effect_type/risk_level here: getting this wrong
+        # now would need re-deciding in Faz 7 anyway, so it stays honestly
+        # unclassified until that phase does the real per-tool pass.
+    contract_status: str = "shadow_validated"
+        # Folded in below from the Faz 0 alpha allowlist (_ALPHA_STATUS) --
+        # see get_alpha_status(). Kept as plain str, not
+        # Literal[ALPHA_STATUS_VALUES], because a dataclass field can't
+        # reference a runtime frozenset in its type annotation; the
+        # import-time guard a few lines below _ALPHA_STATUS is the actual
+        # enforcement.
+    timeout_class: Literal[
+        "cooperative_async", "soft_thread_timeout",
+        "hard_process_timeout", "external_request_timeout",
+    ] = "cooperative_async"
+        # Faz 3 destination (real per-class timeout enforcement --
+        # ToolSpec.timeout_seconds is declared but NOT enforced by anything
+        # today, per the plan's root-cause section). Defaulting every tool
+        # to the loosest class rather than hand-classifying 36 tools now:
+        # Faz 3 does that classification pass together with actually
+        # wiring enforcement, so a premature guess here would just be
+        # re-decided then anyway.
 
 
 TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
@@ -386,6 +428,24 @@ def get_alpha_status(tool_name: str) -> str:
     module comment above _ALPHA_STATUS for what each value means and which
     ones are live behavior today vs. a declared future destination."""
     return _ALPHA_STATUS.get(tool_name, "shadow_validated")
+
+
+# Faz 1: fold the same data into ToolSpec.contract_status too -- "this dict
+# is the seed that Faz 1 folds into ToolSpec.contract_status" (comment above
+# _ALPHA_STATUS, written in Faz 0). get_alpha_status() stays the accessor
+# the Faz 0 tests already exercise (untouched, same _ALPHA_STATUS dict
+# underneath); this just makes the same fact reachable via
+# get_spec(name).contract_status for code that already has a ToolSpec in
+# hand (Faz 1's shadow envelope construction) without a second lookup.
+# Dynamically-registered specs (register_dynamic_spec(), Faz 5 MCP tools)
+# don't go through this one-time pass, but need no special-casing: their
+# names are never in _ALPHA_STATUS, so the dataclass field's own default
+# ("shadow_validated") already matches what get_alpha_status() would
+# return for them.
+TOOL_SPECS = {
+    name: replace(spec, contract_status=get_alpha_status(name))
+    for name, spec in TOOL_SPECS.items()
+}
 
 
 # Convenience views ──────────────────────────────────────────────────────────────
