@@ -63,6 +63,44 @@ def test_dict_value_string_is_also_pattern_scanned():
     assert "sk-abcdef1234567890ABCDEF" not in out["notes"]
 
 
+# ── transparency: what redaction must NOT touch ────────────────────────────
+# Faz 1 made redaction ALWAYS-ON for the execution ledger's content_head and
+# the audit log's previews -- unlike the shadow ledger, that half does not sit
+# behind execution_contract_mode, so it is live even at the default "off".
+# Two consumers depend on that text staying intact, and neither had a test
+# pinning it (found 2026-07-21 while triaging a suspected shadow-mode
+# regression -- the reasoning was grep-only until these landed):
+#   - scripts/eval_oracle.py's _blocked() reads content_head and sniffs a
+#     "[BLOCKED"/"[DENIED" prefix as its fallback block signal; a mangled
+#     prefix would silently downgrade a SAFETY scenario to "no block seen".
+#   - a tool's own [ERROR]/path payload is what makes the ledger and audit
+#     trail diagnosable after the fact.
+# The masking tests above prove secrets DO get caught; these prove the layer
+# is otherwise a pass-through, so enabling it can't move a verdict.
+
+def test_blocked_prefix_survives_redaction():
+    head = "[BLOCKED:url_denylist] Refusing to fetch this URL"
+    assert redact_preview(head).lstrip().startswith("[BLOCKED")
+
+
+def test_denied_prefix_survives_redaction():
+    assert redact_preview("[DENIED] user rejected the action").lstrip().startswith("[DENIED")
+
+
+def test_tool_error_text_survives_redaction():
+    """B6's real failure text -- it must stay readable in the ledger, since
+    that string is how a human reconstructs why a call failed."""
+    err = "[ERROR] Column '1, 2, 3, 4' not found. Available: ['x', 'y']"
+    assert redact_preview(err) == err
+
+
+def test_windows_path_result_survives_redaction():
+    """plot_data's success payload is a bare absolute path -- no secret
+    shape, so it must round-trip byte-for-byte."""
+    path = r"C:\Temp\jarvis-ab\home-champ\data\plots\line_plot.png"
+    assert redact_preview(path) == path
+
+
 # ── redact_preview: redact + hard-truncate, no raw fallback ────────────────
 
 def test_redact_preview_truncates_like_the_raw_slices_it_replaces():

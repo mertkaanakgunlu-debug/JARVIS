@@ -50,6 +50,18 @@ New-Item -ItemType Directory -Force $Home_ | Out-Null
 
 $env:JARVIS_TEST_HOME = $Home_
 
+# -Port must reach the DRIVER too, not just the server. manual_test_driver.py
+# resolves its target from JARVIS_TEST_BASE_URL and falls back to a hardcoded
+# http://127.0.0.1:8132 -- so before this line, any run with -Port <other>
+# started the server on that port while the driver kept talking to 8132 and
+# got ConnectionRefused on EVERY scenario. The run still exited 0 and still
+# wrote a full results file, just one where every row failed with
+# "trace tools=none" -- a silent, plausible-looking total loss.
+# Live-found 2026-07-21 while triaging a suspected shadow-mode regression;
+# this is also the most likely explanation for the previous session's
+# unexplained isolated-run anomaly (see HANDOFF.md, 2026-07-20).
+$env:JARVIS_TEST_BASE_URL = "http://127.0.0.1:$Port"
+
 # --- start server -------------------------------------------------------------
 $srvOut = "$Logs\server_$Config.out.log"
 $srvErr = "$Logs\server_$Config.err.log"
