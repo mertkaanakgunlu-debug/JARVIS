@@ -36,7 +36,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from jarvis.config import Settings
-from jarvis.graph.graph import build_graph
+from jarvis.graph.graph import build_graph, make_checkpointer
 from jarvis.memory import Memory
 
 # Fields that legitimately vary run to run and are normalized before comparison.
@@ -227,12 +227,22 @@ def _normalize(value):
 
 
 def _side_effects(workspace) -> dict:
-    """Every file under the workspace, by relative path -> content hash."""
+    """Every file a tool actually produced, by relative path -> content hash.
+
+    The checkpoint database is excluded on purpose and it is the one exclusion
+    that matters: shadow mode stores execution_envelopes IN graph state, so its
+    checkpoint bytes legitimately differ. That is internal persistence, not an
+    external side effect -- the distinction this test rests on. Everything else
+    under the workspace is a real artifact and must match.
+    """
     out = {}
     for p in sorted(workspace.rglob("*")):
-        if p.is_file():
-            rel = str(p.relative_to(workspace)).replace("\\", "/")
-            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(workspace)).replace("\\", "/")
+        if rel.startswith("cp/"):
+            continue
+        out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
     return out
 
 
@@ -274,7 +284,13 @@ async def _run_mode(mode: str, fx: Fixture, tmp_path, monkeypatch) -> tuple[dict
     monkeypatch.setattr("jarvis.graph.graph.get_llm", lambda *a, **k: llm)
 
     memory = Memory(settings)
-    graph = build_graph(settings, workspace, memory, checkpointer=None)
+    # A REAL SqliteSaver, not checkpointer=None. Shadow mode makes the state
+    # bigger (execution_envelopes rides in it), so every super-step serializes
+    # and writes more -- "checkpoint yazimi" is one of the indirect mechanisms
+    # by which a mode could change behavior without touching a prompt. Running
+    # this without a checkpointer would leave exactly that mechanism untested.
+    checkpointer = make_checkpointer(workspace / "cp" / "checkpoints.db")
+    graph = build_graph(settings, workspace, memory, checkpointer=checkpointer)
 
     state = {
         "messages": [SystemMessage(content="test"), HumanMessage(content=fx.user_query)],
@@ -296,8 +312,11 @@ async def _run_mode(mode: str, fx: Fixture, tmp_path, monkeypatch) -> tuple[dict
         "completed_tool_fingerprints": [],
         "tool_execution_ledger": [],
     }
-    result = await graph.ainvoke(state, {"recursion_limit": 25})
-    return _observable(result, workspace), result
+    # Same thread_id in both arms: the checkpointer must see an identical
+    # thread identity, so any divergence comes from the mode, not the key.
+    config = {"configurable": {"thread_id": f"replay-{fx.name}"}, "recursion_limit": 25}
+    result = await graph.ainvoke(state, config)
+    return _observable(result, workspace), result, workspace
 
 
 # ── the equivalence assertion ────────────────────────────────────────────────
@@ -305,8 +324,8 @@ async def _run_mode(mode: str, fx: Fixture, tmp_path, monkeypatch) -> tuple[dict
 @pytest.mark.parametrize("fx", FIXTURES, ids=[f.name for f in FIXTURES])
 @pytest.mark.asyncio
 async def test_off_and_shadow_are_externally_identical(fx, isolated_cwd, tmp_path, monkeypatch):
-    off_obs, off_raw = await _run_mode("off", fx, tmp_path, monkeypatch)
-    shadow_obs, shadow_raw = await _run_mode("shadow", fx, tmp_path, monkeypatch)
+    off_obs, off_raw, _ = await _run_mode("off", fx, tmp_path, monkeypatch)
+    shadow_obs, shadow_raw, _ = await _run_mode("shadow", fx, tmp_path, monkeypatch)
 
     # Side effects are keyed by path relative to each arm's own workspace, so
     # they are directly comparable despite living in different directories.
@@ -332,8 +351,8 @@ async def test_off_and_shadow_are_externally_identical(fx, isolated_cwd, tmp_pat
 async def test_same_mode_twice_is_reproducible(fx, isolated_cwd, tmp_path, monkeypatch):
     """Guards the guard: if a fixture were nondeterministic on its own, the
     equivalence test above would pass or fail for unrelated reasons."""
-    a, _ = await _run_mode("shadow", fx, tmp_path / "a", monkeypatch)
-    b, _ = await _run_mode("shadow", fx, tmp_path / "b", monkeypatch)
+    a, _, _ = await _run_mode("shadow", fx, tmp_path / "a", monkeypatch)
+    b, _, _ = await _run_mode("shadow", fx, tmp_path / "b", monkeypatch)
     assert a == b, f"[{fx.name}] fixture is not self-reproducible; equivalence result is meaningless"
 
 
@@ -345,9 +364,41 @@ async def test_b6_wrong_argument_actually_fails_in_the_fixture(isolated_cwd, tmp
     test into a test of the happy path.
     """
     fx = next(f for f in FIXTURES if f.name == "b6_semantically_wrong_argument")
-    obs, _ = await _run_mode("off", fx, tmp_path, monkeypatch)
+    obs, _, _ = await _run_mode("off", fx, tmp_path, monkeypatch)
     joined = " ".join(obs["tool_results"])
     assert "[ERROR]" in joined and "not found" in joined, (
         f"B6 fixture no longer reproduces the wrong-column-binding failure: {joined[:300]}"
     )
     assert not obs["completed_fingerprints"], "plot_data must not be recorded as succeeded"
+
+
+@pytest.mark.asyncio
+async def test_shadow_state_really_reaches_the_checkpoint_db(isolated_cwd, tmp_path, monkeypatch):
+    """Proves the checkpoint-write path was genuinely exercised, not assumed.
+
+    The equivalence result is only as strong as the mechanisms it actually
+    ran. Shadow mode carries execution_envelopes IN graph state, so if the
+    envelopes reach the SQLite checkpoint, the bigger-state/serialization/write
+    path is demonstrably covered -- and the off arm must show none.
+    """
+    fx = next(f for f in FIXTURES if f.name == "successful_single_tool")
+
+    _, _, shadow_ws = await _run_mode("shadow", fx, tmp_path / "s", monkeypatch)
+    _, _, off_ws = await _run_mode("off", fx, tmp_path / "o", monkeypatch)
+
+    def _envelope_bytes(ws) -> int:
+        db = ws / "cp" / "checkpoints.db"
+        assert db.exists(), f"no checkpoint db written at {db} -- checkpointer never ran"
+        blob = db.read_bytes()
+        # WAL may hold the recent writes; count both.
+        for extra in ("checkpoints.db-wal",):
+            p = ws / "cp" / extra
+            if p.exists():
+                blob += p.read_bytes()
+        return blob.count(b"execution_envelopes")
+
+    assert _envelope_bytes(shadow_ws) > 0, (
+        "shadow envelopes never reached the checkpoint db -- the larger-state "
+        "write path this test claims to cover was not actually exercised"
+    )
+    assert _envelope_bytes(off_ws) == 0, "off mode must not write envelopes"
