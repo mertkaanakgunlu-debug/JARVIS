@@ -38,7 +38,9 @@ without specifying what "repair" concretely means across 30+ different tool arg 
 2, not started.
 
 **49 new tests** (`test_args_schemas.py`, `test_tool_registry_schemas.py`,
-`test_blocked_reason_code.py` +4). **841 pytest green (792+49), ruff clean.**
+`test_blocked_reason_code.py` +4). **792 pytest green (743+49), ruff clean.** *(Corrected
+2026-07-22: this entry originally said 841, an arithmetic slip — 743+49 is 792, not 841. Fixed
+after cross-checking against CI's own independently-run total, which agreed with 792.)*
 
 ---
 

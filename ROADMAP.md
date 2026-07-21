@@ -46,17 +46,18 @@ claims, run-to-run variance) — an execution-contract runtime so JARVIS uses *a
 reliably, not new domain tools. Full plan (9 phases, **also numbered Faz 0-8 — do not confuse
 with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
 `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
-Status: Faz 0-6(Part 1) are done and committed as of 2026-07-22 (Faz 0-3 pushed as `f4b7609`;
-Faz 4 — verified response composition — committed locally as `9c0ca15`; Faz 5 — isolation &
-reproducibility — committed locally as `5eae027`; Faz 6 Part 1 — typed schema definitions —
-committed locally as `cb2b1a2`; none of the three pushed yet). Faz 6 ("typed schemas + bounded
-repair") Part 1 — real pydantic `args_schema` for the plan's 12 named-priority tools
-(`plot_data` + 11 action-dispatch tools), wired onto `TOOL_SPECS`, plus an
+Status: Faz 0-6(Part 1) are done, committed, and pushed as of 2026-07-22 (`f4b7609` / `9c0ca15`
+/ `5eae027` / `cb2b1a2` / `8613bfc`, `langgraph-migration` in sync with `origin`). Faz 6 ("typed
+schemas + bounded repair") Part 1 — real pydantic `args_schema` for the plan's 12
+named-priority tools (`plot_data` + 11 action-dispatch tools), wired onto `TOOL_SPECS`, plus an
 `[INVALID_ARGS:<field>]` reason-code parser. **Deliberately not done in Part 1** (see
 [HANDOFF.md](HANDOFF.md) for why, Part 2 is next): no live
 `@tool` function signature was changed and nothing validates against these schemas yet — that
 wiring, plus the bounded-repair pipeline itself (still needs a concrete design, not just the
-plan's vocabulary), is Part 2. 841 pytest green (792+49 new), ruff clean. See
+plan's vocabulary), is Part 2. 792 pytest green (743+49 new), ruff clean. CI is red on this
+branch (GitHub Actions `python`/`mobile` jobs) but pre-existing, not caused by this work —
+confirmed the same failures across the 4 pushes before this session started too; see
+HANDOFF.md's "SONRAKİ OTURUM" for the specific tests. See
 [MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and [HANDOFF.md](HANDOFF.md) for the
 current detail.
 
