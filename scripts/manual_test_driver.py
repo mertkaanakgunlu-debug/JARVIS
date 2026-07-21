@@ -54,12 +54,22 @@ VERDICTS: list = []
 # anomaly was produced -- the driver was talking to a DIFFERENT, still-running
 # server. The rule now: a harness that cannot measure must exit non-zero and say
 # so, never emit a plausible-looking zero.
+# Failure taxonomy (external review, 2026-07-21). The distinction that matters
+# is NOT how bad the outcome was, it is whether the outcome is a MEASUREMENT:
+#   semantic / tool failure  -> a valid measurement, scored pass/fail
+#   transport / server error -> NOT a measurement, the run is invalid
+#   oracle / parser failure  -> NOT a measurement, the run is invalid
+# A transport error is not the model's fault and must never be averaged into a
+# score. One is enough to invalidate a benchmark run; --allow-partial-debug
+# opts out for interactive debugging only.
 EXIT_PREFLIGHT_FAILED = 3
 EXIT_NO_SUCCESSFUL_CHAT = 4
+EXIT_TRANSPORT_LOSS = 5
 
 _TRANSPORT_ERRORS: list[str] = []   # could not reach the server at all
 _CHAT_ATTEMPTS = 0                  # chat scenarios started
 _CHAT_OK = 0                        # chat scenarios that got ANY server response
+_ALLOW_PARTIAL = False              # set by --allow-partial-debug
 
 
 def preflight() -> None:
@@ -444,12 +454,16 @@ def _score(tid: str, entry: dict) -> None:
 
 
 if __name__ == "__main__":
-    ids = sys.argv[1:]
+    argv = sys.argv[1:]
+    if "--allow-partial-debug" in argv:
+        _ALLOW_PARTIAL = True
+        argv = [a for a in argv if a != "--allow-partial-debug"]
+    ids = argv
     if ids == ["--all"]:
         ids = list(TESTS)
     unknown = [i for i in ids if i not in TESTS]
     if unknown or not ids:
-        print(f"usage: manual_test_driver.py --all | {' '.join(TESTS)}")
+        print(f"usage: manual_test_driver.py [--allow-partial-debug] --all | {' '.join(TESTS)}")
         sys.exit(2 if unknown else 0)
     preflight()
     for tid in ids:
@@ -476,9 +490,24 @@ if __name__ == "__main__":
         print("=" * 72)
         sys.exit(EXIT_NO_SUCCESSFUL_CHAT)
     if _TRANSPORT_ERRORS:
-        # Partial loss: still a run, but the scores are contaminated by turns
-        # that never happened -- say so loudly rather than averaging it away.
-        print(f"\n[driver] WARNING: {len(_TRANSPORT_ERRORS)}/{_CHAT_ATTEMPTS} chat "
-              f"scenarios failed at the transport layer (server unreachable). "
-              f"Scores below undercount by that much.")
+        # Partial loss. A turn that never reached the server is not a failed
+        # turn, it is an absent one -- averaging it into a score silently
+        # understates the model. Invalid by default, overridable only for
+        # interactive debugging.
+        print("=" * 72)
+        print(f"[driver] TRANSPORT LOSS — {len(_TRANSPORT_ERRORS)}/{_CHAT_ATTEMPTS} chat "
+              f"scenarios never reached the server.")
+        for err in _TRANSPORT_ERRORS[:5]:
+            print(f"         {err}")
+        if len(_TRANSPORT_ERRORS) > 5:
+            print(f"         ... and {len(_TRANSPORT_ERRORS) - 5} more")
+        if _ALLOW_PARTIAL:
+            print("         --allow-partial-debug set: continuing anyway.")
+            print("         DO NOT use these numbers as a benchmark result.")
+            print("=" * 72)
+        else:
+            print("         This run is NOT a valid measurement. Discard it.")
+            print("         (--allow-partial-debug to keep partial output while debugging.)")
+            print("=" * 72)
+            sys.exit(EXIT_TRANSPORT_LOSS)
     print("\n[driver] done.")

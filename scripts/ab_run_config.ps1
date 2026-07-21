@@ -126,6 +126,7 @@ if (-not $ready) {
 "server ready" | Out-File $OLog -Append -Encoding utf8
 
 # --- N driver runs ------------------------------------------------------------
+$RunExits = @()   # one driver exit code per completed run; drives the verdict below
 foreach ($r in 1..$Runs) {
     # Re-arm the kill switch defensively: if a previous run died between D13a
     # and D13c, a tripped switch would cascade veto D10/D11 of this run.
@@ -149,7 +150,16 @@ foreach ($r in 1..$Runs) {
     $ScenarioArgs = @($Scenarios -split '\s+' | Where-Object { $_ -ne "" })
     & $Py "$Repo\scripts\manual_test_driver.py" $ScenarioArgs *> "$Logs\driver_${Config}_r$r.out"
 
-    "run $r done  $(Get-Date -Format o) exit=$LASTEXITCODE" | Out-File $OLog -Append -Encoding utf8
+    $runExit = $LASTEXITCODE
+    $RunExits += $runExit
+    "run $r done  $(Get-Date -Format o) exit=$runExit" | Out-File $OLog -Append -Encoding utf8
+    # The driver's non-zero exits mean "this is not a measurement" (3 preflight,
+    # 4 no successful chat, 5 transport loss). Recording that in the log while
+    # the wrapper itself returns 0 would recreate the exact silent-failure class
+    # the driver guards were added to close -- so it propagates below.
+    if ($runExit -ne 0) {
+        "run $r NOT A VALID MEASUREMENT (driver exit=$runExit)" | Out-File $OLog -Append -Encoding utf8
+    }
     if ($srv.HasExited) {
         "SERVER DIED during run $r - aborting" | Out-File $OLog -Append -Encoding utf8
         break
@@ -160,3 +170,25 @@ foreach ($r in 1..$Runs) {
 if (-not $srv.HasExited) { try { Stop-Process -Id $srv.Id -Force -ErrorAction Stop } catch {} }
 Start-Sleep -Seconds 3
 "config $Config complete" | Out-File $OLog -Append -Encoding utf8
+
+# --- finalize manifest + propagate the driver's verdict -----------------------
+# The manifest was written BEFORE the run so an interrupted run is still
+# identifiable; this closes it out. A half-finished run is then obvious: it has
+# a manifest with no "status" field at all.
+$bad = @($RunExits | Where-Object { $_ -ne 0 })
+$expectedRuns = $Runs
+$manifest["status"]            = if ($RunExits.Count -lt $expectedRuns) { "incomplete" } else { "completed" }
+$manifest["runs_completed"]    = $RunExits.Count
+$manifest["run_exit_codes"]    = $RunExits
+$manifest["invalid_runs"]      = $bad.Count
+$manifest["valid_measurement"] = ($bad.Count -eq 0 -and $RunExits.Count -eq $expectedRuns)
+$manifest["end_time"]          = (Get-Date -Format o)
+$manifest | ConvertTo-Json | Out-File "$Res\manifest_$Config.json" -Encoding utf8
+
+if (-not $manifest["valid_measurement"]) {
+    "INVALID MEASUREMENT: $($bad.Count) of $($RunExits.Count) runs failed (expected $expectedRuns runs)" |
+        Out-File $OLog -Append -Encoding utf8
+    Write-Error "ab_run_config: $Config is NOT a valid measurement -- $($bad.Count) run(s) exited non-zero, $($RunExits.Count)/$expectedRuns completed. See $OLog"
+    exit 1
+}
+exit 0

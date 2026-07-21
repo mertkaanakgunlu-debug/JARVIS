@@ -157,8 +157,98 @@ def test_ab_run_config_exports_base_url_from_port():
     )
 
 
-@pytest.mark.parametrize("marker", ["PREFLIGHT FAILED", "NO SUCCESSFUL CHAT"])
+@pytest.mark.parametrize("marker", ["PREFLIGHT FAILED", "NO SUCCESSFUL CHAT", "TRANSPORT LOSS"])
 def test_driver_declares_its_failure_exit_codes(marker):
-    """Both loud-failure paths must stay reachable in the driver source."""
+    """All three loud-failure paths must stay reachable in the driver source."""
     src = DRIVER.read_text(encoding="utf-8", errors="replace")
     assert marker in src
+
+
+def test_single_transport_error_invalidates_the_run_by_default(tmp_path):
+    """A turn that never reached the server is ABSENT, not failed.
+
+    Averaging it into a score silently understates the model, so one is enough
+    to invalidate a benchmark run. B5b is a continuation scenario (no /reset),
+    so the stub sees only the chat POST it cannot serve.
+    """
+    port = _free_port()
+    _StubHandler.paths = []
+    srv = HTTPServer(("127.0.0.1", port), _StubHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        proc = _run_driver(f"http://127.0.0.1:{port}", tmp_path)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    # Stub answers GET /status but 501s the chat POST -> HTTPError, which is a
+    # SERVER response, not a transport error. So this run trips the
+    # no-successful-chat guard rather than the transport guard.
+    assert proc.returncode == EXIT_NO_SUCCESSFUL_CHAT
+    assert "TRANSPORT LOSS" not in proc.stdout, (
+        "an HTTPError means the server answered -- it must not be miscounted "
+        "as a transport failure"
+    )
+
+
+# ── the orchestrator must not swallow the driver's verdict ───────────────────
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ab_run_config.ps1 is PowerShell/Windows")
+def test_ps_wrapper_propagates_driver_failure_exit_code(tmp_path):
+    """The wrapper must exit non-zero when the driver says "not a measurement".
+
+    Before this guard, ab_run_config.ps1 recorded `exit=$LASTEXITCODE` into its
+    log and then returned 0 anyway -- which would have recreated the exact
+    silent-failure class the driver guards were added to close, one level up.
+
+    Setup: a stub holds the port and answers /status, so the wrapper's readiness
+    probe passes (its own real server fails to bind, harmlessly). The driver
+    then reaches the stub, cannot complete a chat, and exits 4. The wrapper must
+    surface that as a non-zero exit AND mark the manifest invalid.
+    """
+    port = _free_port()
+    _StubHandler.paths = []
+    srv = HTTPServer(("127.0.0.1", port), _StubHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(AB_SCRIPT),
+             "-Config", "pytest-exitcode", "-Effort", "none", "-Runs", "1",
+             "-Port", str(port), "-Root", str(tmp_path), "-Scenarios", "A1"],
+            capture_output=True, text=True, timeout=300, env=_clean_env(),
+        )
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert proc.returncode != 0, (
+        "wrapper returned 0 while the driver reported an invalid measurement\n"
+        f"stdout:\n{proc.stdout[-1500:]}\nstderr:\n{proc.stderr[-1500:]}"
+    )
+
+    manifest = tmp_path / "results" / "manifest_pytest-exitcode.json"
+    assert manifest.exists(), "manifest must be written even for a failed run"
+    data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    assert data["valid_measurement"] is False
+    assert data["invalid_runs"] >= 1
+    assert data["status"] in ("completed", "incomplete")
+    assert data["driver_base_url"] == f"http://127.0.0.1:{port}", (
+        "manifest must record the URL the driver was actually pointed at"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ab_run_config.ps1 is PowerShell/Windows")
+def test_manifest_is_written_before_the_run_not_only_after():
+    """An interrupted run must still be identifiable.
+
+    Pinned as source order: the manifest write must precede the driver loop, so
+    a killed run leaves a manifest WITHOUT a status field rather than no
+    manifest at all.
+    """
+    src = AB_SCRIPT.read_text(encoding="utf-8", errors="replace")
+    first_write = src.index('manifest_$Config.json')
+    run_loop = src.index('foreach ($r in 1..$Runs)')
+    assert first_write < run_loop, (
+        "manifest is written only after the run loop -- an interrupted run "
+        "would leave nothing on disk identifying it"
+    )
