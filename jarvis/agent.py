@@ -716,32 +716,58 @@ class JarvisAgent:
         """Acquire _state_lock without blocking the calling event loop's thread."""
         await asyncio.get_running_loop().run_in_executor(None, self._state_lock.acquire)
 
-    def _reset_state_sync(self) -> tuple[str, bool]:
-        """The lock-guarded state mutation shared by reset()/reset_async().
+    def _reset_state_sync(self, target_session_id: str | None = None) -> tuple[str, str, bool]:
+        """The lock-guarded state mutation shared by reset()/reset_async()/
+        reset_conversation_async(). Pure sync work (SQLite archive + new
+        session + in-memory clears) with NO event-loop interaction — safe
+        to run on any thread, including asyncio.to_thread workers.
 
-        Pure sync work (SQLite archive + new session + in-memory clears) with
-        NO event-loop interaction — safe to run on any thread, including
-        asyncio.to_thread workers. Returns (old_session_id, had_content) so
-        the caller decides whether/where to schedule summarization.
+        target_session_id (Faz 7.3, P1): None (every pre-existing caller)
+        or a value equal to the currently-active self.session_id resets
+        the ACTIVE session exactly as before — old behavior, unchanged.
+        A DIFFERENT target_session_id (an API caller resetting a
+        conversation_id that isn't the one currently loaded into memory,
+        e.g. because another client's request switched the shared agent
+        to a different one in between) archives THAT session directly by
+        id and mints its replacement WITHOUT touching self.session_id/
+        self._history/self._turn at all -- whatever conversation is
+        currently active (some other client's) is left completely
+        undisturbed. This is what closes the cross-client /reset race: the
+        old code always reset "whichever session happens to be active
+        right now", so client A's /reset could silently archive client
+        B's in-flight conversation.
+
+        Returns (archived_session_id, new_session_id, had_content) —
+        had_content is read from self._history/_turn for the active-session
+        path (matches the in-memory state precisely) and from the store's
+        own last_turn_idx() for the other-session path (no in-memory copy
+        of a non-active session exists to check).
         """
         with self._state_lock:
-            old_session_id = self.session_id
-            had_content = self._turn > 0 or len(self._history) > 0
-            self.session_store.archive_session(old_session_id)
-            self.session_id = self.session_store.new_session()
-            self._history = []
-            self._turn = 0
-            # Stabilization patch 1.1: per-session telemetry must not leak
-            # into the fresh session -- without these, /status kept showing
-            # the ARCHIVED session's provider/model/fallback rollup, and a
-            # pre-reset confirmation id could resume its interrupted graph
-            # into (and write history against) the new session. The user's
-            # explicit model pin (_active_model_id) deliberately survives:
-            # it's a preference, not per-session state.
-            self._last_turn_trace = None
-            self._last_turn_used_pro = None
-            self._pending_confirmations.clear()
-        return old_session_id, had_content
+            if not target_session_id or target_session_id == self.session_id:
+                old_session_id = self.session_id
+                had_content = self._turn > 0 or len(self._history) > 0
+                self.session_store.archive_session(old_session_id)
+                new_session_id = self.session_store.new_session()
+                self.session_id = new_session_id
+                self._history = []
+                self._turn = 0
+                # Stabilization patch 1.1: per-session telemetry must not leak
+                # into the fresh session -- without these, /status kept showing
+                # the ARCHIVED session's provider/model/fallback rollup, and a
+                # pre-reset confirmation id could resume its interrupted graph
+                # into (and write history against) the new session. The user's
+                # explicit model pin (_active_model_id) deliberately survives:
+                # it's a preference, not per-session state.
+                self._last_turn_trace = None
+                self._last_turn_used_pro = None
+                self._pending_confirmations.clear()
+            else:
+                old_session_id = target_session_id
+                had_content = self.session_store.last_turn_idx(target_session_id) > 0
+                self.session_store.archive_session(target_session_id)
+                new_session_id = self.session_store.new_session()
+        return old_session_id, new_session_id, had_content
 
     def reset(self) -> None:
         """Archive the current session and start a fresh one (sync variant).
@@ -754,7 +780,7 @@ class JarvisAgent:
         Async callers (API endpoints, the CLI's async REPL) should prefer
         reset_async(), which never blocks the loop on the SQLite work.
         """
-        old_session_id, had_content = self._reset_state_sync()
+        old_session_id, _new_session_id, had_content = self._reset_state_sync()
         if had_content:
             try:
                 self._schedule_summarize_one(old_session_id)
@@ -772,14 +798,48 @@ class JarvisAgent:
         to_thread, and summarization is scheduled only after control returns
         to the event loop — where create_task is legal. A scheduling failure
         logs and moves on; the reset has already succeeded by then.
+
+        Always resets the CURRENTLY ACTIVE session -- see
+        reset_conversation_async() for the per-conversation-id variant a
+        multi-client caller (the API) should prefer.
         """
-        old_session_id, had_content = await asyncio.to_thread(self._reset_state_sync)
+        old_session_id, _new_session_id, had_content = await asyncio.to_thread(self._reset_state_sync)
         if had_content:
             try:
                 self._schedule_summarize_one(old_session_id)
             except Exception as exc:
                 print(f"[reset] summary scheduling failed (reset itself OK): {exc}")
         event_bus.session(self.session_id, None)
+
+    async def reset_conversation_async(self, conversation_id: str = "") -> tuple[str, str]:
+        """Per-conversation reset (Faz 7.3, P1) -- archives exactly
+        conversation_id (or the active session if empty, matching every
+        pre-conversation_id client) and returns (archived_session_id,
+        new_session_id) for THAT conversation specifically.
+
+        Never returns/implies self.session_id: when conversation_id isn't
+        the currently active session, self.session_id may belong to an
+        entirely different, unrelated client and must not be read as "the"
+        answer here -- see _reset_state_sync's docstring for the full
+        cross-client race this closes. Callers (the API endpoint) must
+        return THIS method's new_session_id to the caller, not
+        agent.session_id.
+        """
+        old_session_id, new_session_id, had_content = await asyncio.to_thread(
+            self._reset_state_sync, conversation_id or None
+        )
+        if had_content:
+            try:
+                self._schedule_summarize_one(old_session_id)
+            except Exception as exc:
+                print(f"[reset] summary scheduling failed (reset itself OK): {exc}")
+        if self.session_id == new_session_id:
+            # Only true when the archived conversation was (or defaulted
+            # to) the currently active one -- an unrelated other session's
+            # reset must not fire an event_bus "active session changed"
+            # notification for a session that never stopped being active.
+            event_bus.session(self.session_id, None)
+        return old_session_id, new_session_id
 
     def _switch_session_locked(self, session_id: str) -> int:
         """Core of switch_session(), assuming _state_lock is already held.

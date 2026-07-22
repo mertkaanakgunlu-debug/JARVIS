@@ -980,25 +980,37 @@ async def workflow_resolve(workflow_id: str, body: WorkflowResolveRequest, reque
     }
 
 
+class ResetRequest(BaseModel):
+    # Faz 7.3 (P1): "" (every pre-existing client) resets whichever session
+    # is currently active on the shared agent -- byte-identical to the old
+    # no-body behavior. A non-empty value resets THAT conversation
+    # specifically, regardless of what else is currently active -- see
+    # JarvisAgent.reset_conversation_async()'s docstring for the
+    # cross-client race this closes (client A's /reset no longer archives
+    # client B's conversation just because B's request happened to switch
+    # the shared agent's active pointer in between).
+    conversation_id: str = ""
+
+
 @app.post("/reset")
-async def reset(request: Request):
+async def reset(request: Request, body: ResetRequest = ResetRequest()):
     _check_auth(request)
     agent = get_agent()
-    # reset_async: the blocking _state_lock/SQLite work still runs off-loop
-    # (to_thread), but summarization is scheduled AFTER control returns to
-    # this loop. The old run_in_executor(agent.reset) shape called
-    # create_task on a loopless worker thread -> RuntimeError -> HTTP 500
-    # on every content-bearing session.
-    await agent.reset_async()
-    # Agent Runtime rev.2, Faz 5 follow-up: a client using conversation_id
-    # needs the new id back immediately to keep tagging its next message
-    # correctly -- previously this response gave no way to learn it short of
-    # a separate /status call. Additive field, ignored by any pre-existing
-    # client.
+    # reset_conversation_async: the blocking _state_lock/SQLite work still
+    # runs off-loop (to_thread), but summarization is scheduled AFTER
+    # control returns to this loop. The old run_in_executor(agent.reset)
+    # shape called create_task on a loopless worker thread -> RuntimeError
+    # -> HTTP 500 on every content-bearing session.
+    archived_id, new_session_id = await agent.reset_conversation_async(body.conversation_id)
     return {
         "ok": True,
         "message": "Conversation archived, new session started",
-        "session_id": agent.session_id,
+        "archived_conversation_id": archived_id,
+        # The new id for THIS conversation specifically -- never
+        # agent.session_id, which may belong to a different client's
+        # currently-active turn when body.conversation_id targeted a
+        # non-active session.
+        "session_id": new_session_id,
     }
 
 

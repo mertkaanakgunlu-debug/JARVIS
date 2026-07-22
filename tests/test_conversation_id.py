@@ -135,6 +135,16 @@ class _StubAgent:
     async def reset_async(self):
         self.session_id = "fresh-after-reset"
 
+    async def reset_conversation_async(self, conversation_id=""):
+        # Faz 7.3 (P1): /reset now calls this instead of reset_async() --
+        # see test_reset_per_conversation.py for the real cross-client
+        # behavior this stub deliberately does not re-verify (it exists
+        # here only so /reset's OTHER conversation_id-echoing behavior
+        # keeps a working stub to call).
+        old = self.session_id
+        self.session_id = "fresh-after-reset"
+        return old, self.session_id
+
 
 def _client(monkeypatch, agent) -> TestClient:
     # Same precedent as test_api_upload.py's _client(): monkeypatch the
