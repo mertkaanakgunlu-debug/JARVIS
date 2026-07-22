@@ -99,11 +99,16 @@ async def test_approve_dispatches_and_audits(isolated_cwd, tmp_path):
     assert outcome.ok is True and outcome.reapproval_required is False
     assert len(gmail.calls) == 1
     assert outcome.plan.status == "succeeded"
-    events = audit_log.tail(10)
-    mine = [e for e in events if e.get("workflow_id") == plan.workflow_id]
-    assert mine and mine[-1]["outcome"] == "user_approved"
-    assert mine[-1]["transport"] == "api"
-    assert mine[-1]["step_id"] == "s1"
+    mine = [e for e in audit_log.tail(20) if e.get("workflow_id") == plan.workflow_id]
+    approved = [e for e in mine if e.get("outcome") == "user_approved"]
+    assert approved, mine
+    assert approved[-1]["transport"] == "api"
+    assert approved[-1]["step_id"] == "s1"
+    # Faz 7.3 P1 (audit core): the dispatch itself is audited too, same
+    # execution_start/end pair the graph path's callback writes.
+    assert any(e["event"] == "execution_start" and e["tool"] == "gmail" for e in mine)
+    ends = [e for e in mine if e["event"] == "execution_end"]
+    assert ends and ends[-1]["ok"] is True and ends[-1]["transport"] == "api"
 
 
 @pytest.mark.asyncio
@@ -121,9 +126,10 @@ async def test_deny_with_reason_fails_step_and_audits(isolated_cwd, tmp_path):
     assert gmail.calls == []
     assert outcome.plan.step("s1").status == "failed"
     assert "not today" in outcome.plan.step("s1").error
-    mine = [e for e in audit_log.tail(10) if e.get("workflow_id") == plan.workflow_id]
-    assert mine and mine[-1]["outcome"] == "user_denied"
-    assert mine[-1]["reason"] == "not today"
+    mine = [e for e in audit_log.tail(20) if e.get("workflow_id") == plan.workflow_id]
+    denied = [e for e in mine if e.get("outcome") == "user_denied"]
+    assert denied and denied[-1]["reason"] == "not today"
+    assert denied[-1]["transport"] == "cli"
 
 
 # ── Restart-invalidated signature: re-mint, never execute, never die ─────────
@@ -153,8 +159,8 @@ async def test_stale_signature_reissues_approval_instead_of_failing(
     assert reloaded.step("s1").status == "needs_approval"
     assert reloaded.step("s1").approval_signature != old_signature  # freshly signed
     assert "re-approve" in outcome.message
-    mine = [e for e in audit_log.tail(10) if e.get("workflow_id") == plan.workflow_id]
-    assert mine and mine[-1]["outcome"] == "blocked_stale_approval"
+    mine = [e for e in audit_log.tail(20) if e.get("workflow_id") == plan.workflow_id]
+    assert any(e.get("outcome") == "blocked_stale_approval" for e in mine)
 
     # The human answers the fresh request -- now it executes.
     outcome2 = await resolve_workflow_approval(

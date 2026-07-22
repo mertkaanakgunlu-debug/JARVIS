@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import asyncio
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from jarvis.tools import files as file_tools
@@ -1211,7 +1212,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     # closure semantics.
 
     @tool
-    async def workflow_start(goal: str, steps: str) -> str:
+    async def workflow_start(goal: str, steps: str, config: RunnableConfig) -> str:
         """Start a multi-step workflow for a task that needs more tool calls
         than a single turn's budget allows -- each step is validated, risk-
         classified, and executed independently (a risky step pauses for the
@@ -1294,7 +1295,16 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         if unknown_deps:
             return f"⚠ Bilinmeyen dependency step_id'leri: {sorted(unknown_deps)}"
 
-        engine = WorkflowEngine(_alpha_tools, settings, workspace)
+        # config is LangChain's injected RunnableConfig (never part of the
+        # model-facing schema): agent.py rides the turn's real transport and
+        # conversation_id in configurable, so this workflow's audit rows say
+        # which surface actually started it (Faz 7.3 P1).
+        configurable = (config or {}).get("configurable", {})
+        engine = WorkflowEngine(
+            _alpha_tools, settings, workspace,
+            transport=configurable.get("transport", "") or "workflow",
+            conversation_id=configurable.get("conversation_id", ""),
+        )
         contract = TaskContract(task_id=f"wf-goal-{_uuid.uuid4().hex[:8]}", user_goal=goal)
         plan = engine.create_plan(contract, workflow_steps)
         plan = await engine.advance(plan)

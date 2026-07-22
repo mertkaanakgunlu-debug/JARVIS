@@ -14,10 +14,11 @@ What this layer adds over calling WorkflowEngine directly:
     error -- never silently treated as an approval. (The engine's own
     historical rule "anything not starting with deny approves" made
     "yes"/""/"invalid" all approve.)
-  - An audit "decision" event per human resolution, same vocabulary as
-    confirmation_node's (user_approved / user_denied /
-    blocked_stale_approval), carrying transport + workflow/step ids --
-    a workflow approval is exactly as auditable as a single-turn one.
+  - transport identity threaded into WorkflowEngine, whose own audit
+    layer (Faz 7.3 P1, "workflow steps must not bypass the audit core")
+    records the human decision (user_approved / user_denied /
+    blocked_stale_approval) with workflow/step ids -- the engine is the
+    single audit writer; this layer only supplies who/where.
   - The re-approval flow surfaced explicitly: a stale binding (process
     restart rotated approval.py's process-local HMAC key) re-issues a
     fresh request instead of executing or killing the workflow, and the
@@ -37,7 +38,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jarvis import audit_log
 from jarvis.execution import workflow_store
 from jarvis.execution.workflow import WorkflowPlan
 from jarvis.execution.workflow_engine import WorkflowEngine, render_workflow_report
@@ -83,19 +83,8 @@ async def resolve_workflow_approval(
         )
 
     step_id = plan.pending_approval_step_id
-    step = plan.step(step_id)
-    req = step.approval_request or {}
-    audit_fields = dict(
-        tool=step.capability,
-        action=req.get("action", ""),
-        risk_level=req.get("risk_level", 0),
-        transport=transport,
-        workflow_id=plan.workflow_id,
-        step_id=step_id,
-        execution_id=req.get("execution_id", ""),
-    )
 
-    engine = WorkflowEngine(tools, settings, workspace)
+    engine = WorkflowEngine(tools, settings, workspace, transport=transport)
     try:
         plan = await engine.resolve_approval(plan, step_id, "approve" if dl == "approve" else d)
     except ValueError as exc:
@@ -110,10 +99,6 @@ async def resolve_workflow_approval(
     )
     if reapproval:
         resolved_step = plan.step(step_id)
-        audit_log.record(
-            "decision", **audit_fields, outcome="blocked_stale_approval",
-            reason=(resolved_step.error or "stale approval binding")[:200],
-        )
         return ApprovalOutcome(
             ok=False, reapproval_required=True,
             message=resolved_step.error
@@ -121,13 +106,7 @@ async def resolve_workflow_approval(
             report=render_workflow_report(plan), plan=plan,
         )
 
-    if dl == "approve":
-        audit_log.record("decision", **audit_fields, outcome="user_approved")
-        message = f"step {step_id!r} approved"
-    else:
-        reason = d[4:].lstrip(":").strip() or "denied by user"
-        audit_log.record("decision", **audit_fields, outcome="user_denied", reason=reason)
-        message = f"step {step_id!r} denied"
+    message = f"step {step_id!r} approved" if dl == "approve" else f"step {step_id!r} denied"
     return ApprovalOutcome(
         ok=True, reapproval_required=False, message=message,
         report=render_workflow_report(plan), plan=plan,

@@ -83,8 +83,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from jarvis import policy_guard
+from jarvis import audit_log, policy_guard
 from jarvis.execution import approval, idempotency, workflow_store
+from jarvis.execution.redaction import redact_preview
 from jarvis.execution.args_schemas import validate_args
 from jarvis.execution.contract import TaskContract
 from jarvis.execution.envelope import build_shadow_envelope
@@ -261,10 +262,37 @@ class WorkflowEngine:
     Stateless between calls; all durable state lives in the WorkflowPlan
     itself and jarvis.execution.workflow_store."""
 
-    def __init__(self, tools: list, settings, workspace: Path):
+    def __init__(
+        self,
+        tools: list,
+        settings,
+        workspace: Path,
+        *,
+        transport: str = "workflow",
+        conversation_id: str = "",
+    ):
         self._tools_by_name = {t.name: t for t in tools}
         self._settings = settings
         self._workspace = workspace
+        # Faz 7.3 (P1): execution context for the audit trail. The graph
+        # path gets transport from _HudEventCallback's constructor and
+        # records every policy decision + risk>=2 execution in
+        # data/audit_log.jsonl -- workflow steps previously produced ZERO
+        # audit entries (the engine calls tool.ainvoke() directly, so no
+        # LangChain callback ever fires). Same event vocabulary as
+        # nodes.py/_HudEventCallback, plus workflow_id/step_id fields.
+        self._transport = transport
+        self._conversation_id = conversation_id
+
+    def _audit(self, event: str, plan: WorkflowPlan, step: WorkflowStep, **fields) -> None:
+        audit_log.record(
+            event,
+            transport=self._transport,
+            conversation_id=self._conversation_id,
+            workflow_id=plan.workflow_id,
+            step_id=step.step_id,
+            **fields,
+        )
 
     # ── Plan lifecycle ──────────────────────────────────────────────────────
 
@@ -367,10 +395,16 @@ class WorkflowEngine:
         plan.pending_approval_step_id = None
         plan.status = "running"
 
+        req_fields = step.approval_request or {}
         if decision.lower().startswith("deny"):
             reason = decision[4:].lstrip(":").strip() or "denied by user"
             step.status = "failed"
             step.error = f"denied: {reason}"
+            self._audit(
+                "decision", plan, step, tool=step.capability,
+                action=req_fields.get("action", ""), risk_level=req_fields.get("risk_level", 0),
+                outcome="user_denied", reason=reason,
+            )
             plan.propagate_skip(step.step_id, f"dependency {step.step_id} was denied ({reason})")
             workflow_store.save(plan)
             return plan
@@ -399,10 +433,20 @@ class WorkflowEngine:
                 f"previous approval was no longer valid ({why}); "
                 "a fresh approval request was issued -- please re-approve"
             )
+            self._audit(
+                "decision", plan, step, tool=step.capability,
+                action=req_fields.get("action", ""), risk_level=req_fields.get("risk_level", 0),
+                outcome="blocked_stale_approval", reason=why,
+            )
             await self._run_step(plan, step)
             workflow_store.save(plan)
             return plan
         approval.consume(req)
+        self._audit(
+            "decision", plan, step, tool=step.capability,
+            action=req_fields.get("action", ""), risk_level=req_fields.get("risk_level", 0),
+            outcome="user_approved",
+        )
 
         await self._dispatch(plan, step)
         if step.status == "failed":
@@ -432,6 +476,10 @@ class WorkflowEngine:
                 note = f"compensation attempt raised: {exc}"
             step.compensation_note = note
             step.status = "compensated"
+            self._audit(
+                "compensation", plan, step, tool=step.capability,
+                note=redact_preview(note),
+            )
         workflow_store.save(plan)
         return plan
 
@@ -495,6 +543,11 @@ class WorkflowEngine:
                 first = errors[0] if errors else {"loc": [], "msg": "invalid arguments"}
                 step.status = "failed"
                 step.error = f"invalid_args {first.get('loc')}: {first.get('msg')}"[:300]
+                self._audit(
+                    "decision", plan, step, tool=step.capability, action="", risk_level=0,
+                    outcome="blocked_invalid_args",
+                    reason=f"{first.get('loc')}: {first.get('msg')}"[:200],
+                )
                 plan.propagate_skip(step.step_id, f"dependency {step.step_id} had invalid arguments")
                 return
 
@@ -503,6 +556,13 @@ class WorkflowEngine:
         if not decision.allowed:
             step.status = "failed"
             step.error = f"blocked ({decision.veto_kind}): {decision.reason}"
+            self._audit(
+                "decision", plan, step, tool=decision.tool, action=decision.action,
+                risk_level=decision.risk_level,
+                outcome="blocked_kill_switch" if decision.veto_kind == "kill_switch"
+                else "blocked_capability_disabled",
+                reason=decision.reason,
+            )
             plan.propagate_skip(step.step_id, f"dependency {step.step_id} was blocked ({decision.reason})")
             return
 
@@ -512,12 +572,21 @@ class WorkflowEngine:
         ):
             step.status = "failed"
             step.error = "blocked: external writes disabled in this profile"
+            self._audit(
+                "decision", plan, step, tool=decision.tool, action=decision.action,
+                risk_level=decision.risk_level, outcome="blocked_external_writes_disabled",
+                reason="EXTERNAL_WRITES_ENABLED=false",
+            )
             plan.propagate_skip(
                 step.step_id, f"dependency {step.step_id} blocked (external writes disabled)"
             )
             return
 
         if decision.requires_confirmation and getattr(self._settings, "confirmation_gate_enabled", True):
+            self._audit(
+                "decision", plan, step, tool=decision.tool, action=decision.action,
+                risk_level=decision.risk_level, outcome="confirm_required", reason=decision.reason,
+            )
             ttl = getattr(self._settings, "approval_ttl_sec", 300)
             now_iso = datetime.now(timezone.utc).isoformat()
             req = ExecutionRequest(
@@ -543,6 +612,11 @@ class WorkflowEngine:
             plan.pending_approval_step_id = step.step_id
             return
 
+        if decision.risk_level >= 2:
+            self._audit(
+                "decision", plan, step, tool=decision.tool, action=decision.action,
+                risk_level=decision.risk_level, outcome="auto_approved", reason=decision.reason,
+            )
         await self._dispatch(plan, step)
         if step.status == "failed":
             plan.propagate_skip(step.step_id, f"dependency {step.step_id} failed: {step.error}")
@@ -567,6 +641,18 @@ class WorkflowEngine:
             except Exception:  # noqa: BLE001 -- capture is best-effort only
                 step.compensation_data = None
 
+        # Same risk>=2 threshold as _HudEventCallback's on_tool_start (the
+        # graph path's execution audit) -- L1 reads are not audited there
+        # either. The callback never fires here (direct ainvoke, no
+        # LangChain callback manager), so the engine writes the pair itself.
+        audit_execution = spec is not None and spec.risk_level >= 2
+        if audit_execution:
+            self._audit(
+                "execution_start", plan, step, tool=step.capability,
+                risk_level=spec.risk_level, execution_id=execution_id,
+                args_preview=redact_preview(step.args),
+            )
+
         if tool is None:
             content = format_tool_error(step.capability, RuntimeError(f"unknown capability: {step.capability}"))
             ok = False
@@ -578,6 +664,13 @@ class WorkflowEngine:
             except Exception as exc:  # noqa: BLE001 -- this boundary is the point, mirrors safe_tools.py
                 content = format_tool_error(step.capability, exc)
                 ok = False
+
+        if audit_execution:
+            self._audit(
+                "execution_end", plan, step, tool=step.capability,
+                risk_level=spec.risk_level, execution_id=execution_id,
+                ok=ok, result_preview=redact_preview(content),
+            )
 
         code = parse_blocked_code(content)
         timed_out, may_still_run, worker_terminated = parse_timeout_flags(content)

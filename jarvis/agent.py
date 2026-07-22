@@ -1182,7 +1182,15 @@ class JarvisAgent:
                 requested_role="reasoning" if use_pro_agent else "fast",
             )
             config = {
-                "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
+                # transport/conversation_id: read back via RunnableConfig by
+                # tools that start their own audited execution (workflow_start
+                # -- Faz 7.3 P1), so workflow audit rows carry the real
+                # originating transport instead of a placeholder.
+                "configurable": {
+                    "thread_id": f"{self.session_id}-t{self._turn}",
+                    "transport": transport,
+                    "conversation_id": self.session_id,
+                },
                 "callbacks": [_HudEventCallback(transport), recorder],
                 # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
                 # model stuck retrying a tool call fails clearly instead of
@@ -1413,7 +1421,13 @@ class JarvisAgent:
                 requested_role="reasoning" if use_pro_agent else "fast",
             )
             config = {
-                "configurable": {"thread_id": f"{self.session_id}-t{self._turn}"},
+                # See chat()'s identical block for why transport/
+                # conversation_id ride in configurable (workflow_start audit).
+                "configurable": {
+                    "thread_id": f"{self.session_id}-t{self._turn}",
+                    "transport": transport,
+                    "conversation_id": self.session_id,
+                },
                 "callbacks": [_HudEventCallback(transport), recorder],
                 # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
                 # model stuck retrying a tool call fails clearly instead of
@@ -1729,7 +1743,11 @@ class JarvisAgent:
                 requested_role="reasoning" if use_pro_agent else "fast",
             )
             config = {
-                "configurable": {"thread_id": f"{self.session_id}-proactive-{uuid.uuid4().hex[:8]}"},
+                "configurable": {
+                    "thread_id": f"{self.session_id}-proactive-{uuid.uuid4().hex[:8]}",
+                    "transport": f"monitor-{source}",
+                    "conversation_id": self.session_id,
+                },
                 "callbacks": [_HudEventCallback(f"monitor-{source}"), recorder],
                 "recursion_limit": self.settings.graph_recursion_limit,
             }
@@ -1850,7 +1868,11 @@ class JarvisAgent:
             requested_role="reasoning" if use_pro_agent else "fast",
         )
         config = {
-            "configurable": {"thread_id": f"{self.session_id}-task-{uuid.uuid4().hex[:8]}"},
+            "configurable": {
+                "thread_id": f"{self.session_id}-task-{uuid.uuid4().hex[:8]}",
+                "transport": transport,
+                "conversation_id": self.session_id,
+            },
             "callbacks": [_HudEventCallback(transport), recorder],
             "recursion_limit": self.settings.graph_recursion_limit,
         }
