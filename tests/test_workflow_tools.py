@@ -2,22 +2,28 @@
 @tool wrappers (jarvis/graph/tools.py), live-wiring WorkflowEngine to the
 model-facing tool surface. Uses REAL tools from make_tools() (same
 precedent as test_workflow_engine.py/test_langchain_dispatch_coercion.py).
+
+make_tools()'s `memory` parameter is a MagicMock here, not a real
+jarvis.memory.Memory -- see test_workflow_engine.py's module docstring for
+why (none of the capabilities exercised in this file ever touch it, and a
+real one's ChromaDB construction repeated across every test here was
+CI-only load this suite doesn't need to pay).
 """
 from __future__ import annotations
 
 import json
 import re
+from unittest.mock import MagicMock
 
 import pytest
 
 from jarvis.config import Settings
 from jarvis.graph import tools as graph_tools
-from jarvis.memory import Memory
 
 
 def _tools(workspace, **settings_overrides):
     settings = Settings(_env_file=None, confirmation_gate_enabled=True, **settings_overrides)
-    memory = Memory(settings)
+    memory = MagicMock()
     return {t.name: t for t in graph_tools.make_tools(workspace, settings, memory)}
 
 

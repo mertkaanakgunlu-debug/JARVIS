@@ -8,8 +8,28 @@ so a test double would hide exactly the integration risk worth covering.
 isolated_cwd is required everywhere: workflow_store, idempotency, and the
 todo/file tools this file exercises all resolve cwd/JARVIS_HOME-relative
 paths (see MEMORY.md's isolate-test-data-paths lesson).
+
+make_tools()'s own `memory` parameter is a MagicMock, not a real
+jarvis.memory.Memory: none of the capabilities exercised anywhere in this
+file (file_write/file_read/gmail/shell_run/todo) ever touch it -- only
+vault_search/note_append/index_doc/procedure_save do, none of which appear
+in any test here (confirmed by reading make_tools()'s body: `memory.` is
+referenced in exactly those four closures and nowhere else). A real
+Memory() constructs a full ChromaDB PersistentClient (5 collections) --
+harmless in isolation, but 30 real constructions across this file alone
+(one per test) was enough to exhaust something in chromadb's Rust bindings
+under CI's Windows runner specifically (never reproduced locally): a batch
+of otherwise-unrelated, PRE-EXISTING tests elsewhere in the suite started
+failing with `chromadb.errors.InternalError: ... no such table:
+acquire_write` once this file's real-Memory test count grew past a certain
+point in the same pytest process. Not exercising the one dependency these
+tests never need removes that load entirely, and is arguably more correct
+test design regardless -- a mock for a genuinely-unused collaborator, not a
+cut corner on what this file actually verifies.
 """
 from __future__ import annotations
+
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,13 +39,11 @@ from jarvis.execution.contract import TaskContract
 from jarvis.execution.workflow import WorkflowStep
 from jarvis.execution.workflow_engine import WorkflowEngine
 from jarvis.graph import tools as graph_tools
-from jarvis.memory import Memory
 
 
 def _engine(workspace, **settings_overrides) -> WorkflowEngine:
     settings = Settings(_env_file=None, confirmation_gate_enabled=True, **settings_overrides)
-    memory = Memory(settings)
-    tools = graph_tools.make_tools(workspace, settings, memory)
+    tools = graph_tools.make_tools(workspace, settings, MagicMock())
     return WorkflowEngine(tools, settings, workspace)
 
 
