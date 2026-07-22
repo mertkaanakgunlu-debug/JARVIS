@@ -228,6 +228,17 @@ def test_ps_wrapper_propagates_driver_failure_exit_code(tmp_path):
     probe passes (its own real server fails to bind, harmlessly). The driver
     then reaches the stub, cannot complete a chat, and exits 4. The wrapper must
     surface that as a non-zero exit AND mark the manifest invalid.
+
+    This assumption -- "its own real server fails to bind, harmlessly" -- is
+    NOT actually guaranteed: under CI's process-scheduling timing this test was
+    intermittently observed hitting KeyError: 'valid_measurement' instead of
+    the assertion below, because the real server subprocess sometimes wins the
+    port-bind race against this test's own stub thread, then misses its own
+    300s readiness window for real (see
+    test_ps_wrapper_manifest_reports_invalid_when_server_never_becomes_ready
+    right below, which exercises that path directly and deterministically) --
+    ab_run_config.ps1's manifest now reports valid_measurement=false on BOTH
+    paths, not only this one.
     """
     port = _free_port()
     _StubHandler.paths = []
@@ -259,6 +270,43 @@ def test_ps_wrapper_propagates_driver_failure_exit_code(tmp_path):
     assert data["driver_base_url"] == f"http://127.0.0.1:{port}", (
         "manifest must record the URL the driver was actually pointed at"
     )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ab_run_config.ps1 is PowerShell/Windows")
+def test_ps_wrapper_manifest_reports_invalid_when_server_never_becomes_ready(tmp_path):
+    """CI-fix 2026-07-22: the other exit-before-finalize gap. If the readiness
+    probe never succeeds -- nothing at all answers /status, not a stub, not
+    the real server -- the wrapper must still exit non-zero AND leave a
+    manifest that says so, not one silently missing valid_measurement
+    entirely (ab_run_config.ps1's finalize block, which sets that field,
+    sits AFTER the readiness check's own early exit -- a run that never gets
+    past readiness never reaches it).
+
+    No stub server is started here on purpose: nothing is listening on this
+    port at all, so /status can never succeed regardless of environment --
+    -ReadyTimeoutSec 4 keeps this fast (2 retries) rather than waiting out
+    the real 300s default, without relying on winning/losing the CI-only
+    port-bind race the sibling test above documents.
+    """
+    port = _free_port()  # nothing listening -- readiness can never succeed
+    proc = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", str(AB_SCRIPT),
+         "-Config", "pytest-notready", "-Effort", "none", "-Runs", "1",
+         "-Port", str(port), "-Root", str(tmp_path), "-Scenarios", "A1",
+         "-ReadyTimeoutSec", "4"],
+        capture_output=True, text=True, timeout=60, env=_clean_env(),
+    )
+
+    assert proc.returncode != 0, (
+        "wrapper returned 0 while the server never became ready\n"
+        f"stdout:\n{proc.stdout[-1500:]}\nstderr:\n{proc.stderr[-1500:]}"
+    )
+    manifest = tmp_path / "results" / "manifest_pytest-notready.json"
+    assert manifest.exists(), "manifest must be written even when readiness times out"
+    data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    assert data["valid_measurement"] is False
+    assert data["status"] == "server_not_ready"
 
 
 # ── instance identity: "a server" is not "THE server" ────────────────────────

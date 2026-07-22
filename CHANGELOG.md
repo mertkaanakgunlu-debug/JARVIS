@@ -6,6 +6,35 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Fix: ab_run_config.ps1's manifest missing valid_measurement on readiness timeout] — 2026-07-22
+
+Root-caused the intermittent CI failure of `test_ab_harness_guards.py::test_ps_wrapper_propagates_
+driver_failure_exit_code` (`KeyError: 'valid_measurement'`, observed on 3 of 4 CI runs today,
+including runs where nothing else in this session's own changes was even touched). `ab_run_config.ps1`
+only sets `valid_measurement` (and `status`/`invalid_runs`/`run_exit_codes`/`runs_completed`) in its
+finalize block, AFTER the driver-runs loop — but the readiness-wait loop has its own early `exit 1`
+(server never answers `/status` within the timeout) that returns BEFORE finalize ever runs. The
+test's own docstring assumed its stub server always wins the port-bind race against the script's
+real `ab_launch_server.py` subprocess ("its own real server fails to bind, harmlessly") — not
+actually guaranteed; under CI's process-scheduling timing the real server sometimes binds first,
+then misses the 300s readiness window for real (loading chroma/models takes real time), hitting the
+exit-before-finalize path with a manifest that was only ever written once, at construction, missing
+all five of those fields entirely.
+
+Fixed by initializing all five fields at manifest construction time (before the server even starts)
+with honest "not yet run" defaults (`valid_measurement: false`, `status: "not_started"`, etc.) —
+finalize still overwrites them with the real outcome on every path that reaches it, but a run that
+exits earlier now leaves a manifest that already says "not valid" instead of one missing the field.
+The readiness-timeout path also now writes a specific `status: "server_not_ready"` before exiting.
+New `-ReadyTimeoutSec` param (default 300, unchanged for real usage) lets a test force this exact
+path deterministically in ~4s instead of relying on CI's own timing to reproduce it. New test,
+`test_ps_wrapper_manifest_reports_invalid_when_server_never_becomes_ready` — exercises the
+readiness-timeout path directly (no stub started at all, so nothing can ever answer `/status`).
+927 pytest green (926+1), ruff clean. Confirmed against a real CI run, not just local reasoning
+(the local suite never reproduced the original bug either) — see HANDOFF.md for the run link.
+
+---
+
 ## [Fix: CI-only chromadb capacity failure in workflow tests] — 2026-07-22
 
 Faz 7 Part 2's push (`5d29ddc`) broke CI: 37 tests failed with `chromadb.errors.InternalError: ...

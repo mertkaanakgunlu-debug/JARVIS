@@ -31,7 +31,15 @@ param(
     # 2026-07-19: scenario subset for a fast targeted rerun (e.g. "B5a B5b B6").
     # Default "--all" runs the full suite. Space-separated IDs otherwise; mind
     # continuations (B5b needs B5a first in the same session).
-    [string]$Scenarios = "--all"
+    [string]$Scenarios = "--all",
+    # CI-fix 2026-07-22: real usage never sets this (300s is the right
+    # patience for a real --profile test server's first-boot chroma/model
+    # setup) -- exists so tests/test_ab_harness_guards.py can force the
+    # "server never becomes ready" path deterministically and quickly rather
+    # than waiting out the real 300s, or relying on the CI-only bind-order
+    # race that originally surfaced this path's own bug (see the manifest
+    # construction comment below).
+    [int]$ReadyTimeoutSec = 300
 )
 
 $ErrorActionPreference = "Continue"
@@ -131,6 +139,28 @@ $manifest = [ordered]@{
     start_time              = (Get-Date -Format o)
     machine                 = $env:COMPUTERNAME
     os                      = [System.Environment]::OSVersion.VersionString
+    # CI-fix 2026-07-22: present from this FIRST write, not only added by the
+    # finalize block below. A run that exits before ever reaching finalize --
+    # concretely, the "server never becomes ready" path a few lines down --
+    # previously left a manifest with NONE of these five keys at all, not
+    # "valid_measurement: false". tests/test_ab_harness_guards.py's own
+    # test_ps_wrapper_propagates_driver_failure_exit_code hit exactly this as
+    # an intermittent CI-only failure (KeyError: 'valid_measurement', not the
+    # expected `is False`): under CI's process-scheduling timing, the stub
+    # HTTP server the test uses to hold the port and the real
+    # ab_launch_server.py subprocess this script starts are racing to bind
+    # first -- the test's own assumption ("its own real server fails to bind,
+    # harmlessly") isn't guaranteed, and when the REAL server wins that race
+    # instead, its own real (slow, model-loading) startup can miss the 300s
+    # readiness window entirely, hitting the exit-before-finalize path below.
+    # Every value here is overwritten with the real outcome by the finalize
+    # block on every path that reaches it -- these are just an honest "not a
+    # valid measurement yet" starting point, never a silently-assumed success.
+    status                  = "not_started"
+    runs_completed          = 0
+    run_exit_codes          = @()
+    invalid_runs            = 0
+    valid_measurement       = $false
 }
 $manifest | ConvertTo-Json | Out-File "$Res\manifest_$Config.json" -Encoding utf8
 
@@ -151,7 +181,8 @@ $srv = Start-Process -FilePath $Py `
 
 # --- wait for readiness (first boot builds chroma etc.) -----------------------
 $ready = $false
-foreach ($i in 1..150) {
+$readyRetries = [Math]::Max(1, [int]($ReadyTimeoutSec / 2))
+foreach ($i in 1..$readyRetries) {
     Start-Sleep -Seconds 2
     if ($srv.HasExited) { break }
     try {
@@ -160,8 +191,16 @@ foreach ($i in 1..150) {
     } catch { }
 }
 if (-not $ready) {
-    "SERVER NOT READY after 300s (exited=$($srv.HasExited)) - aborting $Config" | Out-File $OLog -Append -Encoding utf8
+    "SERVER NOT READY after ${ReadyTimeoutSec}s (exited=$($srv.HasExited)) - aborting $Config" | Out-File $OLog -Append -Encoding utf8
     if (-not $srv.HasExited) { try { Stop-Process -Id $srv.Id -Force -ErrorAction Stop } catch {} }
+    # See the manifest's own construction-time comment above: this path never
+    # reaches the finalize block below, so it must record its own honest
+    # outcome here rather than leaving the construction-time placeholder
+    # values (which are already valid_measurement=false, just not labeled
+    # with the SPECIFIC reason this run never got its own measurement).
+    $manifest["status"] = "server_not_ready"
+    $manifest["end_time"] = (Get-Date -Format o)
+    $manifest | ConvertTo-Json | Out-File "$Res\manifest_$Config.json" -Encoding utf8
     exit 1
 }
 "server ready" | Out-File $OLog -Append -Encoding utf8
