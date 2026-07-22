@@ -653,8 +653,8 @@ applied. The approved plan (9 phases, 0-8) lives at
   [[project-agent-runtime-rev2]] for full detail. Committed 2026-07-22 as `d6ce968`
   (conversation_id feature) + `a2a1bb3` (unrelated auth_setup.py fix); not yet pushed as of that
   commit — verify against `git log` before trusting the push status specifically.
-- **Faz 7, Part 1 (Workflow runtime) committed+pushed as `20280a3` (CI green), Part 2 (live wiring)
-  built 2026-07-22, not yet committed**: new `jarvis/execution/workflow.py`/`workflow_store.py`/
+- **Faz 7 (both Part 1 and Part 2) committed+pushed, CI green (`c1d12bb`) — the whole 9-phase Agent
+  Runtime rev.2 plan now has only Faz 8 left**: new `jarvis/execution/workflow.py`/`workflow_store.py`/
   `workflow_engine.py` — a standalone `WorkflowEngine` (dependency-ordered steps, a step budget,
   SQLite checkpoint/resume, approval pause mirroring `confirmation_node`'s HMAC binding without a
   LangGraph interrupt, and narrow auto-compensation for exactly two registered true inverses:
@@ -677,7 +677,7 @@ applied. The approved plan (9 phases, 0-8) lives at
 - `vault/conversations/*.md` (daily transcripts) are gitignored for privacy; the vault
   directory structure itself is tracked via `.gitkeep`.
 - `tests/` (pytest, added Faz 8, extended in the 2026-07-15 GPT-5.6 remediation session and again
-  through Agent Runtime rev.2) is the automated test suite — **926 tests as of 2026-07-22**
+  through Agent Runtime rev.2) is the automated test suite — **927 tests as of 2026-07-22**
   (was 160 on 2026-07-15; this count moves fast — treat it as a snapshot, verify via
   `pytest --collect-only -q` before citing it), ~3 min, fully offline. Run `python -m pytest -q`
   from the repo root.
