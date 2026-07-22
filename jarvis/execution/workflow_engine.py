@@ -249,6 +249,29 @@ _COMPENSATORS: dict[tuple[str, str | None], tuple[_CaptureFn, _CompensateFn]] = 
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
+def _step_table(plan: WorkflowPlan) -> list[str]:
+    """Faz 7.3 (medium finding): render_operation_status_for_user only ever
+    covers steps that reached _dispatch() and got a real envelope -- a step
+    that failed validation (invalid_args) or a policy veto BEFORE dispatch
+    has envelope=None, so it was previously invisible in the report
+    entirely (not "skipped" either -- only a step CASCADED from a failed
+    dependency gets that status). A dependent's "blocked by a failed
+    dependency" line named the blocker's step_id but never why IT failed.
+    This table covers every step unconditionally, dispatched or not, so
+    that reason is always visible somewhere."""
+    lines = ["Steps (step_id | capability | status | error | execution_id | compensation):"]
+    for s in plan.steps:
+        lines.append(
+            "  " + " | ".join([
+                s.step_id, s.capability, s.status,
+                (s.error or "")[:160],
+                s.execution_id or "",
+                s.compensation_note or "",
+            ])
+        )
+    return lines
+
+
 def render_workflow_report(plan: WorkflowPlan) -> str:
     """Human-facing summary of a plan's current state -- reuses
     jarvis.execution.summary's existing VerifiedExecutionSummary renderer
@@ -261,6 +284,7 @@ def render_workflow_report(plan: WorkflowPlan) -> str:
     envelopes = [s.envelope for s in plan.steps if s.envelope is not None]
     summary = build_verified_summary(envelopes)
     lines = [f"[Workflow {plan.workflow_id} -- {plan.status}]"]
+    lines.extend(_step_table(plan))
     lines.append(
         render_operation_status_for_user(summary) if summary.operations else "No steps executed."
     )
@@ -375,6 +399,17 @@ class WorkflowEngine:
             raise ValueError(
                 f"workflow {plan.workflow_id} has exhausted its replan budget ({plan.max_replans})"
             )
+        # Faz 7.3 (medium finding): the collision check below only ever
+        # compared new_steps against the plan's EXISTING ids -- two steps
+        # sharing an id WITHIN the same new_steps batch both passed it
+        # (neither id was "existing" yet). WorkflowPlan.step() returns the
+        # first match, so the second one became an unaddressable zombie:
+        # never resolvable by resolve_approval(), silently mis-resolving
+        # any dependency that named it.
+        new_ids = [s.step_id for s in new_steps]
+        internal_dupes = sorted({sid for sid in new_ids if new_ids.count(sid) > 1})
+        if internal_dupes:
+            raise ValueError(f"replan new_steps contains duplicate step_id(s) within itself: {internal_dupes}")
         existing_ids = {s.step_id for s in plan.steps}
         collisions = [s.step_id for s in new_steps if s.step_id in existing_ids]
         if collisions:
@@ -429,10 +464,24 @@ class WorkflowEngine:
             # even though this one paused/failed/succeeded.
 
     async def resolve_approval(self, plan: WorkflowPlan, step_id: str, decision: str) -> WorkflowPlan:
-        """decision: "approve" or "deny[:reason]" -- same vocabulary
-        confirmation_node's own interrupt/resume already uses. Resolves
-        exactly this one step; call advance() again afterward to keep the
-        rest of the plan moving (see this module's docstring)."""
+        """decision: EXACTLY "approve", "deny", or "deny:<reason>"
+        (case-insensitive verb) -- same closed vocabulary
+        jarvis.execution.workflow_approval's service layer already
+        enforces at the transport boundary, re-checked HERE too (defense
+        in depth -- same precedent as workflow_start's own
+        requires_confirmation on top of this engine's per-step gate: this
+        method must stay safe to call directly, not merely safe because
+        every CURRENT caller happens to pre-validate). Before this check,
+        anything not starting with "deny" silently fell through to the
+        approve path -- "yes", "", a typo all approved.
+
+        Resolves exactly this one step; call advance() again afterward to
+        keep the rest of the plan moving (see this module's docstring)."""
+        dl = decision.strip().lower()
+        if dl != "approve" and dl != "deny" and not dl.startswith("deny:"):
+            raise ValueError(
+                f"invalid decision {decision!r}: must be exactly 'approve', 'deny', or 'deny:<reason>'"
+            )
         if plan.status != "paused_for_approval" or plan.pending_approval_step_id != step_id:
             raise ValueError(
                 f"workflow {plan.workflow_id} is not currently awaiting approval for step {step_id!r}"
