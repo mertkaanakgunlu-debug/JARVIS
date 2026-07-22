@@ -62,3 +62,28 @@ class JarvisState(TypedDict):
     # Absent when prepare_execution hasn't run (old checkpoints, direct-node
     # unit tests) -- confirmation_node's new checks no-op in that case.
     execution_requests: list[dict]
+
+    # Agent Runtime rev.2, Faz 6 Part 2: pending tool calls that FAILED
+    # jarvis.execution.args_schemas.validate_args() this round -- built by
+    # prepare_execution_node (only calls with a registered ToolSpec.
+    # args_schema are checked; everything else is absent from this list,
+    # never a false negative), consumed by confirmation_node's own
+    # invalid-args pre-gate. {"tool_call_id", "capability", "errors"} per
+    # entry -- "errors" is pydantic's own ValidationError.errors() shape,
+    # trimmed to loc/type/msg (see args_schemas.validate_args()'s docstring
+    # for why "input" is deliberately dropped). Overwritten each round, same
+    # "describes only the batch currently being decided on" shape as
+    # execution_requests above.
+    invalid_args_calls: list[dict]
+
+    # Agent Runtime rev.2, Faz 6 Part 2: sticks for the rest of the TURN
+    # (reset in the initial state dict every turn, like the Patch 1.2
+    # fields above) -- True once an invalid-args batch has already been
+    # rejected back to the agent once this turn. Makes "exactly one bounded
+    # repair attempt" an explicit, deterministic fact instead of an
+    # incidental side effect of max_tool_rounds_per_turn (which a rejected
+    # batch also consumes, and which a config change would silently alter)
+    # -- an external review of Faz 6 Part 1 caught that the plan's own
+    # "normalize -> validate -> one repair -> ..." wording needed exactly
+    # this, not an implicit reliance on the round budget.
+    args_repair_attempted: bool

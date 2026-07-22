@@ -1133,6 +1133,9 @@ class JarvisAgent:
                 "seen_tool_fingerprints": [],
                 "completed_tool_fingerprints": [],
                 "tool_execution_ledger": [],
+                # Agent Runtime rev.2, Faz 6 Part 2: explicit bounded-repair
+                # tracking -- see JarvisState's own comment on this field.
+                "args_repair_attempted": False,
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,
@@ -1355,6 +1358,9 @@ class JarvisAgent:
                 "seen_tool_fingerprints": [],
                 "completed_tool_fingerprints": [],
                 "tool_execution_ledger": [],
+                # Agent Runtime rev.2, Faz 6 Part 2: explicit bounded-repair
+                # tracking -- see JarvisState's own comment on this field.
+                "args_repair_attempted": False,
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,

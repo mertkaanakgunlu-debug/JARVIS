@@ -7,6 +7,9 @@ Graph topology (Agent Runtime rev.2, Faz 2 added prepare_execution):
   prepare_execution → confirmation (unconditional -- mints a signed
                        ExecutionRequest per pending call, see nodes.py)
   confirmation → tools (approved) | agent (denied/blocked)
+                | END (Faz 6 Part 2 -- bounded-repair budget for invalid
+                  tool-call args spent; confirmation_node already composed
+                  the final answer)
   tools → tool_result_accounting → compose (default)
                                  → agent   (multi-step shape + round budget left)
   compose → critic
@@ -207,11 +210,14 @@ def build_graph(
     # ExecutionRequests and signs them, never itself decides approve/deny.
     builder.add_edge("prepare_execution", "confirmation")
 
-    # confirmation → tools (approved) or agent (denied — LLM acknowledges)
+    # confirmation → tools (approved) or agent (denied — LLM acknowledges) or
+    # END (Agent Runtime rev.2, Faz 6 Part 2 — the bounded-repair budget for
+    # invalid tool-call args is spent; confirmation_node already composed
+    # the final honest answer, nothing left for the agent/critic to do).
     builder.add_conditional_edges(
         "confirmation",
         route_from_confirmation,
-        {"tools": "tools", "agent": "agent"},
+        {"tools": "tools", "agent": "agent", END: END},
     )
     # Patch 1.2 (Faz 1B): completed-fingerprint/ledger bookkeeping happens
     # AFTER execution -- the only point that knows how a call actually ended.

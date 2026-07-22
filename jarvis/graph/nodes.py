@@ -565,14 +565,26 @@ def make_prepare_execution_node(settings=None):
     call (Agent Runtime rev.2, Faz 2, reviewer #2/#6) -- new routing:
     agent → prepare_execution → confirmation.
 
-    Pipeline per call: capability resolve (get_spec) → normalize (pass-
-    through today -- no ToolSpec carries an args_schema yet, that's Faz 6)
-    → risk classify (policy_guard.evaluate) → best-effort canonical
-    resource (_resolve_target_resource) → TaskContract match (always
-    "no_contract" -- nothing produces one yet, reported honestly rather
-    than silently "verified") → sign. The result is an immutable
-    ExecutionRequest (jarvis.execution.request) that confirmation_node now
-    binds its approval to instead of raw tool_call args.
+    Pipeline per call: capability resolve (get_spec) → schema validate
+    (Agent Runtime rev.2, Faz 6 Part 2 -- jarvis.execution.args_schemas.
+    validate_args(), only for the 12 tools that have a registered
+    args_schema; a REJECT-ONLY gate, see that module's own docstring for
+    why it never substitutes canonical args back into the call) → risk
+    classify (policy_guard.evaluate) → best-effort canonical resource
+    (_resolve_target_resource) → TaskContract match (always "no_contract"
+    -- nothing produces one yet, reported honestly rather than silently
+    "verified") → sign. The result is an immutable ExecutionRequest
+    (jarvis.execution.request) that confirmation_node now binds its
+    approval to instead of raw tool_call args.
+
+    A call that fails schema validation gets NO ExecutionRequest minted --
+    it is recorded in the returned "invalid_args_calls" list instead
+    (tool_call_id, capability, and the trimmed pydantic error list) so
+    confirmation_node's own pre-gate can reject the whole batch (same
+    "an over-limit/duplicate-bearing batch is rejected wholesale, not
+    partially executed" precedent every other pre-gate already follows)
+    rather than silently letting a malformed call fall through to policy
+    evaluation and signing.
 
     Deliberately calls policy_guard.evaluate() again here even though
     confirmation_node ALSO calls it independently for its own pre-gate
@@ -598,6 +610,7 @@ def make_prepare_execution_node(settings=None):
     """
     from jarvis import policy_guard
     from jarvis.execution import approval
+    from jarvis.execution.args_schemas import validate_args
     from jarvis.execution.request import ExecutionRequest
     from jarvis.graph.tool_accounting import tool_call_fingerprint
     from jarvis.tool_registry import get_spec
@@ -615,10 +628,22 @@ def make_prepare_execution_node(settings=None):
 
         now_iso = datetime.now(timezone.utc).isoformat()
         requests: list[dict] = []
+        invalid_calls: list[dict] = []
         for tc in last_ai.tool_calls:
             name = tc.get("name", "")
             args = tc.get("args") or {}
             spec = get_spec(name)
+
+            if spec is not None and spec.args_schema is not None:
+                ok, errors = validate_args(spec.args_schema, args)
+                if not ok:
+                    invalid_calls.append({
+                        "tool_call_id": tc.get("id", ""),
+                        "capability": name,
+                        "errors": errors,
+                    })
+                    continue
+
             decision = policy_guard.evaluate(name, args, settings)
 
             req = ExecutionRequest(
@@ -642,7 +667,7 @@ def make_prepare_execution_node(settings=None):
                 "signature": approval.sign(req),
             })
 
-        return {"execution_requests": requests}
+        return {"execution_requests": requests, "invalid_args_calls": invalid_calls}
 
     prepare_execution_node.__name__ = "prepare_execution_node"
     return prepare_execution_node
@@ -740,11 +765,14 @@ def make_confirmation_node(settings):
             "tool_rounds": int(state.get("tool_rounds") or 0) + 1,
         }
 
-        def _reject_batch(outcome: str, stub_text: str, ack_text: str, *, per_call_stubs: list[ToolMessage] | None = None) -> dict:
+        def _reject_batch(outcome: str, stub_text: str, ack_text: str, *, per_call_stubs: list[ToolMessage] | None = None, extra: dict | None = None) -> dict:
             """Whole-batch refusal: executing 'just the safe part' of an
             over-limit or duplicate-bearing batch would be guessing which part
             of a hallucination was safe. Same stub+ack shape as the kill-switch
-            path so LangGraph state stays valid and the agent must acknowledge."""
+            path so LangGraph state stays valid and the agent must acknowledge.
+            extra: additional state keys to merge in (Faz 6 Part 2's
+            args_repair_attempted flag) -- additive, every pre-existing
+            caller passes nothing and is unaffected."""
             audit_log.record("decision", tool="*batch*", action="", risk_level=0,
                              transport=transport, outcome=outcome, reason=ack_text[:120], **rich)
             stubs = per_call_stubs or [
@@ -754,6 +782,7 @@ def make_confirmation_node(settings):
                 "confirmation_result": "denied",
                 "messages": stubs + [HumanMessage(content=ack_text)],
                 **counter_updates,
+                **(extra or {}),
             }
 
         max_batch = getattr(settings, "max_tool_calls_per_ai_message", 4)
@@ -821,6 +850,85 @@ def make_confirmation_node(settings):
                 "the batch was genuinely new, re-issue only that one.",
                 per_call_stubs=per_call,
             )
+
+        # Agent Runtime rev.2, Faz 6 Part 2 -- bounded repair for calls that
+        # failed jarvis.execution.args_schemas.validate_args() in
+        # prepare_execution_node. Whole-batch reject (same reasoning as the
+        # duplicate-batch case above: a partially-invalid batch is rejected
+        # wholesale, never partially executed). "Bounded" is an EXPLICIT
+        # state flag, not an incidental side effect of max_tool_rounds_per_turn
+        # (which a rejected batch also consumes, and which a config change
+        # would silently alter) -- an external review of Faz 6 Part 1 caught
+        # that the plan's "normalize -> validate -> one repair -> ..."
+        # wording needed exactly this guarantee.
+        invalid_calls = list(state.get("invalid_args_calls") or [])
+        if invalid_calls:
+            invalid_by_id = {c["tool_call_id"]: c for c in invalid_calls}
+
+            def _first_error(c: dict) -> dict:
+                return c["errors"][0] if c["errors"] else {"loc": [], "msg": "invalid arguments"}
+
+            for c in invalid_calls:
+                first = _first_error(c)
+                audit_log.record(
+                    "decision", tool=c["capability"], action="", risk_level=0,
+                    transport=transport, outcome="blocked_invalid_args",
+                    reason=f"{first.get('loc')}: {first.get('msg')}"[:200], **rich,
+                )
+
+            already_repaired = bool(state.get("args_repair_attempted"))
+            if not already_repaired:
+                def _stub_for(tc: dict) -> ToolMessage:
+                    entry = invalid_by_id.get(tc.get("id", ""))
+                    if entry is None:
+                        return ToolMessage(
+                            content="[SKIPPED: batched with an invalid call -- re-issue this one alone if still needed]",
+                            tool_call_id=tc.get("id", ""),
+                        )
+                    first = _first_error(entry)
+                    field = str(first["loc"][0]) if first.get("loc") else "_"
+                    return ToolMessage(
+                        content=f"[INVALID_ARGS:{field}] {first.get('msg', 'invalid arguments')}",
+                        tool_call_id=tc.get("id", ""),
+                    )
+
+                return _reject_batch(
+                    "blocked_invalid_args",
+                    "",  # unused -- per_call_stubs given
+                    "One or more of these tool calls had invalid arguments (see the "
+                    "[INVALID_ARGS:...] message(s) for exactly what's wrong). You get "
+                    "ONE corrected retry this turn -- re-issue the SAME action(s) with "
+                    "the missing/fixed field(s). If it fails again, stop and tell the "
+                    "user what information is missing instead of retrying further.",
+                    per_call_stubs=[_stub_for(tc) for tc in batch],
+                    extra={"args_repair_attempted": True},
+                )
+
+            # Repair already used once this turn -- exhausted. Compose the
+            # final honest answer directly and route straight to END (never
+            # back through the tool-bound agent a second time) -- see
+            # route_from_confirmation's "invalid_args_exhausted" branch.
+            detail_lines = []
+            for c in invalid_calls:
+                first = _first_error(c)
+                field = first["loc"][0] if first.get("loc") else None
+                where = f" ({field})" if field else ""
+                detail_lines.append(f"- {c['capability']}{where}: {first.get('msg', 'invalid arguments')}")
+            final_text = (
+                "I couldn't complete this -- the arguments were still invalid after one "
+                "corrected attempt:\n" + "\n".join(detail_lines)
+            )
+            audit_log.record(
+                "decision", tool="*batch*", action="", risk_level=0,
+                transport=transport, outcome="blocked_invalid_args_exhausted",
+                reason=final_text[:200], **rich,
+            )
+            return {
+                "confirmation_result": "invalid_args_exhausted",
+                "messages": [AIMessage(content=final_text)],
+                "response": final_text,
+                **counter_updates,
+            }
 
         # Past the pre-gate: these calls now reach the policy layer, so their
         # fingerprints become 'seen' (exact repeats are blocked from here on,
@@ -1125,7 +1233,15 @@ def make_confirmation_node(settings):
 
 
 def route_from_confirmation(state: JarvisState) -> str:
-    """approved → 'tools'; denied → 'agent' (LLM acknowledges denial)."""
-    if state.get("confirmation_result", "approved") == "denied":
+    """approved → 'tools'; denied → 'agent' (LLM acknowledges denial);
+    invalid_args_exhausted → END (Agent Runtime rev.2, Faz 6 Part 2 -- the
+    bounded-repair budget is spent; confirmation_node already composed the
+    final honest answer directly, so there is nothing left for the
+    tool-bound agent OR the critic to do with this turn)."""
+    from langgraph.graph import END
+    result = state.get("confirmation_result", "approved")
+    if result == "invalid_args_exhausted":
+        return END
+    if result == "denied":
         return "agent"
     return "tools"

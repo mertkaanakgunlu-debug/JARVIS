@@ -71,11 +71,11 @@ async def test_request_fields_mirror_policy_guard(isolated_cwd):
     from jarvis import policy_guard
 
     node = make_prepare_execution_node(_settings())
-    ai = _ai_tool_call("gmail", {"action": "send", "to": "a@b.c"})
+    ai = _ai_tool_call("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"})
     result = await node({"messages": [ai]})
 
     entry = result["execution_requests"][0]["request"]
-    decision = policy_guard.evaluate("gmail", {"action": "send", "to": "a@b.c"}, _settings())
+    decision = policy_guard.evaluate("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, _settings())
     assert entry["risk_level"] == decision.risk_level
     assert entry["requires_confirmation"] == decision.requires_confirmation
     assert entry["allowed"] == decision.allowed
@@ -169,7 +169,7 @@ async def _through_pipeline(tool_name, args, settings, *, call_id="call_1"):
 @pytest.mark.asyncio
 async def test_happy_path_approves_and_matches_signed_request(isolated_cwd, monkeypatch):
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     monkeypatch.setattr("langgraph.types.interrupt", lambda payload: "approve")
 
     node = make_confirmation_node(settings)
@@ -181,7 +181,7 @@ async def test_happy_path_approves_and_matches_signed_request(isolated_cwd, monk
 @pytest.mark.asyncio
 async def test_interrupt_payload_carries_the_execution_id(isolated_cwd, monkeypatch):
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     expected_id = state["execution_requests"][0]["request"]["execution_id"]
 
     captured = {}
@@ -205,7 +205,7 @@ async def test_args_changed_after_approval_is_denied(isolated_cwd, monkeypatch):
     stale execution_requests entry) -- must be denied, not silently executed
     under the old approval."""
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     # Mutate the pending call's args in place -- the signed request in
     # execution_requests still reflects the ORIGINAL args.
     state["messages"][-1].tool_calls[0]["args"] = {"action": "send", "to": "SOMEONE-ELSE@evil.example"}
@@ -221,7 +221,7 @@ async def test_args_changed_after_approval_is_denied(isolated_cwd, monkeypatch):
 @pytest.mark.asyncio
 async def test_tampered_signature_is_denied(isolated_cwd, monkeypatch):
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     state["execution_requests"][0]["signature"] = "0" * 64
     monkeypatch.setattr("langgraph.types.interrupt", lambda payload: "approve")
 
@@ -234,7 +234,7 @@ async def test_tampered_signature_is_denied(isolated_cwd, monkeypatch):
 @pytest.mark.asyncio
 async def test_expired_approval_is_denied(isolated_cwd, monkeypatch):
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     entry = state["execution_requests"][0]
     req = ExecutionRequest(**entry["request"])
     expired = req.model_copy(update={
@@ -256,7 +256,7 @@ async def test_replayed_already_committed_execution_is_denied(isolated_cwd, monk
     committing) -> retry the SAME already-approved request -> journal
     refusal."""
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     entry = state["execution_requests"][0]
     exec_id = entry["request"]["execution_id"]
     idempotency.commit(exec_id, "gmail", entry["request"]["normalized_args_digest"])
@@ -274,7 +274,7 @@ async def test_second_approval_of_a_fresh_request_is_not_a_duplicate(isolated_cw
     """Guards against a false positive: a brand new (never-committed)
     execution_id must NOT be denied -- only a genuine journal hit should be."""
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     monkeypatch.setattr("langgraph.types.interrupt", lambda payload: "approve")
 
     node = make_confirmation_node(settings)
@@ -291,7 +291,7 @@ async def test_confirmation_node_unaffected_when_execution_requests_absent(isola
     monkeypatch.setattr("langgraph.types.interrupt", lambda payload: "approve")
     node = make_confirmation_node(_settings())
     state = {
-        "messages": [_ai_tool_call("gmail", {"action": "send", "to": "a@b.c"})],
+        "messages": [_ai_tool_call("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"})],
         "transport": "cli-text",
     }
 
@@ -303,7 +303,7 @@ async def test_confirmation_node_unaffected_when_execution_requests_absent(isola
 @pytest.mark.asyncio
 async def test_denial_path_is_unaffected_by_faz2_changes(isolated_cwd, monkeypatch):
     settings = _settings()
-    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c"}, settings)
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
     monkeypatch.setattr("langgraph.types.interrupt", lambda payload: "deny:not now")
 
     node = make_confirmation_node(settings)

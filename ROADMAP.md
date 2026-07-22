@@ -47,19 +47,40 @@ reliably, not new domain tools. Full plan (9 phases, **also numbered Faz 0-8 —
 with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
 `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
 Status: Faz 0-6(Part 1) are done, committed, and pushed as of 2026-07-22 (`f4b7609` / `9c0ca15`
-/ `5eae027` / `cb2b1a2` / `8613bfc`, `langgraph-migration` in sync with `origin`). Faz 6 ("typed
-schemas + bounded repair") Part 1 — real pydantic `args_schema` for the plan's 12
-named-priority tools (`plot_data` + 11 action-dispatch tools), wired onto `TOOL_SPECS`, plus an
-`[INVALID_ARGS:<field>]` reason-code parser. **Deliberately not done in Part 1** (see
-[HANDOFF.md](HANDOFF.md) for why, Part 2 is next): no live
-`@tool` function signature was changed and nothing validates against these schemas yet — that
-wiring, plus the bounded-repair pipeline itself (still needs a concrete design, not just the
-plan's vocabulary), is Part 2. 792 pytest green (743+49 new), ruff clean. CI is red on this
-branch (GitHub Actions `python`/`mobile` jobs) but pre-existing, not caused by this work —
-confirmed the same failures across the 4 pushes before this session started too; see
-HANDOFF.md's "SONRAKİ OTURUM" for the specific tests. See
-[MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and [HANDOFF.md](HANDOFF.md) for the
-current detail.
+/ `5eae027` / `cb2b1a2` / `8613bfc`, `langgraph-migration` in sync with `origin`). **Faz 6 Part 2
+is built and tested but not yet committed** (HEAD is still `b7d03c6`): `prepare_execution_node`
+now runs `jarvis.execution.args_schemas.validate_args()` as a reject-only gate (raw args are
+never substituted — validation normalizers exist only to make the accept/reject decision
+accurate, matching what every dispatch function already does internally; this closes a
+digest/execution divergence risk an external review of Part 1 caught), and `confirmation_node`
+gained an explicit, config-independent bounded-repair state machine: first invalid batch →
+whole-batch reject with one guaranteed retry; second invalid batch in the same turn → straight to
+END with a composed honest answer (new `route_from_confirmation` branch). Still not done, by
+design: no live `@tool` function signature promotes these schemas (the model still sees free-text
+`action: str`) — see HANDOFF.md for the full reasoning.
+
+A second external review round raised a P0 concern about that "raw args execute unchanged" design
+(pydantic coercion discarded, e.g. `reply_all="false"` → semantic corruption at execution) —
+**empirically refuted against JARVIS's real registered tool objects**: every `@tool` function
+already gets its own LangChain-auto-derived schema (independent of and predating
+`jarvis.execution.args_schemas`), and `make_safe_tool_node` wraps rather than bypasses `ToolNode`
+dispatch through it — so `"false"`/`"60"` are already coerced to `False`/`60` before any tool body
+runs, confirmed directly (`tests/test_langchain_dispatch_coercion.py`, 5 new tests against the
+real `google_calendar`/`itu_mail` tool objects — which also incidentally proved
+`jarvis.execution.args_schemas`' `extra="forbid"` is a genuine, non-redundant addition, since
+LangChain's own auto-schema silently accepts unknown fields). One real but pre-existing,
+Faz-6-independent gap surfaced in the process: `tool_call_fingerprint` hashes raw args, so
+`"send"` vs `" SEND "` bypasses semantic duplicate detection — not fixed this session (separate,
+low-severity). 853 pytest green — 792 baseline + 61 new (44 in test_args_schemas.py [40→84] + 12 in the
+brand-new test_bounded_repair.py + 5 in the brand-new test_langchain_dispatch_coercion.py =
+44+12+5=61, 792+61=853, verified by direct arithmetic, not estimated). Separately (no count
+change), 9 pre-existing tests in test_prepare_execution_node.py were fixed, not added, to a
+fixture that predated required-field validation. Ruff clean, `git diff --check` clean — this count was taken
+**after** all file changes including documentation, addressing a fair staleness critique from the
+first report. CI is red on this branch (GitHub Actions `python`/`mobile` jobs) but pre-existing,
+not caused by any of this session's work — confirmed identical failures across every push before
+this session started too. See [MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and
+[HANDOFF.md](HANDOFF.md) for the current detail.
 
 ---
 
