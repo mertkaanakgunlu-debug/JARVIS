@@ -238,10 +238,17 @@ def render_workflow_report(plan: WorkflowPlan) -> str:
         for step_id, note in compensated:
             lines.append(f"  - {step_id}: {note}")
     if plan.status == "paused_for_approval" and plan.pending_approval_step_id:
+        pending = plan.step(plan.pending_approval_step_id)
+        if pending is not None and pending.error:
+            # e.g. the re-approval note resolve_approval leaves after a
+            # stale (restart-invalidated) signature -- the human deserves to
+            # know why they are being asked again.
+            lines.append(f"Note: {pending.error}")
         lines.append(
             f"Awaiting approval for step {plan.pending_approval_step_id!r} -- "
-            f"use `/workflow approve {plan.workflow_id}` or "
-            f"`/workflow deny {plan.workflow_id} <reason>` to continue."
+            f"use `/workflow approve {plan.workflow_id}` / "
+            f"`/workflow deny {plan.workflow_id} <reason>` (CLI) or "
+            f"POST /workflow/{plan.workflow_id}/resolve (API) to continue."
         )
     return "\n".join(lines)
 
@@ -372,9 +379,27 @@ class WorkflowEngine:
         current_digest = tool_call_fingerprint(step.capability, step.args)
         ok, why = approval.verify(req, step.approval_signature, current_args_digest=current_digest)
         if not ok:
-            step.status = "failed"
-            step.error = f"approval no longer valid: {why}"
-            plan.propagate_skip(step.step_id, f"dependency {step.step_id}'s approval was invalid ({why})")
+            # Faz 7.3 (P1): a stale binding must NOT kill the workflow -- and
+            # must NEVER execute under the old yes. The dominant real cause is
+            # a process restart rotating approval.py's process-local HMAC key
+            # (its own documented tradeoff), which previously contradicted
+            # workflow.py's whole reason for persisting the request/signature.
+            # Recovery: send the step back through its own gate from scratch --
+            # _run_step re-validates args, re-evaluates policy (the CURRENT
+            # policy, which may have changed across the restart), and pauses
+            # again with a freshly signed request for the human to re-approve.
+            # Every verify failure gets this same path: expiry and key
+            # rotation are the expected cases, and a tampered persisted row
+            # is also safest re-shown to the human rather than half-trusted.
+            step.status = "pending"
+            step.execution_id = None
+            step.approval_request = None
+            step.approval_signature = None
+            step.error = (
+                f"previous approval was no longer valid ({why}); "
+                "a fresh approval request was issued -- please re-approve"
+            )
+            await self._run_step(plan, step)
             workflow_store.save(plan)
             return plan
         approval.consume(req)

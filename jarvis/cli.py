@@ -658,7 +658,8 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
         if lower == "/workflow" or lower.startswith("/workflow "):
             sub = user_input[len("/workflow"):].strip()
             from jarvis.execution import workflow_store
-            from jarvis.execution.workflow_engine import WorkflowEngine, render_workflow_report
+            from jarvis.execution.workflow_approval import resolve_workflow_approval
+            from jarvis.execution.workflow_engine import render_workflow_report
             from jarvis.graph.tools import make_tools
 
             if not sub or sub == "list":
@@ -690,23 +691,21 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
                 rest = parts[1].split(maxsplit=1)
                 workflow_id = rest[0]
                 reason = rest[1] if len(rest) > 1 else ""
-                plan = workflow_store.load(workflow_id)
-                if plan is None:
-                    _print_error(f"Workflow bulunamadı: '{workflow_id}'")
-                    continue
-                if plan.status != "paused_for_approval" or not plan.pending_approval_step_id:
-                    _print_error(f"Workflow '{workflow_id}' onay beklemiyor (durum: {plan.status}).")
-                    continue
+                decision = "approve" if verb == "approve" else (
+                    f"deny:{reason}" if reason else "deny"
+                )
                 tools = make_tools(agent.workspace, agent.settings, agent.memory)
-                engine = WorkflowEngine(tools, agent.settings, agent.workspace)
-                decision = "approve" if verb == "approve" else f"deny:{reason}"
-                try:
-                    plan = await engine.resolve_approval(plan, plan.pending_approval_step_id, decision)
-                except ValueError as exc:
-                    _print_error(str(exc))
+                outcome = await resolve_workflow_approval(
+                    workflow_id, decision,
+                    tools=tools, settings=agent.settings,
+                    workspace=agent.workspace, transport="cli",
+                )
+                if not outcome.ok and not outcome.reapproval_required and not outcome.report:
+                    _print_error(outcome.message)
                     continue
-                plan = await engine.advance(plan)
-                console.print(Panel(render_workflow_report(plan), border_style="gold3 dim"))
+                if outcome.reapproval_required:
+                    console.print(f"[yellow]{outcome.message}[/yellow]")
+                console.print(Panel(outcome.report, border_style="gold3 dim"))
                 continue
 
             _print_error(

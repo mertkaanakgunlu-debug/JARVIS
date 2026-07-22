@@ -46,6 +46,27 @@ from jarvis.agent import JarvisAgent, ConfirmationRequired
 from jarvis.ws import event_bus, start_metrics_task, start_live_data_task, live_data_snapshot
 from jarvis.voice_api import start_voice_task, trigger_ptt
 
+def _confirmation_sse_frame(marker: dict) -> str:
+    """One structured SSE frame for a confirmation interrupt -- Faz 7.3 (P1).
+
+    chat_stream() surfaces an L3 confirmation as a single yielded
+    __jarvis_confirm__ JSON marker (not a raised ConfirmationRequired --
+    that's chat()'s contract). Before this, every SSE endpoint passed that
+    internal marker straight through as if it were response text, so a
+    streaming client had no reliable way to render an approval prompt.
+    This is the same structured DTO /chat's non-stream path returns
+    ({"confirmation_required": true, id, payload}), tagged with "type" so
+    a stream client can tell it apart from ordinary tokens."""
+    payload = json.dumps(
+        {
+            "type": "confirmation_required",
+            "id": marker.get("id"),
+            "payload": marker.get("payload") or {},
+        },
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n"
+
 logger = logging.getLogger(__name__)
 
 # Mobile routers
@@ -599,6 +620,8 @@ async def chat_stream(body: ChatRequest, request: Request):
         )
 
     async def _sse_generator() -> AsyncGenerator[str, None]:
+        from jarvis.voice.session import parse_confirm_marker
+
         event_bus.state("thinking")
         full: list[str] = []
         try:
@@ -608,6 +631,10 @@ async def chat_stream(body: ChatRequest, request: Request):
                 transport="api-stream",
                 conversation_id=body.conversation_id,
             ):
+                marker = parse_confirm_marker(token)
+                if marker is not None:
+                    yield _confirmation_sse_frame(marker)
+                    continue
                 full.append(token)
                 safe = token.replace("\n", "\\n")
                 yield f"data: {safe}\n\n"
@@ -737,6 +764,8 @@ async def chat_upload(
         image_mime = _IMAGE_MIME.get(suffix, "image/png")
 
         async def _sse_image() -> AsyncGenerator[str, None]:
+            from jarvis.voice.session import parse_confirm_marker
+
             try:
                 async for token in agent.chat_stream(
                     user_query,
@@ -746,6 +775,10 @@ async def chat_upload(
                     transport="api-upload",
                     conversation_id=conversation_id,
                 ):
+                    marker = parse_confirm_marker(token)
+                    if marker is not None:
+                        yield _confirmation_sse_frame(marker)
+                        continue
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
             except Exception as e:
@@ -781,6 +814,8 @@ async def chat_upload(
             logger.warning("Could not clean up uploaded file %s", saved_path, exc_info=True)
 
         async def _sse_pdf() -> AsyncGenerator[str, None]:
+            from jarvis.voice.session import parse_confirm_marker
+
             try:
                 async for token in agent.chat_stream(
                     full_input,
@@ -789,6 +824,10 @@ async def chat_upload(
                     transport="api-upload",
                     conversation_id=conversation_id,
                 ):
+                    marker = parse_confirm_marker(token)
+                    if marker is not None:
+                        yield _confirmation_sse_frame(marker)
+                        continue
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
             except Exception as e:
@@ -806,6 +845,8 @@ async def chat_upload(
     full_query = f'{file_hint}\n\n{user_query}'
 
     async def _sse() -> AsyncGenerator[str, None]:
+        from jarvis.voice.session import parse_confirm_marker
+
         try:
             try:
                 async for token in agent.chat_stream(
@@ -814,6 +855,10 @@ async def chat_upload(
                     transport="api-upload",
                     conversation_id=conversation_id,
                 ):
+                    marker = parse_confirm_marker(token)
+                    if marker is not None:
+                        yield _confirmation_sse_frame(marker)
+                        continue
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
             except Exception as e:
@@ -870,6 +915,69 @@ async def status(request: Request):
         last_turn_output_tokens=trace.get("output_tokens"),
         last_turn_llm_total_ms=trace.get("total_llm_ms"),
     )
+
+
+# ── Workflow approval (Faz 7.3, P1) ──────────────────────────────────────────
+# The transport-agnostic human approval surface the CLI's /workflow command
+# already had: list / show / resolve. Same shared service layer
+# (jarvis.execution.workflow_approval), same audit vocabulary, same exact
+# decision allowlist. Authenticated like every other endpoint; deliberately
+# NOT reachable by the model (no @tool wraps approval -- see
+# workflow_approval.py's docstring).
+
+
+class WorkflowResolveRequest(BaseModel):
+    decision: str  # "approve" | "deny" | "deny:<reason>"
+
+
+@app.get("/workflow")
+async def workflow_list(request: Request):
+    _check_auth(request)
+    from jarvis.execution import workflow_store
+
+    return {"workflows": workflow_store.list_workflows(limit=50)}
+
+
+@app.get("/workflow/{workflow_id}")
+async def workflow_show(workflow_id: str, request: Request):
+    _check_auth(request)
+    from jarvis.execution import workflow_store
+    from jarvis.execution.workflow_engine import render_workflow_report
+
+    plan = workflow_store.load(workflow_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"workflow not found: {workflow_id}")
+    return {
+        "workflow_id": plan.workflow_id,
+        "status": plan.status,
+        "pending_approval_step_id": plan.pending_approval_step_id,
+        "report": render_workflow_report(plan),
+    }
+
+
+@app.post("/workflow/{workflow_id}/resolve")
+async def workflow_resolve(workflow_id: str, body: WorkflowResolveRequest, request: Request):
+    _check_auth(request)
+    agent = get_agent()
+    from jarvis.execution.workflow_approval import resolve_workflow_approval
+    from jarvis.graph.tools import make_tools
+
+    tools = make_tools(agent.workspace, agent.settings, agent.memory)
+    outcome = await resolve_workflow_approval(
+        workflow_id, body.decision,
+        tools=tools, settings=agent.settings,
+        workspace=agent.workspace, transport="api",
+    )
+    if not outcome.ok and not outcome.reapproval_required and outcome.plan is None:
+        status = 404 if outcome.message.startswith("workflow not found") else 400
+        raise HTTPException(status_code=status, detail=outcome.message)
+    return {
+        "ok": outcome.ok,
+        "reapproval_required": outcome.reapproval_required,
+        "message": outcome.message,
+        "status": outcome.plan.status if outcome.plan is not None else None,
+        "report": outcome.report,
+    }
 
 
 @app.post("/reset")
