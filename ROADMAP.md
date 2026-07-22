@@ -106,6 +106,18 @@ the prior session's report as-is. `langgraph-migration` is 3 commits ahead of
 `origin/langgraph-migration` — push is a separate, not-yet-made owner decision. See
 [HANDOFF.md](HANDOFF.md) for the current commit/push status.
 
+**2026-07-22, a 13th session — Faz 7, Part 1 (Workflow runtime) built and tested, not yet
+committed.** New `jarvis/execution/workflow.py`/`workflow_store.py`/`workflow_engine.py` — a
+standalone workflow engine (step dependency graph, step budget, checkpoint/resume via a crash-safe
+`idempotency.is_committed()` check, approval pause mirroring `confirmation_node`'s HMAC binding
+without a LangGraph interrupt, and narrow auto-compensation for exactly two registered true
+inverses: `file_write` and `todo`'s `"add"` action) that reuses Faz 1-4's execution contract for
+every step instead of a second verification vocabulary. Deliberately separate from the single-turn
+chat graph, and deliberately NOT wired to any live trigger yet (same Part 1/Part 2 split as Faz
+1→2 and Faz 6 Part 1→2) — see [CHANGELOG.md](CHANGELOG.md) for full detail, including a real
+step-budget bug (`executed_count()`) a test caught and fixed before it shipped. 46 new tests, 914
+pytest green (868+46), ruff clean. See [HANDOFF.md](HANDOFF.md) for the current commit/push status.
+
 ---
 
 ## Faz 0 — Hafıza-Kritik Stabilizasyon (minimal) ✅ done (2026-07-14)

@@ -6,6 +6,77 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 7, Part 1: Workflow runtime] — 2026-07-22
+
+**Standalone workflow engine, reusing Faz 1-4's execution contract, deliberately NOT wired to any
+live trigger yet** — the same "Part 1: mechanism, Part 2: wire it to something live" split Faz 1→2
+and Faz 6 Part 1→2 already used. The plan's own framing (reviewer #7): `max_tool_rounds_per_turn`
+(2) is a single-turn budget, not built for long, multi-step daily tasks.
+
+New `jarvis/execution/workflow.py` (`WorkflowStep`/`WorkflowPlan` — pure shapes plus
+dependency-readiness/skip-propagation/terminal-status logic, no I/O), `jarvis/execution/
+workflow_store.py` (SQLite checkpoint/resume, mirrors `jarvis.execution.idempotency`'s
+per-call-connection pattern), and `jarvis/execution/workflow_engine.py` (`WorkflowEngine` — drives
+a plan's steps to completion). Explicitly separate from the single-turn chat graph
+(`jarvis/graph/graph.py`'s `StateGraph`) — no new LangGraph node — but every step dispatch reuses
+the exact same pipeline the single-turn path already has: `jarvis.execution.args_schemas.
+validate_args()`, `policy_guard.evaluate()`, an HMAC-bound `ExecutionRequest`/approval
+(`jarvis.execution.request`/`approval`), `build_shadow_envelope()`/`run_postconditions()`, and the
+idempotency journal — no second, parallel verification vocabulary (plan principle #2).
+
+**Approval pause**, mirroring `confirmation_node`'s HMAC binding exactly but without a LangGraph
+interrupt (there is no compiled graph to interrupt here): a step needing confirmation sets
+`plan.status="paused_for_approval"` and persists; `WorkflowEngine.resolve_approval(plan, step_id,
+"approve"|"deny[:why]")` re-verifies the signature/digest/expiry before dispatching, then the
+caller calls `advance()` again to keep going.
+
+**Checkpoint/resume**: every step transition persists to `workflows.db`. A step found `"running"`
+on load means the process died mid-dispatch — `idempotency.is_committed(execution_id)` (not a
+guess) decides whether to mark it `"succeeded"` (committed before the crash, envelope honestly
+absent rather than fabricated) or reset it to `"pending"` for a safe fresh retry (never committed
+= never actually happened, per `idempotency.py`'s own documented semantics).
+
+**Failed-step propagation**: `WorkflowPlan.propagate_skip()` cascades a failure/denial/
+invalid-args rejection to every transitive dependent. A real bug caught by writing an honest test,
+not assumed: the step-budget counter (`executed_count()`) originally counted any non-pending
+status, so a propagated `"skipped"` step (never actually dispatched) silently consumed budget
+meant for an unrelated, independent branch — fixed to count only genuinely-dispatched statuses;
+`test_a_propagated_skip_does_not_consume_the_step_budget` locks this in.
+
+**Compensation** (plan's own bullet 4 — narrow, deliberately): "yalnız kayıtlı gerçek tersi olan
+işlemlerde otomatik telafi." Exactly two real compensators are registered: `file_write` (restore
+prior content, or delete a newly-created file — capture happens BEFORE the overwrite) and `todo`'s
+`"add"` action (delete the created to-do, id recovered from its own result text via the same
+"parse a structured fact from free text" pattern `postcondition_runner.py`'s exit-code check
+already uses). Every other capability's succeeded steps are left honestly uncompensated, never
+silently claimed reverted. Auto-triggered whenever a plan finalizes `"failed"`/
+`"partially_committed"` — including step-budget exhaustion, not just hard failures.
+`ToolSpec.effect_scope` gains its first real classification: `file_write` → `"reversible"` (every
+other tool stays `"unclassified"` — this field is coarse/per-tool, while the compensator registry
+itself is the precise per-(capability, action) source of truth).
+
+**Workflow-level final validation**: reuses Faz 4's `VerifiedExecutionSummary`/
+`render_operation_status_for_user` over the plan's own collected step envelopes
+(`WorkflowEngine.report()`) rather than building a second aggregation.
+
+Small refactor alongside: `_resolve_target_resource` moved from `jarvis/graph/nodes.py` into
+`jarvis/execution/request.py` as public `resolve_target_resource()` — the workflow engine needed
+the identical logic for minting its own `ExecutionRequest`s; `nodes.py`'s `prepare_execution_node`
+now imports it from there instead of keeping a second copy (plan principle #2 again).
+
+**Deliberately NOT built this phase** (see `workflow_engine.py`'s own docstring): no LLM decides
+*when* to replan or *what* the new steps should be — `WorkflowEngine.replan()` enforces
+`max_replans` as a real, tested budget and appends caller-supplied steps, but nothing here triggers
+it (same "mechanism before trigger" precedent as Faz 1's shadow ledger). No live entry point
+constructs a `WorkflowPlan` from a real user request yet — this phase builds and tests the engine
+as a standalone, directly-invokable mechanism, same split as Faz 1→2/Faz 6 Part 1→2.
+
+46 new tests (`test_workflow_types.py` 16, `test_workflow_store.py` 9, `test_workflow_engine.py`
+21) — against REAL tool objects from `jarvis.graph.tools.make_tools()`, not fakes (same precedent
+as `test_langchain_dispatch_coercion.py`). 914 pytest green (868+46), ruff clean.
+
+---
+
 ## [Agent Runtime rev.2 — Faz 5 follow-up: API conversation_id] — 2026-07-22
 
 **Real per-client conversation support lands in the API.** Previously `jarvis/api.py`'s single

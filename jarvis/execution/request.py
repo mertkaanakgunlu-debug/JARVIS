@@ -34,6 +34,33 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+# Best-effort resource identifier for the HMAC binding's target_resource
+# field -- NOT full per-tool canonical-path resolution (that needs the
+# tool's own workspace root, which no caller currently has generic access
+# to; a real per-tool canonicalization pass is future territory, alongside
+# args_schema). Picks the first recognizable resource-ish key present so two
+# calls with different targets bind to visibly different resources; falls
+# back to the bare capability name when none of these are present.
+#
+# Faz 7: moved here from jarvis/graph/nodes.py (make_prepare_execution_node's
+# module) so the standalone workflow engine (jarvis.execution.workflow_engine
+# -- deliberately separate from the single-turn chat graph, see that
+# module's docstring) can mint ExecutionRequests with the exact same
+# resolution logic instead of a second, drifting copy. nodes.py now imports
+# this instead of defining its own.
+_RESOURCE_ARG_KEYS = (
+    "path", "file_path", "script_path", "output", "file_id", "event_id",
+    "to", "url", "query", "title", "name",
+)
+
+
+def resolve_target_resource(capability: str, args: dict) -> str:
+    for key in _RESOURCE_ARG_KEYS:
+        value = args.get(key)
+        if value:
+            return f"{capability}:{value}"
+    return capability
+
 
 class ExecutionRequest(BaseModel):
     """Immutable -- built once by prepare_execution, never mutated after.

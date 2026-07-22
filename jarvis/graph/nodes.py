@@ -539,27 +539,6 @@ def route_from_critic(state: JarvisState) -> str:
 
 # ── Agent Runtime rev.2, Faz 2 ──────────────────────────────────────────────
 
-# Best-effort resource identifier for the HMAC binding's target_resource
-# field -- NOT full per-tool canonical-path resolution (that needs the
-# tool's own workspace root, which no node currently has access to; a real
-# per-tool canonicalization pass is Faz 6 territory, alongside args_schema).
-# Picks the first recognizable resource-ish key present so two calls with
-# different targets bind to visibly different resources; falls back to the
-# bare capability name when none of these are present.
-_RESOURCE_ARG_KEYS = (
-    "path", "file_path", "script_path", "output", "file_id", "event_id",
-    "to", "url", "query", "title", "name",
-)
-
-
-def _resolve_target_resource(capability: str, args: dict) -> str:
-    for key in _RESOURCE_ARG_KEYS:
-        value = args.get(key)
-        if value:
-            return f"{capability}:{value}"
-    return capability
-
-
 def make_prepare_execution_node(settings=None):
     """Return a node that mints one signed ExecutionRequest per pending tool
     call (Agent Runtime rev.2, Faz 2, reviewer #2/#6) -- new routing:
@@ -611,7 +590,7 @@ def make_prepare_execution_node(settings=None):
     from jarvis import policy_guard
     from jarvis.execution import approval
     from jarvis.execution.args_schemas import validate_args
-    from jarvis.execution.request import ExecutionRequest
+    from jarvis.execution.request import ExecutionRequest, resolve_target_resource
     from jarvis.graph.tool_accounting import tool_call_fingerprint
     from jarvis.tool_registry import get_spec
 
@@ -651,7 +630,7 @@ def make_prepare_execution_node(settings=None):
                 capability=name,
                 action=decision.action,
                 normalized_args_digest=tool_call_fingerprint(name, args),
-                target_resource=_resolve_target_resource(name, args),
+                target_resource=resolve_target_resource(name, args),
                 risk_level=decision.risk_level,
                 requires_confirmation=decision.requires_confirmation,
                 allowed=decision.allowed,

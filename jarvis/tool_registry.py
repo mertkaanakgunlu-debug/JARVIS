@@ -129,6 +129,12 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
             PostconditionSpec(kind="file_exists", params={"path_arg": "path"}, source="tool_contract"),
             PostconditionSpec(kind="path_within_workspace", params={"path_arg": "path"}, source="policy"),
         ),
+        # Faz 7: the one tool with a real, registered compensator
+        # (jarvis.execution.workflow_engine's _COMPENSATORS -- restore prior
+        # content, or delete a newly-created file). Every other tool stays
+        # "unclassified" -- see that module's docstring for why this field
+        # isn't blanket-populated across all 36 tools this phase.
+        effect_scope="reversible",
     ),
     ToolSpec(
         "file_list", "filesystem", 1, False, "local_read",
