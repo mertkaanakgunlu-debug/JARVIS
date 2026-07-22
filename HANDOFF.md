@@ -3,156 +3,158 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-22 (13. oturum) — FAZ 7 (KISIM 1 + KISIM 2) TAMAMEN YAPILDI, COMMIT'LENDİ, PUSH'LANDI; İKİ AYRI CI REGRESYONU/FLAKY TEST AYNI OTURUMDA BULUNUP DÜZELTİLDİ; CI ARTIK TAMAMEN YEŞİL
+## Last session: 2026-07-22 (14. oturum) — FAZ 7.3 (PRE-FAZ-8 REVIEW REMEDIATION): TÜM 7 MADDE UYGULANDI, TEST EDİLDİ, GERÇEK BİR SUNUCUYA KARŞI CANLI DOĞRULANDI; CANLI DOĞRULAMA SIRASINDA YENİ, GERÇEK BİR P1 BULUNUP AYNI OTURUMDA DÜZELTİLDİ; COMMIT'LENDİ, HENÜZ PUSH'LANMADI
 
-**Durum tek cümlede:** Bu oturum önce 11. oturumun bıraktığı commit kararını uyguladı (3 commit
-landed+push'landı, CI yeşil), sonra owner "sıradaki faz" dedi ve **Agent Runtime rev.2'nin Faz 7'si
-(Workflow Runtime)** iki bölüm halinde inşa edildi: **Kısım 1** (bağımsız workflow motoru —
-`20280a3`) ve **Kısım 2** (canlı tetikleyici: `workflow_start`/`workflow_status` tool'ları + insan-
-only `/workflow` CLI komutu — `5d29ddc`). Kısım 2'nin push'u CI'ı kırdı (37 test
-`chromadb.errors.InternalError` ile başarısız — kendi yeni testlerimin çok sayıda gerçek
-`Memory`/ChromaDB nesnesi inşa etmesinin CI'ya özgü bir kapasite eşiğini aşması) — kök neden aynı
-oturumda bulunup düzeltildi (`644c47e`). Owner "Faz 8'e geçmeden commit/push'lar tam olsun, review
-alacağım" dedi; bu kontrol sırasında **ikinci, tamamen ilgisiz ve önceden var olan bir flaky CI
-testi** de bulundu (`test_ab_harness_guards.py`, %75 oranında başarısız oluyordu) — owner'ın onayıyla
-kök nedeni bulunup düzeltildi (`c1d12bb`: `ab_run_config.ps1`'in manifest'i, sunucu hazır olma
-zaman aşımı sunucusunda finalize bloğuna hiç ulaşmadan `exit 1` olduğunda `valid_measurement`
-alanını hiç yazmıyordu). **`langgraph-migration` origin ile birebir aynı (8 commit, `92abf52`'den
-`c1d12bb`'ye). 927 pytest yeşil, ruff temiz, ve gerçek CI koşusunda doğrulandı: `python` ✓, `electron`
-✓, yalnız beklenen/bilinen kozmetik `mobile` flutter-analyze kaldı (continue-on-error, bloklamıyor).
-CI artık gerçekten tamamen yeşil (mobile hariç) — review'a hazır.**
+**Durum tek cümlede:** Owner Faz 8'e geçmeden önce bağımsız bir kod review'ı (Claude web/başka bir
+oturum) getirdi — 1 kritik (P0), 4 yüksek (P1), 3 orta önem düzeyinde bulgu, Faz 7'nin workflow
+runtime'ında. Ben önce her bulguyu canlı koddan tek tek doğruladım (hepsi doğru çıktı), sonra
+owner'ın "review'ın tam 7 adımı" seçimiyle **hepsini bu oturumda uyguladım** — 7 commit, 986 pytest
+yeşil (927 → 986, +59), ruff temiz — **ve owner'ın 7. maddesinde istediği gerçek E2E doğrulamasını
+gerçekten yaptım**: izole bir `python -m jarvis --api --profile test` sunucusunu gerçek yerel Ollama
+modeline karşı çalıştırıp restart/crash/approval/reset senaryolarını canlı HTTP ile sürdüm. Bu canlı
+geçiş sırasında **review'da olmayan, gerçek ve ciddi yeni bir P1 bulundu ve aynı oturumda
+düzeltildi**: `/chat/stream` ve `resume_and_stream()` bu LangGraph sürümünde `GraphInterrupt`'ı hiç
+raise etmiyor (aynı `ainvoke()`'un Faz 3'te bulunup düzeltilmiş açığı — ama streaming tarafı hiç
+düzeltilmemiş, hatta koddaki yorum "streaming path raise ediyor" diye yanlış iddia ediyordu) — sonuç:
+onay gerektiren bir eylem (email gönder, takvim sil, shell çalıştır) `/chat/stream` üzerinden
+istendiğinde **sessizce hiçbir şey dönmüyordu** (ne prompt, ne hata) — bu da voice (tüm voice loop'lar
+`chat_stream()`/`resume_and_stream()` üzerine kurulu) ve Electron HUD dahil tüm streaming yüzeyini
+etkiliyordu. Düzeltildi ve düzeltme canlı sunucuya karşı 3/3 tekrar doğrulandı.
 
-## Bu oturumda yapılanlar
+## Bu oturumda yapılan 7 commit (hepsi `langgraph-migration`'da, push'lanmadı)
 
-### 1. 11. oturumun commit kararı uygulandı + push'landı
+1. **`0cdaa2b` — P0: crash recovery artık idempotent-olmayan adımları asla otomatik tekrar
+   çalıştırmıyor.** Önceki davranış: `_dispatch()` `idempotency.commit()`'i tool başarılı olduktan
+   SONRA çağırıyordu; process bu ikisi arasında çökerse (`gmail send` gerçekten gitmiş ama journal'a
+   yazılmamış), recovery "running + journal yok" durumunu körü körüne "pending"e çeviriyor, bir
+   sonraki `advance()` aynı e-postayı tekrar gönderiyordu. Düzeltme: yeni terminal durum
+   `unknown_outcome` (dependents skip edilir, plan `partially_committed`, rapor "check manually"
+   der) — yalnız `ToolSpec.idempotency == "natural"` olan capability'ler eski "pending'e resetle"
+   davranışını korur. `tool_registry.py`'de 38 tool'un gerçek `idempotency` sınıflandırması
+   (`_IDEMPOTENCY` dict, `_TOOL_DOMAINS` ile aynı "tek yer, import-time kontrollü" şekli).
+   Review'ın istediği tam fault-injection testi: sahte gmail tool GERÇEKTEN "başarılı" dönüyor,
+   `idempotency.commit` exception fırlatıyor (gerçek crash penceresi), recovery `workflow_store`'un
+   gerçekten diske yazdığı şeye karşı çalışıyor — sıfır yeniden çalıştırma doğrulanıyor.
+   **Kendi bulduğum bir nüans:** P0 gerçek ama şu an canlıda tetiklenebilir değildi — `advance()`'i
+   çağıran tek iki yer (`workflow_start`, her zaman yeni plan; CLI'nin `/workflow approve`, yalnız
+   `paused_for_approval`) bir çökmüş-ama-onay-beklemeyen planı asla yeniden `advance()` edemiyordu
+   (`/workflow resume` diye bir şey yoktu) — yani düzeltme öncesi gerçek sonuç "workflow kalıcı
+   takılı kalır", "sessizce iki kez çalışır" değildi. Aynı kök neden, aynı gerekli düzeltme.
+2. **`66b942a` — P1: transport-agnostic approval servisi + structured SSE confirmation.** Yeni
+   `jarvis/execution/workflow_approval.py` — CLI ve API'nin ikisinin de geçtiği TEK insan-only onay
+   katmanı (yine agent-callable bir tool DEĞİL). Exact decision allowlist (yalnız
+   `approve`/`deny`/`deny:<reason>` — "yes"/""/"invalid" artık hata). `WorkflowEngine.resolve_approval`:
+   restart sonrası bozulan imza (approval.py'nin process-local HMAC key'i) artık workflow'u
+   öldürmüyor — adım baştan `_run_step`'e gönderilip taze imzalı yeni bir istek üretiliyor, plan
+   yine `paused_for_approval`'a dönüyor, insan tekrar sorulan bir soruyla karşılaşıyor (execute
+   ETMİYOR eski "yes" ile). API: `GET /workflow`, `GET /workflow/{id}`, `POST /workflow/{id}/resolve`.
+   `/chat/stream` + `/chat/upload`'ın 3 SSE dalı: `chat_stream()`'in içsel `__jarvis_confirm__`
+   marker'ı artık ham metin gibi geçmiyor, `{"type":"confirmation_required","id","payload"}` olarak
+   yayınlanıyor.
+3. **`f8d85ef` — P1: workflow adımları artık audit log'a yazıyor.** `WorkflowEngine` artık
+   `tool.ainvoke()`'u audit'siz çağırmıyor — `transport`/`conversation_id` alıyor, `nodes.py`'nin
+   `_HudEventCallback`'iyle AYNI event vocabulary'sini yazıyor (`decision`
+   auto_approved/confirm_required/user_approved/user_denied/blocked_*, `execution_start`/
+   `execution_end`, yeni `compensation` event'i). `agent.py`'nin 4 graph-config noktası artık
+   `transport`/`conversation_id`'yi `configurable`'da taşıyor; `workflow_start` bunu injected
+   `RunnableConfig`'ten okuyor (model-facing şemaya asla sızmıyor — testle sabitlendi).
+4. **`ae3a41c` — P1: başarısız compensation artık "compensated" sayılmıyor.** Yeni
+   `CompensationResult(ok, note, retryable)` — iki compensator (`file_write`, `todo add`) artık
+   yapısal sonuç dönüyor. Yeni terminal durum `compensation_failed`, `compensated`'dan ayrı — rapor
+   artık gerçekten ne olduğunu söylüyor ("⚠ COMPENSATION FAILED -- check manually", "Compensation
+   applied" ile ASLA karışmıyor), ve `compensate()` ikinci çağrıda `compensation_failed` adımları
+   YENİDEN dener (eskiden `status != succeeded` olduğu için asla denenemiyordu).
+5. **`eecb173` — P1: `/reset` artık `conversation_id` alıyor, başka client'ın konuşmasını
+   arşivleyemiyor.** Review'ın tam senaryosu: Client B aktifken Client A `/reset` çağırırsa eskiden
+   B'nin konuşması arşivleniyordu. `JarvisAgent.reset_conversation_async(conversation_id)`: hedef
+   şu an aktif olan session DEĞİLSE, doğrudan ID ile arşivler, `self.session_id`/`_history`/`_turn`'e
+   HİÇ dokunmadan — hangi konuşma o an aktifse tamamen bozulmadan kalıyor.
+6. **`f45a763` — Orta: rapor step tablosu + exact allowlist (engine seviyesinde de, defense-in-
+   depth) + replan invariant.** `render_workflow_report()` artık HER adım için satır üretiyor
+   (`step_id | capability | status | error | execution_id | compensation`) — validation/policy-veto
+   nedeniyle dispatch'e hiç ulaşmamış adımlar artık görünür (eskiden sadece "Skipped (blocked by...)"
+   deniyordu, blocker'ın KENDİ nedeni hiç görünmüyordu). `replan()` artık `new_steps`'in KENDİ İÇİNDEKİ
+   duplicate ID'leri de yakalıyor (eskiden yalnız mevcut plan'a karşı kontrol ediyordu).
+7. **`fa34225` — P1 (canlı E2E sırasında bulundu): `chat_stream()`/`resume_and_stream()` stream'in
+   hiç raise etmediği bir interrupt'ı tespit edemiyordu.** Yukarıda özetlendi. Yeni
+   `JarvisAgent._pending_interrupt_payload(config)` — stream sonlandığında `graph.aget_state(config)
+   .interrupts`'a doğrudan bakıyor (aynı `chat()`'in `ainvoke()` için zaten yaptığı
+   `result["__interrupt__"]` kontrolünün streaming eşleniği). Hem `chat_stream()` hem
+   `resume_and_stream()`'e (aynı turdaki İKİNCİ bir interrupt için) eklendi.
 
-`d6ce968` (feat: conversation_id) + `a2a1bb3` (fix: auth_setup.py) + `a87ebe9` (docs) — commit'lendi,
-`git fetch`+`rev-list` ile temiz fast-forward doğrulanıp push'landı. CI: `python` job yeşil.
+## Canlı E2E doğrulaması (owner'ın 7. maddesi) — ne yapıldı, ne bulundu
 
-### 2. Faz 7, Kısım 1 — Workflow Runtime motoru (commit `20280a3`, push'landı, CI yeşil)
+İzole `JARVIS_TEST_HOME` ile gerçek `python -m jarvis --api --profile test` (CLOUD_POLICY=off →
+gerçek yerel Ollama, `EXTERNAL_WRITES_ENABLED=false` → gerçek dış yan etki riski sıfır) süreç
+başlatılıp gerçek HTTP ile sürüldü, gerçek proje `data/`'sına hiç dokunulmadı (`git status` oturum
+sonunda temiz).
 
-Owner'a kaç faz kaldığı soruldu (Faz 7 + Faz 8, artı Faz 6'nın canlı-veri-bekleyen bir alt maddesi),
-"sıradaki faz" (Faz 7) ile devam edildi. Yeni `jarvis/execution/workflow.py`/`workflow_store.py`/
-`workflow_engine.py` — bağımsız bir `WorkflowEngine`: bağımlılık sıralı adımlar, adım bütçesi,
-SQLite checkpoint/resume (çökme sonrası `idempotency` journal'ına bakarak dürüst kurtarma), onay
-duraklatma (`confirmation_node`'un HMAC bağlamasının aynısı, LangGraph interrupt'ı olmadan), ve dar
-kapsamlı otomatik telafi (yalnız `file_write` ve `todo add` için gerçek kayıtlı ters işlem). Tek-turlu
-chat graph'ından ayrı, Faz 1-4'ün execution contract'ını yeniden kullanıyor. Yazarken gerçek bir hata
-bulundu ve düzeltildi: adım bütçesi sayacı yayılan (hiç çalıştırılmamış) "skipped" adımları da
-sayıyordu. 46 yeni test. Tam detay [CHANGELOG.md](CHANGELOG.md)'de.
-
-### 3. Faz 7, Kısım 2 — Canlı tetikleyici (commit `5d29ddc`, push'landı)
-
-Owner "devam et" dedi, Kısım 1'in kendi notundaki açık soru (motoru nasıl gerçek bir isteğe
-bağlamalı) ele alındı. **Önemli güvenlik kararı:** onay çözümlemesi (approve/deny) bilinçli olarak
-bir tool DEĞİL, insan-only bir CLI komutu (`/workflow`) yapıldı — agent'ın kendi onayını kendisinin
-vermesini engellemek için (mevcut `confirmation_node`'un LangGraph interrupt'ının da aynı özelliği
-taşıdığı gibi: yalnız transport katmanı `Command(resume=...)` ile devam ettirebilir, model tool
-call'ı ile değil).
-
-- `workflow_start(goal, steps)` — yeni `@tool`, `steps` bir JSON dizisi (bu codebase'in mevcut
-  karmaşık-argüman geleneği — `geo_math`'in `grid_data`/`x_data` gibi). Her `capability`,
-  modelin görebildiği alpha-filtrelenmiş tool listesine karşı doğrulanıyor (`python_run` gibi
-  alpha-disabled bir capability, bilinmeyen bir tool adı gibi reddediliyor).
-- `workflow_status(workflow_id)` — salt-okunur, hiçbir şeyi ilerletmiyor/onaylamıyor.
-- `/workflow list|show <id>|approve <id>|deny <id> [sebep]` — yeni CLI komutu (`cli.py`).
-- `jarvis/graph/tool_router.py`'de yeni "workflow" domain'i — `procedure_save`'in kullandığı
-  "yalnız açık niyetle" (explicit_tool_intent) mekanizması genelleştirildi. **Gerçek bir çakışma
-  yazarken bulundu ve düzeltildi:** ilk "adım adım" kalıbı, mevcut bir procedure-save test
-  sorgusuyla da eşleşiyordu — "çok adımlı görev"e daraltıldı, kilitleyen bir test eklendi.
-- `WorkflowEngine.report()` modül seviyesinde `render_workflow_report()`'a taşındı (salt-okunur
-  çağıranlar tam bir engine inşa etmeden rapor okuyabilsin diye).
-
-**Bilinçli olarak test edilmedi:** `/workflow` CLI komutunun kendisi için REPL-loop testi yok — bu
-repo'da `cli.py`'nin interaktif döngüsünü uçtan uca süren bir test altyapısı hiç yok (mevcut tek CLI
-test dosyası salt bir yardımcı fonksiyonu test ediyor), ve komutun kendi mantığı zaten test edilmiş
-`WorkflowEngine` metodları üzerine ince bir argüman-ayrıştırma katmanı — bu orana yeni bir test
-altyapısı kurmak orantısız görüldü, kayıt altına alınmış bir kapsam kararı.
-
-12 yeni test (`test_tool_router.py` +3, yeni `test_workflow_tools.py` 9). Commit'lendi, push'landı.
-
-### 4. Kısım 2'nin push'u sonrası bulunan CI regresyonu, aynı oturumda düzeltildi (commit `644c47e`)
-
-`5d29ddc` push'landıktan sonra CI'ın `python` job'u kırmızı çıktı: 37 test
-`chromadb.errors.InternalError: ... no such table: acquire_write` ile başarısız — yalnız yeni
-eklenen `test_workflow_engine.py`/`test_workflow_tools.py`'de değil, ilgisiz, önceden var olan
-dosyalarda da (`test_shadow_replay_equivalence.py`, `test_shell_workspace.py`,
-`test_todo_bg_analysis.py`). Kök neden araştırıldı: bu iki yeni test dosyasının her testi
-`make_tools()` için gerçek bir `jarvis.memory.Memory` (5 ChromaDB collection) inşa ediyordu — 30
-ek gerçek inşa, CI'nin Windows runner'ında chromadb'nin Rust binding'lerinde bir kapasite eşiğini
-aşmış görünüyor (yerelde hiç tekrarlanmadı, birkaç tam-paket koşusunda bile). `make_tools()`'un
-gövdesi okunarak doğrulandı: `memory` yalnızca `vault_search`/`note_append`/`index_doc`/
-`procedure_save`'de kullanılıyor — bu iki test dosyasının hiçbiri bunları hiç çağırmıyor. Düzeltme:
-`memory` parametresi artık gerçek nesne değil, `unittest.mock.MagicMock()` — 30 test hâlâ geçiyor
-(hatta daha hızlı). Push'landı, CI'da doğrulandı: kalan tek hata, oturumdan ÖNCE de var olan
-ilgisiz bir flaky test (`test_ab_harness_guards.py`, aşağıya bakın).
-
-### 5. Owner'ın "commit/push tam olsun" isteği üzerine bulunan 2. flaky test, kök nedeniyle düzeltildi (commit `c1d12bb`)
-
-Owner "Faz 8'e geçmeden commit/push'lar tam olsun, review alacağım" dedi. Doğrulama sırasında
-`test_ab_harness_guards.py::test_ps_wrapper_propagates_driver_failure_exit_code`'ın bugünkü 4
-CI koşusundan 3'ünde başarısız olduğu görüldü (`KeyError: 'valid_measurement'`) — bu Faz 7 ile
-tamamen ilgisiz, oturumdan ÖNCE de (`92abf52`'de) var olan bir durum. Owner'a soruldu, "şimdi
-düzelt" onayı alındı. **Kök neden:** `scripts/ab_run_config.ps1`, `valid_measurement` alanını
-yalnızca script'in SONUNDAKİ finalize bloğunda yazıyor — ama sunucu hazır olma kontrolü zaman
-aşımına uğrarsa (`SERVER NOT READY after 300s`), script bu bloğa hiç ulaşmadan `exit 1` oluyor,
-geriye yalnızca BAŞLANGIÇTA yazılan (bu alanı içermeyen) bir manifest kalıyor. Testin kendi
-varsayımı ("stub her zaman portu tutar, gerçek sunucu zararsızca bağlanamaz") garanti değilmiş —
-CI'nin zamanlama koşullarında gerçek sunucu bazen portu önce alıyor, sonra gerçek (model/chroma
-yükleme) başlangıcı 300 saniyeyi kaçırıyor. **Düzeltme:** bu 5 alan artık manifest'in İLK
-yazımında (sunucu başlamadan önce) dürüst "henüz çalışmadı" varsayılanlarıyla var; finalize bloğu
-hâlâ gerçek sonuçla üzerine yazıyor, ama erken çıkan bir koşu artık eksik alan yerine
-`valid_measurement: false` bırakıyor. Yeni `-ReadyTimeoutSec` parametresi (gerçek kullanımda
-varsayılan 300, değişmedi) + bu tam senaryoyu ~4 saniyede deterministik olarak tetikleyen yeni bir
-test eklendi. **927 pytest yeşil, ruff temiz — ve gerçek bir CI koşusunda doğrulandı** (run
-29919576780: `python` ✓, `electron` ✓, yalnız beklenen `mobile` kaldı).
+- ✅ **Crash+restart+re-approval, tam canlı:** `shell_run` içeren bir workflow gerçek onay
+  beklemesine sokuldu, süreç öldürüldü (`kill`), AYNI `JARVIS_HOME`'a karşı yeni bir süreç
+  başlatıldı, `POST /workflow/{id}/resolve` ile ilk deneme `signature_mismatch` → `reapproval_required:
+  true` (execute ETMEDİ), ikinci deneme (taze imzayla) → gerçekten çalıştı (`shell_run` çıktısı
+  `hello-from-e2e` olarak audit log'da ve raporda göründü). `audit_log.jsonl`'da tam
+  decision→execution_start→execution_end zinciri doğru transport etiketleriyle doğrulandı.
+- ✅ **Per-conversation reset, tam canlı:** conv-x "42" öğrendi, conv-y "7" öğrendi (aktif olan),
+  yalnız conv-x reset edildi, conv-y'ye tekrar soruldu — hâlâ doğru "7" cevabını verdi (bozulmadı).
+- ✅ **Structured SSE confirmation, düzeltmeden ÖNCE ve SONRA canlı karşılaştırıldı:** aynı prompt
+  `/chat`'te 5/5 doğru `confirmation_required` döndü, `/chat/stream`'de düzeltmeden önce 5/5 boş
+  döndü (yalnız `[DONE]`) — bu paired karşılaştırma yukarıdaki 7. bulguyu ortaya çıkardı. Düzeltme
+  sonrası aynı sunucuya karşı 3/3 doğru structured frame + `/chat/confirm` ile tam round-trip
+  (gerçek shell komutu çalıştı, sonuç stream'e düzgün geri geldi).
+- **Yeni, ayrı bir gözlem (düzeltilmedi — bu oturumun kapsamı dışı, ayrı bir konu):** yerel model
+  (`qwen3:8b`, bu makinede varsayılan) bir "run this command" tarzı isteğe bazen tool hiç
+  çağırmadan "komut çalıştırıldı, çıktı: X" diye DÜZ METİNLE UYDURUYOR (2/2 gözlemde) — tam da bu
+  girişimin (Agent Runtime rev.2) başlangıç motivasyonu olan "fabricated success claims" sınıfından
+  canlı bir örnek. `workflow_start`'ı tetiklemek için de model 2/2 denemede bunun yerine doğrudan
+  `file_write`/`file_read` kullanmayı tercih etti (görev basit olduğu için makul bir tercih, ama
+  `workflow_start`'ın JSON güvenilirliği hâlâ ölçülemedi — HANDOFF'un önceki notu hâlâ geçerli).
+  Bu, review'ın kapsamındaki bir "workflow safety kernel" bulgusu değil, ayrı bir model/prompt
+  güvenilirlik sorusu — owner'a bilgi olarak not düşülüyor, bu oturumda müdahale edilmedi.
+- **Bilinçli yapılmayan (owner'a aktarılan, mevcut kod tabanının kendi emsaliyle tutarlı bir kapsam
+  kararı):** gerçek CLI REPL'ini (`/workflow` komutu) programatik sürecek bir test altyapısı
+  kurulmadı — bu repo'nun zaten belgelenmiş, bilinçli bir kapsam dışı kararı ("bu orana yeni bir
+  test altyapısı kurmak orantısız görüldü"), bu oturum da aynı disiplini korudu. Bunun yerine API
+  yüzeyi (voice/Electron/mobile'ın da gerçekte kullandığı yüzey) çok daha kapsamlı canlı test edildi.
 
 ## Ortam / komutlar — bu oturum sonunda
 ```powershell
 git log --oneline -8
-#  c1d12bb fix(ci): manifest must report valid_measurement even if readiness times out   <- HEAD, origin da burada
-#  db21720 docs: record the CI regression fix and Faz 7's final commit/CI status
-#  644c47e fix(tests): stop constructing real Memory/ChromaDB in workflow test files
-#  5d29ddc feat(workflow): live-wire the workflow runtime (Agent Runtime rev.2, Faz 7 Part 2)
-#  20280a3 feat(workflow): add standalone workflow runtime (Agent Runtime rev.2, Faz 7 Part 1)
-#  a87ebe9 docs: sync conversation_id feature and Faz 6 Part 3 decision
-#  a2a1bb3 fix(scripts): remove placeholder-less f-string in auth_setup.py
-#  d6ce968 feat(api): add per-client conversation_id support
-git rev-list --left-right --count origin/langgraph-migration...HEAD   # 0  0 (hepsi push'landı)
-python -m pytest -q       # 927 passed, ~183-225s (birkaç kez doğrulandı)
+#  fa34225 fix(agent): chat_stream()/resume_and_stream() must detect an interrupt ...   <- HEAD
+#  f45a763 fix(workflow): report step table, exact approval allowlist, replan invariant (medium)
+#  eecb173 fix(api): /reset takes conversation_id ...
+#  ae3a41c fix(workflow): a failed compensation attempt is no longer reported as applied (P1)
+#  f8d85ef feat(workflow): workflow steps now write the same audit trail as the graph path (P1)
+#  66b942a feat(workflow): transport-agnostic human approval + structured SSE confirmation (P1)
+#  0cdaa2b fix(workflow): never auto-retry a non-idempotent step after a crash (P0)
+#  9ddf8fb docs: record CI fully green after both regression fixes   <- bu oturumun başlangıcı
+git rev-list --left-right --count origin/langgraph-migration...HEAD   # 0  7 (push edilmedi)
+python -m pytest -q       # 986 passed (927 + 59 yeni), ~200s
 ruff check jarvis/ tests/ scripts/    # All checks passed!
 git diff --check          # temiz
-# CI (run 29919576780, commit c1d12bb, GERÇEK koşu, yerel akıl yürütme değil):
-#   python: success | electron: success | mobile: failure (beklenen, continue-on-error, bloklamıyor)
-# CI artık gerçekten tamamen yeşil (mobile hariç) -- review'a hazır.
+git status --short        # yalnız .claude/settings.local.json (oturum öncesinden) — gerçek data/ hiç dokunulmadı
 ```
+**CI'da doğrulanmadı** (henüz push edilmedi) — yalnız yerel `pytest`/`ruff`. Push, owner'ın ayrı
+kararı.
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Faz 7 Kısım 2'nin kendi takip maddeleri:**
-   - `/workflow` CLI komutu gerçek bir terminalde manuel olarak hiç denenmedi (yalnız
-     `WorkflowEngine`'in kendisi + tool'ların `.ainvoke()` çağrıları test edildi) — bir sonraki
-     oturumda `python -m jarvis` ile canlı bir workflow başlatıp onaylamak/reddetmek faydalı olur.
-   - `workflow_start`'ın JSON `steps` argümanının gerçek bir LLM (özellikle yerel qwen2.5:7b) ile ne
-     kadar güvenilir üretildiği hiç ölçülmedi — yalnız doğrudan `.ainvoke()` ile test edildi, model
-     bu şemayı gerçekte ne sıklıkla doğru dolduruyor bilinmiyor.
-   - API/Electron/mobil'de workflow onayı için hiçbir arayüz yok (yalnız CLI) — mevcut confirmation
-     mekanizmasının aynı, zaten bilinen kısıtıyla aynı asimetri.
-2. **Faz 8 (Evaluation v2 + manuel alpha kapısı)** hâlâ başlanmadı — **Agent Runtime rev.2 planının
-   son fazı**, bu bittiğinde 9 fazlık plan tamamlanmış olacak.
-3. **Faz 6, Kısım 3'ün Literal-terfi maddesi** (değişmedi, hâlâ bilinçli ertelenmiş).
-4. Diğer Faz 5 kalan işleri (değişmedi): `run_manifest.json`'ın prompt hash/registry version
-   alanları boş; `plot_data` dışındaki artifact tool'ları run-scoped değil.
-5. Canlı A/B'nin B6 sorusu hâlâ açık (değişmedi). Şampiyon 62/65 referansı kontamine (değişmedi).
-   **Not:** Faz 7'nin iki yeni tool'u + yeni "workflow" domain'i canlı A/B'nin tool sayısını/routing
-   davranışını etkileyebilir — bir sonraki A/B koşusu bunu hesaba katmalı.
-6. conversation_id'nin istemci tarafı hâlâ yapılmadı (değişmedi, ayrı takip).
-7. Bilinçli ertelenenler (değişmedi): W4b, `[BLOCKED]` sunum katmanı, qwen3.5/ministral-3
-   thinking-on, `stoic-spence` rolling summarization, `docs/ARCHITECTURE.md` orchestrator bölümü,
-   mobile'ın 71 flutter-analyze info/warning'i.
+1. **Push kararı bekliyor** — 7 commit `langgraph-migration`'da, `origin`'e hiç gönderilmedi.
+2. **Faz 8 (Evaluation v2 + manuel alpha kapısı)** artık gerçekten önü açık — review'ın kendi
+   sözleriyle "Bu maddeler tamamlanmadan Faz 8 ölçümleri yanıltıcı olur" — 7 madde de artık
+   tamamlandı ve canlı doğrulandı.
+3. **Model tool-calling güvenilirliği** (bu oturumda canlı gözlemlendi, düzeltilmedi): yerel modelin
+   bazen tool çağırmadan başarı uydurması ayrı bir inceleme/düzeltme gerektirebilir — muhtemelen
+   sistem promptu/tool-seçim talimatları tarafı, workflow safety kernel'inin değil.
+4. `workflow_start`'ın JSON `steps` güvenilirliği hâlâ ölçülmedi (değişmedi, 13. oturumdan).
+5. Gerçek CLI REPL E2E testi hâlâ yok (bilinçli, değişmedi).
+6. Diğer eski kalan işler (değişmedi): Faz 6 Kısım 3 Literal-terfi, Faz 5 kalan işleri
+   (`run_manifest.json` prompt hash/registry version, artifact tool run-scoping), canlı A/B'nin B6
+   sorusu, conversation_id client-side adoption, 4 worktree branch, mobile flutter-analyze info/warning.
 
 ## Değişmeyen taşınan işler
 - 8 direct-Gemini modülün shared gateway'e migrasyonu (Sprint 3) — kapsam dışı.
 - 4 worktree branch read-through — ayrı go-ahead bekliyor (CLAUDE.md'de liste).
-- Electron/mobil confirmation render'ı — hâlâ yalnız CLI text+voice (+ workflow onayı da hâlâ CLI-only, madde 2).
+- Electron/mobil confirmation render'ı — hâlâ yalnız CLI text+voice (+ workflow onayı artık API'den
+  de mümkün, madde 2 — ama Electron/mobil UI'ı hâlâ bunu render etmiyor).
 - Pre-first-turn kozmetik model label — değişmedi.

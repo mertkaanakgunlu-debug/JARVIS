@@ -132,6 +132,42 @@ building this (an early "adım adım" workflow-trigger phrase also fired on an e
 procedure-saving test query) — see [CHANGELOG.md](CHANGELOG.md) for full detail. 12 new tests, 926
 pytest green (914+12), ruff clean. See [HANDOFF.md](HANDOFF.md) for the current commit/push status.
 
+**2026-07-22, a 14th session — Faz 7.3 (pre-Faz-8 remediation): all 7 items from an independent
+external review of Faz 7's workflow runtime, done and live-verified, 7 commits, not yet pushed.**
+The review (1 P0, 4 P1, 3 medium) was verified fact-by-fact against live code before any fix
+started — every finding held up. In severity order: **P0** crash recovery could re-execute a
+non-idempotent side effect (a real double-send risk) — fixed with a new terminal step status
+`unknown_outcome` gated on a genuine per-tool `idempotency` classification (38 tools, `none |
+natural | keyed`), not a blind retry-on-uncommitted assumption. **P1** workflow approval couldn't
+survive a process restart or cross a CLI/API process boundary (the HMAC signer is process-local by
+design, but the plan persists the signature to survive restarts — a real contradiction) — fixed
+with a shared `workflow_approval.py` service layer (exact decision allowlist, one audit vocabulary)
+and a stale-signature path that re-issues a fresh approval instead of killing the step; `/chat/
+stream` also gained a structured `confirmation_required` SSE frame instead of leaking the internal
+marker as an `[ERROR]`. **P1** workflow steps bypassed the audit log entirely (zero entries for a
+mechanism explicitly built on Faz 4's "one audit kernel" contract) — fixed, same event vocabulary
+as the graph path, transport/conversation_id threaded through. **P1** a failed compensation attempt
+was reported as "Compensation applied" (no structural way to tell success from failure, and a
+failed attempt could never be retried) — fixed with a structured `CompensationResult` and a
+distinct `compensation_failed` status. **P1** `/reset` could archive a DIFFERENT client's active
+conversation (no `conversation_id` at all) — fixed, targets a specific conversation without
+touching whichever session happens to be active elsewhere. **Medium** findings (report wasn't
+truly step-by-step, approval decision parsing wasn't an exact allowlist, `replan()` missed
+duplicate ids within one batch) all fixed. Then, per the review's own 7th recommended item (real
+E2E verification), a real `python -m jarvis --api --profile test` server was driven over live HTTP
+against the real local Ollama model — crash+restart+re-approval confirmed working end to end
+(including the audit trail), per-conversation reset confirmed against the review's exact named
+race, and a paired `/chat` vs `/chat/stream` comparison **found a real, previously-unknown P1**:
+neither `ainvoke()` NOR `astream(stream_mode="messages")` raises `GraphInterrupt` on the installed
+LangGraph version (the `except GraphInterrupt` branches in `chat_stream()`/`resume_and_stream()`
+are dead code — confirmed via a minimal LangGraph repro) — so a confirmation-required action
+requested via `/chat/stream`, voice, or the Electron HUD could silently vanish with no prompt and
+no error. Fixed (`_pending_interrupt_payload()` reads the pending interrupt back from
+`graph.aget_state()` once the stream ends without raising) and live-reverified 3/3 against the
+running server. 986 pytest green (927+59), ruff clean. See [HANDOFF.md](HANDOFF.md) for the full
+per-commit detail, the live-observed (not fixed, out of this session's scope) model tool-calling
+reliability finding, and current push status.
+
 ---
 
 ## Faz 0 — Hafıza-Kritik Stabilizasyon (minimal) ✅ done (2026-07-14)
