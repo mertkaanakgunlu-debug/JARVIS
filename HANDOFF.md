@@ -3,15 +3,19 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-22 (13. oturum) — FAZ 7 KISIM 1 (WORKFLOW MOTORU) + KISIM 2 (CANLI TETİKLEYİCİ) YAPILDI; KISIM 1 COMMIT'LENDİ+PUSH'LANDI, KISIM 2 HENÜZ COMMIT'LENMEDİ
+## Last session: 2026-07-22 (13. oturum) — FAZ 7 (KISIM 1 + KISIM 2) TAMAMEN YAPILDI, COMMIT'LENDİ, PUSH'LANDI, CI YEŞİL (bir CI regresyonu aynı oturumda bulunup düzeltildi)
 
-**Durum tek cümlede:** Bu oturum önce 11. oturumun bıraktığı commit kararını uyguladı (owner "3
-parçalı yapıyla commit et" dedi, 3 commit landed+push'landı, CI yeşil), sonra owner "sıradaki faz"
-dedi ve **Agent Runtime rev.2'nin Faz 7'si (Workflow Runtime)** iki bölüm halinde inşa edildi:
-**Kısım 1** (bağımsız workflow motoru — commit'lendi `20280a3`, push'landı, CI yeşil) ve **Kısım 2**
-(motoru gerçek bir model-facing tool'a bağlama: `workflow_start`/`workflow_status` + insan-only
-`/workflow` CLI komutu — owner "devam et" dedi, inşa edildi, test edildi, **henüz commit'lenmedi**).
-**926 pytest yeşil (868+46+12), ruff temiz, `git diff --check` temiz.**
+**Durum tek cümlede:** Bu oturum önce 11. oturumun bıraktığı commit kararını uyguladı (3 commit
+landed+push'landı, CI yeşil), sonra owner "sıradaki faz" dedi ve **Agent Runtime rev.2'nin Faz 7'si
+(Workflow Runtime)** iki bölüm halinde inşa edildi: **Kısım 1** (bağımsız workflow motoru —
+`20280a3`) ve **Kısım 2** (canlı tetikleyici: `workflow_start`/`workflow_status` tool'ları + insan-
+only `/workflow` CLI komutu — `5d29ddc`). Kısım 2'nin push'u CI'ı kırdı (37 test
+`chromadb.errors.InternalError` ile başarısız — kendi yeni testlerimin çok sayıda gerçek
+`Memory`/ChromaDB nesnesi inşa etmesinin CI'ya özgü bir kapasite eşiğini aşması) — kök neden aynı
+oturumda bulunup düzeltildi (`644c47e`: testlerde hiç kullanılmayan `memory` parametresi artık
+gerçek nesne değil, mock), push'landı, CI'da doğrulandı (yalnız önceden var olan, ilgisiz bir flaky
+test kaldı — ayrı bir task olarak işaretlendi). **`langgraph-migration` origin ile birebir aynı
+(6 commit, `92abf52`'den `644c47e`'ye). 926 pytest yeşil, ruff temiz.**
 
 ## Bu oturumda yapılanlar
 
@@ -32,7 +36,7 @@ chat graph'ından ayrı, Faz 1-4'ün execution contract'ını yeniden kullanıyo
 bulundu ve düzeltildi: adım bütçesi sayacı yayılan (hiç çalıştırılmamış) "skipped" adımları da
 sayıyordu. 46 yeni test. Tam detay [CHANGELOG.md](CHANGELOG.md)'de.
 
-### 3. Faz 7, Kısım 2 — Canlı tetikleyici (henüz commit'lenmedi)
+### 3. Faz 7, Kısım 2 — Canlı tetikleyici (commit `5d29ddc`, push'landı)
 
 Owner "devam et" dedi, Kısım 1'in kendi notundaki açık soru (motoru nasıl gerçek bir isteğe
 bağlamalı) ele alındı. **Önemli güvenlik kararı:** onay çözümlemesi (approve/deny) bilinçli olarak
@@ -60,36 +64,49 @@ test dosyası salt bir yardımcı fonksiyonu test ediyor), ve komutun kendi mant
 `WorkflowEngine` metodları üzerine ince bir argüman-ayrıştırma katmanı — bu orana yeni bir test
 altyapısı kurmak orantısız görüldü, kayıt altına alınmış bir kapsam kararı.
 
-12 yeni test (`test_tool_router.py` +3, yeni `test_workflow_tools.py` 9). **926 pytest yeşil
-(868+46+12), ruff temiz, `git diff --check` temiz — Kısım 2 henüz commit'lenmedi.**
+12 yeni test (`test_tool_router.py` +3, yeni `test_workflow_tools.py` 9). Commit'lendi, push'landı.
+
+### 4. Kısım 2'nin push'u sonrası bulunan CI regresyonu, aynı oturumda düzeltildi (commit `644c47e`)
+
+`5d29ddc` push'landıktan sonra CI'ın `python` job'u kırmızı çıktı: 37 test
+`chromadb.errors.InternalError: ... no such table: acquire_write` ile başarısız — yalnız yeni
+eklenen `test_workflow_engine.py`/`test_workflow_tools.py`'de değil, ilgisiz, önceden var olan
+dosyalarda da (`test_shadow_replay_equivalence.py`, `test_shell_workspace.py`,
+`test_todo_bg_analysis.py`). Kök neden araştırıldı: bu iki yeni test dosyasının her testi
+`make_tools()` için gerçek bir `jarvis.memory.Memory` (5 ChromaDB collection) inşa ediyordu — 30
+ek gerçek inşa, CI'nin Windows runner'ında chromadb'nin Rust binding'lerinde bir kapasite eşiğini
+aşmış görünüyor (yerelde hiç tekrarlanmadı, birkaç tam-paket koşusunda bile). `make_tools()`'un
+gövdesi okunarak doğrulandı: `memory` yalnızca `vault_search`/`note_append`/`index_doc`/
+`procedure_save`'de kullanılıyor — bu iki test dosyasının hiçbiri bunları hiç çağırmıyor. Düzeltme:
+`memory` parametresi artık gerçek nesne değil, `unittest.mock.MagicMock()` — 30 test hâlâ geçiyor
+(hatta daha hızlı). Push'landı, CI'da doğrulandı: kalan tek hata, oturumdan ÖNCE de var olan
+ilgisiz bir flaky test (`test_ab_harness_guards.py`, aşağıya bakın) — ayrı bir background task
+olarak işaretlendi (`task_e77e8577`), bu oturumda peşinden gidilmedi.
 
 ## Ortam / komutlar — bu oturum sonunda
 ```powershell
-git log --oneline -4
-#  20280a3 feat(workflow): add standalone workflow runtime (Agent Runtime rev.2, Faz 7 Part 1)  <- HEAD, origin da burada
+git log --oneline -6
+#  644c47e fix(tests): stop constructing real Memory/ChromaDB in workflow test files   <- HEAD, origin da burada
+#  5d29ddc feat(workflow): live-wire the workflow runtime (Agent Runtime rev.2, Faz 7 Part 2)
+#  20280a3 feat(workflow): add standalone workflow runtime (Agent Runtime rev.2, Faz 7 Part 1)
 #  a87ebe9 docs: sync conversation_id feature and Faz 6 Part 3 decision
 #  a2a1bb3 fix(scripts): remove placeholder-less f-string in auth_setup.py
 #  d6ce968 feat(api): add per-client conversation_id support
-git rev-list --left-right --count origin/langgraph-migration...HEAD   # 0  0 (Kısım 1 push'landı)
-git status --short
-#  M jarvis/cli.py
-#  M jarvis/execution/workflow_engine.py
-#  M jarvis/graph/tool_router.py
-#  M jarvis/graph/tools.py
-#  M jarvis/tool_registry.py
-#  M tests/test_tool_router.py
-#  ?? tests/test_workflow_tools.py
-#  (+ CHANGELOG.md/ROADMAP.md/HANDOFF.md/MEMORY.md docs-sync, + ilgisiz .claude/settings.local.json)
-python -m pytest -q       # 926 passed, 223s
+git rev-list --left-right --count origin/langgraph-migration...HEAD   # 0  0 (hepsi push'landı)
+python -m pytest -q       # 926 passed, ~200-225s (birkaç kez doğrulandı)
 ruff check jarvis/ tests/ scripts/    # All checks passed!
 git diff --check          # temiz
+# CI (run 29916575721, commit 644c47e): python job'da yalnız 1 hata kaldı —
+# test_ab_harness_guards.py::test_ps_wrapper_propagates_driver_failure_exit_code,
+# oturumdan ÖNCE de var olan, ilgisiz, aralıklı bir flaky test (task_e77e8577'ye bakın).
 ```
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Faz 7 Kısım 2'nin commit kararı owner'ı bekliyor** — kod+test+docs working tree'de duruyor,
-   `origin` hâlâ Kısım 1'de (`20280a3`, byte-equal).
-2. **Faz 7 Kısım 2'nin kendi takip maddeleri (yeni):**
+1. **`task_e77e8577`** (ayrı, işaretlenmiş): `test_ab_harness_guards.py`'nin flaky CI hatasının kök
+   nedenini bul ve düzelt — Faz 7 ile ilgisi yok, owner bir sonraki oturumda bu chip'i tetikleyebilir
+   ya da görmezden gelebilir.
+2. **Faz 7 Kısım 2'nin kendi takip maddeleri:**
    - `/workflow` CLI komutu gerçek bir terminalde manuel olarak hiç denenmedi (yalnız
      `WorkflowEngine`'in kendisi + tool'ların `.ainvoke()` çağrıları test edildi) — bir sonraki
      oturumda `python -m jarvis` ile canlı bir workflow başlatıp onaylamak/reddetmek faydalı olur.
@@ -98,7 +115,8 @@ git diff --check          # temiz
      bu şemayı gerçekte ne sıklıkla doğru dolduruyor bilinmiyor.
    - API/Electron/mobil'de workflow onayı için hiçbir arayüz yok (yalnız CLI) — mevcut confirmation
      mekanizmasının aynı, zaten bilinen kısıtıyla aynı asimetri.
-3. **Faz 8 (Evaluation v2 + manuel alpha kapısı)** hâlâ başlanmadı.
+3. **Faz 8 (Evaluation v2 + manuel alpha kapısı)** hâlâ başlanmadı — **Agent Runtime rev.2 planının
+   son fazı**, bu bittiğinde 9 fazlık plan tamamlanmış olacak.
 4. **Faz 6, Kısım 3'ün Literal-terfi maddesi** (değişmedi, hâlâ bilinçli ertelenmiş).
 5. Diğer Faz 5 kalan işleri (değişmedi): `run_manifest.json`'ın prompt hash/registry version
    alanları boş; `plot_data` dışındaki artifact tool'ları run-scoped değil.

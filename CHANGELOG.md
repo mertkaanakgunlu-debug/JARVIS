@@ -6,6 +6,26 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Fix: CI-only chromadb capacity failure in workflow tests] — 2026-07-22
+
+Faz 7 Part 2's push (`5d29ddc`) broke CI: 37 tests failed with `chromadb.errors.InternalError: ...
+no such table: acquire_write`, including unrelated, pre-existing files
+(`test_shadow_replay_equivalence.py`, `test_shell_workspace.py`, `test_todo_bg_analysis.py`), never
+reproduced locally across several full-suite runs. Root cause: `test_workflow_engine.py`/
+`test_workflow_tools.py` each constructed a real `jarvis.memory.Memory` (5 ChromaDB collections) per
+test via `make_tools()` — 30 additional real constructions apparently crossed a capacity threshold
+in chromadb's Rust bindings specific to the GitHub Actions Windows runner. Confirmed by reading
+`make_tools()`'s body that `memory` is referenced only inside `vault_search`/`note_append`/
+`index_doc`/`procedure_save`'s closures — none of which either test file exercises. Fixed by making
+`memory` a `unittest.mock.MagicMock()` in both files instead of a real `Memory` — removes the load
+entirely (all 30 tests still pass, faster too) rather than working around it. 926 pytest green
+(unchanged count — a fix to existing tests' setup, not new tests), ruff clean. Confirmed against a
+real CI run, not just local reasoning — the only remaining failure after this fix is a separate,
+pre-existing, intermittent flake in `test_ab_harness_guards.py` (already present on a commit before
+this session started; flagged as its own follow-up, not fixed here).
+
+---
+
 ## [Agent Runtime rev.2 — Faz 7, Part 2: Workflow runtime, live-wired] — 2026-07-22
 
 **`WorkflowEngine` (Part 1) gets a real, model-facing entry point** — two new tools, `workflow_start`
