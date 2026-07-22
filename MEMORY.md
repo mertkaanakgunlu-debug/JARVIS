@@ -637,6 +637,22 @@ applied. The approved plan (9 phases, 0-8) lives at
   propagation through the PS wrapper (it used to log the driver's exit code and return 0 anyway),
   a per-run manifest, and `GET /internal/test-identity` (test-mode-only) proving the driver reached
   **the** server with **the** config, not just *a* server.
+- **Faz 6 (Parts 1-2) shipped 2026-07-22**: `jarvis/execution/args_schemas.py`'s 12 pydantic
+  schemas (`extra="forbid"`, per-action required-field validators verified against each tool's
+  real dispatch body) are wired into `prepare_execution_node` as a **reject-only gate** — raw args
+  always execute unchanged; a schema failure never substitutes a "corrected" form back into the
+  call (closing a digest/execution divergence risk a review caught). `confirmation_node` gained an
+  explicit bounded-repair state machine: one whole-batch reject-and-retry per turn, then a
+  composed honest error — deliberately NOT implicit in `max_tool_rounds_per_turn`. A later session
+  investigated the plan's remaining "alternative capability" repair rung against the real 12
+  schema'd tools and **deliberately did not implement it** — no safe, mechanical substitute exists
+  in this tool set (every candidate either reaches a different destination, like `gmail`↔
+  `itu_mail`, or requires a content judgment call, like `schedule`→`todo`) — see CHANGELOG.md.
+  That same session built the API's real per-client `conversation_id` support (`jarvis/api.py` +
+  `JarvisAgent._switch_session_locked()` + `SessionStore.ensure_session()`) — see
+  [[project-agent-runtime-rev2]] for full detail. Committed 2026-07-22 as `d6ce968`
+  (conversation_id feature) + `a2a1bb3` (unrelated auth_setup.py fix); not yet pushed as of that
+  commit — verify against `git log` before trusting the push status specifically.
 
 ## Known permanently-true gotchas
 
@@ -647,8 +663,10 @@ applied. The approved plan (9 phases, 0-8) lives at
 - `vault/conversations/*.md` (daily transcripts) are gitignored for privacy; the vault
   directory structure itself is tracked via `.gitkeep`.
 - `tests/` (pytest, added Faz 8, extended in the 2026-07-15 GPT-5.6 remediation session and again
-  through Agent Runtime rev.2) is the automated test suite — **559 tests as of 2026-07-21**
-  (was 160 on 2026-07-15), ~3 min, fully offline. Run `python -m pytest -q` from the repo root.
+  through Agent Runtime rev.2) is the automated test suite — **868 tests as of 2026-07-22**
+  (was 160 on 2026-07-15; this count moves fast — treat it as a snapshot, verify via
+  `pytest --collect-only -q` before citing it), ~3 min, fully offline. Run `python -m pytest -q`
+  from the repo root.
   **`pytest-timeout` is not installed** — passing `--timeout=` is a usage error (exit 4), which
   looks like a test failure but isn't. A handful are timing-sensitive and occasionally flake under
   full-suite load but always pass in isolation. Not exhaustive (most tool modules still have zero

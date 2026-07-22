@@ -6,6 +6,56 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 5 follow-up: API conversation_id] — 2026-07-22
+
+**Real per-client conversation support lands in the API.** Previously `jarvis/api.py`'s single
+shared `JarvisAgent` had exactly one active session for every caller — every server (re)start
+began fresh for every client, a known gap flagged (but not fixed) when Faz 5 removed silent
+session auto-resume. `ChatRequest` gains `conversation_id: str = ""` (empty — every pre-existing
+client — is a complete no-op); `/chat` and `/chat/stream` thread it into `JarvisAgent.chat()`/
+`chat_stream()`, `/chat/upload` gets a matching form field, and responses echo the active
+`session_id` back (`/reset`'s response gains one too) so a client can persist and re-send it.
+
+The switch happens **inside** `chat()`/`chat_stream()`'s existing `_state_lock` section, not as a
+separate pre-call step — a new `JarvisAgent._switch_session_locked()` (extracted from
+`switch_session()`, which now delegates to it) lets both call it without either deadlocking
+(`threading.Lock` isn't reentrant) or letting a concurrent request's own switch interleave between
+"adopt conversation A" and "run A's turn" (the same class of shared-singleton race BUG-8 already
+closed once for `_history`/`_turn`/`session_id`).
+
+New `SessionStore.ensure_session()` closes a real, if previously rare, gap this surfaced:
+`switch_session()` used to adopt **any** id with zero existence check (`messages`' FK to
+`sessions` is declared but never enforced — no `PRAGMA foreign_keys=ON`), leaving it invisible to
+`list_sessions()`/`set_topic_hint()`. Harmless as a human-typo edge case for cli.py's `/session
+<id>`; would have been the *common* case once an API client mints its own `conversation_id` (e.g.
+a UUID on first launch). `ensure_session()` (`INSERT OR IGNORE`) registers a real row for a
+brand-new id without ever clobbering an existing one's `created_at`/`topic_hint`/`status`.
+
+Client-side adoption (Electron/mobile actually persisting and sending `conversation_id`) is a
+separate, not-yet-done follow-up — this phase is the backend capability only.
+
+11 new tests (`test_conversation_id.py` 8, `test_session_store.py` +3), 868 pytest green (857+11),
+ruff clean, `git diff --check` clean.
+
+---
+
+## [Agent Runtime rev.2 — Faz 6, Part 3: alternative capability, resolved] — 2026-07-22
+
+The plan's bounded-repair ladder names five rungs: *normalize → validate → one repair →
+alternative capability → explicit error*. Parts 1-2 built everything except the fourth rung.
+Investigated against the real 12 schema'd tools (not argued abstractly) and **deliberately not
+implemented**: every candidate pairing either reaches a different destination entirely (`gmail`
+vs `itu_mail` are different mailboxes — routing a failed send to the other account is wrong, not
+helpful) or requires a content judgment call (`schedule` missing `run_at` falling back to `todo`
+silently changes what the user asked for — recurring automation vs. a plain checklist item). Both
+are exactly the silent-reinterpretation failure mode this entire initiative exists to eliminate,
+one level deeper in the repair ladder. No safe, mechanical instance exists in the current registry
+— building a generic mechanism now would either sit unused or force one of these unsafe mappings.
+The ladder's meaningful rungs for JARVIS are the four already built; re-opening the fifth needs a
+concrete tool pairing that doesn't exist yet, not a speculative framework.
+
+---
+
 ## [Agent Runtime rev.2 — Faz 6, Part 2] — 2026-07-22
 
 **Internal typed validation goes live** on the 12 priority capabilities (plot_data + 11

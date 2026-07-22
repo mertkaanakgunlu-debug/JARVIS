@@ -82,6 +82,30 @@ against a real GitHub Actions run**, not just local reasoning: [run 29885614689]
 sessions that had carried this branch's CI as red. See [MEMORY.md](MEMORY.md)'s own "Agent Runtime
 rev.2" section and [HANDOFF.md](HANDOFF.md) for the current detail.
 
+**2026-07-22, a later session — two of HANDOFF's own carried-over items resolved, not yet
+committed.** (1) The API's missing real per-client `conversation_id` support (carried since Faz 5)
+is now built: `ChatRequest.conversation_id` threads through `/chat`/`/chat/stream`/`/chat/upload`
+into `JarvisAgent.chat()`/`chat_stream()`, which switch the shared agent's active session **inside**
+their existing `_state_lock` section (a new `_switch_session_locked()`, extracted from
+`switch_session()`) so a per-request switch can't race a concurrent request's own switch — the same
+class of shared-singleton hazard BUG-8 originally closed. A new `SessionStore.ensure_session()`
+registers a real `sessions` row for a brand-new client-chosen id (previously `switch_session()`
+adopted any id with zero existence check, invisible to `list_sessions()`). Client-side adoption
+(Electron/mobile persisting and sending the id) is a separate, not-yet-done follow-up. (2) Faz 6
+Part 3's "alternative capability" repair-ladder rung was investigated against the real 12 schema'd
+tools and **deliberately not implemented** — no safe, mechanical instance exists (every candidate
+either reaches a different destination entirely, like `gmail`↔`itu_mail`, or requires a content
+judgment call, like `schedule`→`todo`) — see [CHANGELOG.md](CHANGELOG.md) for the full reasoning.
+868 pytest green (857+11), ruff clean, `git diff --check` clean.
+
+**2026-07-22, a 12th session — committed in 3 parts, not yet pushed.** Per the owner's explicit
+choice of the proposed independent-commit structure: `d6ce968` (feat: API `conversation_id`
+support), `a2a1bb3` (fix: unrelated `auth_setup.py` ruff finding), and a docs-sync commit. Both
+pytest (868 green) and ruff were re-verified immediately before committing rather than trusting
+the prior session's report as-is. `langgraph-migration` is 3 commits ahead of
+`origin/langgraph-migration` — push is a separate, not-yet-made owner decision. See
+[HANDOFF.md](HANDOFF.md) for the current commit/push status.
+
 ---
 
 ## Faz 0 — Hafıza-Kritik Stabilizasyon (minimal) ✅ done (2026-07-14)
