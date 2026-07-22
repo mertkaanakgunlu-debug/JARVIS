@@ -24,8 +24,12 @@ never jarvis.graph.nodes or this module.
 Step lifecycle (jarvis.execution.workflow.StepStatus):
   pending -> running -> succeeded | failed
                      \\-> needs_approval -> (resolve_approval) -> running -> ...
+                     \\-> unknown_outcome   (crash recovery, non-idempotent capability)
   pending -> skipped   (propagated from a failed/skipped dependency)
-  succeeded -> compensated   (see compensate() below)
+  succeeded -> compensated | compensation_failed   (see compensate() below --
+    the two are distinct so a failed rollback attempt is never reported as
+    a successful one, and so a later compensate() call can retry only the
+    failed ones)
 
 Approval pause: mirrors confirmation_node's HMAC-bound ExecutionRequest
 (jarvis.execution.request/approval) exactly, but pauses by returning from
@@ -79,6 +83,7 @@ import asyncio
 import re
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -120,6 +125,30 @@ def _timeout_bound_for(spec) -> float:
 
 # ── Compensation registry ────────────────────────────────────────────────────
 
+@dataclass
+class CompensationResult:
+    """Structured outcome of one compensator attempt -- Faz 7.3 (P1).
+
+    Replaces the old bare `str` return: a plain note conflated "I reverted
+    it" with "I tried and failed" (compensate() used to set status=
+    "compensated" unconditionally, and render_workflow_report() headlined
+    the whole section "Compensation applied" regardless of what the note
+    actually said). ok is the ONLY thing that may set step.status=
+    "compensated" now -- note is display text, never parsed for meaning.
+
+    retryable: whether a LATER compensate() call over the same step is
+    worth attempting again (a transient I/O failure) vs. pointless (the
+    capture data needed to compensate at all was never there). Not
+    currently gated on by compensate() itself -- it still safely re-tries
+    a "compensation_failed" step on any subsequent call regardless, since
+    a needless retry of a non-retryable failure just reproduces the same
+    note harmlessly. Exists so a future caller/report can tell "worth
+    asking the human to retry" from "will never succeed as-is"."""
+    ok: bool
+    note: str
+    retryable: bool = True
+
+
 def _compensator_key(capability: str, args: dict[str, Any]) -> tuple[str, str | None]:
     action = args.get("action")
     return (capability, action.strip().lower() if isinstance(action, str) else None)
@@ -150,24 +179,30 @@ def _capture_file_write(args: dict[str, Any], workspace: Path) -> dict[str, Any]
 
 async def _compensate_file_write(
     step: WorkflowStep, content: str, workspace: Path, tools_by_name: dict
-) -> str:
+) -> CompensationResult:
     captured = step.compensation_data
     if not captured:
-        return "no capture data -- cannot compensate"
+        return CompensationResult(ok=False, note="no capture data -- cannot compensate", retryable=False)
     path = Path(captured["path"])
     if captured.get("unreadable"):
-        return f"cannot compensate: previous content of {path} was not text-readable at capture time"
+        return CompensationResult(
+            ok=False,
+            note=f"cannot compensate: previous content of {path} was not text-readable at capture time",
+            retryable=False,
+        )
     if not captured.get("existed"):
         try:
             path.unlink(missing_ok=True)
-            return f"deleted newly-created file {path} (no previous version existed)"
+            return CompensationResult(
+                ok=True, note=f"deleted newly-created file {path} (no previous version existed)"
+            )
         except OSError as exc:
-            return f"failed to delete {path}: {exc}"
+            return CompensationResult(ok=False, note=f"failed to delete {path}: {exc}")
     try:
         path.write_text(captured["previous_content"], encoding="utf-8")
-        return f"restored previous content of {path}"
+        return CompensationResult(ok=True, note=f"restored previous content of {path}")
     except OSError as exc:
-        return f"failed to restore {path}: {exc}"
+        return CompensationResult(ok=False, note=f"failed to restore {path}: {exc}")
 
 
 # to-do add's own result text: "eklendi [<id>]" (jarvis/graph/tools.py) --
@@ -178,26 +213,33 @@ _TODO_ADDED_ID_RE = re.compile(r"eklendi \[([0-9a-f]+)\]")
 
 async def _compensate_todo_add(
     step: WorkflowStep, content: str, workspace: Path, tools_by_name: dict
-) -> str:
+) -> CompensationResult:
     match = _TODO_ADDED_ID_RE.search(content or "")
     if not match:
-        return "cannot compensate: could not recover the created to-do's id from its result text"
+        return CompensationResult(
+            ok=False,
+            note="cannot compensate: could not recover the created to-do's id from its result text",
+            retryable=False,
+        )
     tool = tools_by_name.get("todo")
     if tool is None:
-        return "cannot compensate: 'todo' tool not available in this engine instance"
+        return CompensationResult(
+            ok=False, note="cannot compensate: 'todo' tool not available in this engine instance",
+            retryable=False,
+        )
     todo_id = match.group(1)
     try:
         result = await tool.ainvoke({"action": "delete", "todo_id": todo_id})
     except Exception as exc:
-        return f"compensating delete failed: {exc}"
+        return CompensationResult(ok=False, note=f"compensating delete failed: {exc}")
     result_text = result if isinstance(result, str) else str(result)
     if content_is_failure(result_text):
-        return f"compensating delete reported failure: {result_text[:150]}"
-    return f"deleted to-do {todo_id} created by this step"
+        return CompensationResult(ok=False, note=f"compensating delete reported failure: {result_text[:150]}")
+    return CompensationResult(ok=True, note=f"deleted to-do {todo_id} created by this step")
 
 
 _CaptureFn = Callable[[dict, Path], "dict | None"]
-_CompensateFn = Callable[[WorkflowStep, str, Path, dict], Awaitable[str]]
+_CompensateFn = Callable[[WorkflowStep, str, Path, dict], Awaitable[CompensationResult]]
 
 _COMPENSATORS: dict[tuple[str, str | None], tuple[_CaptureFn, _CompensateFn]] = {
     ("file_write", None): (_capture_file_write, _compensate_file_write),
@@ -237,6 +279,13 @@ def render_workflow_report(plan: WorkflowPlan) -> str:
     if compensated:
         lines.append("Compensation applied:")
         for step_id, note in compensated:
+            lines.append(f"  - {step_id}: {note}")
+    comp_failed = [(s.step_id, s.compensation_note) for s in plan.steps if s.status == "compensation_failed"]
+    if comp_failed:
+        lines.append(
+            "⚠ COMPENSATION FAILED -- these steps' side effects were NOT reversed. Check manually:"
+        )
+        for step_id, note in comp_failed:
             lines.append(f"  - {step_id}: {note}")
     if plan.status == "paused_for_approval" and plan.pending_approval_step_id:
         pending = plan.step(plan.pending_approval_step_id)
@@ -461,9 +510,12 @@ class WorkflowEngine:
         compensator where one exists. Steps with no compensator are left
         "succeeded" -- honestly uncompensated, never silently claimed
         reverted. Safe to call more than once: an already-"compensated"
-        step is skipped."""
+        (successfully reversed) step is skipped; a "compensation_failed"
+        step is retried -- the whole point of separating that status from
+        "compensated" (Faz 7.3 P1) is that a failed attempt must remain
+        retriable, not silently permanent."""
         for step in reversed(plan.steps):
-            if step.status != "succeeded":
+            if step.status not in ("succeeded", "compensation_failed"):
                 continue
             entry = _COMPENSATORS.get(_compensator_key(step.capability, step.args))
             if entry is None:
@@ -471,14 +523,14 @@ class WorkflowEngine:
             _capture_fn, compensate_fn = entry
             content = (step.envelope or {}).get("normalized_output") or ""
             try:
-                note = await compensate_fn(step, content, self._workspace, self._tools_by_name)
+                result = await compensate_fn(step, content, self._workspace, self._tools_by_name)
             except Exception as exc:  # noqa: BLE001 -- compensation must never itself crash
-                note = f"compensation attempt raised: {exc}"
-            step.compensation_note = note
-            step.status = "compensated"
+                result = CompensationResult(ok=False, note=f"compensation attempt raised: {exc}")
+            step.compensation_note = result.note
+            step.status = "compensated" if result.ok else "compensation_failed"
             self._audit(
                 "compensation", plan, step, tool=step.capability,
-                note=redact_preview(note),
+                ok=result.ok, retryable=result.retryable, note=redact_preview(result.note),
             )
         workflow_store.save(plan)
         return plan

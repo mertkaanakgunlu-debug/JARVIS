@@ -56,10 +56,23 @@ StepStatus = Literal[
     # "check manually". One status, not two ("needs_manual_reconciliation"
     # would carry identical information with an extra transition to define).
     "unknown_outcome",
+    # Faz 7.3 (P1): compensate() ATTEMPTED to reverse this step's side
+    # effect and the attempt itself failed (see workflow_engine.py's
+    # CompensationResult) -- distinct from "compensated" (the rollback
+    # genuinely happened) so a report can never claim a failed rollback
+    # succeeded. Distinct from "succeeded" so a second compensate() call
+    # can tell "never attempted" from "attempted and failed" -- retrying a
+    # step already sitting at "succeeded" would be a no-op skip, not a
+    # retry, if this status were folded back into "succeeded" instead.
+    "compensation_failed",
 ]
 
 # Statuses a step can be "stuck" in that block it from ever running --
 # propagate_skip() walks dependents of a step in any of these.
+# NOT "compensated"/"compensation_failed" here, deliberately matching that
+# existing omission: both only ever get set inside compensate(), which only
+# ever runs from _finalize() after the plan is already terminal -- no
+# dependent step is evaluated against readiness/blocking again afterward.
 _BLOCKING_STATUSES = frozenset({"failed", "skipped", "unknown_outcome"})
 
 WorkflowStatus = Literal[
@@ -176,7 +189,7 @@ class WorkflowPlan(BaseModel):
             1 for s in self.steps
             if s.status in (
                 "succeeded", "failed", "needs_approval", "running", "compensated",
-                "unknown_outcome",
+                "unknown_outcome", "compensation_failed",
             )
         )
 
