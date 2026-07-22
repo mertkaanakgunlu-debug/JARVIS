@@ -75,8 +75,10 @@ class ToolSpec:
         # Faz 3 destination (the postcondition runner). Empty = none
         # declared yet for any tool.
     idempotency: Literal["none", "natural", "keyed"] = "none"
-        # Faz 2 destination (idempotency journal keying, plan section C).
-        # "none" = not yet classified for any tool.
+        # Classified per-tool via _IDEMPOTENCY below (Faz 7.3) -- the
+        # dataclass default stays "none" so dynamically-registered MCP specs
+        # (register_dynamic_spec) are fail-closed: an unknown external tool
+        # must never be presumed safe to re-run after a crash.
     effect_scope: Literal["unclassified", "reversible", "irreversible"] = "unclassified"
         # Faz 7 destination (compensation eligibility -- "yalniz kayitli
         # gercek tersi olan islemlerde otomatik telafi"). Deliberately NOT
@@ -609,6 +611,77 @@ if _unknown_timeout_class_names:  # pragma: no cover -- import-time wiring asser
 
 TOOL_SPECS = {
     name: replace(spec, timeout_class=_TIMEOUT_CLASSES[name])
+    for name, spec in TOOL_SPECS.items()
+}
+
+
+# ── Faz 7.3 (P0): idempotency classification ─────────────────────────────────
+# Same "one place, import-time-checked" shape as _TOOL_DOMAINS/_TIMEOUT_CLASSES.
+# This field is the SINGLE authority WorkflowEngine's crash recovery consults
+# when a step is found "running" with no idempotency-journal commit -- i.e.
+# the process died somewhere between dispatch and journal write, and nobody
+# knows whether the side effect landed:
+#
+#   natural -- re-running the SAME call converges to the same end state, so a
+#              blind retry is safe. True for every pure read, for fixed-
+#              content overwrites (file_write, report_write: title-derived
+#              path), and for writers with verified content-dedup on re-run
+#              (index_doc: deletes stale chunks by source + deterministic
+#              chunk ids; finance sync: add_transaction skips on existing
+#              email_uid; procedure_save: fingerprint-based add_or_get --
+#              the F16 incident fix).
+#   none    -- re-running may duplicate or compound the effect. gmail/
+#              itu_mail send, google_calendar create, google_drive upload
+#              (the exact double-send class this classification exists to
+#              stop), but also honestly-non-idempotent local ops:
+#              note_append (append twice = duplicated text), todo/schedule
+#              "add" (second row), plot_data (counter-suffixes a NEW file
+#              rather than overwriting -- verified in plotting.py, not
+#              assumed), spotify ("next" twice skips two tracks),
+#              hud_panels ("toggle" twice = back where it started),
+#              workflow_start (a second whole workflow), and arbitrary
+#              execution (shell_run/python_run/geo_math -- geo_math's
+#              non-analyze branches write files with unverified naming;
+#              fail-closed).
+#   keyed   -- the service accepts a client idempotency key, and the
+#              dispatch layer passes execution_id as that key. Declared
+#              destination, NOT live: no tool implementation accepts a key
+#              today. google_calendar (client-generated event ids) is the
+#              first real candidate when someone wires it -- reclassify to
+#              "keyed" in the same commit that threads the key through the
+#              tool body, never before.
+_IDEMPOTENCY: dict[str, str] = {
+    # natural -- pure reads
+    "file_read": "natural", "file_list": "natural", "pdf_read": "natural",
+    "pdf_vision": "natural", "excel_read": "natural", "csv_read": "natural",
+    "data_analyze": "natural", "vault_search": "natural",
+    "web_search": "natural", "url_read": "natural", "deep_web_research": "natural",
+    "research": "natural", "gcp_quota": "natural", "workflow_status": "natural",
+    # natural -- pure compute, no side effects
+    "math_solve": "natural", "write_content": "natural", "generate_code": "natural",
+    # natural -- converging writes (overwrite / verified dedup)
+    "file_write": "natural", "report_write": "natural", "report_compile": "natural",
+    "report_compose": "natural", "index_doc": "natural", "finance": "natural",
+    "procedure_save": "natural",
+    # none -- re-run may duplicate/compound
+    "shell_run": "none", "python_run": "none", "geo_math": "none",
+    "plot_data": "none", "note_append": "none",
+    "schedule": "none", "todo": "none",
+    "spotify": "none", "hud_panels": "none",
+    "google_calendar": "none", "gmail": "none",
+    "google_drive": "none", "itu_mail": "none",
+    "workflow_start": "none",
+}
+
+_missing_idem = set(TOOL_SPECS) - set(_IDEMPOTENCY)
+if _missing_idem:  # pragma: no cover -- import-time wiring assertion
+    raise RuntimeError(f"_IDEMPOTENCY missing tool(s): {sorted(_missing_idem)}")
+_unknown_idem_names = set(_IDEMPOTENCY) - set(TOOL_SPECS)
+if _unknown_idem_names:  # pragma: no cover -- import-time wiring assertion
+    raise RuntimeError(f"_IDEMPOTENCY names unknown tools: {sorted(_unknown_idem_names)}")
+
+TOOL_SPECS = {
+    name: replace(spec, idempotency=_IDEMPOTENCY[name])
     for name, spec in TOOL_SPECS.items()
 }
 

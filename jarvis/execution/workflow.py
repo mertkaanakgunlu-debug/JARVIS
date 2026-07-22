@@ -49,11 +49,18 @@ from jarvis.execution.contract import TaskContract
 
 StepStatus = Literal[
     "pending", "running", "succeeded", "failed", "skipped", "needs_approval", "compensated",
+    # Faz 7.3 (P0): the process died mid-dispatch and the capability is not
+    # safely re-runnable (ToolSpec.idempotency != "natural") -- the side
+    # effect MAY or MAY NOT have landed, and nothing here can find out.
+    # Terminal for the step; never auto-retried; surfaced in the report as
+    # "check manually". One status, not two ("needs_manual_reconciliation"
+    # would carry identical information with an extra transition to define).
+    "unknown_outcome",
 ]
 
 # Statuses a step can be "stuck" in that block it from ever running --
 # propagate_skip() walks dependents of a step in any of these.
-_BLOCKING_STATUSES = frozenset({"failed", "skipped"})
+_BLOCKING_STATUSES = frozenset({"failed", "skipped", "unknown_outcome"})
 
 WorkflowStatus = Literal[
     "planned", "running", "paused_for_approval", "succeeded", "failed", "partially_committed",
@@ -167,7 +174,10 @@ class WorkflowPlan(BaseModel):
         chance to run."""
         return sum(
             1 for s in self.steps
-            if s.status in ("succeeded", "failed", "needs_approval", "running", "compensated")
+            if s.status in (
+                "succeeded", "failed", "needs_approval", "running", "compensated",
+                "unknown_outcome",
+            )
         )
 
     def is_terminal(self) -> bool:

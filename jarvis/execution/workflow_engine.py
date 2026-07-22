@@ -221,6 +221,14 @@ def render_workflow_report(plan: WorkflowPlan) -> str:
     lines.append(
         render_operation_status_for_user(summary) if summary.operations else "No steps executed."
     )
+    unknown = [(s.step_id, s.capability) for s in plan.steps if s.status == "unknown_outcome"]
+    if unknown:
+        lines.append(
+            "⚠ UNKNOWN OUTCOME -- these steps crashed mid-execution and are NOT safely "
+            "re-runnable; the side effect may or may not have been applied. Check manually:"
+        )
+        for step_id, capability in unknown:
+            lines.append(f"  - {step_id}: {capability}")
     skipped = [s.step_id for s in plan.steps if s.status == "skipped"]
     if skipped:
         lines.append(f"Skipped (blocked by a failed dependency): {', '.join(skipped)}")
@@ -415,15 +423,40 @@ class WorkflowEngine:
 
     def _recover_interrupted_steps(self, plan: WorkflowPlan) -> None:
         """A step left "running" means the process died mid-dispatch (see
-        module docstring). idempotency.is_committed() is the ground truth."""
+        module docstring). A journal hit (idempotency.is_committed) is the
+        ground truth for "it definitely landed". The ABSENCE of a journal
+        entry is NOT ground truth for "it never happened" -- the crash
+        window includes "tool succeeded, process died before commit()".
+        So (Faz 7.3, P0) an uncommitted running step is only reset to
+        pending when its capability is classified safely re-runnable
+        (ToolSpec.idempotency == "natural" -- see tool_registry's
+        _IDEMPOTENCY); anything else -- gmail send, calendar create, an
+        unclassified MCP tool -- is parked as "unknown_outcome": terminal,
+        never auto-retried, reported for manual reconciliation. Its
+        dependents are skipped exactly as if it had failed."""
         for step in plan.steps:
             if step.status != "running":
                 continue
             if step.execution_id and idempotency.is_committed(step.execution_id):
                 step.status = "succeeded"
                 step.error = None
-            else:
+                continue
+            spec = get_spec(step.capability)
+            if spec is not None and spec.idempotency == "natural":
                 step.status = "pending"
+            else:
+                step.status = "unknown_outcome"
+                step.error = (
+                    "crashed mid-execution; this capability is not safely re-runnable "
+                    "(idempotency: "
+                    + (spec.idempotency if spec is not None else "unknown capability")
+                    + ") -- the side effect may or may not have been applied. "
+                    "Verify manually before retrying."
+                )
+                plan.propagate_skip(
+                    step.step_id,
+                    f"dependency {step.step_id} has an unknown outcome after a crash",
+                )
 
     async def _run_step(self, plan: WorkflowPlan, step: WorkflowStep) -> None:
         """Validate -> risk-classify -> (pause for approval) -> dispatch.
@@ -552,7 +585,12 @@ class WorkflowEngine:
         if statuses <= {"succeeded"}:
             # Vacuously true for a zero-step plan too -- nothing failed.
             plan.status = "succeeded"
-        elif any(s.status == "succeeded" and self._had_side_effect(s) for s in plan.steps):
+        elif any(s.status == "succeeded" and self._had_side_effect(s) for s in plan.steps) or (
+            # An unknown_outcome step MAY have committed its side effect --
+            # "partially_committed" is the honest label; "failed" would
+            # falsely promise nothing happened.
+            "unknown_outcome" in statuses
+        ):
             plan.status = "partially_committed"
         else:
             plan.status = "failed"
