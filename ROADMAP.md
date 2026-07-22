@@ -74,12 +74,13 @@ fingerprint differently) — `cf769b2`; and this branch's CI red — carried acr
 `.venv` path that doesn't exist on the GitHub Actions runner, silently producing a false "success"
 exit code under the script's own `$ErrorActionPreference="Continue"` rather than the loud failure
 its own guard tests exist to require; fixed with a verified (not just located) PATH fallback —
-`a06cbd2`. This doc-sync itself is a third, separate commit. All three land together, then push in
-one shot per the owner's instruction — the CI fix specifically hasn't been confirmed against a live
-GitHub Actions run yet (that confirmation only becomes possible once pushed) — see HANDOFF.md for
-exact verification tiers and the live push/CI outcome once it exists. See
-[MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and [HANDOFF.md](HANDOFF.md) for the
-current detail.
+`a06cbd2`. That doc-sync (`1df4c5b`) landed as a third, separate commit, then all three pushed to
+`origin/langgraph-migration` in one shot (`8613bfc..1df4c5b`, fast-forward) per the owner's
+instruction — `langgraph-migration` is now byte-equal with `origin`. **The CI fix is confirmed
+against a real GitHub Actions run**, not just local reasoning: [run 29885614689](https://github.com/mertkaanakgunlu-debug/JARVIS/actions/runs/29885614689)'s
+`python` job went green (857 passed, ruff clean) for the first time across the several prior
+sessions that had carried this branch's CI as red. See [MEMORY.md](MEMORY.md)'s own "Agent Runtime
+rev.2" section and [HANDOFF.md](HANDOFF.md) for the current detail.
 
 ---
 
