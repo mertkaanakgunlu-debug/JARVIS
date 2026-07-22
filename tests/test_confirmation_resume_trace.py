@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -64,7 +65,12 @@ class _FakeResumeAgent:
         self._history = []
         self._turn = 1
         self.session_id = "s1"
-        self._graph = None  # graph_stream_to_text is monkeypatched, never touches it
+        # graph_stream_to_text is monkeypatched, so _graph itself is never
+        # touched there -- but Faz 7.3's post-stream interrupt fallback
+        # (_pending_interrupt_payload) DOES call self._graph.aget_state()
+        # directly, every time, so it needs a real (mocked) return value:
+        # an empty snapshot.interrupts, i.e. "no second interrupt happened".
+        self._graph = SimpleNamespace(aget_state=AsyncMock(return_value=SimpleNamespace(interrupts=())))
         self._last_turn_trace = dict(_STALE_TRACE)
         # get_tuple -> None makes the method take its documented fallback
         # path (rebuild history manually) -- no checkpointer machinery needed.
@@ -84,6 +90,9 @@ class _FakeResumeAgent:
 
     def _schedule_memory_extraction(self, user_text, response):
         pass
+
+    async def _pending_interrupt_payload(self, config):
+        return await JarvisAgent._pending_interrupt_payload(self, config)
 
 
 async def _fake_stream(graph, command, config):

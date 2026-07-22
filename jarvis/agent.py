@@ -1394,6 +1394,32 @@ class JarvisAgent:
 
         return response, self.current_model_label
 
+    async def _pending_interrupt_payload(self, config: dict) -> dict | None:
+        """Read a pending confirmation interrupt directly from graph state --
+        Faz 7.3 (P1), found live: on this LangGraph version neither
+        ainvoke() NOR astream(stream_mode="messages") RAISES GraphInterrupt
+        to the caller -- a run that hits interrupt() just ends/returns
+        normally with the interrupt sitting in the checkpoint. chat()'s own
+        Faz 3 fix already handles the ainvoke() case via
+        result["__interrupt__"] (see that method's comment). This is the
+        streaming equivalent -- confirmed missing via a live E2E pass where
+        /chat correctly returned confirmation_required for a shell_run
+        request while /chat/stream silently returned nothing (just
+        "[DONE]", no error, no marker) for the byte-identical prompt, 5/5
+        reproductions. A streamed run gives no final result dict to check
+        "__interrupt__" on -- StateSnapshot.interrupts is the only place
+        left to read it from once the astream() generator has already
+        ended. Returns the first pending interrupt's value, or None if
+        there isn't one.
+        """
+        snapshot = await self._graph.aget_state(config)
+        if not snapshot.interrupts:
+            return None
+        try:
+            return snapshot.interrupts[0].value
+        except Exception:
+            return {}
+
     async def chat_stream(
         self,
         user_input: str,
@@ -1540,6 +1566,21 @@ class JarvisAgent:
                 # "thinking"/"speaking" — handled in the finally block below.
                 interrupted = True
                 raise
+
+            if not _confirmation_issued:
+                # See _pending_interrupt_payload()'s docstring: the except
+                # GraphInterrupt branch above is effectively dead on this
+                # LangGraph version (confirmed live) -- this is the real
+                # detection path for a streamed turn.
+                payload = await self._pending_interrupt_payload(config)
+                if payload is not None:
+                    _confirmation_issued = True
+                    conf_id = str(uuid.uuid4())
+                    self._pending_confirmations[conf_id] = {
+                        "config": config, "recorder": recorder,
+                    }
+                    event_bus.confirmation_required(conf_id, payload)
+                    yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
 
             if _confirmation_issued:
                 event_bus.state("idle")
@@ -1689,6 +1730,29 @@ class JarvisAgent:
             except Exception as exc:
                 event_bus.state("idle")
                 yield f"[ERROR: {exc}]"
+                return
+
+            # Faz 7.3 (P1), same live finding as chat_stream() -- if the
+            # NEWLY-resumed portion of this turn hits ANOTHER confirmable
+            # tool call (a second, different L3 action in the same turn),
+            # the astream() loop above ends normally with nothing raised;
+            # the resume's own confirmation would otherwise be silently
+            # lost exactly like the original bug this mirrors.
+            resumed_confirmation_issued = False
+            resumed_payload = await self._pending_interrupt_payload(config)
+            if resumed_payload is not None:
+                resumed_confirmation_issued = True
+                new_conf_id = str(uuid.uuid4())
+                self._pending_confirmations[new_conf_id] = {
+                    "config": config, "recorder": recorder,
+                }
+                event_bus.confirmation_required(new_conf_id, resumed_payload)
+                yield json.dumps(
+                    {"__jarvis_confirm__": True, "id": new_conf_id, "payload": resumed_payload}
+                )
+
+            if resumed_confirmation_issued:
+                event_bus.state("idle")
                 return
 
             full_response = "".join(chunks)

@@ -11,12 +11,22 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage
 
 from jarvis.agent import JarvisAgent
 from jarvis.config import Settings
+
+
+def _no_interrupt_graph() -> SimpleNamespace:
+    """Faz 7.3: chat_stream()'s post-stream fallback
+    (_pending_interrupt_payload) always calls self._graph.aget_state(),
+    even on the plain-success path these tests exercise -- graph_stream_to_text
+    itself is monkeypatched per-test, but _graph still needs this one real
+    (mocked) method."""
+    return SimpleNamespace(aget_state=AsyncMock(return_value=SimpleNamespace(interrupts=())))
 
 
 def _base_agent(jarvis_home, *, starting_turn: int = 0):
@@ -113,7 +123,7 @@ async def test_chat_stream_writes_a_run_manifest_on_success(jarvis_home, monkeyp
     async def _fake_stream(graph, state, config):
         yield "merhaba"
     monkeypatch.setattr("jarvis.agent.graph_stream_to_text", _fake_stream)
-    agent._graph = SimpleNamespace()  # graph_stream_to_text is patched; the real object is unused
+    agent._graph = _no_interrupt_graph()
 
     chunks = [c async for c in agent.chat_stream("selam", transport="voice-cli")]
     assert "".join(chunks) == "merhaba"
@@ -140,7 +150,7 @@ async def test_chat_stream_manifest_survives_a_checkpointer_error(jarvis_home, m
     async def _fake_stream(graph, state, config):
         yield "ok"
     monkeypatch.setattr("jarvis.agent.graph_stream_to_text", _fake_stream)
-    agent._graph = SimpleNamespace()
+    agent._graph = _no_interrupt_graph()
 
     chunks = [c async for c in agent.chat_stream("selam", transport="voice-cli")]
     assert "".join(chunks) == "ok"
