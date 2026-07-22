@@ -170,7 +170,7 @@ def setup_spotify():
         thread.start()
 
         auth_url = auth_manager.get_authorize_url()
-        print(f"  Opening browser for Spotify consent…")
+        print("  Opening browser for Spotify consent…")
         webbrowser.open(auth_url)
         print("  Waiting for callback on http://127.0.0.1:8888/callback …")
 
