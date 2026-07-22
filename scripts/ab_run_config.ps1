@@ -37,6 +37,37 @@ param(
 $ErrorActionPreference = "Continue"
 $Repo   = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Py     = "$Repo\.venv\Scripts\python.exe"
+# Fall back to a real interpreter on PATH when the repo's own venv isn't there
+# (e.g. CI, which installs requirements-lock.txt into the runner's system
+# Python instead of a venv). Without this, `& $Py ...` below fails with
+# CommandNotFoundException -- a NON-terminating error under
+# $ErrorActionPreference="Continue", so the script sails on with whatever
+# $LASTEXITCODE a previous `git` call happened to leave behind, which reads as
+# a false "run succeeded" -- the exact "plausible-looking zero" class
+# tests/test_ab_harness_guards.py exists to catch, just one level below what it
+# checks (live-found: this is why that suite was red in CI, not a driver bug).
+# `Get-Command` finding *a* python.exe is not enough to trust it: Windows App
+# Execution Alias stubs (WindowsApps\python.exe / python3.exe) resolve
+# successfully but just print an "install from the Store" nag and exit
+# non-zero when actually run -- live-found on this dev machine, where bare
+# `python`/`python3` are exactly that stub while `py` is a real interpreter.
+# So every candidate is verified by actually running `--version`, not just
+# located, and several launcher names are tried since which one is real
+# varies by machine.
+if (-not (Test-Path $Py)) {
+    $resolved = $null
+    foreach ($candidate in @("py", "python", "python3")) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if (-not $cmd) { continue }
+        & $cmd.Source --version *> $null
+        if ($LASTEXITCODE -eq 0) { $resolved = $cmd.Source; break }
+    }
+    if (-not $resolved) {
+        Write-Error "ab_run_config: no working Python interpreter found ($Py does not exist, and none of py/python/python3 on PATH actually run) -- aborting before starting anything"
+        exit 1
+    }
+    $Py = $resolved
+}
 $Home_  = "$Root\home-$Config"
 $Logs   = "$Root\logs"
 $Res    = "$Root\results"
