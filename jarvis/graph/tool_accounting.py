@@ -53,8 +53,30 @@ _CONTENT_HEAD_CHARS = 120
 
 
 def tool_call_fingerprint(name: str, args: dict[str, Any] | None) -> str:
-    """Stable identity for a tool call: same tool + same args ⇒ same hash."""
-    canonical = json.dumps(args or {}, sort_keys=True, ensure_ascii=False, default=str)
+    """Stable identity for a tool call: same tool + same args ⇒ same hash.
+
+    `action`, if present, is compared case/whitespace-insensitively
+    (`.strip().lower()`) before hashing: every action-dispatch tool's own
+    body already normalizes it the same way before branching on it
+    (confirmed while building jarvis.execution.args_schemas), so "send" and
+    " SEND " are the same call as far as the tool itself is concerned --
+    the fingerprint used to disagree, silently missing same-turn duplicate
+    detection for a retry that only varied by how the model capitalized or
+    padded the action string (Agent Runtime rev.2, Faz 6 Kısım 2 review).
+    Every other arg is hashed as-is: most (email bodies, search queries,
+    file paths) are genuinely case-sensitive, so normalizing them too would
+    be wrong, not just unnecessary. This only ever widens what counts as a
+    duplicate, never narrows it, so it cannot make an already-safe call look
+    new -- fine for both of this function's callers (the turn-scoped
+    seen/completed-fingerprint dedup gate, and prepare-time vs. resume-time
+    TOCTOU comparison in confirmation_node, which hashes both sides through
+    this same function and so stays internally consistent either way).
+    """
+    normalized = dict(args or {})
+    action = normalized.get("action")
+    if isinstance(action, str):
+        normalized["action"] = action.strip().lower()
+    canonical = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(f"{name}:{canonical}".encode("utf-8")).hexdigest()
 
 

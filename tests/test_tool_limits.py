@@ -56,6 +56,36 @@ def test_fingerprint_distinguishes_args_and_tool():
     assert base != tool_call_fingerprint("file_list", {"path": "x"})
 
 
+def test_fingerprint_action_is_case_and_whitespace_insensitive():
+    """Faz 6 Kısım 2 review finding: 'send' and ' SEND ' used to hash
+    differently, evading same-turn duplicate detection for a retry that only
+    varies by how the model capitalized/padded the action string -- every
+    action-dispatch tool's own body already treats them as the same call."""
+    a = tool_call_fingerprint("itu_mail", {"action": "send", "to": "a@b.c"})
+    b = tool_call_fingerprint("itu_mail", {"action": " SEND ", "to": "a@b.c"})
+    assert a == b
+
+
+def test_fingerprint_only_normalizes_action_not_other_strings():
+    """Blanket-normalizing every string arg would be wrong, not just
+    unnecessary: an email body or search query genuinely differs by case."""
+    a = tool_call_fingerprint("itu_mail", {"action": "send", "body": "Hello"})
+    b = tool_call_fingerprint("itu_mail", {"action": "send", "body": "hello"})
+    assert a != b
+
+
+def test_fingerprint_tolerates_non_string_action():
+    # Malformed/hallucinated args are a realistic input here -- must not crash.
+    tool_call_fingerprint("geo_math", {"action": None})
+    tool_call_fingerprint("geo_math", {"action": 42})
+
+
+def test_fingerprint_does_not_mutate_the_caller_s_args_dict():
+    args = {"action": " SEND ", "to": "a@b.c"}
+    tool_call_fingerprint("itu_mail", args)
+    assert args == {"action": " SEND ", "to": "a@b.c"}
+
+
 # ── batch-size cap (A2 shape) ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio
