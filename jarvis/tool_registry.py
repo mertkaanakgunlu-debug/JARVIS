@@ -334,6 +334,25 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         timeout_seconds=15,
         description="Save a reusable multi-step workflow to procedural memory",
     ),
+
+    # ── Agent Runtime rev.2, Faz 7 Part 2: workflow runtime, live-wired ─────────
+    ToolSpec(
+        # Deliberately requires_confirmation=True as defense-in-depth ON TOP
+        # of jarvis.execution.workflow_engine's own PER-STEP gating (each
+        # step independently runs policy_guard.evaluate() and pauses for its
+        # own approval when needed): kicking off an autonomous multi-step
+        # process is a meaningfully bigger action than one tool call, even
+        # though nothing it does can bypass its own steps' individual gates.
+        "workflow_start", "sub_agent", 2, True, "local_write",
+        timeout_seconds=300,
+        description="Start a multi-step workflow (dependency-ordered steps, its own approval/"
+                     "compensation) for a task too large for one turn's tool-call budget",
+    ),
+    ToolSpec(
+        "workflow_status", "sub_agent", 1, False, "local_read",
+        timeout_seconds=10,
+        description="Report a workflow's current step-by-step status",
+    ),
 ]}
 
 
@@ -374,6 +393,8 @@ _TOOL_DOMAINS: dict[str, str] = {
     "vault_search": "memory", "index_doc": "memory", "note_append": "memory",
     # procedure — exposed only on explicit intent (see tool_router)
     "procedure_save": "procedure",
+    # workflow — exposed only on explicit intent (see tool_router); Faz 7 Part 2
+    "workflow_start": "workflow", "workflow_status": "workflow",
 }
 
 TOOL_SPECS = {
@@ -575,6 +596,8 @@ _TIMEOUT_CLASSES: dict[str, str] = {
     "hud_panels": "soft_thread_timeout",
     "schedule": "soft_thread_timeout",
     "procedure_save": "soft_thread_timeout",
+    "workflow_start": "soft_thread_timeout",
+    "workflow_status": "soft_thread_timeout",
 }
 
 _missing_timeout_class = set(TOOL_SPECS) - set(_TIMEOUT_CLASSES)

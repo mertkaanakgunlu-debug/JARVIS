@@ -653,16 +653,20 @@ applied. The approved plan (9 phases, 0-8) lives at
   [[project-agent-runtime-rev2]] for full detail. Committed 2026-07-22 as `d6ce968`
   (conversation_id feature) + `a2a1bb3` (unrelated auth_setup.py fix); not yet pushed as of that
   commit — verify against `git log` before trusting the push status specifically.
-- **Faz 7, Part 1 (Workflow runtime) built 2026-07-22, not yet committed**: new
-  `jarvis/execution/workflow.py`/`workflow_store.py`/`workflow_engine.py` — a standalone
-  `WorkflowEngine` (dependency-ordered steps, a step budget, SQLite checkpoint/resume, approval
-  pause mirroring `confirmation_node`'s HMAC binding without a LangGraph interrupt, and narrow
-  auto-compensation for exactly two registered true inverses: `file_write` and `todo`'s `"add"`)
-  that reuses Faz 1-4's execution contract per step rather than a second verification vocabulary.
-  Deliberately separate from the single-turn chat graph and NOT wired to any live trigger yet (same
-  Part 1/Part 2 split as Faz 1→2 and Faz 6 Part 1→2) — see [[project-agent-runtime-rev2]] and
-  CHANGELOG.md for full detail, including a real step-budget-counter bug a test caught before it
-  shipped. Verify against `git log` before trusting the commit status.
+- **Faz 7, Part 1 (Workflow runtime) committed+pushed as `20280a3` (CI green), Part 2 (live wiring)
+  built 2026-07-22, not yet committed**: new `jarvis/execution/workflow.py`/`workflow_store.py`/
+  `workflow_engine.py` — a standalone `WorkflowEngine` (dependency-ordered steps, a step budget,
+  SQLite checkpoint/resume, approval pause mirroring `confirmation_node`'s HMAC binding without a
+  LangGraph interrupt, and narrow auto-compensation for exactly two registered true inverses:
+  `file_write` and `todo`'s `"add"`) that reuses Faz 1-4's execution contract per step rather than a
+  second verification vocabulary. Part 2 gives it a real entry point: `workflow_start`/
+  `workflow_status` tools (validated against the same alpha-filtered tool list the model sees, so a
+  step can never reach `python_run`), plus a human-only `/workflow approve|deny` CLI command —
+  deliberately NOT a third tool, since exposing approval to the agent would let it resolve its own
+  confirmation gate. See [[project-agent-runtime-rev2]] and CHANGELOG.md for full detail, including
+  two real bugs a test caught before shipping (a step-budget-counter miscount in Part 1; a
+  "workflow" router-pattern collision with an existing procedure-save test in Part 2). Verify
+  against `git log` before trusting Part 2's commit status.
 
 ## Known permanently-true gotchas
 
@@ -673,7 +677,7 @@ applied. The approved plan (9 phases, 0-8) lives at
 - `vault/conversations/*.md` (daily transcripts) are gitignored for privacy; the vault
   directory structure itself is tracked via `.gitkeep`.
 - `tests/` (pytest, added Faz 8, extended in the 2026-07-15 GPT-5.6 remediation session and again
-  through Agent Runtime rev.2) is the automated test suite — **914 tests as of 2026-07-22**
+  through Agent Runtime rev.2) is the automated test suite — **926 tests as of 2026-07-22**
   (was 160 on 2026-07-15; this count moves fast — treat it as a snapshot, verify via
   `pytest --collect-only -q` before citing it), ~3 min, fully offline. Run `python -m pytest -q`
   from the repo root.

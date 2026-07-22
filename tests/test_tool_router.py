@@ -93,6 +93,34 @@ def test_procedure_save_requires_explicit_intent():
     assert select_tool_names(implicit, ALL_NAMES) == []
 
 
+# ── Agent Runtime rev.2, Faz 7 Part 2: workflow_start/workflow_status ───────
+
+def test_bare_workflow_word_routes_to_workflow_not_procedure():
+    """"workflow" alone means "run a multi-step task", not "save a
+    procedure" -- the two domains must not collide on this word."""
+    route = classify_query("Bir workflow başlat: raporu yaz ve gönder")
+    assert route.primary_domain == "workflow"
+
+
+def test_procedure_save_query_does_not_also_pull_in_workflow_tools():
+    """Regression guard: "adım adım" is common procedure-saving phrasing and
+    must not also score the workflow domain (it did during development,
+    before the pattern was narrowed to "çok adımlı görev")."""
+    route = classify_query("Şu prosedürü kaydet: adım adım kahve yap")
+    assert route.domains == ["procedure"]
+
+
+def test_workflow_tools_require_explicit_intent():
+    explicit = classify_query("workflow başlat ve şu adımları çalıştır")
+    names = select_tool_names(explicit, ALL_NAMES)
+    assert "workflow_start" in names
+    assert "workflow_status" in names
+
+    # same domain forced WITHOUT explicit wording → tools stay hidden
+    implicit = ToolRoute("workflow", ["workflow"], 1.0, explicit_tool_intent=False)
+    assert select_tool_names(implicit, ALL_NAMES) == []
+
+
 def test_mcp_tools_are_quarantined():
     available = ALL_NAMES + ["browser_click"]  # dynamic tool, not in TOOL_SPECS
     # a files turn must never expose it

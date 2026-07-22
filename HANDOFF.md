@@ -3,135 +3,108 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-22 (13. oturum) — AGENT RUNTIME REV.2 FAZ 7, KISIM 1 (WORKFLOW RUNTIME) YAPILDI, HENÜZ COMMIT'LENMEDİ
+## Last session: 2026-07-22 (13. oturum) — FAZ 7 KISIM 1 (WORKFLOW MOTORU) + KISIM 2 (CANLI TETİKLEYİCİ) YAPILDI; KISIM 1 COMMIT'LENDİ+PUSH'LANDI, KISIM 2 HENÜZ COMMIT'LENMEDİ
 
-**Durum tek cümlede:** Bu oturum önce 11. oturumun bıraktığı commit kararını uyguladı (owner "önerilen
-3 parçalı yapıyla commit et" dedi — `d6ce968`/`a2a1bb3`/`a87ebe9` commit'lendi, henüz push'lanmadı),
-sonra owner "sıradaki faz ile devam et" dedi ve **Agent Runtime rev.2'nin Faz 7'si (Workflow
-Runtime)** ele alındı — plan dosyası okunarak (`C:\Users\mertk\.claude\plans\c-users-mertk-desktop-
-gpt-analysis-md-s-delegated-scone.md`) tasarlandı, inşa edildi, test edildi. Faz 6 Part 1→2'nin
-kendi emsaliyle tutarlı olarak **"Kısım 1: mekanizma, Kısım 2: canlıya bağlama"** ayrımına gidildi —
-bu oturum yalnızca Kısım 1'i (bağımsız, doğrudan çağrılabilir workflow motoru) kapsıyor, hiçbir canlı
-tetikleyici eklenmedi. **914 pytest yeşil (868+46), ruff temiz, `git diff --check` temiz — Faz 7
-kod/test/docs değişiklikleri henüz commit'lenmedi** (owner'ın kararını bekliyor, aşağıdaki
-"SONRAKİ OTURUM" listesinin ilk maddesi).
+**Durum tek cümlede:** Bu oturum önce 11. oturumun bıraktığı commit kararını uyguladı (owner "3
+parçalı yapıyla commit et" dedi, 3 commit landed+push'landı, CI yeşil), sonra owner "sıradaki faz"
+dedi ve **Agent Runtime rev.2'nin Faz 7'si (Workflow Runtime)** iki bölüm halinde inşa edildi:
+**Kısım 1** (bağımsız workflow motoru — commit'lendi `20280a3`, push'landı, CI yeşil) ve **Kısım 2**
+(motoru gerçek bir model-facing tool'a bağlama: `workflow_start`/`workflow_status` + insan-only
+`/workflow` CLI komutu — owner "devam et" dedi, inşa edildi, test edildi, **henüz commit'lenmedi**).
+**926 pytest yeşil (868+46+12), ruff temiz, `git diff --check` temiz.**
 
 ## Bu oturumda yapılanlar
 
-### 1. 11. oturumun commit kararı uygulandı
+### 1. 11. oturumun commit kararı uygulandı + push'landı
 
-Owner'a HANDOFF'un bıraktığı 3 parçalı yapı soruldu (`AskUserQuestion`), "önerilen yapıyla commit
-et" seçildi. Commit'lemeden önce 868 testin/ruff'ın hâlâ gerçekten yeşil/temiz olduğu yeniden
-doğrulandı (11. oturumun kendi raporuna körü körüne güvenmek yerine). Üç commit landed:
-- `d6ce968` — feat(api): conversation_id özelliği
-- `a2a1bb3` — fix(scripts): ilgisiz auth_setup.py ruff düzeltmesi
-- `a87ebe9` — docs: HANDOFF/ROADMAP/MEMORY'yi gerçek commit SHA'larına göre senkronize etti
+`d6ce968` (feat: conversation_id) + `a2a1bb3` (fix: auth_setup.py) + `a87ebe9` (docs) — commit'lendi,
+`git fetch`+`rev-list` ile temiz fast-forward doğrulanıp push'landı. CI: `python` job yeşil.
 
-**Henüz push'lanmadı** — bu üçü hâlâ `origin/langgraph-migration`'ın ilerisinde.
+### 2. Faz 7, Kısım 1 — Workflow Runtime motoru (commit `20280a3`, push'landı, CI yeşil)
 
-### 2. Agent Runtime rev.2, Faz 7 Kısım 1 — Workflow Runtime (`jarvis/execution/workflow*.py`)
+Owner'a kaç faz kaldığı soruldu (Faz 7 + Faz 8, artı Faz 6'nın canlı-veri-bekleyen bir alt maddesi),
+"sıradaki faz" (Faz 7) ile devam edildi. Yeni `jarvis/execution/workflow.py`/`workflow_store.py`/
+`workflow_engine.py` — bağımsız bir `WorkflowEngine`: bağımlılık sıralı adımlar, adım bütçesi,
+SQLite checkpoint/resume (çökme sonrası `idempotency` journal'ına bakarak dürüst kurtarma), onay
+duraklatma (`confirmation_node`'un HMAC bağlamasının aynısı, LangGraph interrupt'ı olmadan), ve dar
+kapsamlı otomatik telafi (yalnız `file_write` ve `todo add` için gerçek kayıtlı ters işlem). Tek-turlu
+chat graph'ından ayrı, Faz 1-4'ün execution contract'ını yeniden kullanıyor. Yazarken gerçek bir hata
+bulundu ve düzeltildi: adım bütçesi sayacı yayılan (hiç çalıştırılmamış) "skipped" adımları da
+sayıyordu. 46 yeni test. Tam detay [CHANGELOG.md](CHANGELOG.md)'de.
 
-Owner'a kaç faz kaldığı soruldu — plan dosyası okunarak Faz 7 (Workflow Runtime) ve Faz 8
-(Evaluation v2 + alpha kapısı) olmak üzere 2 faz kaldığı, artı Faz 6'nın canlı trafik verisi
-bekleyen bir alt maddesi (Literal-terfi) olduğu netleştirildi. Owner "sıradaki faz" (Faz 7) ile
-devam edilmesini istedi.
+### 3. Faz 7, Kısım 2 — Canlı tetikleyici (henüz commit'lenmedi)
 
-**Yeni dosyalar:**
-- `jarvis/execution/workflow.py` — `WorkflowStep`/`WorkflowPlan` (saf tipler + I/O'suz bağımlılık-
-  hazırlık/hata-yayılım/terminal-durum mantığı)
-- `jarvis/execution/workflow_store.py` — SQLite checkpoint/resume deposu (`idempotency.py`'nin
-  her-çağrıda-taze-bağlantı desenini taklit ediyor)
-- `jarvis/execution/workflow_engine.py` — `WorkflowEngine`: adımları sırayla yürütür, Faz 1-4'ün
-  execution contract'ını (schema validation, policy_guard, HMAC onay bağlama, ExecutionEnvelope,
-  postcondition runner, idempotency journal) ikinci bir doğrulama sözlüğü icat etmeden yeniden
-  kullanır. Tek-turlu chat graph'ından kasıtlı olarak ayrı — kendi LangGraph node'u yok.
+Owner "devam et" dedi, Kısım 1'in kendi notundaki açık soru (motoru nasıl gerçek bir isteğe
+bağlamalı) ele alındı. **Önemli güvenlik kararı:** onay çözümlemesi (approve/deny) bilinçli olarak
+bir tool DEĞİL, insan-only bir CLI komutu (`/workflow`) yapıldı — agent'ın kendi onayını kendisinin
+vermesini engellemek için (mevcut `confirmation_node`'un LangGraph interrupt'ının da aynı özelliği
+taşıdığı gibi: yalnız transport katmanı `Command(resume=...)` ile devam ettirebilir, model tool
+call'ı ile değil).
 
-**Önemli tasarım noktaları:**
-- **Onay duraklatma**: `confirmation_node`'un HMAC bağlamasının birebir aynısı ama LangGraph
-  interrupt'ı olmadan (burada compile edilmiş bir graph yok) — `plan.status="paused_for_approval"`
-  set edilip persist ediliyor; `resolve_approval(plan, step_id, "approve"|"deny:sebep")` imza/digest/
-  süre doğrulamasını tekrar yapıp öyle dispatch ediyor.
-- **Checkpoint/resume**: her adım geçişi `workflows.db`'ye yazılıyor. Yüklemede "running" durumunda
-  bulunan bir adım = süreç dispatch ortasında çökmüş demek — `idempotency.is_committed()` (tahmin
-  değil) "succeeded" (çökmeden önce commit olmuş, envelope dürüstçe yok) mu yoksa "pending"e
-  sıfırlanıp güvenle yeniden mi denenecek karar veriyor.
-- **Hata yayılımı**: `WorkflowPlan.propagate_skip()` bir hatayı/reddi tüm transitif bağımlılara
-  yayıyor. **Yazarken gerçek bir hata bulundu**: adım bütçesi sayacı (`executed_count()`) başta
-  pending-olmayan HER durumu sayıyordu — yani yayılan (asla dispatch edilmemiş) bir "skipped" adım
-  da bütçeyi tüketiyordu, bu da bağımsız bir dalın haksız yere bütçeden mahrum kalmasına yol
-  açabilirdi. Düzeltildi (yalnız gerçekten dispatch edilen durumlar sayılıyor) ve
-  `test_a_propagated_skip_does_not_consume_the_step_budget` ile kilitlendi.
-- **Telafi (compensation)**: planın kendi ifadesiyle dar kapsamlı — "yalnız kayıtlı gerçek tersi
-  olan işlemlerde otomatik telafi." Sadece 2 gerçek telafi kayıtlı: `file_write` (önceki içeriği
-  geri yükle, ya da yeni oluşturulmuş dosyayı sil — capture, üzerine yazmadan ÖNCE yapılıyor) ve
-  `todo`'nun `"add"` action'ı (oluşturulan görevi sil, id'si kendi sonuç metninden regex ile
-  çıkarılıyor — `postcondition_runner.py`'nin exit-code kontrolüyle aynı desen). Kayıtlı telafisi
-  olmayan her capability, başarılı adımı dürüstçe telafi edilmemiş bırakılıyor, asla sessizce geri
-  alındığı iddia edilmiyor. Plan "failed"/"partially_committed" olarak sonuçlandığında (adım bütçesi
-  tükenmesi dahil, yalnız sert hatalarda değil) otomatik tetikleniyor. `ToolSpec.effect_scope` ilk
-  gerçek sınıflandırmasını aldı: `file_write` → `"reversible"`.
-- **Workflow seviyesinde son doğrulama**: Faz 4'ün `VerifiedExecutionSummary`/
-  `render_operation_status_for_user`'ı workflow'un kendi toplanan adım envelope'ları üzerinde
-  yeniden kullanılıyor (`WorkflowEngine.report()`), ikinci bir agregasyon icat edilmedi.
-- Yan refactor: `_resolve_target_resource`, `jarvis/graph/nodes.py`'den `jarvis/execution/
-  request.py`'ye public `resolve_target_resource()` olarak taşındı — workflow motoru da aynı
-  mantığa ihtiyaç duyuyordu, ikinci bir kopya yerine `nodes.py` da artık oradan import ediyor.
+- `workflow_start(goal, steps)` — yeni `@tool`, `steps` bir JSON dizisi (bu codebase'in mevcut
+  karmaşık-argüman geleneği — `geo_math`'in `grid_data`/`x_data` gibi). Her `capability`,
+  modelin görebildiği alpha-filtrelenmiş tool listesine karşı doğrulanıyor (`python_run` gibi
+  alpha-disabled bir capability, bilinmeyen bir tool adı gibi reddediliyor).
+- `workflow_status(workflow_id)` — salt-okunur, hiçbir şeyi ilerletmiyor/onaylamıyor.
+- `/workflow list|show <id>|approve <id>|deny <id> [sebep]` — yeni CLI komutu (`cli.py`).
+- `jarvis/graph/tool_router.py`'de yeni "workflow" domain'i — `procedure_save`'in kullandığı
+  "yalnız açık niyetle" (explicit_tool_intent) mekanizması genelleştirildi. **Gerçek bir çakışma
+  yazarken bulundu ve düzeltildi:** ilk "adım adım" kalıbı, mevcut bir procedure-save test
+  sorgusuyla da eşleşiyordu — "çok adımlı görev"e daraltıldı, kilitleyen bir test eklendi.
+- `WorkflowEngine.report()` modül seviyesinde `render_workflow_report()`'a taşındı (salt-okunur
+  çağıranlar tam bir engine inşa etmeden rapor okuyabilsin diye).
 
-**Bilinçli olarak YAPILMADI** (`workflow_engine.py`'nin kendi docstring'i): hiçbir LLM *ne zaman*
-yeniden planlama gerektiğine ya da yeni adımların ne olacağına karar vermiyor —
-`WorkflowEngine.replan()` `max_replans`'ı gerçek, test edilmiş bir bütçe olarak uyguluyor ve
-çağıranın verdiği adımları ekliyor, ama bunu tetikleyen hiçbir şey yok (Faz 1'in shadow ledger'ının
-Faz 2'den önce var olması ile aynı "tetikleyiciden önce mekanizma" emsali). Hiçbir canlı giriş
-noktası gerçek bir kullanıcı isteğinden `WorkflowPlan` üretmiyor — bu faz motoru bağımsız, doğrudan
-çağrılabilir bir mekanizma olarak inşa edip test ediyor, Faz 1→2/Faz 6 Kısım 1→2 ile aynı ayrım.
+**Bilinçli olarak test edilmedi:** `/workflow` CLI komutunun kendisi için REPL-loop testi yok — bu
+repo'da `cli.py`'nin interaktif döngüsünü uçtan uca süren bir test altyapısı hiç yok (mevcut tek CLI
+test dosyası salt bir yardımcı fonksiyonu test ediyor), ve komutun kendi mantığı zaten test edilmiş
+`WorkflowEngine` metodları üzerine ince bir argüman-ayrıştırma katmanı — bu orana yeni bir test
+altyapısı kurmak orantısız görüldü, kayıt altına alınmış bir kapsam kararı.
 
-**46 yeni test** (`test_workflow_types.py` 16, `test_workflow_store.py` 9, `test_workflow_engine.py`
-21) — gerçek tool nesneleriyle (`jarvis.graph.tools.make_tools()`), fake değil
-(`test_langchain_dispatch_coercion.py` emsaliyle aynı). **914 pytest yeşil (868+46), ruff temiz,
-`git diff --check` temiz.**
+12 yeni test (`test_tool_router.py` +3, yeni `test_workflow_tools.py` 9). **926 pytest yeşil
+(868+46+12), ruff temiz, `git diff --check` temiz — Kısım 2 henüz commit'lenmedi.**
 
 ## Ortam / komutlar — bu oturum sonunda
 ```powershell
-git log --oneline -3
-#  a87ebe9 docs: sync conversation_id feature and Faz 6 Part 3 decision   <- HEAD, origin da burada
+git log --oneline -4
+#  20280a3 feat(workflow): add standalone workflow runtime (Agent Runtime rev.2, Faz 7 Part 1)  <- HEAD, origin da burada
+#  a87ebe9 docs: sync conversation_id feature and Faz 6 Part 3 decision
 #  a2a1bb3 fix(scripts): remove placeholder-less f-string in auth_setup.py
 #  d6ce968 feat(api): add per-client conversation_id support
-git rev-list --left-right --count origin/langgraph-migration...HEAD   # 0  3 (push edilmedi)
+git rev-list --left-right --count origin/langgraph-migration...HEAD   # 0  0 (Kısım 1 push'landı)
 git status --short
-#  M jarvis/execution/request.py
-#  M jarvis/graph/nodes.py
+#  M jarvis/cli.py
+#  M jarvis/execution/workflow_engine.py
+#  M jarvis/graph/tool_router.py
+#  M jarvis/graph/tools.py
 #  M jarvis/tool_registry.py
-#  ?? jarvis/execution/workflow.py
-#  ?? jarvis/execution/workflow_engine.py
-#  ?? jarvis/execution/workflow_store.py
-#  ?? tests/test_workflow_engine.py
-#  ?? tests/test_workflow_store.py
-#  ?? tests/test_workflow_types.py
-#  (+ CHANGELOG.md/ROADMAP.md/HANDOFF.md docs-sync, + ilgisiz .claude/settings.local.json)
-python -m pytest -q       # 914 passed, 206s
+#  M tests/test_tool_router.py
+#  ?? tests/test_workflow_tools.py
+#  (+ CHANGELOG.md/ROADMAP.md/HANDOFF.md/MEMORY.md docs-sync, + ilgisiz .claude/settings.local.json)
+python -m pytest -q       # 926 passed, 223s
 ruff check jarvis/ tests/ scripts/    # All checks passed!
 git diff --check          # temiz
 ```
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **İki ayrı commit/push kararı owner'ı bekliyor:**
-   (a) Zaten commit'lenmiş 3 commit (`d6ce968`/`a2a1bb3`/`a87ebe9`) hâlâ push'lanmadı.
-   (b) Bu oturumun Faz 7 Kısım 1 çalışması (kod + 46 test + docs-sync) hiç commit'lenmedi.
-   Owner'ın tercihi net değil — tek seferde mi (b'yi de commit'leyip ikisini birden push), yoksa
-   ayrı ayrı mı istiyor, sorulmalı.
-2. **Faz 7, Kısım 2 (canlıya bağlama, henüz başlanmadı):** `WorkflowEngine`'i gerçek bir tetikleyiciye
-   bağlamak — muhtemelen yeni bir `workflow_start`-tarzı tool, ya da planner'ın çok adımlı bir
-   isteği otomatik olarak bir WorkflowPlan'a terfi ettirmesi. Hangisi olacağı owner'ın kararı
-   (Faz 6 Part 2'nin repair-ladder yorumu gibi, bu da bir tasarım çatalı — muhtemelen bir dış
-   review'den geçirilmeli).
-3. **Faz 8 (Evaluation v2 + manuel alpha kapısı)** hâlâ başlanmadı — registry sweep contract
-   testleri, property-based fuzzing, 13 maddelik hata sınıfı taksonomisi, alpha kapısı eşikleri.
-4. **Faz 6, Kısım 3'ün Literal-terfi maddesi** (değişmedi, hâlâ bilinçli ertelenmiş): canlı trafikte
-   `blocked_invalid_args` oranı ölçülmeden gündeme gelmemeli.
+1. **Faz 7 Kısım 2'nin commit kararı owner'ı bekliyor** — kod+test+docs working tree'de duruyor,
+   `origin` hâlâ Kısım 1'de (`20280a3`, byte-equal).
+2. **Faz 7 Kısım 2'nin kendi takip maddeleri (yeni):**
+   - `/workflow` CLI komutu gerçek bir terminalde manuel olarak hiç denenmedi (yalnız
+     `WorkflowEngine`'in kendisi + tool'ların `.ainvoke()` çağrıları test edildi) — bir sonraki
+     oturumda `python -m jarvis` ile canlı bir workflow başlatıp onaylamak/reddetmek faydalı olur.
+   - `workflow_start`'ın JSON `steps` argümanının gerçek bir LLM (özellikle yerel qwen2.5:7b) ile ne
+     kadar güvenilir üretildiği hiç ölçülmedi — yalnız doğrudan `.ainvoke()` ile test edildi, model
+     bu şemayı gerçekte ne sıklıkla doğru dolduruyor bilinmiyor.
+   - API/Electron/mobil'de workflow onayı için hiçbir arayüz yok (yalnız CLI) — mevcut confirmation
+     mekanizmasının aynı, zaten bilinen kısıtıyla aynı asimetri.
+3. **Faz 8 (Evaluation v2 + manuel alpha kapısı)** hâlâ başlanmadı.
+4. **Faz 6, Kısım 3'ün Literal-terfi maddesi** (değişmedi, hâlâ bilinçli ertelenmiş).
 5. Diğer Faz 5 kalan işleri (değişmedi): `run_manifest.json`'ın prompt hash/registry version
    alanları boş; `plot_data` dışındaki artifact tool'ları run-scoped değil.
 6. Canlı A/B'nin B6 sorusu hâlâ açık (değişmedi). Şampiyon 62/65 referansı kontamine (değişmedi).
+   **Not:** Faz 7'nin iki yeni tool'u + yeni "workflow" domain'i canlı A/B'nin tool sayısını/routing
+   davranışını etkileyebilir — bir sonraki A/B koşusu bunu hesaba katmalı.
 7. conversation_id'nin istemci tarafı hâlâ yapılmadı (değişmedi, ayrı takip).
 8. Bilinçli ertelenenler (değişmedi): W4b, `[BLOCKED]` sunum katmanı, qwen3.5/ministral-3
    thinking-on, `stoic-spence` rolling summarization, `docs/ARCHITECTURE.md` orchestrator bölümü,
@@ -140,5 +113,5 @@ git diff --check          # temiz
 ## Değişmeyen taşınan işler
 - 8 direct-Gemini modülün shared gateway'e migrasyonu (Sprint 3) — kapsam dışı.
 - 4 worktree branch read-through — ayrı go-ahead bekliyor (CLAUDE.md'de liste).
-- Electron/mobil confirmation render'ı — hâlâ yalnız CLI text+voice.
+- Electron/mobil confirmation render'ı — hâlâ yalnız CLI text+voice (+ workflow onayı da hâlâ CLI-only, madde 2).
 - Pre-first-turn kozmetik model label — değişmedi.

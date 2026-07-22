@@ -38,9 +38,16 @@ MAX_DOMAINS_PER_TURN = 3
 # on equal keyword-hit scores ("Son 3 mailimi listele" is mail, even though
 # "listele" also smells like the filesystem).
 _DOMAIN_PRIORITY = [
-    "procedure", "mail", "calendar", "drive", "media", "finance", "tasks",
-    "web", "mcp", "files", "data", "system", "memory",
+    "procedure", "workflow", "mail", "calendar", "drive", "media", "finance",
+    "tasks", "web", "mcp", "files", "data", "system", "memory",
 ]
+
+# Domains that are opt-in via explicit wording only, never picked up from
+# general vibes — same reasoning as procedure_save originally: a capability
+# consequential enough (persisting a procedure; here, actually KICKING OFF a
+# multi-step workflow that can execute real side effects) that an ambiguous
+# keyword hit must not be enough to expose it.
+_EXPLICIT_ONLY_DOMAINS = frozenset({"procedure", "workflow"})
 
 _DOMAIN_PATTERNS: dict[str, list[str]] = {
     "files": [
@@ -85,7 +92,15 @@ _DOMAIN_PATTERNS: dict[str, list[str]] = {
         r"\bhisse", r"\bdolar", r"\beuro\b",
     ],
     "memory": [r"\bnot\b", r"\bnotlar", r"\bvault\b", r"\barşiv", r"\bkaydettiğim"],
-    "procedure": [r"\bprosedür", r"\bprocedure\b", r"\biş akışı", r"\bworkflow"],
+    "procedure": [r"\bprosedür", r"\bprocedure\b", r"\biş akışı"],
+    # Agent Runtime rev.2, Faz 7 Part 2: workflow_start/workflow_status. Bare
+    # "workflow" moved here from "procedure" -- saying just that word now
+    # means "run this as a multi-step task", not "remember this procedure"
+    # (procedure_save's own Turkish-native triggers, "prosedür"/"iş akışı",
+    # are untouched). Gated explicit-only (_EXPLICIT_ONLY_DOMAINS) for the
+    # same reason procedure_save is: this can actually execute real tool
+    # calls, not just persist a description.
+    "workflow": [r"\bworkflow\b", r"\bçok adımlı görev", r"\bmulti-?step\b"],
     "mcp": [r"\btarayıcı", r"\bbrowser\b", r"\bplaywright\b", r"\bmcp\b", r"\btıkla", r"\bclick\b"],
 }
 
@@ -154,7 +169,7 @@ def classify_query(query: str) -> ToolRoute:
         if hits:
             scores[domain] = hits
 
-    explicit = bool(_EXPLICIT_INTENT.search(text)) or "procedure" in scores
+    explicit = bool(_EXPLICIT_INTENT.search(text)) or bool(_EXPLICIT_ONLY_DOMAINS & set(scores))
     if not scores:
         return ToolRoute("conversation", ["conversation"], 1.0, explicit)
 
@@ -189,8 +204,8 @@ def select_tool_names(route: ToolRoute | None, available: list[str]) -> list[str
             spec = TOOL_SPECS.get(n)
             spec_domain = getattr(spec, "domain", "") if spec else "mcp"
             if (spec_domain or "mcp") == domain:
-                # procedure_save is opt-in: explicit wording only
-                if domain == "procedure" and not route.explicit_tool_intent:
+                # procedure_save / workflow_start are opt-in: explicit wording only
+                if domain in _EXPLICIT_ONLY_DOMAINS and not route.explicit_tool_intent:
                     continue
                 names.append(n)
         return names

@@ -1196,4 +1196,126 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     # here), so filtering once, at the source, closes all three at once. See
     # jarvis/tool_registry.py's _ALPHA_STATUS comment for why python_run is
     # the one entry here today.
-    return [t for t in all_tools if get_alpha_status(t.name) != "disabled"]
+    _alpha_tools = [t for t in all_tools if get_alpha_status(t.name) != "disabled"]
+
+    # ── Agent Runtime rev.2, Faz 7 Part 2: workflow runtime, live-wired ─────────
+    # workflow_start's own engine is built over _alpha_tools -- never the raw,
+    # unfiltered all_tools -- so a workflow step can never target an alpha-
+    # disabled capability (python_run) that the model itself structurally
+    # cannot see or call directly. _alpha_tools never contains workflow_start/
+    # workflow_status themselves (they are appended to the RETURNED list
+    # below, never to all_tools), so no separate self-exclusion is needed.
+    # Referencing _alpha_tools here (defined above, in the same make_tools()
+    # call) is safe even though workflow_start is DEFINED before the variable
+    # it closes over is read at CALL time, not def time -- ordinary Python
+    # closure semantics.
+
+    @tool
+    async def workflow_start(goal: str, steps: str) -> str:
+        """Start a multi-step workflow for a task that needs more tool calls
+        than a single turn's budget allows -- each step is validated, risk-
+        classified, and executed independently (a risky step pauses for the
+        user's separate approval via the CLI, never auto-approved here), with
+        narrow automatic compensation (file_write, todo's "add") if a later
+        step fails.
+
+        Only use this for a task that genuinely needs MULTIPLE dependent
+        capability calls the user has already described in full -- not as a
+        replacement for a normal single-turn tool call, and never to work
+        around being denied a normal request.
+
+        Parameters:
+            goal:  one sentence describing what the whole workflow accomplishes.
+            steps: a JSON array, each element:
+                     {"step_id": "s1", "capability": "<a real tool name>",
+                      "args": {...same args that tool normally takes...},
+                      "dependencies": ["<step_id>", ...]}
+                   step_id must be unique within this array; dependencies must
+                   reference other step_ids in the SAME array (a step with no
+                   dependencies runs as soon as the workflow starts). capability
+                   must be a tool name currently available to you.
+
+        Example:
+            workflow_start(
+                goal="Bir rapor dosyası yaz, sonra onu e-posta ile gönder",
+                steps='[{"step_id":"s1","capability":"file_write",'
+                      '"args":{"path":"rapor.txt","content":"..."},"dependencies":[]},'
+                      '{"step_id":"s2","capability":"gmail",'
+                      '"args":{"action":"send","to":"...","subject":"...","body":"..."},'
+                      '"dependencies":["s1"]}]'
+            )
+        """
+        import json
+        import uuid as _uuid
+
+        from jarvis.execution.contract import TaskContract
+        from jarvis.execution.workflow import WorkflowStep
+        from jarvis.execution.workflow_engine import WorkflowEngine
+
+        try:
+            raw_steps = json.loads(steps)
+        except (json.JSONDecodeError, TypeError) as exc:
+            return f"⚠ steps geçerli bir JSON dizisi değil: {exc}"
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return (
+                '⚠ steps boş olmayan bir JSON dizisi olmalı: '
+                '[{"step_id":"s1","capability":"...","args":{...},"dependencies":[]}]'
+            )
+
+        available = {t.name for t in _alpha_tools}
+        seen_ids: set[str] = set()
+        workflow_steps: list[WorkflowStep] = []
+        for i, raw in enumerate(raw_steps):
+            if not isinstance(raw, dict):
+                return f"⚠ steps[{i}] bir obje olmalı."
+            step_id = str(raw.get("step_id") or "").strip()
+            if not step_id:
+                return f"⚠ steps[{i}].step_id gerekli."
+            if step_id in seen_ids:
+                return f"⚠ Tekrarlanan step_id: '{step_id}'."
+            seen_ids.add(step_id)
+            capability = str(raw.get("capability") or "")
+            if capability not in available:
+                return (
+                    f"⚠ steps[{i}] geçersiz capability: '{capability}'. "
+                    f"Geçerli tool'lar: {sorted(available)}"
+                )
+            deps = raw.get("dependencies") or []
+            if not isinstance(deps, list):
+                return f"⚠ steps[{i}].dependencies bir liste olmalı."
+            args = raw.get("args") or {}
+            if not isinstance(args, dict):
+                return f"⚠ steps[{i}].args bir obje olmalı."
+            workflow_steps.append(WorkflowStep(
+                step_id=step_id, capability=capability,
+                args=args, dependencies=[str(d) for d in deps],
+            ))
+        unknown_deps = {d for s in workflow_steps for d in s.dependencies} - seen_ids
+        if unknown_deps:
+            return f"⚠ Bilinmeyen dependency step_id'leri: {sorted(unknown_deps)}"
+
+        engine = WorkflowEngine(_alpha_tools, settings, workspace)
+        contract = TaskContract(task_id=f"wf-goal-{_uuid.uuid4().hex[:8]}", user_goal=goal)
+        plan = engine.create_plan(contract, workflow_steps)
+        plan = await engine.advance(plan)
+        return engine.report(plan)
+
+    @tool
+    def workflow_status(workflow_id: str) -> str:
+        """Report a workflow's current step-by-step status (read-only,
+        never advances or approves anything). Use to check on a workflow
+        started earlier via workflow_start -- one still running/paused for
+        approval, or one already finished.
+
+        Parameters:
+            workflow_id: the id returned by workflow_start (e.g. "wf-...").
+        """
+        from jarvis.execution import workflow_store
+        from jarvis.execution.workflow_engine import render_workflow_report
+
+        plan = workflow_store.load(workflow_id)
+        if plan is None:
+            return f"⚠ Workflow bulunamadı: '{workflow_id}'"
+        return render_workflow_report(plan)
+
+    return [*_alpha_tools, workflow_start, workflow_status]

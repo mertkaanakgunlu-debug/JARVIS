@@ -204,6 +204,40 @@ _COMPENSATORS: dict[tuple[str, str | None], tuple[_CaptureFn, _CompensateFn]] = 
 }
 
 
+# ── Reporting ─────────────────────────────────────────────────────────────────
+
+def render_workflow_report(plan: WorkflowPlan) -> str:
+    """Human-facing summary of a plan's current state -- reuses
+    jarvis.execution.summary's existing VerifiedExecutionSummary renderer
+    over the plan's own collected step envelopes (plan principle #2: one
+    verification vocabulary, not a second one for workflows). Module-level
+    (not a method) so a read-only caller -- workflow_status's @tool body,
+    the CLI's /workflow command -- can render a report from a loaded
+    WorkflowPlan alone, without constructing a full WorkflowEngine (which
+    needs a live tools list) just to read one."""
+    envelopes = [s.envelope for s in plan.steps if s.envelope is not None]
+    summary = build_verified_summary(envelopes)
+    lines = [f"[Workflow {plan.workflow_id} -- {plan.status}]"]
+    lines.append(
+        render_operation_status_for_user(summary) if summary.operations else "No steps executed."
+    )
+    skipped = [s.step_id for s in plan.steps if s.status == "skipped"]
+    if skipped:
+        lines.append(f"Skipped (blocked by a failed dependency): {', '.join(skipped)}")
+    compensated = [(s.step_id, s.compensation_note) for s in plan.steps if s.status == "compensated"]
+    if compensated:
+        lines.append("Compensation applied:")
+        for step_id, note in compensated:
+            lines.append(f"  - {step_id}: {note}")
+    if plan.status == "paused_for_approval" and plan.pending_approval_step_id:
+        lines.append(
+            f"Awaiting approval for step {plan.pending_approval_step_id!r} -- "
+            f"use `/workflow approve {plan.workflow_id}` or "
+            f"`/workflow deny {plan.workflow_id} <reason>` to continue."
+        )
+    return "\n".join(lines)
+
+
 # ── Engine ────────────────────────────────────────────────────────────────────
 
 class WorkflowEngine:
@@ -371,25 +405,11 @@ class WorkflowEngine:
     # ── Reporting ───────────────────────────────────────────────────────────
 
     def report(self, plan: WorkflowPlan) -> str:
-        """Human-facing final summary -- reuses jarvis.execution.summary's
-        existing VerifiedExecutionSummary renderer over this workflow's own
-        collected step envelopes (plan principle #2: one verification
-        vocabulary, not a second one for workflows)."""
-        envelopes = [s.envelope for s in plan.steps if s.envelope is not None]
-        summary = build_verified_summary(envelopes)
-        lines = [f"[Workflow {plan.workflow_id} -- {plan.status}]"]
-        lines.append(
-            render_operation_status_for_user(summary) if summary.operations else "No steps executed."
-        )
-        skipped = [s.step_id for s in plan.steps if s.status == "skipped"]
-        if skipped:
-            lines.append(f"Skipped (blocked by a failed dependency): {', '.join(skipped)}")
-        compensated = [(s.step_id, s.compensation_note) for s in plan.steps if s.status == "compensated"]
-        if compensated:
-            lines.append("Compensation applied:")
-            for step_id, note in compensated:
-                lines.append(f"  - {step_id}: {note}")
-        return "\n".join(lines)
+        """Human-facing final summary. Thin wrapper over the module-level
+        render_workflow_report() -- kept as a method too since every
+        existing caller (tests, and any future graph-side code holding an
+        engine instance already) uses it that way."""
+        return render_workflow_report(plan)
 
     # ── Internals ───────────────────────────────────────────────────────────
 

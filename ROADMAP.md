@@ -116,7 +116,21 @@ every step instead of a second verification vocabulary. Deliberately separate fr
 chat graph, and deliberately NOT wired to any live trigger yet (same Part 1/Part 2 split as Faz
 1→2 and Faz 6 Part 1→2) — see [CHANGELOG.md](CHANGELOG.md) for full detail, including a real
 step-budget bug (`executed_count()`) a test caught and fixed before it shipped. 46 new tests, 914
-pytest green (868+46), ruff clean. See [HANDOFF.md](HANDOFF.md) for the current commit/push status.
+pytest green (868+46), ruff clean. Committed as `20280a3`, pushed, CI green — see
+[HANDOFF.md](HANDOFF.md) for the current commit/push status.
+
+**2026-07-22, same 13th session — Faz 7, Part 2 (live wiring), not yet committed.** Two new tools,
+`workflow_start`/`workflow_status` (`jarvis/graph/tools.py`), give `WorkflowEngine` a real,
+model-facing entry point; every step's capability is validated against the same alpha-filtered
+tool list the model itself can see, so a step can never target an alpha-disabled capability
+(`python_run`). Approval resolution is a new CLI command (`/workflow list|show|approve|deny`),
+deliberately NOT a third tool — exposing "approve"/"deny" to the agent would let it resolve its
+own confirmation gate, the exact bypass this whole initiative exists to prevent. New "workflow"
+capability-router domain (`jarvis/graph/tool_router.py`), opt-in via explicit wording only, same
+mechanism `procedure_save` already used. A real pattern collision was caught and fixed while
+building this (an early "adım adım" workflow-trigger phrase also fired on an existing
+procedure-saving test query) — see [CHANGELOG.md](CHANGELOG.md) for full detail. 12 new tests, 926
+pytest green (914+12), ruff clean. See [HANDOFF.md](HANDOFF.md) for the current commit/push status.
 
 ---
 

@@ -6,6 +6,60 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 7, Part 2: Workflow runtime, live-wired] — 2026-07-22
+
+**`WorkflowEngine` (Part 1) gets a real, model-facing entry point** — two new tools, `workflow_start`
+and `workflow_status`, plus a human-only CLI approval command. Closes Part 1's own explicitly
+deferred gap ("no live entry point constructs a WorkflowPlan from a real user request yet").
+
+`workflow_start(goal, steps)` — `steps` is a JSON array (`{"step_id", "capability", "args",
+"dependencies"}` per element), following this codebase's own established convention for complex
+tool arguments (`geo_math`'s `grid_data`/`x_data`/`y_data`, `plot_data`'s `data_json`) rather than a
+native nested type, since the primary local model handles JSON-as-string more reliably than deeply
+nested tool-call arguments. Every step's `capability` is validated against the SAME alpha-filtered
+tool list the model itself can see (`python_run` and any other alpha-disabled capability is
+rejected exactly like an unknown tool name — a workflow step can never reach a capability the model
+couldn't call directly) before anything is minted. `workflow_status(workflow_id)` is a pure read —
+never advances or resolves anything — for checking on a running/paused/finished workflow.
+
+**Approval resolution is a new CLI command (`/workflow list|show|approve|deny`), deliberately NOT a
+third tool.** Exposing "approve"/"deny" as something the agent itself can call would let the model
+resolve its own confirmation gate — exactly the bypass this entire initiative exists to prevent.
+The single-turn graph's own confirmation gate has the same property structurally (a LangGraph
+interrupt only resumes via `Command(resume=...)` from the transport layer, never from a model tool
+call); `/workflow approve <id>` / `/workflow deny <id> [reason]` is the workflow engine's equivalent
+for a mechanism that has no LangGraph interrupt to piggyback on (it runs outside the compiled
+graph, see `workflow_engine.py`'s docstring). `/workflow show <id>` and the bare `/workflow`/
+`/workflow list` are read-only.
+
+**Capability routing**: `workflow_start`/`workflow_status` are opt-in via explicit wording only —
+same mechanism `procedure_save` already used (`jarvis/graph/tool_router.py`'s
+`_EXPLICIT_ONLY_DOMAINS`, generalized from a single hardcoded `"procedure"` check to a set). New
+`"workflow"` domain; the bare word "workflow" moved out of `"procedure"`'s trigger patterns (it
+used to double as a procedure-saving trigger) since it now means "run this now", not "remember
+this description" — `procedure_save`'s own Turkish-native triggers (`prosedür`, `iş akışı`) are
+unaffected. A real collision was caught while adding this: an early `"adım adım"` ("step by step")
+pattern for the new domain also fired on an *existing* procedure-saving test query (that exact
+phrase is common procedure-saving language) — narrowed to `"çok adımlı görev"` before it shipped;
+`test_procedure_save_query_does_not_also_pull_in_workflow_tools` locks in the fix.
+
+Small cleanup alongside: `WorkflowEngine.report()`'s body moved to a module-level
+`render_workflow_report()` (workflow_engine.py) — `workflow_status`'s read-only tool body and the
+new CLI command render a report from a loaded `WorkflowPlan` alone, without constructing a full
+engine (which needs a live tools list) just to read one. The report also now names the exact
+`/workflow approve|deny` command when a plan is paused, so both tools' return text and the CLI
+surface the same actionable next step.
+
+12 new tests (`test_tool_router.py` +3, new `test_workflow_tools.py` 9) — no CLI-loop test for the
+new `/workflow` command itself: this repo has no established infrastructure for driving `cli.py`'s
+interactive REPL loop end-to-end (its one existing CLI test file covers a pure helper function
+only), and the command's own logic is a thin argument-parsing wrapper over already-tested
+`WorkflowEngine` methods (`resolve_approval`/`advance`) — building new REPL-mocking infrastructure
+for that thin a layer was judged disproportionate to the value, a documented scope cut rather than
+an oversight. 926 pytest green (914+12), ruff clean.
+
+---
+
 ## [Agent Runtime rev.2 — Faz 7, Part 1: Workflow runtime] — 2026-07-22
 
 **Standalone workflow engine, reusing Faz 1-4's execution contract, deliberately NOT wired to any

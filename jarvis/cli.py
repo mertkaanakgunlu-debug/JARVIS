@@ -645,6 +645,76 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
             _print_error(f"Bilinmeyen alt komut: '{sub}'. Geçerli: status, on, off <sebep>")
             continue
 
+        # ── /workflow command (Agent Runtime rev.2, Faz 7 Part 2) ───────────
+        # Approval resolution is a CLI command, deliberately NOT a tool the
+        # agent itself can call -- exposing "approve"/"deny" as a tool would
+        # let the model resolve its own confirmation gate, exactly the
+        # bypass this whole safety mechanism exists to prevent (see
+        # jarvis/execution/workflow_engine.py's own module docstring: the
+        # approval pause has no LangGraph interrupt to piggyback on here,
+        # since the workflow engine runs outside the compiled graph -- this
+        # command is its human-only equivalent). Only a human, via this
+        # command, can approve or deny a paused step.
+        if lower == "/workflow" or lower.startswith("/workflow "):
+            sub = user_input[len("/workflow"):].strip()
+            from jarvis.execution import workflow_store
+            from jarvis.execution.workflow_engine import WorkflowEngine, render_workflow_report
+            from jarvis.graph.tools import make_tools
+
+            if not sub or sub == "list":
+                rows = workflow_store.list_workflows(limit=20)
+                if not rows:
+                    console.print("[dim]Henüz bir workflow yok.[/dim]")
+                else:
+                    table = Table(border_style="gold3 dim")
+                    table.add_column("ID")
+                    table.add_column("Durum")
+                    table.add_column("Güncellendi")
+                    for r in rows:
+                        table.add_row(r["workflow_id"], r["status"], r["updated_at"][:19])
+                    console.print(table)
+                continue
+
+            parts = sub.split(maxsplit=1)
+            verb = parts[0].lower()
+
+            if verb == "show" and len(parts) == 2:
+                plan = workflow_store.load(parts[1])
+                if plan is None:
+                    _print_error(f"Workflow bulunamadı: '{parts[1]}'")
+                else:
+                    console.print(Panel(render_workflow_report(plan), border_style="gold3 dim"))
+                continue
+
+            if verb in ("approve", "deny") and len(parts) == 2:
+                rest = parts[1].split(maxsplit=1)
+                workflow_id = rest[0]
+                reason = rest[1] if len(rest) > 1 else ""
+                plan = workflow_store.load(workflow_id)
+                if plan is None:
+                    _print_error(f"Workflow bulunamadı: '{workflow_id}'")
+                    continue
+                if plan.status != "paused_for_approval" or not plan.pending_approval_step_id:
+                    _print_error(f"Workflow '{workflow_id}' onay beklemiyor (durum: {plan.status}).")
+                    continue
+                tools = make_tools(agent.workspace, agent.settings, agent.memory)
+                engine = WorkflowEngine(tools, agent.settings, agent.workspace)
+                decision = "approve" if verb == "approve" else f"deny:{reason}"
+                try:
+                    plan = await engine.resolve_approval(plan, plan.pending_approval_step_id, decision)
+                except ValueError as exc:
+                    _print_error(str(exc))
+                    continue
+                plan = await engine.advance(plan)
+                console.print(Panel(render_workflow_report(plan), border_style="gold3 dim"))
+                continue
+
+            _print_error(
+                f"Bilinmeyen /workflow kullanımı: '{sub}'. "
+                "Geçerli: list, show <id>, approve <id>, deny <id> [sebep]"
+            )
+            continue
+
         # ── /quota command (Faz 17) ─────────────────────────────────────────
         if lower in ("/quota", "/quota status", "/quota usage", "/quota forecast"):
             from jarvis.gcp_quota import quota_status, quota_usage_today, quota_forecast
