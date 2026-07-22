@@ -231,6 +231,15 @@ class ChatRequest(BaseModel):
     message: str
     language: str = ""
     force_async: bool = False
+    # Agent Runtime rev.2, Faz 5 follow-up: real per-client conversation
+    # support. Empty (every pre-existing client -- Electron HUD, mobile app,
+    # anything predating this field) is a complete no-op, preserving today's
+    # single-shared-active-session behavior exactly. A client that wants
+    # independent conversations mints its own id (e.g. a UUID on first
+    # launch) and echoes it back on every subsequent call -- see
+    # JarvisAgent.chat()'s own docstring for why the switch happens INSIDE
+    # the agent's turn lock rather than as a separate endpoint-level step.
+    conversation_id: str = ""
 
 
 class ConfirmRequest(BaseModel):
@@ -240,6 +249,7 @@ class ConfirmRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     model: str
+    conversation_id: str = ""
 
 
 class AsyncChatResponse(BaseModel):
@@ -541,6 +551,7 @@ async def chat(body: ChatRequest, request: Request):
             body.message,
             detected_language=body.language or "en",
             transport="api",
+            conversation_id=body.conversation_id,
         )
     except ConfirmationRequired as cr:
         # BUG-confirm-payload: this used to fall through to the generic
@@ -553,7 +564,7 @@ async def chat(body: ChatRequest, request: Request):
         event_bus.state("idle")
         raise HTTPException(status_code=500, detail=str(e))
     event_bus.state("idle")
-    return ChatResponse(response=response, model=model_label)
+    return ChatResponse(response=response, model=model_label, conversation_id=agent.session_id)
 
 
 @app.post("/chat/stream")
@@ -595,6 +606,7 @@ async def chat_stream(body: ChatRequest, request: Request):
                 body.message,
                 detected_language=body.language or "en",
                 transport="api-stream",
+                conversation_id=body.conversation_id,
             ):
                 full.append(token)
                 safe = token.replace("\n", "\\n")
@@ -689,6 +701,7 @@ async def chat_upload(
     file: UploadFile = File(...),
     query: str = Form(""),
     language: str = Form(""),
+    conversation_id: str = Form(""),
 ):
     """Accept a file + optional text query, stream JARVIS response.
 
@@ -731,6 +744,7 @@ async def chat_upload(
                     image_bytes=content,
                     image_mime=image_mime,
                     transport="api-upload",
+                    conversation_id=conversation_id,
                 ):
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
@@ -773,6 +787,7 @@ async def chat_upload(
                     detected_language=language or "en",
                     extra_images=figures or None,
                     transport="api-upload",
+                    conversation_id=conversation_id,
                 ):
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
@@ -797,6 +812,7 @@ async def chat_upload(
                     full_query,
                     detected_language=language or "en",
                     transport="api-upload",
+                    conversation_id=conversation_id,
                 ):
                     safe = token.replace("\n", "\\n")
                     yield f"data: {safe}\n\n"
@@ -866,7 +882,16 @@ async def reset(request: Request):
     # create_task on a loopless worker thread -> RuntimeError -> HTTP 500
     # on every content-bearing session.
     await agent.reset_async()
-    return {"ok": True, "message": "Conversation archived, new session started"}
+    # Agent Runtime rev.2, Faz 5 follow-up: a client using conversation_id
+    # needs the new id back immediately to keep tagging its next message
+    # correctly -- previously this response gave no way to learn it short of
+    # a separate /status call. Additive field, ignored by any pre-existing
+    # client.
+    return {
+        "ok": True,
+        "message": "Conversation archived, new session started",
+        "session_id": agent.session_id,
+    }
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────

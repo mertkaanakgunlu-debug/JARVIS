@@ -181,6 +181,33 @@ class SessionStore:
             ).fetchone()
         return row is not None
 
+    def ensure_session(self, session_id: str, topic_hint: str | None = None) -> bool:
+        """INSERT a `sessions` row for this exact caller-chosen id if one
+        doesn't already exist. Returns True if a new row was created.
+
+        Agent Runtime rev.2, Faz 5 follow-up (API per-client conversation_id):
+        JarvisAgent.switch_session() previously adopted ANY session_id with no
+        existence check at all (cli.py's own `/session <id>` already relied on
+        exactly that) -- silently leaving list_sessions()/set_topic_hint()
+        blind to it, since `messages` rows carry no matching `sessions` row
+        (the FK in _SCHEMA is declared but never enforced -- no `PRAGMA
+        foreign_keys=ON` here). That was a rare typo-only edge case for a
+        human-typed CLI id; it becomes the COMMON path once an API client
+        mints its own conversation_id (e.g. a UUID on first launch), so it's
+        worth closing for real rather than inheriting. INSERT OR IGNORE keeps
+        this idempotent -- a second call for an id that already exists (the
+        overwhelmingly common case: the same client's 2nd+ message) is a
+        harmless no-op, never overwriting real created_at/topic_hint/status.
+        """
+        now = datetime.now().isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO sessions(id, created_at, last_active, topic_hint, status) "
+                "VALUES (?, ?, ?, ?, 'active')",
+                (session_id, now, now, topic_hint),
+            )
+        return cur.rowcount > 0
+
     def archive_session(self, session_id: str) -> None:
         with self._lock:
             self._conn.execute(

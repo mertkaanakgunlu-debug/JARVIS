@@ -781,17 +781,42 @@ class JarvisAgent:
                 print(f"[reset] summary scheduling failed (reset itself OK): {exc}")
         event_bus.session(self.session_id, None)
 
+    def _switch_session_locked(self, session_id: str) -> int:
+        """Core of switch_session(), assuming _state_lock is already held.
+
+        Agent Runtime rev.2, Faz 5 follow-up: chat()/chat_stream() call this
+        directly from inside their own locked section so a per-request
+        conversation_id switch is atomic with the turn it applies to.
+        Calling the public switch_session() (which acquires _state_lock
+        itself) from in there would deadlock (threading.Lock is not
+        reentrant); switching as a separate, unlocked step *before* chat()
+        would let a concurrent request's own switch interleave between
+        "adopt conversation A" and "run A's turn" -- exactly the class of
+        shared-singleton race BUG-8 already closed once for
+        _history/_turn/session_id.
+
+        ensure_session() registers a real `sessions` row for session_id if
+        none exists yet -- session_id was previously adopted with no
+        existence check at all, leaving list_sessions()/set_topic_hint()
+        blind to any id that never went through new_session() (harmless
+        rarity for cli.py's human-typed `/session <id>`, but the common case
+        once an API client mints its own conversation_id).
+        """
+        self.session_store.ensure_session(session_id)
+        self._history = self.session_store.load_history(session_id, limit=20)
+        self.session_id = session_id
+        # BUG-11: resume this session's own turn counter instead of
+        # restarting at 0 — a fresh 0 would let the next turn reuse an
+        # old thread_id ("{session_id}-t1") and resurrect that session's
+        # very first LangGraph checkpoint into the current conversation.
+        self._turn = self.session_store.last_turn_idx(session_id)
+        return len(self._history)
+
     def switch_session(self, session_id: str) -> int:
-        """Load a past session's history. Returns number of messages loaded."""
+        """Load a past session's history (or adopt a brand-new caller-chosen
+        id -- see _switch_session_locked). Returns number of messages loaded."""
         with self._state_lock:
-            self._history = self.session_store.load_history(session_id, limit=20)
-            self.session_id = session_id
-            # BUG-11: resume this session's own turn counter instead of
-            # restarting at 0 — a fresh 0 would let the next turn reuse an
-            # old thread_id ("{session_id}-t1") and resurrect that session's
-            # very first LangGraph checkpoint into the current conversation.
-            self._turn = self.session_store.last_turn_idx(session_id)
-            n = len(self._history)
+            n = self._switch_session_locked(session_id)
         topic = next(
             (s["topic_hint"] for s in self.session_store.list_sessions(50) if s["id"] == session_id),
             None,
@@ -1068,6 +1093,7 @@ class JarvisAgent:
         image_mime: str = "image/png",
         extra_images: list[bytes] | None = None,
         transport: str = "unknown",
+        conversation_id: str = "",
     ) -> tuple[str, str]:
         """Run one turn. Returns (response_text, model_label).
 
@@ -1076,6 +1102,17 @@ class JarvisAgent:
                         appended after the text block.
         transport     — Faz 4: caller identity tag ("cli-text" | "api" | ...),
                         threaded into state["transport"] for the audit log.
+        conversation_id — Agent Runtime rev.2, Faz 5 follow-up: real per-client
+                        conversation support for jarvis/api.py (a single shared
+                        JarvisAgent instance otherwise has exactly one active
+                        session for every caller). Empty (every pre-existing
+                        caller — cli.py, voice, TaskExecutor) is a complete
+                        no-op. A non-empty id is applied via
+                        _switch_session_locked() from INSIDE the lock this
+                        method already holds for the whole turn, not as a
+                        separate pre-call switch_session() — see that
+                        method's own docstring for why a separate call would
+                        race a concurrent request's own switch.
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
@@ -1087,6 +1124,9 @@ class JarvisAgent:
         # between would clobber one turn's result with the other's.
         await self._acquire_state_lock()
         try:
+            if conversation_id and conversation_id != self.session_id:
+                self._switch_session_locked(conversation_id)
+                event_bus.session(self.session_id, None)
             await self.connect_mcp_tools()  # Faz 5: no-op after the first real connect
             ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(
@@ -1294,6 +1334,7 @@ class JarvisAgent:
         image_mime: str = "image/png",
         extra_images: list[bytes] | None = None,
         transport: str = "unknown",
+        conversation_id: str = "",
     ) -> AsyncGenerator[str, None]:
         """Stream one turn token-by-token. Yields text deltas for voice.speak_stream().
 
@@ -1302,6 +1343,8 @@ class JarvisAgent:
                         appended after the text block.
         transport     — Faz 4: caller identity tag ("voice-cli" | "api-stream" | ...),
                         threaded into state["transport"] for the audit log.
+        conversation_id — see chat()'s docstring; same atomic-inside-the-lock
+                        handling applies here.
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
@@ -1312,6 +1355,9 @@ class JarvisAgent:
         # self._history/_turn still reflect the *previous* completed turn.
         await self._acquire_state_lock()
         try:
+            if conversation_id and conversation_id != self.session_id:
+                self._switch_session_locked(conversation_id)
+                event_bus.session(self.session_id, None)
             await self.connect_mcp_tools()  # Faz 5: no-op after the first real connect
             ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(

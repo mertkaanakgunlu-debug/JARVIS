@@ -78,6 +78,41 @@ def test_session_exists_true_even_when_archived(tmp_path):
     assert store.session_exists(sid) is True
 
 
+# ── Agent Runtime rev.2, Faz 5 follow-up: ensure_session() ──────────────────
+
+def test_ensure_session_creates_a_row_for_a_brand_new_id(tmp_path):
+    store = _store(tmp_path)
+    created = store.ensure_session("client-chosen-id")
+    assert created is True
+    assert store.session_exists("client-chosen-id") is True
+    assert any(s["id"] == "client-chosen-id" for s in store.list_sessions(50))
+
+
+def test_ensure_session_is_idempotent_for_an_existing_id(tmp_path):
+    store = _store(tmp_path)
+    store.new_session()
+    sid = store.list_sessions(1)[0]["id"]
+
+    created_again = store.ensure_session(sid)
+
+    assert created_again is False
+    assert store.total_sessions() == 1  # no duplicate row
+
+
+def test_ensure_session_never_overwrites_an_existing_row(tmp_path):
+    """INSERT OR IGNORE must not clobber a real session's topic_hint/status
+    with ensure_session()'s own defaults on a second call."""
+    store = _store(tmp_path)
+    sid = store.new_session("original topic")
+    store.archive_session(sid)
+
+    store.ensure_session(sid, topic_hint="should not apply")
+
+    row = next(s for s in store.list_sessions(50) if s["id"] == sid)
+    assert row["topic_hint"] == "original topic"
+    assert row["status"] == "archived"
+
+
 def test_save_turn_then_load_history_round_trips(tmp_path):
     store = _store(tmp_path)
     sid = store.new_session()
