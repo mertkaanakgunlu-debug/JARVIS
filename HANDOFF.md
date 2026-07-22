@@ -3,189 +3,138 @@
 > Overwrite this file's content at the end of every session — it's meant to reflect only the
 > *current* handoff state, not a history (that's what `git log` / `CHANGELOG.md` are for).
 
-## Last session: 2026-07-22 (9. oturum, devamı) — FAZ 6 KISIM 2 KODLANDI VE TEST EDİLDİ (COMMIT'LENMEDİ); FAZ 4/5/6-K1 COMMIT'LENDİ VE PUSH'LANDI
+## Last session: 2026-07-22 (10. oturum) — DOC-DRIFT + 2 KÜÇÜK GERÇEK BULGU DÜZELTİLDİ, 3 AYRI COMMIT'TE LANDED
 
-**Durum tek cümlede:** Bu oturumda Faz 4, Faz 5, Faz 6 Kısım 1 owner'ın ayrı ayrı "commit et"
-isteğiyle dört commit'te (`9c0ca15`/`5eae027`/`cb2b1a2`/`8613bfc`) landed ve push'landı (owner
-kendisi push'ladı); ardından dış bir review Faz 6 Kısım 1'i, sonra Faz 6 Kısım 2'nin İLK halini
-sorguladı — ikisini de değerlendirdim (bazı noktaları kabul edip farklı/daha güvenli şekilde
-çözdüm, bir P0 iddiasını AMPİRİK KANITLA çürüttüm, ayrıntı aşağıda) — ve **Faz 6 Kısım 2
-tamamlandı + test edildi, henüz commit'lenmedi** — owner'ın kararını bekliyor. **853 pytest
-yeşil, ruff temiz, `git diff --check` temiz** (bu sayı TÜM dosya değişiklikleri, dokümantasyon
-dahil, TAMAMLANDIKTAN SONRA çalıştırıldı — önceki turun "rapor dokümantasyon güncellemesinden
-önceydi" eleştirisi haklıydı, bu kez değil).
+**Durum tek cümlede:** Bu oturum "kaldığımız yerden devam" ile başladı ve önce HANDOFF.md'nin
+kendisinin yalan söylediğini buldu — Faz 6 Kısım 2 aslında önceki bir oturumda `10e1508` ile
+COMMIT'LENMİŞTİ (mesaj "Co-Authored-By: Claude Sonnet 5" taşıyor, yani bir Claude Code oturumu
+commit etmiş), ama HANDOFF.md/ROADMAP.md hâlâ "henüz commit'lenmedi, HEAD b7d03c6" diyordu — **bu
+tam olarak aynı hatanın üçüncü tekrarı** (`git log`'da bunu düzelten iki ayrı geçmiş commit var:
+`8613bfc`, `8b3cd1f`). Düzelttim, sonra HANDOFF'un kendi "SONRAKİ OTURUM" listesindeki gerçek işe
+geçtim: CI'nin neden kırmızı olduğunu (birden fazla oturumdur "pre-existing, incelenmedi" diye
+geçiştiriliyordu) kök nedenine kadar izleyip düzelttim, ve Kısım 2 review'inin bulup ertelediği
+küçük ama gerçek `tool_call_fingerprint` normalizasyon boşluğunu kapattım. Owner'ın açık talimatıyla
+**3 ayrı, bağımsız commit'te** landed: CI fix `a06cbd2`, fingerprint fix `cf769b2`, ve bu
+dokümantasyon güncellemesinin kendisi (bu commit — `git log -1` ile kontrol edilebilir). **857
+pytest yeşil (853+4 yeni test), ruff temiz, `git diff --check` temiz** — bu 3 commit sonrası tek
+seferde push edilecek (owner onayladı, bu oturumun kalan adımı).
 
-## Faz 6 Kısım 2 — dış review + tasarım + implementasyon
+## Bu oturumda yapılanlar
 
-**Review'in 4 ana noktası ve benim değerlendirmem:**
+### 1. Doc-drift düzeltmesi (HANDOFF.md / ROADMAP.md / CHANGELOG.md)
 
-1. **"Tek şema kaynağı kullan (`@tool(args_schema=...)`)"** — KISMEN katıldım, FARKLI çözdüm.
-   `@tool` fonksiyon imzalarına (`jarvis/graph/tools.py`) DOKUNMADIM — LangChain `args_schema`'yı
-   modelin GERÇEKTEN gördüğü şema olarak kullanıyor, yani bunu bağlamak modelin canlı davranışını
-   DEĞİŞTİRİR (Kısım 1'in kendi bulguları — geo_math'ın gizli action'ları, spotify'ın
-   dokümante edilmemiş alias'ları — yalnız TAM dispatch kodu okunarak yakalandı, docstring
-   yetmiyordu). Bunun yerine `jarvis.execution.args_schemas` TEK dahili doğrulama kaynağı oldu —
-   `prepare_execution_node` ondan okuyor, ikinci bir Literal seti YAZILMADI.
-2. **"Normalize → validate → sign → execute sırası, canonical args her yerde aynı olmalı"** —
-   KATILDIM ama DAHA BASİT çözdüm. Canonical args'ı imzalama/fingerprint/execution'a
-   PROPAGATE etmek yerine (mesaj listesi cerrahisi gerektirirdi, güvenlik-kritik bir yolda),
-   **validation SADECE bir GEÇİT** — hiçbir zaman ham args'ı değiştirmiyor. Normalizer'lar
-   (`.strip().lower()`) yalnız kabul/red KARARINI doğru vermek için var — imzalanan/çalıştırılan
-   args HER ZAMAN ham. Bu güvenli çünkü doğruladığım HER dispatch fonksiyonu (calendar/gmail/
-   drive/itu_mail/finance/spotify/schedule/todo/gcp_quota/geo_math — TAMAMI okundu) zaten KENDİ
-   `.strip().lower()`'ını yapıyor — digest/execution ayrışma riski TASARIMLA kapatıldı, dikkatli
-   propagasyonla değil.
-3. **"Action Literal tek başına yetmez, action-özel zorunlu alan kontrolü gerekiyor"** —
-   KATILDIM, GERÇEK KODDAN doğrulayarak (docstring'den değil — review'in KENDİ önerdiği bazı
-   gereksinimler yanlış çıktı: `spotify`'ın `play`'i query'siz de GEÇERLİ, `gcp_quota`/
-   `hud_panels`'ın hiç zorunlu alanı yok, `geo_math`'ın yalnız analyze/reason/derive/explain
-   ailesi bir gereksinim taşıyor — 9 dispatch dosyasının TAMAMI satır satır okunarak doğrulandı).
-4. **"Structured validation_errors + açık bounded-repair sayacı"** — TAMAMEN katıldım.
-   `validate_args()` pydantic'in kendi `ValidationError.errors()`'ını `loc`/`type`/`msg`'e
-   kırpıyor (`input`/`url`/`ctx` DÜŞÜRÜLDÜ — `input` ham argüman değerini yankılıyor, bu
-   codebase'in redaksiyon disiplini bunun redakte edilmeden kalıcı olmasını yasaklıyor). Yeni
-   `JarvisState["args_repair_attempted"]: bool` (turn başına sıfırlanıyor) — `max_tool_rounds_
-   per_turn`'e GÜVENMİYOR (review'in doğru yakaladığı gerçek risk: reddedilen bir batch de
-   tool_rounds'u tüketiyor, "tek repair" implicit garantisi config değişince sessizce bozulurdu).
+`10e1508` ("feat: complete Agent Runtime rev.2 Faz 6 bounded arg repair") zaten HEAD'de duruyordu
+ve local `langgraph-migration`, `origin/langgraph-migration`'ın **2 commit ilerisinde**
+(`b7d03c6`, `10e1508` — ikisi de push'lanmamış). Faz 6 Kısım 2'nin dolu anlatısı artık `10e1508`'in
+commit mesajında kalıcı olarak duruyor (ve şimdi CHANGELOG.md'de de) — bu dosyadan çıkarıp oraya
+işaret ettim; ayrıca CHANGELOG.md'de hiç var olmayan "Faz 6, Part 2" girdisini ekledim (Faz 4/5/
+6-Part-1'in hepsi kendi girdisini almıştı, bu commit'te unutulmuş görünüyor).
 
-**Yapılanlar:**
-1. `jarvis/execution/args_schemas.py`: 12 şemanın hepsine `field_validator(mode="before")`
-   normalizer + (8 tanesine) `model_validator(mode="after")` action-özel zorunlu alan kontrolü +
-   yeni `validate_args(schema_cls, args) -> (ok, errors)` fonksiyonu eklendi.
-2. `prepare_execution_node` (`jarvis/graph/nodes.py`): her tool call için `spec.args_schema`
-   varsa `validate_args()` çalıştırıyor — geçersizse ExecutionRequest MINT ETMİYOR, yeni
-   `invalid_args_calls` state alanına kaydediyor (ham args DEĞİŞMEDEN).
-3. `confirmation_node`: yeni bir pre-gate (duplicate-fingerprint kontrolünden hemen sonra) —
-   `invalid_args_calls` varsa TÜM batch reddediliyor (`[INVALID_ARGS:field]` + `[SKIPPED]` stub'ları,
-   mevcut whole-batch-reject deseniyle aynı), `args_repair_attempted=True` set ediliyor, "agent"a
-   dönüyor. Bu turda İKİNCİ bir geçersiz batch gelirse — dönmüyor, doğrudan dürüst bir final
-   cevap composing edip yeni `confirmation_result="invalid_args_exhausted"` ile END'e gidiyor.
-4. `route_from_confirmation` + `graph.py`: yeni üçüncü dal (`confirmation → END`).
-5. **Mevcut testler düzeltildi** — `test_prepare_execution_node.py`'nin paylaşılan gmail fixture'ı
-   (`{"action": "send", "to": "a@b.c"}`, subject/body eksik) artık YENİ validation'ı gerçekten
-   ihlal ediyordu (9 test kırıldı) — subject/body eklenerek düzeltildi (bu, doğrulamanın
-   ÇALIŞTIĞININ kanıtı, bir regresyon değil).
-6. **54 yeni test (792→846)** — `test_args_schemas.py` genişletildi (normalizer + action-özel
-   required-field testleri, `validate_args()` testleri — dosya 40'tan 84'e çıktı, +44), yeni
-   `tests/test_bounded_repair.py` (10 test — 3 katman: prepare_execution_node izole, confirmation_
-   node zincirlenmiş, GERÇEK derlenmiş graf'ta scripted bir modelin AYNI geçersiz gmail çağrısını
-   iki kez yapıp turun onurlu bir cevapla END'e ulaştığını kanıtlayan uçtan uca test).
+**Neden tekrar oldu (üçüncü kez), akılda tutulması gereken kalıp:** owner bir fazı commit etmeden
+önce "owner'ın kararını bekliyor" diye HANDOFF taslağı yazılıyor; owner commit kararını verince o
+commit'in KENDİSİ HANDOFF/ROADMAP'i de günceller ama taslak metin önceden (commit'ten önce, "henüz
+commit'lenmedi" varsayımıyla) yazıldığı için commit sonrası gerçek duruma göre YENİDEN üretilmiyor.
+Bir dahaki sefere: bir fazı commit ederken HANDOFF/ROADMAP metnini commit'ten SONRAKİ gerçek
+duruma göre (HEAD neye işaret ediyor, push'landı mı) yeniden yaz, önceden hazırlanmış "bekliyor"
+taslağını aynen taşıma.
 
-**Dürüst kalan boşluk (değişmedi):** `@tool` fonksiyon imzaları hâlâ `action: str` — model hâlâ
-serbest metin görüyor. Bu şemalar yalnız `prepare_execution_node`'un dahili kapısında aktif.
+### 2. CI kırmızısının kök nedeni bulundu ve düzeltildi (`scripts/ab_run_config.ps1`)
 
-## Faz 6 Kısım 2 — ikinci review turu: bir P0 iddiası ampirik olarak çürütüldü
+Birkaç oturumdur HANDOFF/ROADMAP "CI kırmızı ama bu oturumun regresyonu değil" diyip geçiyordu,
+hiç kök nedene inilmemişti. `gh run view --log-failed` ile gerçek CI log'una bakıldı:
 
-Owner review'i başka bir GPT'ye gönderdi; o da GERÇEK bir P0 doğruluk sorunu iddia etti: pydantic
-(`_StrictArgs` yalnız `extra="forbid"`, `strict=True` DEĞİL) `"60"` → `60`, `"false"` → `False`
-gibi coercion yapıyor, ama `validate_args()` bu canonical sonucu ATIYOR ve ham args tool'a
-gidiyor — iddiaya göre `ItuMailArgs(reply_all="false")` validation'dan geçer ama tool ham
-`"false"` string'ini görür, Python'da bu truthy olduğu için `if reply_all:` yanlışlıkla True
-çalışır.
+- **`python` job (BLOCKING, continue-on-error değil) gerçekten kırmızı** —
+  `tests/test_ab_harness_guards.py::test_ps_wrapper_propagates_driver_failure_exit_code` düşüyor:
+  `assert proc.returncode != 0` başarısız, çünkü `ab_run_config.ps1:39`'daki
+  `$Py = "$Repo\.venv\Scripts\python.exe"` GitHub Actions runner'ında yok (CI `requirements-lock.txt`'i
+  runner'ın sistem Python'ına kuruyor, venv oluşturmuyor — `ci.yml`). `& $Py ...` çağrısı
+  `CommandNotFoundException` fırlatıyor; script'in tepesindeki `$ErrorActionPreference = "Continue"`
+  yüzünden bu HATA SCRIPT'İ DURDURMUYOR, `$LASTEXITCODE` önceki bir `git` komutundan kalan `0`'ı
+  taşıyor, wrapper "ölçüm geçerli" sanıp `exit 0` ile çıkıyor — **bu dosyanın kendi felsefesinin
+  ("a harness that cannot measure must never emit a plausible-looking zero") tam olarak yakalamaya
+  çalıştığı hata sınıfı, ama test altyapısının kendisinde, driver'da değil.**
+  **Düzeltme:** `$Py` yoksa `py`/`python`/`python3` adaylarını sırayla dene, ama sadece
+  `Get-Command`'ın BULMASI yetmiyor — gerçekten `--version` çalıştırıp exit code'u doğrula. Bu ayrım
+  gerçek: bu dev makinede çıplak `python`/`python3` Windows'un App Execution Alias stub'ları (Store'dan
+  yükle nag'i basıp exit 9009 ile çıkıyor), sadece `py` gerçek bir yorumlayıcıya çözülüyor —
+  canlı test edilerek bulundu, varsayılmadı. Hiçbir aday çalışmazsa script artık sessizce devam
+  etmek yerine gürültülü `exit 1` ile duruyor.
+  **Doğrulama seviyesi (dürüstçe):** dev makinede `.venv` var olan asıl yol hiç değişmedi (17/17
+  `test_ab_harness_guards.py` + 857 tam paket yeşil). Fallback dalının PowerShell mekaniği izole
+  test edildi (gerçekten `py`'yi seçip bozuk `python`/`python3` stub'larını atladığı doğrulandı).
+  Kod `a06cbd2`'de commit'lendi. **Ama bu satırlar yazıldığı anda henüz push edilmedi, gerçek bir
+  CI çalıştırmasına karşı henüz teyit edilmedi** — owner bu oturumda 3 commit sonrası tek seferde
+  push edilmesini onayladı; push (ve ardından gerçek CI sonucu) bu oturumun kalan adımı, bu
+  cümlenin yazıldığı andan sonra gerçekleşiyor — güncel sonuç için bu dosyanın en altındaki
+  "Ortam / komutlar" bölümü yerine doğrudan `git log`/`gh run list` çalıştır.
+- **`mobile` job kırmızı ama BLOCKING DEĞİL** (`continue-on-error: true`) — `flutter analyze` 71
+  adet salt "info"/"warning" seviyeli sorun buluyor (çoğu `withOpacity` deprecation, düzinelerce
+  dosyada), gerçek bir hata değil. Kapsamı bu oturumun "kaldığımız yerden devam" hedefine göre
+  orantısız büyük bir kozmetik temizlik olduğu için DOKUNULMADI — bilinçli, orantılı bir kapsam
+  kararı, unutkanlık değil.
 
-**Bu iddiayı AMPİRİK OLARAK test ettim (JARVIS'in GERÇEK, registry'deki tool objelerine karşı,
-varsayımla değil) ve İDDİA BU CODEBASE İÇİN YANLIŞ ÇIKTI:**
+### 3. `tool_call_fingerprint` case/whitespace normalizasyonu (`jarvis/graph/tool_accounting.py`)
 
-```python
-from jarvis.graph import tools as graph_tools
-calendar = by_name["google_calendar"]
-itu_mail = by_name["itu_mail"]
-itu_mail.args_schema(action="reply", uid="1", body="hi", reply_all="false").reply_all
-# → False (bool), STRING DEĞİL
-calendar.args_schema(action="create", ..., duration_minutes="60").duration_minutes
-# → 60 (int), STRING DEĞİL
-```
+Faz 6 Kısım 2'nin ikinci review turunun bulup "bu oturumda düzeltilmedi, ayrı iyileştirme" diye
+bıraktığı gerçek ama düşük ciddiyetteki boşluk: fingerprint ham `args`'ı hash'liyordu, yani
+`action="send"` ile `action=" SEND "` farklı hash üretiyordu — aynı turda modelin biçim farkıyla
+retry ettiği bir çağrı duplicate-tespitinden kaçabiliyordu. **Düzeltme:** yalnızca `action`
+alanı (varsa ve string ise) hash'lenmeden önce `.strip().lower()` ile normalize ediliyor —
+`jarvis.execution.args_schemas`'ın zaten AYNI alan için yaptığı normalizasyonla birebir tutarlı
+(kör bir "tüm string'leri normalize et" DEĞİL — email body/arama sorgusu/dosya yolu gibi diğer
+alanlar bilerek ham kalıyor, çünkü onlar gerçekten case-sensitive). Kalıcılık riski yok:
+`jarvis/execution/idempotency.py`'nin journal'ı `execution_id`'yi PRIMARY KEY yapıyor, fingerprint
+sadece açıklayıcı bir kolon, hiçbir yerde lookup key değil — algoritma değişikliği eski satırları
+bozmuyor. 4 yeni test eklendi (`tests/test_tool_limits.py`): case/whitespace eşitliği, diğer
+alanların hâlâ case-sensitive kaldığının regresyon testi, non-string `action`'ın crash etmediği,
+ve fonksiyonun çağıranın orijinal `args` dict'ini mutate etmediği.
 
-Sebep: `jarvis/graph/tools.py`'deki HER `@tool` fonksiyonu için LangChain KENDİ pydantic şemasını
-fonksiyonun type hint'lerinden OTOMATİK üretiyor (`tool.args_schema` — benim
-`jarvis.execution.args_schemas`'ımdan TAMAMEN BAĞIMSIZ, ve Faz 1'den beri, `@tool` kullanan HER
-fonksiyon için var). `ToolNode`'un GERÇEK dispatch'i (`jarvis/graph/safe_tools.py`'nin
-`make_safe_tool_node`'u — `ToolNode`'u SARIYOR, yerine geçmiyor, doğrulandı) bu şemadan GEÇEREK
-tool fonksiyonunu çağırıyor — yani `"false"` string'i asla fonksiyon gövdesine ulaşmıyor, ondan
-ÖNCE LangChain'in kendi (Faz 6'dan tamamen bağımsız, ondan çok önce var olan) coercion katmanında
-`False`'a dönüşüyor. Benim `jarvis.execution.args_schemas` katmanım bu coercion'ı YAPMIYOR —
-ihtiyacı yok, çünkü execution zaten LangChain'in kendi coercion'ından geçiyor. Benim katmanımın
-GERÇEK, ÇAKIŞMAYAN katkısı: action-Literal enum kısıtı (LangChain'in auto-şeması `action: str`'ı
-serbest bırakıyor), action-özel zorunlu alan kontrolü (her parametrenin default'u var, LangChain
-her şeyi opsiyonel sanıyor), ve unknown-field reddi (**ampirik olarak doğrulandı: LangChain'in
-auto-şeması bilinmeyen bir field'ı SESSİZCE KABUL EDİYOR** — `_StrictArgs`'ın `extra="forbid"`'ı
-GERÇEK, tekrarsız bir güvenlik katkısı, süsleme değil).
-
-Bunu kanıtlayan 5 yeni test: `tests/test_langchain_dispatch_coercion.py` (gerçek `google_calendar`/
-`itu_mail` tool objelerine karşı, coercion + reddedilen-değer + bilinmeyen-field davranışını +
-`make_safe_tool_node`'un gerçekten `ToolNode`'u sardığını doğruluyor).
-
-**Review'in TEK gerçek ama Faz 6'dan BAĞIMSIZ, ÖNCEDEN VAR OLAN bulgusu:** `tool_call_fingerprint`
-ham args üzerinden hash'liyor, yani `"send"` ile `" SEND "` farklı fingerprint üretir — semantic
-duplicate koruması bunu yakalamaz. Bu GERÇEK ama (a) Faz 1B'nin fingerprint tasarımının bir
-özelliği, Faz 6'nın YENİ bir regresyonu değil, (b) düşük ciddiyette (bir modelin AYNI mantıksal
-çağrıyı rastgele büyük/küçük harf farkıyla retry etmesi alışılmadık). Bu oturumda DÜZELTİLMEDİ —
-ayrı, kapsam dışı bir iyileştirme olarak not edildi.
-
-**İkinci gündem: 841 vs 846/853 test sayısı "tutarsızlığı" — YENİ bir hata değil.** "841" bu
-oturumun DAHA ÖNCEKİ bir aşamasında (Faz 6 Kısım 2 başlamadan önce) zaten yakalanıp `b7d03c6`
-commit'iyle 792'ye düzeltilmişti — ama o commit hiç PUSH edilmemişti, dış review'in GitHub okuması
-hâlâ eski (yanlış) sayıyı içeren `8613bfc`'yi görüyordu. Yeni bir tutarsızlık değil, push
-edilmemiş bir düzeltme. `--collect-only` ile istenen kesin dosya bazlı sayım:
-```
-tests/test_args_schemas.py               -> 84 tests
-tests/test_bounded_repair.py              -> 12 tests
-tests/test_tool_registry_schemas.py       -> 5 tests
-tests/test_blocked_reason_code.py         -> 12 tests
-tests/test_langchain_dispatch_coercion.py -> 5 tests   (yeni)
-Toplam bu 5 dosya: 118 test
-```
-
-**Ayrıca eklenen 2 test** (review'in listesindeki, gerçekten eksik olan iki nokta): turn başına
-`args_repair_attempted`'ın gerçekten `False`'a sıfırlandığını `chat()` seviyesinde kanıtlayan test,
-ve `invalid_args_exhausted` yolunun `chat()`'in döndürdüğü GERÇEK, boş olmayan cevaba ulaştığını
-kanıtlayan test — ikisi de `tests/test_bounded_repair.py`'ye eklendi (10→12).
-
-## Ortam / komutlar — TÜM dosya değişiklikleri (dokümantasyon dahil) TAMAMLANDIKTAN SONRAKİ gerçek çıktı
+## Ortam / komutlar — commit 1+2'den SONRAKİ, docs commit'inden HEMEN ÖNCEKİ gerçek çıktı
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python -m pytest -q                      # 853 passed, 288 warnings in 200.51s
+python -m pytest -q                      # 857 passed, 288 warnings in 190.00s (853+4 yeni, doğrudan pytest çıktısından — tahmin değil)
 ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py
                                           # All checks passed!
-git diff --check                         # (temiz, exit 0)
+git diff --check                         # exit 0 (yalnızca LF/CRLF advisory, gerçek hata yok)
+git log --oneline -4
+#  cf769b2 fix(runtime): normalize tool action fingerprints
+#  a06cbd2 fix(ci): resolve a working Python interpreter in AB harness
+#  10e1508 feat: complete Agent Runtime rev.2 Faz 6 bounded arg repair
+#  b7d03c6 docs: fix a real arithmetic error (841 -> 792) and catch up docs to reality
 git status --short
-#  M jarvis/agent.py
-#  M jarvis/execution/args_schemas.py
-#  M jarvis/graph/graph.py
-#  M jarvis/graph/nodes.py
-#  M jarvis/graph/state.py
-#  M tests/test_args_schemas.py
-#  M tests/test_prepare_execution_node.py
-# ?? tests/test_bounded_repair.py
-# ?? tests/test_langchain_dispatch_coercion.py
-#  M HANDOFF.md / ROADMAP.md               (bu dokümantasyon güncellemesinin kendisi)
-#  M .claude/settings.local.json           (ilgisiz, bu oturumdan önce de duruyordu)
+#  M .claude/settings.local.json          (ilgisiz, hiçbir commit'e girmiyor)
+#  M HANDOFF.md / ROADMAP.md / CHANGELOG.md   (bu dokümantasyon güncellemesi — 3. commit, henüz yapılmadı)
 ```
-HEAD şu an `b7d03c6` (Faz 6 Kısım 2 henüz commit'lenmedi, yukarıdaki diff working tree'de).
+Owner'ın talimatıyla 3 ayrı commit'ten ilk ikisi landed: `a06cbd2` (CI fix), `cf769b2` (fingerprint
+fix). Bu dosyanın kendisi + ROADMAP.md + CHANGELOG.md 3. commit olarak ayrı gidecek (mesaj:
+"docs: reconcile Faz 6 status and follow-up fixes"), ardından owner'ın onayıyla tek seferde
+`git push origin langgraph-migration` (fast-forward, force YOK). Push + gerçek CI sonucu bu
+dosyaya yansımadı — bu commit'ten SONRA olacak bir şeyin bu commit içinde doğru anlatılması mümkün
+değil; güncel durum için `git log`/`gh run list --branch langgraph-migration` çalıştır.
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Owner'ın Faz 6 Kısım 2 commit kararı bekliyor.**
+1. **Push'un gerçek CI sonucu teyit edilmeli** — bu oturumun kendisi push edip `gh run watch` ile
+   izleyecek olsa da, bir sonraki oturum açılışta yine de `gh run list --branch langgraph-migration
+   --limit 3` ile `python` job'ının gerçekten yeşile döndüğünü doğrulasın (`mobile` job'ının
+   flutter-analyze kırmızısı `continue-on-error: true` olduğu için beklenen/bilinen, o kalacak —
+   71 info/warning seviyeli kozmetik uyarı, bu oturumda bilinçli olarak dokunulmadı). Eğer `python`
+   job hâlâ kırmızıysa: mevcut commit'leri amend/force-push ETME, gerçek log'u incele ve ayrı bir
+   follow-up commit aç.
 2. **Faz 6, Kısım 3 (hâlâ yapılmayanlar, bilinçli):**
    - `@tool` fonksiyon imzalarını doğrulanmış Literal'lere terfi ettirmek (modelin GÖRDÜĞÜ şemayı
-     sıkılaştırmak) — Kısım 2 sonrası hâlâ ertelendi, şimdi dahili validation canlı trafikte bir
-     süre gözlemlenip (audit_log'daki `blocked_invalid_args` oranı) ölçüldükten sonra gündeme
-     gelmeli.
+     sıkılaştırmak) — dahili validation canlı trafikte bir süre gözlemlenip (audit_log'daki
+     `blocked_invalid_args` oranı) ölçüldükten sonra gündeme gelmeli.
    - "Alternatif capability" (planın "tek repair → alternatif capability → açık hata" ladder'ının
      ortadaki basamağı) hiç yapılmadı — yalnız "tek repair → açık hata" var.
-   - `tool_call_fingerprint`'in ham args üzerinden hash'lemesi (Faz 1B, Faz 6'dan bağımsız,
-     ÖNCEDEN VAR OLAN bir tasarım) `"send"` ile `" SEND "`'i farklı fingerprint yapıyor —
-     semantic duplicate koruması case/whitespace farkını yakalamıyor. İkinci review turunda
-     bulundu, gerçek ama düşük ciddiyette (bir modelin aynı çağrıyı rastgele biçim farkıyla retry
-     etmesi alışılmadık); bu oturumda düzeltilmedi, ayrı bir iyileştirme olarak not edildi.
-3. CI kırmızı (bu oturumun regresyonu değil — bkz. bir önceki oturum notu, `test_ab_harness_
-   guards.py` + `flutter analyze`, ikisi de pre-existing).
-4. Diğer Faz 5 kalan işleri (değişmedi): API'nin gerçek per-client conversation_id desteği yok;
+3. Diğer Faz 5 kalan işleri (değişmedi): API'nin gerçek per-client conversation_id desteği yok;
    `run_manifest.json`'ın prompt hash/registry version alanları boş; `plot_data` dışındaki
    artifact tool'ları run-scoped değil.
-5. Canlı A/B'nin B6 sorusu hâlâ açık (değişmedi). Şampiyon 62/65 referansı kontamine (değişmedi).
-6. Bilinçli ertelenenler (değişmedi): W4b, `[BLOCKED]` sunum katmanı, qwen3.5/ministral-3
-   thinking-on, `stoic-spence` rolling summarization, `docs/ARCHITECTURE.md` orchestrator bölümü.
+4. Canlı A/B'nin B6 sorusu hâlâ açık (değişmedi). Şampiyon 62/65 referansı kontamine (değişmedi).
+5. Bilinçli ertelenenler (değişmedi): W4b, `[BLOCKED]` sunum katmanı, qwen3.5/ministral-3
+   thinking-on, `stoic-spence` rolling summarization, `docs/ARCHITECTURE.md` orchestrator bölümü,
+   mobile'ın 71 flutter-analyze info/warning'i (madde 1'de detay — bilinçli olarak kapsam dışı
+   bırakıldı, unutulmadı).
 
 ## Değişmeyen taşınan işler
 - 8 direct-Gemini modülün shared gateway'e migrasyonu (Sprint 3) — kapsam dışı.

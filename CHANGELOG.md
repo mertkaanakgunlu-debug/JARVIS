@@ -6,6 +6,88 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 6, Part 2] — 2026-07-22
+
+**Internal typed validation goes live** on the 12 priority capabilities (plot_data + 11
+action-dispatch tools) Part 1 defined but left unwired. `jarvis.execution.args_schemas` gained
+`field_validator(mode="before")` normalizers and action-specific required-field validation
+(verified against each tool's actual dispatch body — calendar.py/gmail.py/drive.py/itu_mail.py/
+finance.py/spotify.py, plus schedule/todo/gcp_quota/geo_math's inline dispatches — not inferred
+from docstrings), plus a new `validate_args()` returning structured `validation_errors` (pydantic's
+own `ValidationError.errors()`, trimmed to `loc`/`type`/`msg` — `input`/`url`/`ctx` dropped since
+`input` echoes the raw argument value and this codebase's redaction discipline forbids persisting
+that unredacted).
+
+`prepare_execution_node` now runs `validate_args()` as a **reject-only gate**: a call that fails
+validation gets no `ExecutionRequest` minted and is recorded in a new `invalid_args_calls` list
+instead — raw args are never substituted back into the call, so the signed/fingerprinted digest and
+what actually executes can never diverge (the exact risk Part 1's own docstring flagged, closed by
+construction here rather than by careful propagation).
+
+`confirmation_node` gained an explicit, config-independent **bounded-repair state machine**: an
+`invalid_args_calls` pre-gate whole-batch-rejects on the first invalid attempt, sets a turn-scoped
+`args_repair_attempted` flag, and routes back to the agent for exactly one corrected retry; a second
+invalid attempt in the same turn routes straight to a new `route_from_confirmation` END branch with
+a composed, honest final answer instead of looping the agent again — deliberately not implicit in
+`max_tool_rounds_per_turn` (a rejected batch also consumes that budget, so the "one repair" guarantee
+would silently break if that config ever changed).
+
+A second external review round raised a P0 correctness claim against "raw args execute unchanged":
+that pydantic's lax coercion (`"false"` → `False`) being discarded by `validate_args()` would let a
+raw string reach tool execution and corrupt truthy/type-sensitive logic. **Empirically refuted**
+against JARVIS's real registered tool objects, not argued abstractly
+(`tests/test_langchain_dispatch_coercion.py`): every `@tool` function already has LangChain
+auto-generate its own pydantic schema from the function's type hints, independent of and predating
+`jarvis.execution.args_schemas`, and `make_safe_tool_node()` wraps rather than bypasses `ToolNode`'s
+dispatch through that schema — `"false"`/`"60"` are already coerced to `False`/`60` before any tool
+body runs. The same investigation confirmed `args_schemas`' `extra="forbid"` is a genuine,
+non-redundant addition: LangChain's own auto-derived schema silently accepts unknown fields.
+
+**61 new tests since the 792 baseline** (`test_args_schemas.py` 40→84, new `test_bounded_repair.py`
+with 12, new `test_langchain_dispatch_coercion.py` with 5) plus 9 pre-existing
+`test_prepare_execution_node.py` tests fixed, not disabled (a shared fixture predated required-field
+validation and was missing `subject`/`body` — now correctly rejected, confirming the validation
+works). **853 pytest green, ruff clean, `git diff --check` clean.**
+
+**Deliberately not done:** no `@tool` function signature in `jarvis/graph/tools.py` promotes any of
+this to the live, model-facing schema yet (the model still sees free-text `action: str`) — pending
+shadow-traffic measurement of how often `blocked_invalid_args` actually fires. `tool_call_fingerprint`
+hashing raw args (so `"send"` vs `" SEND "` evaded same-turn duplicate detection) was found in the
+same review round, real but pre-existing/Faz-6-independent — fixed the same day, see the entry
+below.
+
+---
+
+## [Agent Runtime rev.2 — Faz 6, Part 2 follow-ups] — 2026-07-22
+
+Two small, independent fixes for gaps Part 2's review surfaced, landed as separate commits per the
+owner's request (independently revertible) rather than bundled:
+
+- **`tool_call_fingerprint` normalizes `action`** (`cf769b2`: `.strip().lower()`, mirroring what
+  every action-dispatch tool's own body already does) before hashing — `"send"` and `" SEND "` now
+  fingerprint identically, closing the same-turn duplicate-detection gap. Every other arg still
+  hashes raw (an email body or search query genuinely differs by case). No persistence concern:
+  `jarvis/execution/idempotency.py`'s journal keys on `execution_id`, not this fingerprint — the
+  digest is a descriptive column only, never a lookup key.
+- **`scripts/ab_run_config.ps1`'s CI-only failure root-caused and fixed** (`a06cbd2`): `$Py` was
+  hardcoded to `$Repo\.venv\Scripts\python.exe`, which doesn't exist on the GitHub Actions runner
+  (CI installs `requirements-lock.txt` into the system Python, no venv) — `& $Py ...` failed with
+  `CommandNotFoundException`, a non-terminating error under this script's own
+  `$ErrorActionPreference="Continue"`, so the script sailed on with a stale `$LASTEXITCODE` left over
+  from an earlier `git` call and reported a false "run succeeded". Now falls back to a PATH-resolved
+  interpreter, verified by actually running `--version` (not just located — Windows App Execution
+  Alias stubs resolve via `Get-Command` but fail when run) before trusting it; aborts loudly if
+  nothing usable is found. This was the actual cause of `tests/test_ab_harness_guards.py`'s CI-only
+  failure carried as "pre-existing, not this session's regression" across several prior sessions.
+
+**857 pytest green (853+4 new fingerprint tests), ruff clean, `git diff --check` clean.** The CI fix
+is verified locally (no regression on the `.venv`-present path; the PATH-fallback logic itself
+isolate-tested against this dev machine's own broken `python`/`python3` stubs) but not yet confirmed
+against a live GitHub Actions run at commit time — see [HANDOFF.md](HANDOFF.md) for the push/CI
+outcome once it exists.
+
+---
+
 ## [Agent Runtime rev.2 — Faz 6, Part 1] — 2026-07-22
 
 **Typed schemas — definitions only, deliberately not wired anywhere yet.** New

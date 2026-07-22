@@ -46,41 +46,40 @@ claims, run-to-run variance) — an execution-contract runtime so JARVIS uses *a
 reliably, not new domain tools. Full plan (9 phases, **also numbered Faz 0-8 — do not confuse
 with the table above**, always qualified as "Agent Runtime rev.2" in code/docs):
 `C:\Users\mertk\.claude\plans\c-users-mertk-desktop-gpt-analysis-md-s-delegated-scone.md`.
-Status: Faz 0-6(Part 1) are done, committed, and pushed as of 2026-07-22 (`f4b7609` / `9c0ca15`
-/ `5eae027` / `cb2b1a2` / `8613bfc`, `langgraph-migration` in sync with `origin`). **Faz 6 Part 2
-is built and tested but not yet committed** (HEAD is still `b7d03c6`): `prepare_execution_node`
-now runs `jarvis.execution.args_schemas.validate_args()` as a reject-only gate (raw args are
-never substituted — validation normalizers exist only to make the accept/reject decision
-accurate, matching what every dispatch function already does internally; this closes a
-digest/execution divergence risk an external review of Part 1 caught), and `confirmation_node`
-gained an explicit, config-independent bounded-repair state machine: first invalid batch →
-whole-batch reject with one guaranteed retry; second invalid batch in the same turn → straight to
-END with a composed honest answer (new `route_from_confirmation` branch). Still not done, by
-design: no live `@tool` function signature promotes these schemas (the model still sees free-text
-`action: str`) — see HANDOFF.md for the full reasoning.
+Status: Faz 0-6 (Part 1 and Part 2) are done and committed as of 2026-07-22 (`f4b7609` /
+`9c0ca15` / `5eae027` / `cb2b1a2` / `8613bfc` / `b7d03c6` / `10e1508`). Part 2: `prepare_execution_node` now
+runs `jarvis.execution.args_schemas.validate_args()` as a reject-only gate (raw args are never
+substituted — validation normalizers exist only to make the accept/reject decision accurate,
+matching what every dispatch function already does internally; this closes a digest/execution
+divergence risk an external review of Part 1 caught), and `confirmation_node` gained an explicit,
+config-independent bounded-repair state machine: first invalid batch → whole-batch reject with one
+guaranteed retry; second invalid batch in the same turn → straight to END with a composed honest
+answer (new `route_from_confirmation` branch). Still not done, by design: no live `@tool` function
+signature promotes these schemas (the model still sees free-text `action: str`) — see
+[CHANGELOG.md](CHANGELOG.md)'s "Faz 6, Part 2" entry for the full reasoning (including the P0
+pydantic-coercion claim raised by a second review round and empirically refuted against JARVIS's
+real registered tool objects, not argued abstractly — `tests/test_langchain_dispatch_coercion.py`).
+853 pytest green at that commit — 792 baseline + 61 new, verified by direct arithmetic (see
+CHANGELOG for the breakdown), ruff clean, `git diff --check` clean.
 
-A second external review round raised a P0 concern about that "raw args execute unchanged" design
-(pydantic coercion discarded, e.g. `reply_all="false"` → semantic corruption at execution) —
-**empirically refuted against JARVIS's real registered tool objects**: every `@tool` function
-already gets its own LangChain-auto-derived schema (independent of and predating
-`jarvis.execution.args_schemas`), and `make_safe_tool_node` wraps rather than bypasses `ToolNode`
-dispatch through it — so `"false"`/`"60"` are already coerced to `False`/`60` before any tool body
-runs, confirmed directly (`tests/test_langchain_dispatch_coercion.py`, 5 new tests against the
-real `google_calendar`/`itu_mail` tool objects — which also incidentally proved
-`jarvis.execution.args_schemas`' `extra="forbid"` is a genuine, non-redundant addition, since
-LangChain's own auto-schema silently accepts unknown fields). One real but pre-existing,
-Faz-6-independent gap surfaced in the process: `tool_call_fingerprint` hashes raw args, so
-`"send"` vs `" SEND "` bypasses semantic duplicate detection — not fixed this session (separate,
-low-severity). 853 pytest green — 792 baseline + 61 new (44 in test_args_schemas.py [40→84] + 12 in the
-brand-new test_bounded_repair.py + 5 in the brand-new test_langchain_dispatch_coercion.py =
-44+12+5=61, 792+61=853, verified by direct arithmetic, not estimated). Separately (no count
-change), 9 pre-existing tests in test_prepare_execution_node.py were fixed, not added, to a
-fixture that predated required-field validation. Ruff clean, `git diff --check` clean — this count was taken
-**after** all file changes including documentation, addressing a fair staleness critique from the
-first report. CI is red on this branch (GitHub Actions `python`/`mobile` jobs) but pre-existing,
-not caused by any of this session's work — confirmed identical failures across every push before
-this session started too. See [MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and
-[HANDOFF.md](HANDOFF.md) for the current detail.
+**2026-07-22, later same day:** picking the branch back up found HANDOFF.md/ROADMAP.md still
+describing Part 2 as uncommitted — the third time this exact stale-docs pattern has happened (see
+`8613bfc`, `8b3cd1f`) — corrected, see [HANDOFF.md](HANDOFF.md). Two real, small gaps that
+surfaced during Part 2's review got fixed and committed as their own separate commits, per the
+owner's explicit instruction (independent fixes, independently revertible): `tool_call_fingerprint`
+now normalizes `action` (`.strip().lower()`, matching what `args_schemas` already does for the same
+field) before hashing, closing a same-turn duplicate-detection gap (`"send"` vs `" SEND "` used to
+fingerprint differently) — `cf769b2`; and this branch's CI red — carried across several sessions as
+"pre-existing, not investigated" — was root-caused to `scripts/ab_run_config.ps1` hardcoding a
+`.venv` path that doesn't exist on the GitHub Actions runner, silently producing a false "success"
+exit code under the script's own `$ErrorActionPreference="Continue"` rather than the loud failure
+its own guard tests exist to require; fixed with a verified (not just located) PATH fallback —
+`a06cbd2`. This doc-sync itself is a third, separate commit. All three land together, then push in
+one shot per the owner's instruction — the CI fix specifically hasn't been confirmed against a live
+GitHub Actions run yet (that confirmation only becomes possible once pushed) — see HANDOFF.md for
+exact verification tiers and the live push/CI outcome once it exists. See
+[MEMORY.md](MEMORY.md)'s own "Agent Runtime rev.2" section and [HANDOFF.md](HANDOFF.md) for the
+current detail.
 
 ---
 
