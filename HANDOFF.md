@@ -18,11 +18,34 @@ owner bu ikisinin diff'ini başka bir modele (Sonnet) bağımsız review'a soktu
 çıktı, hepsi kodda tek tek doğrulandı (biri chromadb'nin kendi kaynağına kadar inildi), hepsi
 düzeltildi ve test edildi.
 
-**COMMIT DURUMU:** bu oturumda 8 iş commit'i push'landı (Faz 8: `7d6a7af`; Electron UI: `52d0b72`;
-review'ın 4 bulgusu: `599066d`, `7136690`, `5645ae2`, `3c6c05a`) + aralarında 2 docs commit'i
-(`8b451dc`, `8e3977e`) ve bu kapanış docs commit'i. Oturum sonunda local == origin senkrondu.
-Kalıcı kural gereği kapanış commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına `gh run list
---branch langgraph-migration` ile bakın. (`.claude/settings.local.json` her zamanki gibi hariç.)
+**COMMIT DURUMU:** bu oturumda 9 iş commit'i push'landı (Faz 8: `7d6a7af`; Electron UI: `52d0b72`;
+review'ın 4 bulgusu: `599066d`, `7136690`, `5645ae2`, `3c6c05a`; **canlı CI'da yakalanan bir
+izleme-sonrası düzeltme**: `0687772` — bkz. aşağıdaki "CI'da yakalanan" notu) + aralarında 2 docs
+commit'i (`8b451dc`, `8e3977e`) ve bu kapanış docs commit'i. Oturum sonunda local == origin
+senkrondu. Kalıcı kural gereği kapanış commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına
+`gh run list --branch langgraph-migration` ile bakın. (`.claude/settings.local.json` her zamanki
+gibi hariç.)
+
+**CI'da yakalanan, docs commit'inden SONRA çıkan bir 5. sorun (`0687772`), CANLI DOĞRULANDI:**
+`4a37222`'i push ettikten sonra CI'ı izlerken `electron` job'ının `npm ci` adımında gerçekten
+kırıldığını gördüm — `vitest@^4.1.10` (review'a yanıt olarak eklenirken "latest" seçilmişti, ne
+sürüklediği kontrol edilmeden) kendi içinde `vite@7`'yi (esbuild 0.27/0.28 gerektiren) taşıyor;
+bu, projenin zaten sahip olduğu `vite@^5.4.0`/esbuild@0.21.5 kuşağıyla çakışan İKİNCİ bir nesil.
+Yerel npm (11.16.0) bunu gevşek çözmüş, CI'nın npm'i (workflow "20" istese de GitHub artık zorla
+Node 24'e geçiriyor, farklı bir npm geliyor) daha katıymış ve lockfile'ı reddetmiş. Düzeltme:
+`vitest@^2.1.9`'a geçildi (aynı `vite@5` kuşağını hedefleyen en yeni majör — ikinci nesil hiç
+girmiyor). Bu kez "düzelttim" demeden önce `node_modules` silinip CI'ın attığı `npm ci` komutu
+BİREBİR yerel çalıştırıldı, sonra test+build. Dürüst not: `npm audit` artık 8 önceden-var
+advisory gösteriyor (5'ten) — hepsi electron/vite/esbuild/babel'ın ZATEN var olan CVE'leri,
+vitest'in kendi vite-node/mocker'ı aynı zincire farklı yollardan değiyor; düzeltmeleri kırıcı
+sürüm atlamaları (electron 43, vite 8) gerektiriyor, bu oturumun kapsamı dışında — sessizce
+ertelenmedi, burada görünür kılındı.
+
+`0687772`'nin CI run'ı (29989343268) canlı izlendi: **`python` job SUCCESS, `electron` job
+SUCCESS** (`npm ci`/`npm test`/`npm run build` üçü de gerçekten geçti), `mobile` job bilinen
+kozmetik `flutter analyze` hatası (continue-on-error, run'ın genel `conclusion`'ını
+etkilemiyor) — run'ın genel sonucu **success**. Bu, bugünün TÜM commit zincirinin (Faz 8'den bu
+son düzeltmeye kadar) bağımsız CI'da uçtan uca yeşil olduğunun canlı kanıtı.
 
 ### Faz 8 + Electron confirmation UI — özet (detay: CHANGELOG.md)
 
@@ -81,11 +104,11 @@ ampirik doğrula, körü körüne uygulama" disiplini (bkz. [[project-agent-runt
 ### Canlı doğrulama (2026-07-23, bu oturumda koşuldu)
 
 ```powershell
-python -m pytest -q       # 1263 passed, 0 failed (206s) — FULL suite
+python -m pytest -q       # 1263 passed, 0 failed (206s) — FULL suite, yerel
 # chromadb flake tekrar testi (4 dosya x 15 tur):  DONE: 0/15 rounds failed
 ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py scripts/alpha_gate.py   # All checks passed!
-cd electron && npm test && npm run build   # 13/13 vitest passed; build clean
-git log --oneline -9      # (en üstte bu dosyayı yazan kapanış commit'i) 3c6c05a, 5645ae2, 7136690, 599066d, 8e3977e, 52d0b72, 8b451dc, 7d6a7af, e694819
+cd electron && npm ci && npm test && npm run build   # vitest@2.1.9, 13/13; build clean; npm ci de dahil (CI'ın attığı komutun birebiri)
+gh run view 29989343268 --json jobs   # bu oturumun SON push'unun CI'ı: python SUCCESS, electron SUCCESS, mobile bilinen kozmetik fail (continue-on-error) — genel conclusion: success
 ```
 
 ## SONRAKİ OTURUM — kalan iş
@@ -105,6 +128,9 @@ git log --oneline -9      # (en üstte bu dosyayı yazan kapanış commit'i) 3c6
    process pytest'in kendisi bittiğinde zaten temizleniyor). Repo-geneli bir "her Memory()
    testi close() etsin" taraması yapılmadı — orantısız kapsam genişlemesi olurdu, ayrı bir
    oturumun işi olabilir.
+   `electron/`'da `npm audit` 8 önceden-var advisory gösteriyor (electron/vite/esbuild/babel'ın
+   kendi CVE'leri, bu oturumdan önce de vardı) — düzeltmeleri kırıcı sürüm atlamaları (electron
+   43, vite 8) gerektiriyor, bilinçli olarak ertelendi.
 6. Eski kalanlar (değişmedi): `workflow_start` JSON `steps` güvenilirliği; gerçek CLI REPL E2E;
    Faz 6 Kısım 3 Literal-terfi; Faz 5 kalanları; canlı A/B B6 sorusu; 4 worktree branch; mobile
    flutter-analyze info/warning.

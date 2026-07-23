@@ -77,6 +77,22 @@ discipline this repo's external-review responses have followed before.
 
 Full suite 1263 passed, 0 failed; ruff clean; `npm test`/`npm run build` clean.
 
+**Caught by watching the actual CI run after pushing, not assumed clean:** the `electron` job's
+`npm ci` step failed on the pushed lockfile — `vitest@^4.1.10` (installed as "latest" without
+checking what it drags in) bundles its own newer `vite@7` (needs esbuild 0.27/0.28) alongside
+this project's existing `vite@^5.4.0`/esbuild@0.21.5, two generations in one tree; local npm
+(11.16.0) resolved that optional peer loosely, the CI runner's npm (bundled with the Node 24
+GitHub now force-substitutes for the workflow's requested Node 20) rejected the lockfile outright.
+Fixed by moving to `vitest@^2.1.9` — the newest major still targeting the same `vite@5`
+generation, so no second generation enters the tree at all. Verified this time by deleting
+`node_modules` and running the CI step's exact `npm ci` locally before trusting it, then
+re-confirmed on a real CI run (29989343268): `python` SUCCESS, `electron` SUCCESS, `mobile`'s
+known cosmetic `flutter analyze` failure unrelated (continue-on-error) — overall run success.
+Honest note: `npm audit` now shows 8 pre-existing dev-tooling advisories (was 5) — all
+electron/vite/esbuild/babel CVEs that predate this session, surfaced through more transitive
+paths now that vitest's own vite-node/mocker touch the same chain; fixes require breaking
+upgrades (electron 43, vite 8) out of scope here, left visible rather than silently deferred.
+
 ---
 
 ## [Agent Runtime rev.2 — Faz 8: Evaluation v2 + the alpha-gate instrument] — 2026-07-23
