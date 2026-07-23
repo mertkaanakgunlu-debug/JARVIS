@@ -77,8 +77,8 @@ exact action tables.
   - **API**: `POST /chat` now catches `ConfirmationRequired` and returns
     `{"confirmation_required": true, "id": ..., "payload": ...}` instead of an opaque 500
     (BUG-confirm-payload); `POST /chat/stream` already carried the JSON marker through as an SSE
-    frame. A client still needs to actually build a UI around this — **not done this phase**
-    (no Electron/mobile UI renders a confirmation prompt yet; see Known limits below).
+    frame. The Electron HUD builds a real UI around this since 2026-07-23 (`52d0b72`); mobile
+    still doesn't — see Known limits below.
 - The system prompt (`jarvis/prompts/core/02_tool_policy.md`) no longer tells the model it never
   needs to ask — it now says the system itself pauses for risky actions and describes how to react
   to an approval/denial coming back.
@@ -173,10 +173,13 @@ exact action tables.
 
 ## Known limits (honest, not aspirational)
 
-- **No Electron/mobile UI for approving a confirmation.** The API returns the right structured
-  payload; nothing renders a prompt from it yet — that's a real, unstarted UI component + wiring
-  task, not a build/tooling problem (Node.js was installed 2026-07-15, post-Faz-4, and `npm run
-  build` passes clean — see [MEMORY.md](../MEMORY.md) and [HANDOFF.md](../HANDOFF.md)).
+- **Electron confirmation UI exists but is not yet live-verified; mobile has none.** The HUD
+  renders the structured payload as an approve/deny overlay and completes the
+  `/chat/confirm/{id}` round-trip (2026-07-23, `52d0b72`) — verified by `npm run build` and a
+  simulated-stream parser test, **not yet by a live HUD session against a real server+model**
+  (that live E2E is the explicit next manual step). The Flutter app still renders nothing for
+  confirmations; a mobile-initiated L3 action's approval currently requires the CLI, voice, or
+  the HUD.
 - **Voice confirmation phrasing is functional, not fully localized** — the spoken question wrapper
   is bilingual (`jarvis/voice/session.py`'s `describe_confirmation`), but the per-call description
   embedded in it (`jarvis/policy_guard.py`'s `describe_call`) is always in English technical form

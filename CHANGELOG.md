@@ -6,6 +6,29 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Electron: L3 confirmation prompt + approve/deny round-trip] — 2026-07-23
+
+Closes the HUD half of docs/SAFETY.md's oldest known limit ("no Electron/mobile UI renders a
+confirmation prompt") — the owner's chosen next step toward interface-based human alpha testing.
+New shared SSE reader (`electron/src/renderer/src/lib/chatStream.js`) — the ONE parser for
+`/chat/stream`, `/chat/upload` and `/chat/confirm/{id}`; before it, each call site had its own
+loop and none recognized the structured frames, so a `confirmation_required` frame rendered as
+raw JSON and approval was impossible from the HUD. New amber `ConfirmationOverlay` renders each
+pending call via `policy_guard.describe_call()`'s description with APPROVE / DENY (+ optional
+`deny:<reason>`, same vocabulary as the CLI; Escape = deny, no dismiss — fail-closed). The
+decision POSTs `/chat/confirm/{id}` and streams the continuation through the same reader — a
+second same-turn interrupt swaps the prompt in place. `useJarvisSocket` now also handles the
+`{type:"confirmation_required"}` WS broadcast `jarvis/ws.py` has emitted since Phase 3 (the HUD
+never listened), so confirmations initiated on any transport surface in the HUD; double-resolve
+is safe server-side (pending pops once, loser gets a clean error). The HUD also finally sends a
+persistent `conversation_id` (localStorage) with `/chat/stream` + `/chat/upload`, closing the
+Faz 5 "every server restart orphans the HUD conversation" UX regression. Verified: `npm run
+build` clean; parser proven against a simulated stream of the exact server frame vocabulary
+(7 checks). **A live HUD round-trip against a real server+model is deliberately NOT claimed —
+that manual E2E is the explicit next step.**
+
+---
+
 ## [Agent Runtime rev.2 — Faz 8: Evaluation v2 + the alpha-gate instrument] — 2026-07-23
 
 The 9-phase plan's last phase. Two halves: the offline evaluation infrastructure is BUILT and

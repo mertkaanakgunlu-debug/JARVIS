@@ -103,8 +103,11 @@ before assuming proactive turns are as safe as interactive ones.
 
 **What's still genuinely not done** (see `docs/SAFETY.md`'s "Known limits" for the full honest
 list — don't oversell past this):
-- No Electron/mobile UI renders a confirmation prompt from the API's structured response yet —
-  only CLI text and voice actually complete the approve/deny round-trip end-to-end today.
+- The Electron HUD renders a confirmation prompt and completes the approve/deny round-trip as of
+  2026-07-23 (`52d0b72` — structured SSE frame + the WS broadcast both feed one overlay; second
+  same-turn interrupts handled) — but this is compile+parser-verified only, **no live HUD E2E
+  against a real server/model has been run yet**, and the Flutter mobile app still renders
+  nothing for confirmations.
 - `python_run`'s L2→L3 reclassification is an access-control fix, not a sandbox — the subprocess
   itself still has no resource/network restrictions.
 - A background `TaskExecutor` job that hits a confirmable action fails with a clear message

@@ -10,19 +10,39 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Last session: 2026-07-23 (17. oturum) — FAZ 8 (EVALUATION v2 + ALPHA GATE ENSTRÜMANI): 9 FAZLIK PLANIN SON FAZI İNŞA EDİLDİ
+## Last session: 2026-07-23 (17. oturum) — FAZ 8 (SON FAZ) + ELECTRON CONFIRMATION UI
 
 **Durum tek cümlede:** Agent Runtime rev.2'nin son fazı Faz 8'in offline yarısı komple inşa
 edilip test edildi (5 yeni test dosyası, 234 yeni test; full suite **1246 passed, 0 failed**,
-2026-07-23 canlı koşuldu), alpha kapısı artık çalıştırılabilir bir enstrüman
-(`scripts/alpha_gate.py`) — kapının kendisi owner-koşusu canlı ölçüm gerektiriyor ve mevcut
-şampiyon kaydına dürüstçe **KALDI** diyor.
+2026-07-23 canlı koşuldu; alpha kapısı artık çalıştırılabilir bir enstrüman ve mevcut şampiyon
+kaydına dürüstçe **KALDI** diyor); ardından owner'ın seçtiği sıradaki iş — **Electron HUD'un
+L3 confirmation prompt'u** — da aynı oturumda inşa edildi (SAFETY.md'nin en eski known-limit'i;
+build + simüle-stream parser doğrulaması yapıldı, CANLI HUD E2E'si bilinçli olarak İDDİA
+EDİLMİYOR — sıradaki manuel adım o).
 
-**COMMIT DURUMU:** owner oturum sonunda "commit + push et" dedi — bu oturumda **`7d6a7af`
-(feat: Faz 8'in tamamı — 14 dosya) ve bu kapanış docs commit'i** (CHANGELOG/ROADMAP/bu dosya)
-push'landı; oturum sonunda local == origin senkrondu. Kalıcı kural gereği kapanış commit'inin
-kendi SHA'sı/CI'ı burada yok — uç CI'ına `gh run list --branch langgraph-migration` ile bakın.
-(`.claude/settings.local.json` her zamanki gibi hariç.)
+**COMMIT DURUMU:** owner "commit + push et" dedi — bu oturumda **3 iş commit'i (`7d6a7af`
+feat: Faz 8; `8b451dc` docs: Faz 8 kayıtları; `52d0b72` feat: Electron confirmation UI) ve bu
+kapanış docs commit'i** push'landı; oturum sonunda local == origin senkrondu. Kalıcı kural
+gereği kapanış commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına `gh run list --branch
+langgraph-migration` ile bakın. (`.claude/settings.local.json` her zamanki gibi hariç.)
+
+### Electron confirmation UI (`52d0b72`) — ne yapıldı, ne YAPILMADI
+
+- Ortak SSE reader (`electron/src/renderer/src/lib/chatStream.js`): `/chat/stream`,
+  `/chat/upload`, `/chat/confirm/{id}` için TEK parser — structured `confirmation_required` ve
+  `{"async":true}` frame'leri artık transcript'e ham JSON olarak akmıyor.
+- `ConfirmationOverlay` (App.jsx): her bekleyen çağrı `policy_guard.describe_call()` açıklamasıyla
+  listeleniyor; APPROVE / DENY + opsiyonel `deny:<gerekçe>`; Escape = deny (dismiss yok,
+  fail-closed). Karar `/chat/confirm/{id}`'ye gidiyor, devam aynı reader'dan akıyor; aynı-turn
+  İKİNCİ interrupt prompt'u yerinde değiştiriyor.
+- `useJarvisSocket` artık Phase 3'ten beri yayında olan `{type:"confirmation_required"}` WS
+  broadcast'ini de dinliyor — BAŞKA transportlarda (ses dahil) başlayan onaylar da HUD'da
+  görünüyor; çift-resolve sunucu tarafında güvenli (pending tek pop, kaybeden temiz hata).
+- HUD artık kalıcı `conversation_id` gönderiyor (localStorage) — Faz 5'in "her server restart
+  HUD konuşmasını yetim bırakır" bilinçli regresyonu kapandı.
+- **YAPILMADI:** canlı HUD round-trip'i (gerçek server + model + gerçek tıklama) — `npm run
+  build` + 7 kontrollü simüle-stream parser testi var, canlı E2E yok. Mobil (Flutter) tarafı
+  hâlâ hiçbir şey çizmiyor.
 
 ### Ne inşa edildi (detay: CHANGELOG.md'nin Faz 8 girdisi)
 
@@ -80,12 +100,11 @@ git log --oneline -3      # (en üstte bu dosyayı yazan kapanış commit'i) 7d6
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Electron confirmation UI (OWNER KARARI, bu oturumun kapanış sorusunda seçildi):**
-   arayüzden insan testinin önündeki tek yapısal engel — API `confirmation_required`'ı hem
-   `/chat` JSON'unda hem `/chat/stream` yapısal SSE frame'inde gönderiyor ama HUD approve/deny
-   çizmiyor; render + `/chat/confirm` round-trip + conversation_id persistence. (Mobil parite
-   sonraya.) CLI text+voice bugün de uçtan uca çalışıyor — CLI'dan manuel alfa beklemeden
-   başlayabilir.
+1. **CANLI HUD E2E'si (Electron confirmation UI'ın kabulü):** server'ı başlat
+   (`python -m jarvis --api`), Electron'u aç, L3 bir aksiyon iste (örn. "test@... adresine
+   mail gönder"), overlay'de APPROVE/DENY'ı gerçekten tıkla; ikinci-interrupt ve
+   WS-kaynaklı (sesle başlayan) onay senaryosunu da dene. Bu yapılmadan `52d0b72`
+   "çalışıyor" SAYILMAZ — bkz. docs/SAFETY.md'nin güncellenmiş known-limit'i.
 2. **Model tool-calling güvenilirliği** (14. oturumdan; artık taksonomiyle ÖLÇÜLEBİLİR):
    false_success_claim'i 0'a indirme işi — muhtemelen sistem promptu / tool-seçim talimatları;
    Faz 4'ün enforce modu (hâlâ default off) yapısal çözüm adayı, önce shadow ölçümü planın
