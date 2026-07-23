@@ -26,11 +26,19 @@ jobs:
 
       # Installs from the pinned lockfile (requirements-lock.txt), not
       # requirements.txt's ">=" ranges -- see that file's header for why.
+      # ruff is pinned here (not in the lockfile, which is for runtime deps)
+      # for the same reason electron's vitest got pinned in 0687772: an
+      # unpinned dev-tool version drifted mid-project (0.15.21 -> 0.16.0
+      # changed what rules apply with no explicit [tool.ruff.lint].select,
+      # confirmed by reproducing the exact same 672 errors locally with
+      # 0.16.0 against an otherwise-clean tree) and broke a previously-green
+      # CI run with no code change of its own. Bump deliberately, not
+      # silently, after checking what changed.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-lock.txt
-          pip install ruff
+          pip install ruff==0.15.21
 
       # eval_oracle.py, manual_test_driver.py, ab_analyze.py,
       # ab_launch_server.py and alpha_gate.py (Faz 8) are the acceptance
