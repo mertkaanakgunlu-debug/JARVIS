@@ -8,6 +8,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# hypothesis example DB (Faz 8 property tests run derandomized, so this stays
+# empty in CI -- but an exploratory local run without the profile writes here)
+.hypothesis/
 
 # Vector DB (writes frequently, noisy in OneDrive sync)
 data/

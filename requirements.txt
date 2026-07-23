@@ -104,3 +104,4 @@ pywin32>=306             # SetThreadExecutionState (prevent PC sleep during task
 # Testing (Faz 8): minimal suite under tests/ -- run with `pytest`
 pytest>=8.0
 pytest-asyncio>=0.24
+hypothesis>=6.100        # Agent Runtime rev.2 Faz 8: property-based schema/redaction fuzzing

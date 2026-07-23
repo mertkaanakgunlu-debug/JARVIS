@@ -498,6 +498,7 @@ def _score(tid: str, entry: dict) -> None:
     print(f"  [ORACLE {mark}] {tid}" + ("" if v.passed else f" — {'; '.join(v.reasons)}") + sem)
     record({"test_id": tid, "oracle": {
         "passed": v.passed, "reasons": v.reasons, "semantic_reasons": v.semantic_reasons,
+        "error_classes": v.error_classes,  # Faz 8 taxonomy (jarvis/execution/taxonomy.py)
     }})
 
 

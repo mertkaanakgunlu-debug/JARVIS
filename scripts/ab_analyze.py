@@ -28,6 +28,12 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+try:  # Faz 8: the 13-class error taxonomy, single-sourced (see taxonomy.py)
+    from jarvis.execution.taxonomy import ERROR_CLASSES, classify_verdict_reasons
+except ModuleNotFoundError:  # run as a script: sys.path[0] is scripts/
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from jarvis.execution.taxonomy import ERROR_CLASSES, classify_verdict_reasons
+
 # Order = driver TESTS order; scored = has an EXPECTED entry in the driver.
 ORDER = ["A1", "A2", "A3", "B4", "B5a", "B5b", "B6", "C7", "C8", "C9",
          "D10", "D11", "D12", "D13b", "E14", "E15", "F16", "G17a", "G17b"]
@@ -102,6 +108,11 @@ def collect(res, cfg, runs):
         # failure, compliance == overall pass (backward compatible).
         "sem_fail": defaultdict(list),
         "comp_fail": defaultdict(list),
+        # Faz 8: error-taxonomy counts — class -> number of (tid, run) verdicts
+        # carrying it. Written by the driver since Faz 8 (oracle.error_classes);
+        # older recordings are re-derived from their reasons via the SAME
+        # taxonomy function, so old and new runs aggregate identically.
+        "classes": defaultdict(int),
     }
     for run_idx, run_rows in enumerate(load_runs(res, cfg, runs)):
         seen = {}
@@ -117,6 +128,11 @@ def collect(res, cfg, runs):
                 sem_reasons = row["oracle"].get("semantic_reasons") or []
                 for reason in all_reasons:
                     d["reasons"][tid].add(reason)
+                classes = row["oracle"].get("error_classes")
+                if classes is None:  # pre-Faz-8 recording — same mapping, re-derived
+                    classes = classify_verdict_reasons(all_reasons)
+                for cls in classes:
+                    d["classes"][cls] += 1
                 if tid in SCORED:
                     d["sem_fail"][tid].append(bool(sem_reasons))
                     # compliance = any failure that is NOT semantic
@@ -321,6 +337,25 @@ def main():
         comp = "{}/{}".format(*metric_totals(data[cfg], "comp_fail"))
         sem = "{}/{}".format(*metric_totals(data[cfg], "sem_fail"))
         lines.append(f"| {cfg.upper()} | {ov} | {comp} | {sem} |")
+
+    # Faz 8: the same failures, re-counted in the fixed 13-class taxonomy
+    # (jarvis/execution/taxonomy.py — the single source eval_oracle also uses).
+    # Counts are per (scenario, run) verdict; one verdict can carry several
+    # classes. Rows the plan marks as alpha-gate INVARIANTS (0 hedefli) are
+    # tagged so a non-zero there reads as a gate FAIL, not a statistic.
+    _INVARIANT = {"false_success_claim", "duplicate_side_effect",
+                  "cross_run_contamination", "context_leakage", "silent_data_loss"}
+    lines += ["", "## Hata sinifi taksonomisi (Faz 8; verdict sayisi, sinif basina)", "",
+              "| Sinif | " + " | ".join(c.upper() for c in configs) + " |",
+              "|---|" + "---|" * len(configs)]
+    for cls in ERROR_CLASSES:
+        counts = [data[cfg]["classes"].get(cls, 0) for cfg in configs]
+        if not any(counts):
+            continue
+        tag = " **(invariant: 0 olmali)**" if cls in _INVARIANT else ""
+        lines.append(f"| {cls}{tag} | " + " | ".join(str(c) for c in counts) + " |")
+    if not any(data[cfg]["classes"] for cfg in configs):
+        lines.append("| (hic siniflanmis hata yok) | " + " | ".join("-" for _ in configs) + " |")
 
     lines += ["", "## Latency medyanlari (e2e = driver elapsed_s; llm = /status last_latency_ms, warm, gorunur cevabi yazan cagri)", "",
               "| Senaryo | " + " | ".join(f"{c.upper()} e2e | {c.upper()} llm" for c in configs) + " |",

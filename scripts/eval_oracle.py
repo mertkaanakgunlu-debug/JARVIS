@@ -10,15 +10,25 @@ the tool trace (did the right tool actually run and succeed?), the filesystem
 (did the promised file appear?), and the response text (does it claim success
 the trace doesn't support?) — and never trusts the response alone.
 
-Pure and dependency-free on purpose: unit-tested with synthetic Observed, no
-live server needed.
+Pure and dependency-light on purpose: unit-tested with synthetic Observed, no
+live server needed. The one jarvis import (Faz 8) is the taxonomy module --
+itself pure stdlib -- so the error-class vocabulary has exactly one source
+(the plan's "eval_oracle.py Faz 1/3 modullerini import eder" requirement)
+instead of a re-typed copy here.
 """
 from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+try:
+    from jarvis.execution.taxonomy import classify_verdict_reasons
+except ModuleNotFoundError:  # run as/next to a script: sys.path[0] is scripts/
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from jarvis.execution.taxonomy import classify_verdict_reasons
 
 # Outcomes a scenario can expect.
 SUCCESS = "success"    # a tool ran and completed ok
@@ -77,6 +87,11 @@ class Verdict:
     # to tool-execution compliance (right tool ran, artifact exists, block
     # fired). Lets a report show "tool-execution 65/65 but semantic X/65".
     semantic_reasons: list[str] = field(default_factory=list)
+    # Faz 8 — the same reasons mapped into the fixed 13-class error taxonomy
+    # (jarvis/execution/taxonomy.py), deduplicated, taxonomy-ordered. Empty
+    # when passed, and possibly smaller than `reasons` (a latency-budget miss
+    # has no class — honest unclassified, not a forced guess).
+    error_classes: list[str] = field(default_factory=list)
 
 
 def _succeeded(trace: list[dict], tool: str | None) -> bool:
@@ -281,7 +296,9 @@ def score(expected: Expected, observed: Observed) -> Verdict:
         if observed.elapsed_s > expected.max_latency_s:
             add(f"latency {observed.elapsed_s:.1f}s > {expected.max_latency_s:.1f}s budget")
 
-    return Verdict(id=expected.id, passed=not reasons, reasons=reasons, semantic_reasons=semantic)
+    return Verdict(id=expected.id, passed=not reasons, reasons=reasons,
+                   semantic_reasons=semantic,
+                   error_classes=classify_verdict_reasons(reasons))
 
 
 def summarize(verdicts: list[Verdict]) -> str:
