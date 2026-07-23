@@ -480,14 +480,27 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
         async def _handle_transcript(text: str, lang: str):
             nonlocal pending_confirmation
             # Faz 4 / BUG-4: a pending confirmation always consumes the *next*
-            # utterance as its yes/no answer, not a new command.
+            # utterance as its yes/no answer, not a new command -- UNLESS it
+            # was already resolved through a different transport (the
+            # Electron HUD's /chat/confirm, the local wakeword/PTT loop) in
+            # the meantime. Review remediation (2026-07-23): this remote /ws
+            # session was the one transport that never got even a
+            # cross-transport staleness check -- fixed straight to the
+            # atomic form (see claim_pending_confirmation()'s docstring):
+            # claim FIRST (a single synchronous dict.pop(), so nothing else
+            # can interleave on this event loop), proceed only if we
+            # actually got it.
             if pending_confirmation is not None:
                 pending, pending_confirmation = pending_confirmation, None
-                return resolve_confirmation(
-                    agent, engine, pending, text, lang,
-                    on_message=lambda full: event_bus.message("j", full),
-                    set_pending_confirmation=_set_pending,
-                )
+                claimed = agent.claim_pending_confirmation(pending.conf_id)
+                if claimed is not None:
+                    return resolve_confirmation(
+                        agent, engine, pending, text, lang,
+                        on_message=lambda full: event_bus.message("j", full),
+                        set_pending_confirmation=_set_pending,
+                        pre_claimed=claimed,
+                    )
+                # Resolved elsewhere or TTL-evicted -- fall through as a new turn.
             return run_one_response(
                 agent, engine, text, lang, transport="voice-remote", set_pending_confirmation=_set_pending,
             )

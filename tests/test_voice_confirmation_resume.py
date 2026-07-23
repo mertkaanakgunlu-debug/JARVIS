@@ -32,13 +32,19 @@ class _FakeAgent:
         self.calls: list[tuple[str, str]] = []
         self._pending = set(pending_ids)
 
-    async def resume_and_stream(self, conf_id, decision):
+    async def resume_and_stream(self, conf_id, decision, *, pre_claimed=None):
         self.calls.append((conf_id, decision))
         for token in self._streams.pop(0):
             yield token
 
     def has_pending_confirmation(self, conf_id):
         return conf_id in self._pending
+
+    def claim_pending_confirmation(self, conf_id):
+        if conf_id not in self._pending:
+            return None
+        self._pending.discard(conf_id)
+        return {"claimed": conf_id}
 
 
 class _FakeEngine:

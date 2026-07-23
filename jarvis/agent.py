@@ -1498,6 +1498,29 @@ class JarvisAgent:
         is False. Read-only: unlike resume_and_stream(), never pops."""
         return conf_id in self._pending_confirmations
 
+    def claim_pending_confirmation(self, conf_id: str) -> dict | None:
+        """Atomically take ownership of a pending confirmation, or None if
+        it's already gone (resolved through another transport, or
+        TTL-evicted).
+
+        Follow-up finding (2026-07-23) on has_pending_confirmation() above:
+        that check-then-act pattern is NOT atomic against a second
+        transport -- a voice loop's `if is_confirmation_still_pending(...):
+        return resolve_confirmation(...)` returns an unawaited coroutine
+        that a caller (drive_voice_session) schedules via
+        asyncio.ensure_future rather than running inline, so there is a
+        real scheduling gap between the check and resume_and_stream()'s own
+        pop() during which a concurrent /chat/confirm request (or another
+        voice session) can pop the SAME conf_id first. A plain dict.pop()
+        has no `await` inside it, so it cannot itself be interrupted by
+        another coroutine on this single-threaded event loop -- callers
+        should claim FIRST (synchronously, before doing anything else) and
+        only proceed to resolve_confirmation()/resume_and_stream() when
+        this returns non-None, passing the claimed dict through via
+        resume_and_stream()'s pre_claimed parameter so it is never looked
+        up (and never race-popped) a second time."""
+        return self._pending_confirmations.pop(conf_id, None)
+
     async def chat_stream(
         self,
         user_input: str,
@@ -1743,14 +1766,25 @@ class JarvisAgent:
         self,
         conf_id: str,
         decision: str,
+        *,
+        pre_claimed: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         """Resume a graph interrupted for confirmation and stream the agent's response.
 
         decision: "approve" to proceed, "deny" or "deny:<guidance>" to cancel.
+
+        pre_claimed: pass the dict already returned by claim_pending_confirmation(conf_id)
+        when the caller had to claim atomically before deciding whether to resume at
+        all (the voice loops' "is this transcript actually still a pending confirmation's
+        answer" check -- see claim_pending_confirmation()'s docstring for the race this
+        closes). Looking conf_id up again here would either double-pop nothing (silently
+        treating an already-claimed entry as "expired") or, if this method's own pop ran
+        first, race the caller's earlier claim. Direct callers (POST /chat/confirm) that
+        never pre-claim keep the old self-contained pop.
         """
         from langgraph.types import Command
 
-        pending = self._pending_confirmations.pop(conf_id, None)
+        pending = pre_claimed if pre_claimed is not None else self._pending_confirmations.pop(conf_id, None)
         if pending is None:
             yield "[ERROR: confirmation session expired or not found]"
             return

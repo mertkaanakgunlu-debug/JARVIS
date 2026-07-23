@@ -113,6 +113,7 @@ async def resolve_confirmation(
     *,
     on_message: Callable[[str], None] | None = None,
     set_pending_confirmation: Callable[["PendingConfirmation | None"], None] | None = None,
+    pre_claimed: dict | None = None,
 ) -> None:
     """Resume the turn agent.resume_and_stream() left interrupted, using
     `transcript` (the user's reply to describe_confirmation's question) as
@@ -131,6 +132,12 @@ async def resolve_confirmation(
     pattern: the marker is intercepted before it reaches TTS, spoken as a
     natural question instead, and set_pending_confirmation() re-arms the
     next transcript to resolve THIS new interrupt.
+
+    pre_claimed: forwarded verbatim to resume_and_stream() -- the caller
+    should have already called agent.claim_pending_confirmation(pending.
+    conf_id) atomically (see that method's docstring for the cross-
+    transport race this closes) and pass the result here rather than let
+    this call look conf_id up again.
     """
     decision = "approve" if is_affirmative(transcript) else f"deny:{transcript}"
 
@@ -139,7 +146,7 @@ async def resolve_confirmation(
 
     async def _collecting():
         nonlocal confirm_marker
-        async for token in agent.resume_and_stream(pending.conf_id, decision):
+        async for token in agent.resume_and_stream(pending.conf_id, decision, pre_claimed=pre_claimed):
             marker = parse_confirm_marker(token)
             if marker is not None:
                 confirm_marker = marker

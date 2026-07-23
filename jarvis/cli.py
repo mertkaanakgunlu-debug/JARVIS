@@ -1048,7 +1048,6 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
         from jarvis.voice.text import is_exit_phrase
         from jarvis.voice.session import (
             drive_voice_session, STOP_SESSION, PendingConfirmation, resolve_confirmation,
-            is_confirmation_still_pending,
         )
     except ImportError as exc:
         _print_error(
@@ -1103,20 +1102,28 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
         # utterance as its yes/no answer -- checked before exit-phrase/model-
         # switch detection so e.g. "hayır" during a pending confirmation
         # denies it rather than being misread as an unrelated command.
-        # External-review finding (2026-07-23): only if it's STILL actually
-        # pending on the agent -- a long enough pause lets JarvisAgent's own
-        # TTL sweep evict it (_register_pending_confirmation), and without
-        # this check the next real utterance would be silently consumed as
-        # a stale yes/no answer instead of a new command.
+        # Follow-up finding (2026-07-23): the earlier is_confirmation_still_
+        # pending() pre-check here was NOT atomic against the Electron HUD
+        # (or another client) resolving the SAME conf_id via /chat/confirm
+        # in between -- this coroutine is only scheduled via
+        # asyncio.ensure_future by drive_voice_session, not run inline, so a
+        # real gap exists between "check" and resume_and_stream()'s own pop.
+        # claim_pending_confirmation() is a single synchronous dict.pop()
+        # (no `await` inside it, so nothing else can interleave on this
+        # event loop) -- claim FIRST, then only proceed if we actually got
+        # it, passing the claimed dict through so it's never looked up
+        # (and never race-popped) a second time.
         if pending_confirmation is not None:
             pending, pending_confirmation = pending_confirmation, None
-            if is_confirmation_still_pending(agent, pending):
+            claimed = agent.claim_pending_confirmation(pending.conf_id)
+            if claimed is not None:
 
                 async def _resolve():
                     await resolve_confirmation(
                         agent, engine, pending, text, lang,
                         on_message=lambda full: _print_jarvis(full, agent.current_model_label),
                         set_pending_confirmation=_set_pending,
+                        pre_claimed=claimed,
                     )
 
                 return _resolve()

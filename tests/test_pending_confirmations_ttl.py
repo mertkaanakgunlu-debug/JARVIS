@@ -63,3 +63,54 @@ def test_registration_stores_config_and_recorder():
     assert entry["config"] == {"thread_id": "t1"}
     assert entry["recorder"] is recorder
     assert "created_at" in entry
+
+
+# ── claim_pending_confirmation: atomic ownership (cross-transport race fix) ──
+#
+# Follow-up finding (2026-07-23): has_pending_confirmation()'s check-then-act
+# pattern (check membership, THEN later call resume_and_stream() which pops)
+# is not atomic against a second transport claiming the same conf_id in the
+# gap between the two -- both voice loops route a transcript into
+# resolve_confirmation() as an unawaited coroutine that the caller schedules
+# via asyncio.ensure_future rather than running inline, leaving a real
+# scheduling window. claim_pending_confirmation() is a single synchronous
+# dict.pop() -- nothing else can interleave with it on this event loop -- so
+# only one caller can ever successfully claim a given conf_id.
+
+def test_claim_removes_and_returns_the_entry():
+    agent = _bare_agent()
+    agent._register_pending_confirmation("c1", {"thread_id": "t1"}, "rec")
+
+    claimed = agent.claim_pending_confirmation("c1")
+
+    assert claimed["config"] == {"thread_id": "t1"}
+    assert claimed["recorder"] == "rec"
+    assert "c1" not in agent._pending_confirmations
+
+
+def test_claim_returns_none_when_never_registered():
+    agent = _bare_agent()
+    assert agent.claim_pending_confirmation("never-existed") is None
+
+
+def test_second_claim_of_the_same_id_returns_none():
+    """The exact cross-transport race this method exists to close: whichever
+    caller claims first gets the entry; a second claim attempt (a different
+    transport that raced it) gets nothing, never a stale/duplicate copy."""
+    agent = _bare_agent()
+    agent._register_pending_confirmation("c1", {"thread_id": "t1"}, "rec")
+
+    first = agent.claim_pending_confirmation("c1")
+    second = agent.claim_pending_confirmation("c1")
+
+    assert first is not None
+    assert second is None
+
+
+def test_has_pending_confirmation_is_true_before_claim_false_after():
+    agent = _bare_agent()
+    agent._register_pending_confirmation("c1", {"thread_id": "t1"}, "rec")
+
+    assert agent.has_pending_confirmation("c1") is True
+    agent.claim_pending_confirmation("c1")
+    assert agent.has_pending_confirmation("c1") is False

@@ -193,7 +193,7 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
         from jarvis.voice.engine import RealtimeVoiceEngine, get_shared_voice_models
         from jarvis.voice.io_duplex import DuplexAudioIO
         from jarvis.voice.wakeword import WakewordDetector
-        from jarvis.voice.session import drive_voice_session, resolve_confirmation, is_confirmation_still_pending
+        from jarvis.voice.session import drive_voice_session, resolve_confirmation
     except ImportError as exc:
         logger.warning("[voice] Dependencies unavailable (%s) — voice disabled.", exc)
         return
@@ -244,18 +244,24 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
         # Faz 4 / BUG-4: a pending confirmation always consumes the *next*
         # utterance as its yes/no answer, not a new command -- UNLESS it was
         # already resolved through a different transport in the meantime
-        # (external-review finding, 2026-07-23: the Electron HUD now also
-        # listens for confirmation_required over WS and can approve/deny it
-        # from /chat/confirm, since this same session). Without this check
-        # the user's next spoken sentence would be silently consumed as a
-        # stale yes/no answer instead of processed as a new command.
+        # (the Electron HUD also listens for confirmation_required over WS
+        # and can approve/deny it from /chat/confirm). Follow-up finding
+        # (2026-07-23): the earlier is_confirmation_still_pending() pre-check
+        # here was NOT atomic against that -- this coroutine is only
+        # scheduled via asyncio.ensure_future by drive_voice_session, not run
+        # inline, so a real gap exists between "check" and
+        # resume_and_stream()'s own pop. claim_pending_confirmation() is a
+        # single synchronous dict.pop() (nothing else can interleave on this
+        # event loop) -- claim FIRST, proceed only if we actually got it.
         if pending_confirmation is not None:
             pending, pending_confirmation = pending_confirmation, None
-            if is_confirmation_still_pending(agent, pending):
+            claimed = agent.claim_pending_confirmation(pending.conf_id)
+            if claimed is not None:
                 return resolve_confirmation(
                     agent, engine, pending, text, lang,
                     on_message=lambda full: event_bus.message("j", full),
                     set_pending_confirmation=_set_pending,
+                    pre_claimed=claimed,
                 )
             # Resolved elsewhere or TTL-evicted -- treat this utterance as a
             # brand-new turn, falling through below.

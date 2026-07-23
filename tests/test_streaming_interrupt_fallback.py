@@ -225,6 +225,29 @@ async def test_resume_and_stream_without_a_second_interrupt_completes_normally(m
 
 
 @pytest.mark.asyncio
+async def test_resume_and_stream_uses_pre_claimed_without_touching_the_dict(monkeypatch):
+    """Review remediation (cross-transport claim race): a caller that
+    already atomically claimed the entry via claim_pending_confirmation()
+    (popping it out of _pending_confirmations itself) passes it through
+    via pre_claimed -- resume_and_stream() must use THAT dict directly,
+    never look conf_id up in _pending_confirmations again (which would
+    either find nothing, since the caller already popped it, or -- if
+    something else had re-inserted the same id in the meantime -- resume
+    against the WRONG entry)."""
+    agent = _resume_agent({}, aget_state_return=_empty_snapshot())  # conf_id NOT in the dict at all
+    monkeypatch.setattr("jarvis.agent.graph_stream_to_text", _fake_text_stream)
+    pre_claimed = {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None}
+
+    chunks = [
+        c async for c in
+        JarvisAgent.resume_and_stream(agent, "c1", "approve", pre_claimed=pre_claimed)
+    ]
+
+    assert "".join(chunks) == "just talking, no tool call"
+    assert agent._pending_confirmations == {}  # never touched -- nothing to pop
+
+
+@pytest.mark.asyncio
 async def test_resume_and_stream_handles_graph_interrupt_raised_directly(monkeypatch):
     """Review remediation: resume_and_stream() previously had no
     `except GraphInterrupt` handler at all -- unlike chat_stream(), which
