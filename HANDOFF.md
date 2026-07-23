@@ -137,9 +137,17 @@ git status --short        # yalnız .claude/settings.local.json (oturum öncesin
 **CI'da doğrulanmadı** (henüz push edilmedi) — yalnız yerel `pytest`/`ruff`. Push, owner'ın ayrı
 kararı.
 
+**Not (review remediation ile bulundu, 2026-07-23):** yukarıdaki `git rev-list` çıktısı bu commit
+(444a88c, bu HANDOFF metnini kaydeden dokümantasyon commit'i) `HEAD` olmadan ÖNCE, `fa34225`
+`HEAD` iken alınmış bir anlık görüntü — o an doğruydu, ama 444a88c'in kendisi de push'lanmamış
+8. commit olduğu için artık `origin/langgraph-migration...HEAD` gerçekte `0  8` döndürüyor. Bu,
+anlık görüntüyü kaydeden commit'in kendisinin o anlık görüntüyü bir commit geride bırakması —
+"SONRAKİ OTURUM" bölümündeki sayı (aşağıda) güncel, bu bloktaki dondurulmuş komut çıktısı değil.
+
 ## SONRAKİ OTURUM — kalan iş
 
-1. **Push kararı bekliyor** — 7 commit `langgraph-migration`'da, `origin`'e hiç gönderilmedi.
+1. **Push kararı bekliyor** — 8 commit `langgraph-migration`'da, `origin`'e hiç gönderilmedi (7 düzeltme
+   commit'i + bu HANDOFF'u kaydeden 444a88c dokümantasyon commit'i — bkz. yukarıdaki not).
 2. **Faz 8 (Evaluation v2 + manuel alpha kapısı)** artık gerçekten önü açık — review'ın kendi
    sözleriyle "Bu maddeler tamamlanmadan Faz 8 ölçümleri yanıltıcı olur" — 7 madde de artık
    tamamlandı ve canlı doğrulandı.
