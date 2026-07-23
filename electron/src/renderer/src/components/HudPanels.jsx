@@ -3,6 +3,7 @@
  * Ported from the Claude Design prototype (hud-panels.jsx).
  */
 import React, { useRef, useEffect, useState, useCallback } from 'react'
+import { readChatSse } from '../lib/chatStream'
 
 // ── Panel chrome ──────────────────────────────────────────────────────────────
 export function Panel({ title, id, status = 'live', live = true, children, scroll = false }) {
@@ -431,7 +432,8 @@ export function TopBar({ state, clock, panelVis = {}, onTogglePanel, onSetAllPan
 // ── Bottom Bar ────────────────────────────────────────────────────────────────
 export function BottomBar({
   state, micLevel, latency, vaultCount = 0, uptime = '00:00:00',
-  apiUrl, apiKey, onMessage, busy = false, onBusy, onPickFile,
+  apiUrl, apiKey, conversationId = '', onMessage, onConfirmation,
+  busy = false, onBusy, onPickFile,
 }) {
   const [value, setValue] = useState('')
   const fileInputRef = useRef(null)
@@ -443,7 +445,6 @@ export function BottomBar({
     onBusy?.(true)
     onMessage?.({ who: 'u', text: msg })
 
-    let full = ''
     try {
       const resp = await fetch(`${apiUrl}/chat/stream`, {
         method: 'POST',
@@ -451,31 +452,26 @@ export function BottomBar({
           'Content-Type': 'application/json',
           ...(apiKey ? { 'X-API-Key': apiKey } : {}),
         },
-        body: JSON.stringify({ message: msg, language: '' }),
+        body: JSON.stringify({
+          message: msg, language: '',
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        }),
       })
-      const reader = resp.body.getReader()
-      const decoder = new TextDecoder()
-      let buf = ''
-      while (true) {
-        const { done, value: chunk } = await reader.read()
-        if (done) break
-        buf += decoder.decode(chunk, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop()
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const data = line.slice(6)
-          if (data === '[DONE]') { onMessage?.({ who: 'j', text: full }); onBusy?.(false); return }
-          if (data.startsWith('[ERROR]')) { onMessage?.({ who: 'j', text: '⚠ ' + data.slice(7) }); onBusy?.(false); return }
-          full += data.replace(/\\n/g, '\n')
-        }
+      const out = await readChatSse(resp)
+      if (out.error) { onMessage?.({ who: 'j', text: '⚠ ' + out.error }); onBusy?.(false); return }
+      if (out.text) onMessage?.({ who: 'j', text: out.text })
+      if (out.asyncTask) onMessage?.({ who: 'j', text: `⏳ Arka plana alındı (task ${out.asyncTask.task_id || '?'})` })
+      if (out.confirmation) {
+        // Approval pending: busy STAYS true — App owns the approve/deny
+        // round-trip (/chat/confirm) and releases busy when it resolves.
+        onConfirmation?.(out.confirmation)
+        return
       }
     } catch {
       onMessage?.({ who: 'j', text: '⚠ Connection error' })
     }
-    if (full) onMessage?.({ who: 'j', text: full })
     onBusy?.(false)
-  }, [value, busy, apiUrl, apiKey, onMessage, onBusy])
+  }, [value, busy, apiUrl, apiKey, conversationId, onMessage, onConfirmation, onBusy])
 
   return (
     <div className="bar bot slot-bot">

@@ -12,6 +12,7 @@
  *   {type:"vault",   entries:[{title,tag,ts}], count:N}
  *   {type:"progress",jobsDone:N,jobsTotal:N,runtime:"...",tokensIn:N,tokensOut:N}
  *   {type:"mic_level", source:"input"|"output", rms:N}
+ *   {type:"confirmation_required", id:"...", payload:{tools:[{name,args,description,...}],count:N}}
  *
  * Faz 3 remote-audio session (see docs/VOICE_PROTOCOL.md):
  *   {type:"audio_session_ack"|"audio_session_nack"|"audio_session_end"|"audio_format"|"audio_playback_stop", ...}
@@ -47,9 +48,11 @@ function useJarvisSocket(apiUrl, apiKey, options = {}) {
   const onPanelCtrlRef  = useRef(options.onPanelControl)
   const onAudioChunkRef = useRef(options.onAudioChunk)
   const onAudioCtrlRef  = useRef(options.onAudioControl)
+  const onConfirmRef    = useRef(options.onConfirmation)
   useEffect(() => { onPanelCtrlRef.current = options.onPanelControl })
   useEffect(() => { onAudioChunkRef.current = options.onAudioChunk })
   useEffect(() => { onAudioCtrlRef.current = options.onAudioControl })
+  useEffect(() => { onConfirmRef.current = options.onConfirmation })
 
   const connect = useCallback(() => {
     if (!wsUrl) return
@@ -144,6 +147,16 @@ function useJarvisSocket(apiUrl, apiKey, options = {}) {
         case 'audio_format':
         case 'audio_playback_stop':
           onAudioCtrlRef.current?.(msg)
+          break
+
+        // Faz 4's event_bus has broadcast this for every pending L3 approval
+        // since Phase 3 (jarvis/ws.py confirmation_required) — the HUD just
+        // never listened. Covers confirmations initiated on OTHER transports
+        // too (voice, another client); the HUD's own chat stream also
+        // delivers the same prompt as a structured SSE frame, so App dedups
+        // by id.
+        case 'confirmation_required':
+          onConfirmRef.current?.({ id: msg.id, payload: msg.payload || {} })
           break
 
         default:

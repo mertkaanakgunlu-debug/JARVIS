@@ -19,6 +19,25 @@ import useJarvisSocket from './hooks/useJarvisSocket'
 import useRemoteAudioSession from './hooks/useRemoteAudioSession'
 import useClock from './hooks/useClock'
 import { useFakeMic, useFakeFeed, useFakeMetrics } from './hooks/useFakeData'
+import { readChatSse } from './lib/chatStream'
+
+// Stable per-install conversation id (Faz 5 removed the server's silent
+// auto-resume guess; the API has accepted an explicit conversation_id since
+// the 12th session — the HUD just never sent one, so every server restart
+// orphaned its conversation).
+const CONVERSATION_ID_KEY = 'jarvis.conversation_id'
+function loadConversationId() {
+  try {
+    let v = localStorage.getItem(CONVERSATION_ID_KEY)
+    if (!v) {
+      v = (crypto.randomUUID ? crypto.randomUUID() : `hud-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+      localStorage.setItem(CONVERSATION_ID_KEY, v)
+    }
+    return v
+  } catch {
+    return '' // storage unavailable — server falls back to a fresh session
+  }
+}
 
 // ── Color helpers ─────────────────────────────────────────────────────────────
 function toRgb(hex) {
@@ -257,6 +276,86 @@ function DropResponseOverlay({ text, done, onDismiss }) {
   )
 }
 
+// ── L3 confirmation overlay (Faz 4 gate — approve/deny round-trip) ────────────
+// Renders the structured confirmation_required payload: one row per pending
+// tool call, using policy_guard.describe_call()'s human-readable description.
+// Fail-closed by design: there is no "dismiss" — Escape counts as DENY, and
+// an optional reason can be attached to a deny (server accepts
+// "deny:<reason>", same vocabulary as the CLI prompt).
+function ConfirmationOverlay({ payload, busy, onDecision }) {
+  const [reason, setReason] = useState('')
+  const tools = payload?.tools || []
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); onDecision('deny') }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onDecision])
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 10000,
+      background: 'rgba(0,0,0,.82)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div style={{
+        border: '1px solid var(--hud-amber, #FFC857)', borderRadius: 12,
+        padding: '24px 28px', maxWidth: 560, width: '92%',
+        background: 'rgba(16,8,0,.97)',
+        boxShadow: '0 0 24px rgba(255,200,87,.25)',
+      }}>
+        <div style={{ fontSize: 9, letterSpacing: '.22em', color: '#FFC857', marginBottom: 14 }}>
+          // ONAY GEREKİYOR — L3 İŞLEM {tools.length > 1 ? `(${tools.length} çağrı)` : ''}
+        </div>
+        {tools.map((t, i) => (
+          <div key={t.id || i} style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span style={{
+                fontSize: 9, padding: '2px 7px', borderRadius: 4,
+                border: '1px solid #FFC857', color: '#FFC857', letterSpacing: '.12em',
+              }}>{(t.name || '?').toUpperCase()}</span>
+            </div>
+            <div style={{ color: 'var(--hud-cyan-soft)', fontSize: 12, lineHeight: 1.5 }}>
+              {t.description || JSON.stringify(t.args || {})}
+            </div>
+          </div>
+        ))}
+        <input
+          value={reason}
+          onChange={e => setReason(e.target.value)}
+          placeholder="Reddedersen gerekçe (opsiyonel) — modele iletilir"
+          disabled={busy}
+          style={{
+            width: '100%', boxSizing: 'border-box',
+            background: 'rgba(255,255,255,.04)',
+            border: '1px solid var(--hud-line-dim)', borderRadius: 8,
+            color: 'var(--hud-cyan-soft)', fontSize: 11,
+            padding: '7px 10px', outline: 'none', margin: '6px 0 14px',
+          }}
+        />
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+          <button
+            onClick={() => onDecision(reason.trim() ? `deny:${reason.trim()}` : 'deny')}
+            disabled={busy}
+            style={{
+              background: 'rgba(239,68,68,.85)', border: 'none', color: '#fff',
+              borderRadius: 6, padding: '6px 18px', cursor: busy ? 'wait' : 'pointer',
+              fontSize: 10, letterSpacing: '.12em', fontWeight: 700, opacity: busy ? 0.5 : 1,
+            }}>DENY</button>
+          <button
+            onClick={() => onDecision('approve')}
+            disabled={busy}
+            style={{
+              background: 'var(--hud-cyan)', border: 'none', color: '#000',
+              borderRadius: 6, padding: '6px 18px', cursor: busy ? 'wait' : 'pointer',
+              fontSize: 10, letterSpacing: '.12em', fontWeight: 700, opacity: busy ? 0.5 : 1,
+            }}>APPROVE</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Drag-hint overlay (while file is hovering) ────────────────────────────────
 function DragHint() {
   return (
@@ -324,6 +423,55 @@ export default function App() {
     return () => window.jarvis?.removeAllListeners('config')
   }, [])
 
+  // ── L3 confirmation state (Faz 4 gate, HUD leg) ────────────────────────────
+  // {id, payload} of the pending approval. Fed from BOTH sources: the HUD's
+  // own /chat* SSE streams (structured confirmation_required frame) and the
+  // WS broadcast (confirmations initiated on ANY transport — voice, another
+  // client). Same id may arrive from both for a HUD-initiated turn;
+  // overwriting with an identical object is harmless, so no dedup machinery.
+  const [pendingConfirmation, setPendingConfirmation] = useState(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
+  const conversationId = useRef(loadConversationId()).current
+
+  const handleConfirmationRequired = useCallback((conf) => {
+    if (!conf || !conf.id) return
+    setPendingConfirmation(prev => (prev && prev.id === conf.id ? prev : conf))
+  }, [])
+
+  const resolveConfirmation = useCallback(async (decision) => {
+    const conf = pendingConfirmation
+    if (!conf || confirmBusy) return
+    setConfirmBusy(true)
+    try {
+      const resp = await fetch(`${apiUrl}/chat/confirm/${encodeURIComponent(conf.id)}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+        },
+        body: JSON.stringify({ decision }),
+      })
+      const out = await readChatSse(resp)
+      if (out.text) addLocalMessage({ who: 'j', text: out.text })
+      if (out.error) addLocalMessage({ who: 'j', text: '⚠ ' + out.error })
+      if (out.confirmation) {
+        // A SECOND same-turn interrupt (the exact case the backend's
+        // resume_and_stream re-emits the structured frame for) — swap the
+        // prompt in place and stay busy.
+        setPendingConfirmation(out.confirmation)
+        return
+      }
+      setPendingConfirmation(null)
+      setChatBusy(false)
+    } catch (e) {
+      addLocalMessage({ who: 'j', text: `⚠ Onay iletilemedi: ${e.message}` })
+      // Leave the prompt up — the pending confirmation may still be alive
+      // server-side (TTL-bound); the user can retry or deny.
+    } finally {
+      setConfirmBusy(false)
+    }
+  }, [pendingConfirmation, confirmBusy, apiUrl, apiKey, addLocalMessage])
+
   // Faz 3: Electron itself as the mic/speaker for a JARVIS conversation, using
   // the server's Whisper/Piper (see docs/VOICE_PROTOCOL.md). Independent of
   // the local wakeword/PTT loop -- /ws's audio_session_start automatically
@@ -341,6 +489,7 @@ export default function App() {
     onPanelControl: handlePanelControl,
     onAudioChunk: (buf) => remoteAudio.handleAudioChunk(buf),
     onAudioControl: (msg) => remoteAudio.handleAudioControl(msg),
+    onConfirmation: handleConfirmationRequired,
   })
 
   // Space → toggle the remote-audio session (first press starts capture +
@@ -401,6 +550,7 @@ export default function App() {
     formData.append('file', dropFile)
     formData.append('query', dropQuery.trim())
     formData.append('language', 'tr')
+    if (conversationId) formData.append('conversation_id', conversationId)
 
     setDropFile(null)
     setDropQuery('')
@@ -412,28 +562,23 @@ export default function App() {
         headers: apiKey ? { 'X-API-Key': apiKey } : undefined,
         body: formData,
       })
-      const reader = resp.body.getReader()
-      const decoder = new TextDecoder()
-      let buf = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop()
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const data = line.slice(6)
-          if (data === '[DONE]') { setDropResponse(r => ({ ...r, done: true })); return }
-          if (data.startsWith('[ERROR]')) { setDropResponse(r => ({ text: r.text + data.slice(7), done: true })); return }
-          const token = data.replace(/\\n/g, '\n')
-          setDropResponse(r => ({ ...r, text: r.text + token }))
-        }
+      const out = await readChatSse(resp, {
+        onToken: (token) => setDropResponse(r => ({ ...r, text: (r?.text || '') + token })),
+      })
+      if (out.error) { setDropResponse(r => ({ text: (r?.text || '') + out.error, done: true })); return }
+      if (out.confirmation) {
+        // An uploaded-file query can hit the L3 gate too ("read this and
+        // email it"). Same overlay; the continuation flows into the
+        // transcript, so close the drop panel with a pointer.
+        setDropResponse(r => ({ text: (r?.text || '') + '\n— onay bekleniyor (prompt açıldı) —', done: true }))
+        handleConfirmationRequired(out.confirmation)
+        return
       }
+      setDropResponse(r => ({ ...r, done: true }))
     } catch (e) {
       setDropResponse({ text: `Hata: ${e.message}`, done: true })
     }
-  }, [dropFile, dropQuery, apiUrl, apiKey])
+  }, [dropFile, dropQuery, apiUrl, apiKey, conversationId, handleConfirmationRequired])
 
   // Fake data fallback (active when disconnected)
   const fakeMic      = useFakeMic(state)
@@ -491,6 +636,13 @@ export default function App() {
       onDrop={handleDrop}
     >
       {dragging && <DragHint />}
+      {pendingConfirmation && (
+        <ConfirmationOverlay
+          payload={pendingConfirmation.payload}
+          busy={confirmBusy}
+          onDecision={resolveConfirmation}
+        />
+      )}
       {dropFile && (
         <DropOverlay
           file={dropFile.name ?? dropFile}
@@ -586,7 +738,9 @@ export default function App() {
           state={state} micLevel={micLevel} latency={met.latency}
           vaultCount={vaultCount} uptime={uptime}
           apiUrl={apiUrl} apiKey={apiKey}
+          conversationId={conversationId}
           onMessage={addLocalMessage}
+          onConfirmation={handleConfirmationRequired}
           busy={chatBusy}
           onBusy={setChatBusy}
           onPickFile={f => { setDropFile(f); setDropQuery('') }}
