@@ -184,11 +184,23 @@ $ready = $false
 $readyRetries = [Math]::Max(1, [int]($ReadyTimeoutSec / 2))
 foreach ($i in 1..$readyRetries) {
     Start-Sleep -Seconds 2
-    if ($srv.HasExited) { break }
+    # Probe BEFORE the process-liveness check, not after. With the old order a
+    # server process that had already exited by this iteration's check aborted
+    # the run as "not ready" without ever asking /status -- but "the process I
+    # started died" and "nothing answers this port" are different facts, and
+    # tests/test_ab_harness_guards.py depends on the difference: it holds the
+    # port with a stub (the real server's bind failure is expected and
+    # harmless there), so readiness must be judged by the port answering, not
+    # by which process answers it. CI-flake fix 2026-07-23: this order was one
+    # half of the nondeterminism that kept turning
+    # test_ps_wrapper_propagates_driver_failure_exit_code red on docs-only
+    # commits; the other half (the stub's port being stealable at all via
+    # SO_REUSEADDR) is closed on the test's side with SO_EXCLUSIVEADDRUSE.
     try {
         $null = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/status" -TimeoutSec 5
         $ready = $true; break
     } catch { }
+    if ($srv.HasExited) { break }
 }
 if (-not $ready) {
     "SERVER NOT READY after ${ReadyTimeoutSec}s (exited=$($srv.HasExited)) - aborting $Config" | Out-File $OLog -Append -Encoding utf8

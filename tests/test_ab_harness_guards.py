@@ -93,8 +93,31 @@ class _StubHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _ExclusivePortHTTPServer(HTTPServer):
+    """HTTPServer that owns its port exclusively (Windows).
+
+    http.server's default allow_reuse_address=1 sets SO_REUSEADDR, and on
+    Windows SO_REUSEADDR is the port-HIJACK flag: a second socket that sets it
+    can bind an address someone else is already listening on. That is exactly
+    the race behind this suite's one CI flake: the stub is supposed to hold
+    the port so ab_run_config.ps1's real server "fails to bind, harmlessly" --
+    but uvicorn sets SO_REUSEADDR too, so in CI the real server sometimes
+    bound anyway, took the traffic, then died mid-readiness-window (no model
+    in CI), landing the wrapper on its server_not_ready path (invalid_runs=0)
+    instead of the driver path these tests pin. SO_EXCLUSIVEADDRUSE makes the
+    stub's claim on the port unstealable, so the intended setup is guaranteed
+    rather than merely likely.
+    """
+    allow_reuse_address = False  # mutually exclusive with SO_EXCLUSIVEADDRUSE
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows; no-op elsewhere
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def _serve(port: int):
-    srv = HTTPServer(("127.0.0.1", port), _StubHandler)
+    srv = _ExclusivePortHTTPServer(("127.0.0.1", port), _StubHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -197,7 +220,7 @@ def test_single_transport_error_invalidates_the_run_by_default(tmp_path):
     """
     port = _free_port()
     _StubHandler.paths = []
-    srv = HTTPServer(("127.0.0.1", port), _StubHandler)
+    srv = _ExclusivePortHTTPServer(("127.0.0.1", port), _StubHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         proc = _run_driver(f"http://127.0.0.1:{port}", tmp_path)
@@ -229,20 +252,27 @@ def test_ps_wrapper_propagates_driver_failure_exit_code(tmp_path):
     then reaches the stub, cannot complete a chat, and exits 4. The wrapper must
     surface that as a non-zero exit AND mark the manifest invalid.
 
-    This assumption -- "its own real server fails to bind, harmlessly" -- is
-    NOT actually guaranteed: under CI's process-scheduling timing this test was
-    intermittently observed hitting KeyError: 'valid_measurement' instead of
-    the assertion below, because the real server subprocess sometimes wins the
-    port-bind race against this test's own stub thread, then misses its own
-    300s readiness window for real (see
+    This assumption -- "its own real server fails to bind, harmlessly" -- was
+    originally NOT guaranteed, and both halves of the resulting race hit CI
+    for real: the real server sometimes won the port-bind race outright
+    (uvicorn also sets SO_REUSEADDR -- Windows' hijack flag), then died
+    missing its readiness window. That first surfaced as
+    KeyError: 'valid_measurement' (manifest fixed 2026-07-22 to report
+    valid_measurement=false on every path), then, post-fix, as this test's
+    invalid_runs assert seeing the wrapper's server_not_ready path
+    (invalid_runs=0) instead of the driver path it pins -- red CI on two
+    docs-only commits. Deterministic since 2026-07-23: the stub binds with
+    SO_EXCLUSIVEADDRUSE (unstealable -- see _ExclusivePortHTTPServer), and
+    the wrapper's readiness loop probes /status BEFORE its process-liveness
+    check, so a stub-held port passes readiness no matter when the real
+    server's bind failure lands. The never-ready path itself is exercised
+    deterministically by
     test_ps_wrapper_manifest_reports_invalid_when_server_never_becomes_ready
-    right below, which exercises that path directly and deterministically) --
-    ab_run_config.ps1's manifest now reports valid_measurement=false on BOTH
-    paths, not only this one.
+    right below.
     """
     port = _free_port()
     _StubHandler.paths = []
-    srv = HTTPServer(("127.0.0.1", port), _StubHandler)
+    srv = _ExclusivePortHTTPServer(("127.0.0.1", port), _StubHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         proc = subprocess.run(
