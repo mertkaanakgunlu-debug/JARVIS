@@ -38,6 +38,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from langgraph.errors import GraphInterrupt
 
 from jarvis.agent import JarvisAgent
 from jarvis.config import Settings
@@ -177,6 +178,11 @@ def _resume_agent(pending: dict, *, aget_state_return):
     agent._pending_interrupt_payload = (
         lambda cfg: JarvisAgent._pending_interrupt_payload(agent, cfg)
     )
+    agent._register_pending_confirmation = (
+        lambda conf_id, config, recorder: JarvisAgent._register_pending_confirmation(
+            agent, conf_id, config, recorder
+        )
+    )
     return agent
 
 
@@ -216,3 +222,36 @@ async def test_resume_and_stream_without_a_second_interrupt_completes_normally(m
 
     assert "".join(chunks) == "just talking, no tool call"
     assert agent._pending_confirmations == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_and_stream_handles_graph_interrupt_raised_directly(monkeypatch):
+    """Review remediation: resume_and_stream() previously had no
+    `except GraphInterrupt` handler at all -- unlike chat_stream(), which
+    keeps one as defense-in-depth even though it's dead on this LangGraph
+    version. If GraphInterrupt were ever raised here (e.g. a LangGraph
+    version change), it used to fall into the generic `except Exception`
+    and silently become an opaque "[ERROR: ...]" string instead of a
+    confirmation prompt for the second interrupt."""
+    payload = {"tools": [{"name": "shell_run", "args": {"command": "echo hi"}}]}
+
+    async def _raises_graph_interrupt(graph, command, config):
+        raise GraphInterrupt((SimpleNamespace(value=payload),))
+        yield  # pragma: no cover -- unreachable, keeps this an async generator
+
+    agent = _resume_agent(
+        {"c1": {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None}},
+        aget_state_return=_empty_snapshot(),
+    )
+    monkeypatch.setattr("jarvis.agent.graph_stream_to_text", _raises_graph_interrupt)
+
+    chunks = [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert len(chunks) == 1
+    marker = json.loads(chunks[0])
+    assert marker["__jarvis_confirm__"] is True
+    assert marker["payload"] == payload
+    assert marker["id"] in agent._pending_confirmations
+    assert "c1" not in agent._pending_confirmations
+    assert agent._state_lock.acquire(blocking=False), "lock must be released, not held forever"
+    agent._state_lock.release()

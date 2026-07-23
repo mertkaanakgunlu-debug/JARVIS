@@ -96,6 +96,7 @@ async def resolve_confirmation(
     lang: str,
     *,
     on_message: Callable[[str], None] | None = None,
+    set_pending_confirmation: Callable[["PendingConfirmation | None"], None] | None = None,
 ) -> None:
     """Resume the turn agent.resume_and_stream() left interrupted, using
     `transcript` (the user's reply to describe_confirmation's question) as
@@ -103,17 +104,48 @@ async def resolve_confirmation(
     -- fail-safe, same default as the CLI text prompt's default="n". The
     user's own words become the denial guidance the LLM sees, so "no, send
     it to Alice instead" still carries useful correction, not just a bare no.
+
+    Review remediation: resume_and_stream() can itself yield a SECOND
+    __jarvis_confirm__ marker (a different confirmable tool call in the
+    same resumed turn) -- before this fix, that marker was fed straight
+    into engine.speak_stream() like ordinary text, so TTS spoke the raw
+    JSON (tool name/args included) aloud instead of asking a new question,
+    and the graph was left interrupted with no way to ever resume it. This
+    now mirrors run_one_response()'s exact marker-detect/describe/re-arm
+    pattern: the marker is intercepted before it reaches TTS, spoken as a
+    natural question instead, and set_pending_confirmation() re-arms the
+    next transcript to resolve THIS new interrupt.
     """
     decision = "approve" if is_affirmative(transcript) else f"deny:{transcript}"
 
     chunks: list[str] = []
+    confirm_marker: dict | None = None
 
     async def _collecting():
+        nonlocal confirm_marker
         async for token in agent.resume_and_stream(pending.conf_id, decision):
+            marker = parse_confirm_marker(token)
+            if marker is not None:
+                confirm_marker = marker
+                return
             chunks.append(token)
             yield token
 
     await engine.speak_stream(_collecting(), lang=lang)
+
+    if confirm_marker is not None:
+        question = describe_confirmation(confirm_marker, lang)
+        if on_message:
+            on_message(question)
+
+        async def _question_stream(t=question):
+            yield t
+
+        await engine.speak_stream(_question_stream(), lang=lang)
+        if set_pending_confirmation is not None:
+            set_pending_confirmation(PendingConfirmation(confirm_marker["id"], confirm_marker["payload"]))
+        return
+
     if on_message and chunks:
         on_message("".join(chunks))
 

@@ -257,33 +257,53 @@ def _show_model_menu(agent: JarvisAgent) -> None:
 async def _handle_confirmation_cli(agent: JarvisAgent, conf_id: str, payload: dict) -> None:
     """A tool call was interrupted for confirmation (jarvis.agent.ConfirmationRequired).
     Show what's pending, ask once, then resume the same turn via
-    agent.resume_and_stream() with the user's decision."""
-    tools = payload.get("tools", [])
-    lines = []
-    for t in tools:
-        desc = t.get("description") or f"{t.get('name')}({t.get('args')})"
-        lines.append(f"• {desc}")
-    console.print(Panel(
-        "\n".join(lines) or "(no detail)",
-        title="[bold red]Confirmation required[/bold red]",
-        border_style="red",
-    ))
-    try:
-        raw = Prompt.ask(
-            "[bold]Approve?[/bold] [dim](y = yes, anything else = deny + reason)[/dim]",
-            default="n",
-        ).strip()
-    except (EOFError, KeyboardInterrupt):
-        raw = "n"
+    agent.resume_and_stream() with the user's decision.
 
-    decision = "approve" if raw.lower() in ("y", "yes", "evet", "onay", "onayla") else f"deny:{raw}"
+    Review remediation: resume_and_stream() can itself yield a SECOND
+    __jarvis_confirm__ marker if the resumed turn hits another confirmable
+    tool call -- before this fix, that marker was printed as JARVIS's raw
+    reply instead of a new approval prompt, leaving the graph interrupted
+    with no path left to resume it. Loops instead of returning: each
+    iteration prompts once and resumes once; if the resume yields a fresh
+    marker, the loop continues with that marker's conf_id/payload."""
+    from jarvis.voice.session import parse_confirm_marker
 
-    chunks: list[str] = []
-    with console.status("[gold3]Thinking…[/gold3]", spinner="dots"):
-        async for token in agent.resume_and_stream(conf_id, decision):
-            chunks.append(token)
-    if chunks:
-        _print_jarvis("".join(chunks), agent.current_model_label)
+    while True:
+        tools = payload.get("tools", [])
+        lines = []
+        for t in tools:
+            desc = t.get("description") or f"{t.get('name')}({t.get('args')})"
+            lines.append(f"• {desc}")
+        console.print(Panel(
+            "\n".join(lines) or "(no detail)",
+            title="[bold red]Confirmation required[/bold red]",
+            border_style="red",
+        ))
+        try:
+            raw = Prompt.ask(
+                "[bold]Approve?[/bold] [dim](y = yes, anything else = deny + reason)[/dim]",
+                default="n",
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            raw = "n"
+
+        decision = "approve" if raw.lower() in ("y", "yes", "evet", "onay", "onayla") else f"deny:{raw}"
+
+        chunks: list[str] = []
+        next_marker: dict | None = None
+        with console.status("[gold3]Thinking…[/gold3]", spinner="dots"):
+            async for token in agent.resume_and_stream(conf_id, decision):
+                marker = parse_confirm_marker(token)
+                if marker is not None:
+                    next_marker = marker
+                    break
+                chunks.append(token)
+        if chunks:
+            _print_jarvis("".join(chunks), agent.current_model_label)
+
+        if next_marker is None:
+            return
+        conf_id, payload = next_marker["id"], next_marker["payload"]
 
 
 # ── Main loops ─────────────────────────────────────────────────────────────────
@@ -660,7 +680,6 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
             from jarvis.execution import workflow_store
             from jarvis.execution.workflow_approval import resolve_workflow_approval
             from jarvis.execution.workflow_engine import render_workflow_report
-            from jarvis.graph.tools import make_tools
 
             if not sub or sub == "list":
                 rows = workflow_store.list_workflows(limit=20)
@@ -694,13 +713,22 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
                 decision = "approve" if verb == "approve" else (
                     f"deny:{reason}" if reason else "deny"
                 )
-                tools = make_tools(agent.workspace, agent.settings, agent.memory)
+                tools = agent.get_workflow_tools()
                 outcome = await resolve_workflow_approval(
                     workflow_id, decision,
                     tools=tools, settings=agent.settings,
                     workspace=agent.workspace, transport="cli",
                 )
-                if not outcome.ok and not outcome.reapproval_required and not outcome.report:
+                # Review remediation: `report` is non-empty for the "not
+                # currently awaiting approval" outcome too (ok=False,
+                # reapproval_required=False), so gating the error branch on
+                # `not outcome.report` let that failure fall through and
+                # render as an ordinary success panel with outcome.message
+                # never shown. ok=False + reapproval_required=False is
+                # ALWAYS a hard failure regardless of what report/plan
+                # happen to be populated -- report/plan are extra context,
+                # not a success signal.
+                if not outcome.ok and not outcome.reapproval_required:
                     _print_error(outcome.message)
                     continue
                 if outcome.reapproval_required:
@@ -1081,6 +1109,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
                 await resolve_confirmation(
                     agent, engine, pending, text, lang,
                     on_message=lambda full: _print_jarvis(full, agent.current_model_label),
+                    set_pending_confirmation=_set_pending,
                 )
 
             return _resolve()

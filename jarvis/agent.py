@@ -23,6 +23,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -624,6 +625,13 @@ class JarvisAgent:
         # Phase 3: pending interrupted graphs awaiting user confirmation
         self._pending_confirmations: dict[str, dict] = {}
 
+        # Review remediation: get_workflow_tools()'s cache -- see that
+        # method's docstring. Safe to cache unconditionally: workspace/
+        # settings/memory are each assigned exactly once, above, and never
+        # reassigned afterward (switch_model() swaps self._effective_settings,
+        # never self.settings).
+        self._workflow_tools_cache: list | None = None
+
         # Strong refs to background tasks — prevents GC from cancelling them mid-flight
         self._bg_tasks: set[asyncio.Task] = set()
 
@@ -716,7 +724,7 @@ class JarvisAgent:
         """Acquire _state_lock without blocking the calling event loop's thread."""
         await asyncio.get_running_loop().run_in_executor(None, self._state_lock.acquire)
 
-    def _reset_state_sync(self, target_session_id: str | None = None) -> tuple[str, str, bool]:
+    def _reset_state_sync(self, target_session_id: str | None = None) -> tuple[str, str, bool, bool]:
         """The lock-guarded state mutation shared by reset()/reset_async()/
         reset_conversation_async(). Pure sync work (SQLite archive + new
         session + in-memory clears) with NO event-loop interaction — safe
@@ -737,14 +745,20 @@ class JarvisAgent:
         right now", so client A's /reset could silently archive client
         B's in-flight conversation.
 
-        Returns (archived_session_id, new_session_id, had_content) —
-        had_content is read from self._history/_turn for the active-session
-        path (matches the in-memory state precisely) and from the store's
-        own last_turn_idx() for the other-session path (no in-memory copy
-        of a non-active session exists to check).
+        Returns (archived_session_id, new_session_id, had_content,
+        was_active) — was_active (review remediation) is decided HERE,
+        inside the same lock acquisition as the mutation itself, and must
+        be used instead of a caller re-reading self.session_id after this
+        method returns: self._state_lock is released the moment this
+        method's `with` block exits, so a caller that awaits (e.g.
+        asyncio.to_thread returning control to the event loop) before
+        checking self.session_id can race a concurrent request that
+        switches the active session in that gap -- the exact TOCTOU this
+        return value closes.
         """
         with self._state_lock:
-            if not target_session_id or target_session_id == self.session_id:
+            was_active = not target_session_id or target_session_id == self.session_id
+            if was_active:
                 old_session_id = self.session_id
                 had_content = self._turn > 0 or len(self._history) > 0
                 self.session_store.archive_session(old_session_id)
@@ -767,7 +781,7 @@ class JarvisAgent:
                 had_content = self.session_store.last_turn_idx(target_session_id) > 0
                 self.session_store.archive_session(target_session_id)
                 new_session_id = self.session_store.new_session()
-        return old_session_id, new_session_id, had_content
+        return old_session_id, new_session_id, had_content, was_active
 
     def reset(self) -> None:
         """Archive the current session and start a fresh one (sync variant).
@@ -780,7 +794,7 @@ class JarvisAgent:
         Async callers (API endpoints, the CLI's async REPL) should prefer
         reset_async(), which never blocks the loop on the SQLite work.
         """
-        old_session_id, _new_session_id, had_content = self._reset_state_sync()
+        old_session_id, _new_session_id, had_content, _was_active = self._reset_state_sync()
         if had_content:
             try:
                 self._schedule_summarize_one(old_session_id)
@@ -803,7 +817,9 @@ class JarvisAgent:
         reset_conversation_async() for the per-conversation-id variant a
         multi-client caller (the API) should prefer.
         """
-        old_session_id, _new_session_id, had_content = await asyncio.to_thread(self._reset_state_sync)
+        old_session_id, _new_session_id, had_content, _was_active = await asyncio.to_thread(
+            self._reset_state_sync
+        )
         if had_content:
             try:
                 self._schedule_summarize_one(old_session_id)
@@ -825,7 +841,7 @@ class JarvisAgent:
         return THIS method's new_session_id to the caller, not
         agent.session_id.
         """
-        old_session_id, new_session_id, had_content = await asyncio.to_thread(
+        old_session_id, new_session_id, had_content, was_active = await asyncio.to_thread(
             self._reset_state_sync, conversation_id or None
         )
         if had_content:
@@ -833,12 +849,17 @@ class JarvisAgent:
                 self._schedule_summarize_one(old_session_id)
             except Exception as exc:
                 print(f"[reset] summary scheduling failed (reset itself OK): {exc}")
-        if self.session_id == new_session_id:
-            # Only true when the archived conversation was (or defaulted
-            # to) the currently active one -- an unrelated other session's
-            # reset must not fire an event_bus "active session changed"
-            # notification for a session that never stopped being active.
-            event_bus.session(self.session_id, None)
+        if was_active:
+            # Review remediation: was_active is decided ATOMICALLY inside
+            # _reset_state_sync's own lock acquisition, not by re-reading
+            # self.session_id here -- _state_lock is already released by
+            # the time asyncio.to_thread returns control to this coroutine,
+            # so a concurrent request that switches the active session in
+            # that gap could otherwise make `self.session_id == new_session_id`
+            # compare against a since-changed value and silently drop this
+            # notification for a reset that legitimately targeted the
+            # active conversation at the moment it ran.
+            event_bus.session(new_session_id, None)
         return old_session_id, new_session_id
 
     def _switch_session_locked(self, session_id: str) -> int:
@@ -918,6 +939,24 @@ class JarvisAgent:
             self._effective_settings = new_settings
             self._active_model_id = model_id
         return _label_for(model_id)
+
+    def get_workflow_tools(self) -> list:
+        """Cached make_tools() list for workflow-approval resolution (the
+        API's POST /workflow/{id}/resolve and the CLI's /workflow
+        approve|deny) -- review remediation: both previously called
+        make_tools(self.workspace, self.settings, self.memory) fresh on
+        every single approval click, rebuilding all ~38 tool closures (and
+        each one's inferred pydantic args schema) synchronously, just to
+        dispatch the plan's one or two remaining steps. Safe to cache for
+        the agent's whole lifetime: workspace/settings/memory are each
+        assigned exactly once, in __init__, and never reassigned (unlike
+        self._effective_settings, which switch_model() does swap -- but
+        workflow step dispatch reads self._settings on the ENGINE, set
+        fresh per call in workflow_approval.py, not from this tools list)."""
+        if self._workflow_tools_cache is None:
+            from jarvis.graph.tools import make_tools
+            self._workflow_tools_cache = make_tools(self.workspace, self.settings, self.memory)
+        return self._workflow_tools_cache
 
     # ── Entity extraction (fire-and-forget) ────────────────────────────────────
 
@@ -1269,9 +1308,7 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._pending_confirmations[conf_id] = {
-                    "config": config, "recorder": recorder,
-                }
+                self._register_pending_confirmation(conf_id, config, recorder)
                 event_bus.confirmation_required(conf_id, payload)
                 raise ConfirmationRequired(conf_id, payload) from exc
             except GraphRecursionError:
@@ -1312,9 +1349,7 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._pending_confirmations[conf_id] = {
-                    "config": config, "recorder": recorder,
-                }
+                self._register_pending_confirmation(conf_id, config, recorder)
                 event_bus.confirmation_required(conf_id, payload)
                 raise ConfirmationRequired(conf_id, payload)
 
@@ -1419,6 +1454,30 @@ class JarvisAgent:
             return snapshot.interrupts[0].value
         except Exception:
             return {}
+
+    def _register_pending_confirmation(self, conf_id: str, config: dict, recorder) -> None:
+        """Register a turn paused for confirmation, and opportunistically
+        evict stale entries -- review remediation: no Electron/mobile UI
+        renders this prompt yet (CLAUDE.md's safety-model section), and any
+        SSE client that disconnects mid-stream never calls resume, so
+        without this an abandoned entry (holding the turn's graph config,
+        HUD callback, and usage recorder) leaked forever. A generous
+        multiple of approval_ttl_sec: the underlying ExecutionRequest's own
+        HMAC signature already stops verifying after approval_ttl_sec (see
+        jarvis.execution.approval), so a resume attempt past that point
+        would hit "approval no longer valid"/"expired or not found" anyway
+        -- this just stops holding the dict entry open past the point it
+        could ever be usefully resumed."""
+        now = time.monotonic()
+        stale_after = getattr(self.settings, "approval_ttl_sec", 300) * 2
+        for stale_id in [
+            cid for cid, entry in self._pending_confirmations.items()
+            if now - entry.get("created_at", now) > stale_after
+        ]:
+            del self._pending_confirmations[stale_id]
+        self._pending_confirmations[conf_id] = {
+            "config": config, "recorder": recorder, "created_at": now,
+        }
 
     async def chat_stream(
         self,
@@ -1542,9 +1601,7 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._pending_confirmations[conf_id] = {
-                    "config": config, "recorder": recorder,
-                }
+                self._register_pending_confirmation(conf_id, config, recorder)
                 event_bus.confirmation_required(conf_id, payload)
                 yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
             except GraphRecursionError:
@@ -1576,9 +1633,7 @@ class JarvisAgent:
                 if payload is not None:
                     _confirmation_issued = True
                     conf_id = str(uuid.uuid4())
-                    self._pending_confirmations[conf_id] = {
-                        "config": config, "recorder": recorder,
-                    }
+                    self._register_pending_confirmation(conf_id, config, recorder)
                     event_bus.confirmation_required(conf_id, payload)
                     yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
 
@@ -1710,6 +1765,30 @@ class JarvisAgent:
                         _first_chunk = False
                     chunks.append(text)
                     yield text
+            except GraphInterrupt as exc:
+                # Review remediation: chat_stream() keeps this handler as
+                # defense-in-depth even though _pending_interrupt_payload()'s
+                # docstring documents it as dead on the installed LangGraph
+                # version (astream() ends normally instead of raising) --
+                # resume_and_stream() lacked the identical handler, so IF
+                # GraphInterrupt were ever raised here (e.g. after a
+                # LangGraph version change), it fell into the generic
+                # `except Exception` below and was silently converted into
+                # an opaque "[ERROR: ...]" string instead of a confirmation
+                # prompt for the second interrupt. Mirrors chat_stream()'s
+                # handling exactly; returns immediately so the post-loop
+                # _pending_interrupt_payload() fallback below doesn't also
+                # fire for the same interrupt.
+                try:
+                    payload = exc.args[0][0].value
+                except Exception:
+                    payload = {}
+                new_conf_id = str(uuid.uuid4())
+                self._register_pending_confirmation(new_conf_id, config, recorder)
+                event_bus.confirmation_required(new_conf_id, payload)
+                yield json.dumps({"__jarvis_confirm__": True, "id": new_conf_id, "payload": payload})
+                event_bus.state("idle")
+                return
             except (asyncio.CancelledError, GeneratorExit):
                 # BUG-13: see chat_stream()'s identical fix — must propagate, not
                 # swallow, so a barge-in cancellation is correctly observed.
@@ -1743,9 +1822,7 @@ class JarvisAgent:
             if resumed_payload is not None:
                 resumed_confirmation_issued = True
                 new_conf_id = str(uuid.uuid4())
-                self._pending_confirmations[new_conf_id] = {
-                    "config": config, "recorder": recorder,
-                }
+                self._register_pending_confirmation(new_conf_id, config, recorder)
                 event_bus.confirmation_required(new_conf_id, resumed_payload)
                 yield json.dumps(
                     {"__jarvis_confirm__": True, "id": new_conf_id, "payload": resumed_payload}

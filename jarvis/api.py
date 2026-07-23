@@ -67,6 +67,27 @@ def _confirmation_sse_frame(marker: dict) -> str:
     )
     return f"data: {payload}\n\n"
 
+
+async def _sse_frames(token_stream: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]:
+    """Wrap a raw agent token stream (chat_stream()/resume_and_stream()) into
+    SSE `data: ...` frames, reframing any __jarvis_confirm__ marker into the
+    structured confirmation_required frame instead of leaking it as text.
+
+    Review remediation: this used to be copy-pasted per endpoint, and the
+    copy was missed entirely at /chat/confirm's resume_and_stream() consumer
+    -- a second same-turn confirmation leaked as raw JSON there. One shared
+    wrapper used by every SSE endpoint in this file makes that omission
+    structurally impossible for the next one too."""
+    from jarvis.voice.session import parse_confirm_marker
+
+    async for token in token_stream:
+        marker = parse_confirm_marker(token)
+        if marker is not None:
+            yield _confirmation_sse_frame(marker)
+            continue
+        safe = token.replace("\n", "\\n")
+        yield f"data: {safe}\n\n"
+
 logger = logging.getLogger(__name__)
 
 # Mobile routers
@@ -465,6 +486,7 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
                 return resolve_confirmation(
                     agent, engine, pending, text, lang,
                     on_message=lambda full: event_bus.message("j", full),
+                    set_pending_confirmation=_set_pending,
                 )
             return run_one_response(
                 agent, engine, text, lang, transport="voice-remote", set_pending_confirmation=_set_pending,
@@ -620,24 +642,15 @@ async def chat_stream(body: ChatRequest, request: Request):
         )
 
     async def _sse_generator() -> AsyncGenerator[str, None]:
-        from jarvis.voice.session import parse_confirm_marker
-
         event_bus.state("thinking")
-        full: list[str] = []
         try:
-            async for token in agent.chat_stream(
+            async for frame in _sse_frames(agent.chat_stream(
                 body.message,
                 detected_language=body.language or "en",
                 transport="api-stream",
                 conversation_id=body.conversation_id,
-            ):
-                marker = parse_confirm_marker(token)
-                if marker is not None:
-                    yield _confirmation_sse_frame(marker)
-                    continue
-                full.append(token)
-                safe = token.replace("\n", "\\n")
-                yield f"data: {safe}\n\n"
+            )):
+                yield frame
         except Exception as e:
             event_bus.state("idle")
             yield f"data: [ERROR] {e}\n\n"
@@ -664,9 +677,8 @@ async def chat_confirm(conf_id: str, body: ConfirmRequest, request: Request):
 
     async def _sse() -> AsyncGenerator[str, None]:
         try:
-            async for token in agent.resume_and_stream(conf_id, body.decision):
-                safe = token.replace("\n", "\\n")
-                yield f"data: {safe}\n\n"
+            async for frame in _sse_frames(agent.resume_and_stream(conf_id, body.decision)):
+                yield frame
         except Exception as e:
             yield f"data: [ERROR] {e}\n\n"
         yield "data: [DONE]\n\n"
@@ -764,23 +776,16 @@ async def chat_upload(
         image_mime = _IMAGE_MIME.get(suffix, "image/png")
 
         async def _sse_image() -> AsyncGenerator[str, None]:
-            from jarvis.voice.session import parse_confirm_marker
-
             try:
-                async for token in agent.chat_stream(
+                async for frame in _sse_frames(agent.chat_stream(
                     user_query,
                     detected_language=language or "en",
                     image_bytes=content,
                     image_mime=image_mime,
                     transport="api-upload",
                     conversation_id=conversation_id,
-                ):
-                    marker = parse_confirm_marker(token)
-                    if marker is not None:
-                        yield _confirmation_sse_frame(marker)
-                        continue
-                    safe = token.replace("\n", "\\n")
-                    yield f"data: {safe}\n\n"
+                )):
+                    yield frame
             except Exception as e:
                 yield f"data: [ERROR] {e}\n\n"
             yield "data: [DONE]\n\n"
@@ -814,22 +819,15 @@ async def chat_upload(
             logger.warning("Could not clean up uploaded file %s", saved_path, exc_info=True)
 
         async def _sse_pdf() -> AsyncGenerator[str, None]:
-            from jarvis.voice.session import parse_confirm_marker
-
             try:
-                async for token in agent.chat_stream(
+                async for frame in _sse_frames(agent.chat_stream(
                     full_input,
                     detected_language=language or "en",
                     extra_images=figures or None,
                     transport="api-upload",
                     conversation_id=conversation_id,
-                ):
-                    marker = parse_confirm_marker(token)
-                    if marker is not None:
-                        yield _confirmation_sse_frame(marker)
-                        continue
-                    safe = token.replace("\n", "\\n")
-                    yield f"data: {safe}\n\n"
+                )):
+                    yield frame
             except Exception as e:
                 yield f"data: [ERROR] {e}\n\n"
             yield "data: [DONE]\n\n"
@@ -845,22 +843,15 @@ async def chat_upload(
     full_query = f'{file_hint}\n\n{user_query}'
 
     async def _sse() -> AsyncGenerator[str, None]:
-        from jarvis.voice.session import parse_confirm_marker
-
         try:
             try:
-                async for token in agent.chat_stream(
+                async for frame in _sse_frames(agent.chat_stream(
                     full_query,
                     detected_language=language or "en",
                     transport="api-upload",
                     conversation_id=conversation_id,
-                ):
-                    marker = parse_confirm_marker(token)
-                    if marker is not None:
-                        yield _confirmation_sse_frame(marker)
-                        continue
-                    safe = token.replace("\n", "\\n")
-                    yield f"data: {safe}\n\n"
+                )):
+                    yield frame
             except Exception as e:
                 yield f"data: [ERROR] {e}\n\n"
             yield "data: [DONE]\n\n"
@@ -935,7 +926,13 @@ async def workflow_list(request: Request):
     _check_auth(request)
     from jarvis.execution import workflow_store
 
-    return {"workflows": workflow_store.list_workflows(limit=50)}
+    # Review remediation (efficiency): workflow_store's sqlite3 calls are
+    # synchronous (connect/PRAGMA/query per call, no async wrapping) --
+    # offload so a list request doesn't stall the loop for any concurrently
+    # streaming SSE/voice client, same as this file's existing /reset
+    # to_thread precedent.
+    workflows = await asyncio.to_thread(workflow_store.list_workflows, limit=50)
+    return {"workflows": workflows}
 
 
 @app.get("/workflow/{workflow_id}")
@@ -944,7 +941,7 @@ async def workflow_show(workflow_id: str, request: Request):
     from jarvis.execution import workflow_store
     from jarvis.execution.workflow_engine import render_workflow_report
 
-    plan = workflow_store.load(workflow_id)
+    plan = await asyncio.to_thread(workflow_store.load, workflow_id)
     if plan is None:
         raise HTTPException(status_code=404, detail=f"workflow not found: {workflow_id}")
     return {
@@ -960,15 +957,20 @@ async def workflow_resolve(workflow_id: str, body: WorkflowResolveRequest, reque
     _check_auth(request)
     agent = get_agent()
     from jarvis.execution.workflow_approval import resolve_workflow_approval
-    from jarvis.graph.tools import make_tools
 
-    tools = make_tools(agent.workspace, agent.settings, agent.memory)
+    tools = agent.get_workflow_tools()
     outcome = await resolve_workflow_approval(
         workflow_id, body.decision,
         tools=tools, settings=agent.settings,
         workspace=agent.workspace, transport="api",
     )
-    if not outcome.ok and not outcome.reapproval_required and outcome.plan is None:
+    # Review remediation: `plan` is populated for the "not currently
+    # awaiting approval" outcome too (ok=False, reapproval_required=False),
+    # so gating on `outcome.plan is None` let that failure fall through and
+    # return a 200 with ok:false buried in the body instead of a 4xx. Any
+    # ok=False + reapproval_required=False outcome is a hard failure
+    # regardless of whether plan/report happen to be populated.
+    if not outcome.ok and not outcome.reapproval_required:
         status = 404 if outcome.message.startswith("workflow not found") else 400
         raise HTTPException(status_code=status, detail=outcome.message)
     return {

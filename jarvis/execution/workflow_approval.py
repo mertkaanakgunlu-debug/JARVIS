@@ -36,6 +36,7 @@ load() here seeing the step no longer paused.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from jarvis.execution import workflow_store
@@ -72,7 +73,11 @@ async def resolve_workflow_approval(
             f"invalid decision {decision!r}: must be exactly 'approve', 'deny', or 'deny:<reason>'"
         )
 
-    plan = workflow_store.load(workflow_id)
+    # Review remediation (efficiency): workflow_store.load() is synchronous
+    # sqlite3 I/O -- offload so an API-driven resolve doesn't stall the
+    # event loop for any concurrently streaming SSE/voice client. Harmless
+    # for the CLI's own call (a separate process/loop either way).
+    plan = await asyncio.to_thread(workflow_store.load, workflow_id)
     if plan is None:
         return _invalid(f"workflow not found: {workflow_id!r}")
     if plan.status != "paused_for_approval" or not plan.pending_approval_step_id:

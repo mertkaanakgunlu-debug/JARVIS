@@ -172,6 +172,34 @@ async def test_stale_signature_reissues_approval_instead_of_failing(
     assert outcome2.plan.status == "succeeded"
 
 
+@pytest.mark.asyncio
+async def test_stale_approval_writes_policy_decision_trace(isolated_cwd, tmp_path, monkeypatch):
+    """Review remediation: a stale-approval block never dispatches the tool,
+    so on_tool_start/end (and tool_trace's own execution rows) never fire --
+    before this fix, the engine wrote only the audit_log "decision" row,
+    never the tool_trace "policy_decision" row nodes.py's identical
+    graph-path stale-approval block writes."""
+    from jarvis import tool_trace
+
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    gmail = _FakeTool("gmail", result="Email sent.")
+    settings = Settings(_env_file=None, confirmation_gate_enabled=True)
+    plan = await _paused_gmail_plan([gmail], settings, tmp_path)
+    monkeypatch.setattr(approval, "_PROCESS_KEY", secrets.token_bytes(32))
+
+    outcome = await resolve_workflow_approval(
+        plan.workflow_id, "approve",
+        tools=[gmail], settings=settings, workspace=tmp_path, transport="cli",
+    )
+    assert outcome.reapproval_required is True
+
+    rows = [r for r in tool_trace.load() if r.get("event") == "policy_decision"]
+    assert rows, "expected a policy_decision trace row for the stale-approval block"
+    assert rows[-1]["outcome"] == "blocked_stale_approval"
+    assert rows[-1]["ok"] is False
+    assert rows[-1]["workflow_id"] == plan.workflow_id
+
+
 # ── API endpoints ────────────────────────────────────────────────────────────
 
 def _client(monkeypatch, agent=None) -> TestClient:
@@ -214,6 +242,9 @@ def test_workflow_resolve_endpoint_rejects_unknown_id_and_bad_decision(
         settings = Settings(_env_file=None)
         memory = object()
 
+        def get_workflow_tools(self):
+            return []
+
     from pathlib import Path
     _AgentStub.workspace = Path(".")
     client = _client(monkeypatch, agent=_AgentStub())
@@ -226,6 +257,46 @@ def test_workflow_resolve_endpoint_rejects_unknown_id_and_bad_decision(
     resp2 = client.post("/workflow/wf-nope/resolve", json={"decision": "yes"})
     assert resp2.status_code == 400
     assert "invalid decision" in resp2.json()["detail"]
+
+
+def test_workflow_resolve_endpoint_returns_400_when_not_awaiting_approval(
+    isolated_cwd, tmp_path, monkeypatch
+):
+    """Review remediation: a workflow that isn't paused for approval (e.g.
+    already succeeded) must return a 4xx, not a 200 with ok:false silently
+    buried in the body. outcome.plan IS populated for this outcome (unlike
+    the not-found/invalid-decision cases above) -- gating the error branch
+    on `outcome.plan is None` let this specific failure fall through as an
+    ordinary 200, mirroring the identical bug this fix closes in cli.py's
+    /workflow approve|deny command."""
+    async def _seed():
+        writer = _FakeTool("file_write", result="written")
+        settings = Settings(_env_file=None, confirmation_gate_enabled=False)
+        engine = WorkflowEngine([writer], settings, tmp_path)
+        plan = engine.create_plan(
+            _contract(),
+            [WorkflowStep(step_id="s1", capability="file_write", args={"path": "a.txt", "content": "x"})],
+        )
+        plan = await engine.advance(plan)
+        assert plan.status == "succeeded"
+        return plan
+
+    import asyncio
+    plan = asyncio.run(_seed())
+
+    class _AgentStub:
+        workspace = tmp_path
+        settings = Settings(_env_file=None)
+        memory = object()
+
+        def get_workflow_tools(self):
+            return []
+
+    client = _client(monkeypatch, agent=_AgentStub())
+    resp = client.post(f"/workflow/{plan.workflow_id}/resolve", json={"decision": "approve"})
+
+    assert resp.status_code == 400
+    assert "is not awaiting approval" in resp.json()["detail"]
 
 
 # ── Structured SSE confirmation frame ────────────────────────────────────────
@@ -259,5 +330,46 @@ def test_chat_stream_emits_structured_confirmation_frame(isolated_cwd, monkeypat
         "type": "confirmation_required",
         "id": "conf-123",
         "payload": {"tools": [{"name": "gmail", "description": "send an email"}]},
+    }
+    assert "data: [DONE]" in body
+
+
+def test_chat_confirm_emits_structured_confirmation_frame_for_a_second_interrupt(
+    isolated_cwd, monkeypatch,
+):
+    """Review remediation: /chat/confirm's resume_and_stream() consumer was
+    the one SSE endpoint this diff's marker-reframing fix missed -- a second,
+    different confirmable action in the same resumed turn used to leak the
+    raw __jarvis_confirm__ JSON as response text. Same fixture shape as
+    test_chat_stream_emits_structured_confirmation_frame above, but for the
+    resume endpoint."""
+    marker = json.dumps({
+        "__jarvis_confirm__": True, "id": "conf-456",
+        "payload": {"tools": [{"name": "google_calendar", "description": "delete an event"}]},
+    })
+
+    class _ConfirmingAgent:
+        session_id = "s"
+
+        async def resume_and_stream(self, conf_id, decision):
+            yield "Okay, one more thing. "
+            yield marker
+
+    client = _client(monkeypatch, agent=_ConfirmingAgent())
+    resp = client.post("/chat/confirm/conf-123", json={"decision": "approve"})
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert "__jarvis_confirm__" not in body  # internal marker never leaks
+    frame_lines = [
+        line for line in body.splitlines()
+        if line.startswith("data: {") and "confirmation_required" in line
+    ]
+    assert frame_lines, body
+    frame = json.loads(frame_lines[0][len("data: "):])
+    assert frame == {
+        "type": "confirmation_required",
+        "id": "conf-456",
+        "payload": {"tools": [{"name": "google_calendar", "description": "delete an event"}]},
     }
     assert "data: [DONE]" in body

@@ -118,6 +118,57 @@ async def test_invalid_args_and_blocked_capability_are_audited(isolated_cwd, tmp
 
 
 @pytest.mark.asyncio
+async def test_capability_disabled_veto_writes_policy_decision_trace(isolated_cwd, tmp_path, monkeypatch):
+    """Review remediation: a pre-execution policy veto in the engine never
+    dispatches a tool, so on_tool_start/end (and tool_trace's own execution
+    rows) never fire for it -- before this fix, the engine wrote only the
+    audit_log "decision" row, never the tool_trace "policy_decision" row
+    nodes.py's identical graph-path veto writes, leaving the eval/oracle
+    harness with no structural evidence a workflow-path block happened.
+    Mirrors test_confirmation_node.py's test_kill_switch_veto_writes_policy_decision_trace
+    for the graph path."""
+    from jarvis import tool_trace
+
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    settings = Settings(_env_file=None, confirmation_gate_enabled=True)
+    engine = WorkflowEngine([], settings, tmp_path, transport="cli")
+    plan = engine.create_plan(
+        _contract(),
+        [WorkflowStep(step_id="s1", capability="python_run", args={"path": "x.py"})],
+    )
+    plan = await engine.advance(plan)
+
+    rows = [r for r in tool_trace.load() if r.get("event") == "policy_decision"]
+    assert rows, "expected a policy_decision trace row for the capability-disabled veto"
+    assert rows[-1]["outcome"] == "blocked_capability_disabled"
+    assert rows[-1]["ok"] is False
+    assert rows[-1]["workflow_id"] == plan.workflow_id
+    assert rows[-1]["step_id"] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_external_writes_disabled_veto_writes_policy_decision_trace(isolated_cwd, tmp_path, monkeypatch):
+    from jarvis import tool_trace
+
+    monkeypatch.setenv("JARVIS_TOOL_TRACE", "1")
+    settings = Settings(_env_file=None, confirmation_gate_enabled=True, external_writes_enabled=False)
+    engine = WorkflowEngine([], settings, tmp_path, transport="cli")
+    plan = engine.create_plan(
+        _contract(),
+        [WorkflowStep(
+            step_id="s1", capability="gmail",
+            args={"action": "send", "to": "a@b.c", "subject": "s", "body": "b"},
+        )],
+    )
+    plan = await engine.advance(plan)
+
+    rows = [r for r in tool_trace.load() if r.get("event") == "policy_decision"]
+    assert rows, "expected a policy_decision trace row for the external-writes-disabled veto"
+    assert rows[-1]["outcome"] == "blocked_external_writes_disabled"
+    assert rows[-1]["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_failed_dispatch_audits_execution_end_not_ok(isolated_cwd, tmp_path):
     failer = _FakeTool("file_write", result="[ERROR] disk full")
     settings = Settings(_env_file=None, confirmation_gate_enabled=True)
@@ -155,6 +206,56 @@ async def test_compensation_outcome_is_audited(isolated_cwd, tmp_path):
 
     comp = [e for e in _events_for(plan.workflow_id) if e["event"] == "compensation"]
     assert comp and comp[0]["step_id"] == "s1" and comp[0]["tool"] == "file_write"
+
+
+@pytest.mark.asyncio
+async def test_todo_compensation_writes_execution_audit_pair(isolated_cwd, tmp_path):
+    """Review remediation: unlike _compensate_file_write (direct filesystem
+    I/O, nothing to audit at the tool-execution granularity),
+    _compensate_todo_add calls a real registered tool's ainvoke() directly
+    -- before this fix, that call bypassed the audit core entirely, so the
+    compensating delete produced only the coarse "compensation" event, never
+    the execution_start/execution_end pair every other risk>=2 tool call
+    gets."""
+    todo = _FakeTool("todo", result="eklendi [abc123]")
+    failer = _FakeTool("gmail", result="[ERROR] smtp down")
+    settings = Settings(_env_file=None, confirmation_gate_enabled=False)
+    engine = WorkflowEngine([todo, failer], settings, tmp_path, transport="cli")
+    plan = engine.create_plan(
+        _contract(),
+        [
+            WorkflowStep(step_id="s1", capability="todo", args={"action": "add", "title": "buy milk"}),
+            WorkflowStep(
+                step_id="s2", capability="gmail",
+                args={"action": "send", "to": "a@b.c", "subject": "s", "body": "b"},
+                dependencies=["s1"],
+            ),
+        ],
+    )
+    plan = await engine.advance(plan)
+    assert plan.step("s1").status == "compensated"
+    # The compensating delete actually ran against the real todo tool.
+    assert todo.calls[-1] == {"action": "delete", "todo_id": "abc123"}
+
+    mine = _events_for(plan.workflow_id)
+    # Two execution_start/end pairs for "todo" now exist: the original add
+    # dispatch (from _dispatch()'s own pre-existing audit) and the NEW
+    # compensating delete this fix adds -- distinguish by execution_id, which
+    # _compensate_todo_add stamps with a "compensate-" prefix.
+    comp_starts = [
+        e for e in mine
+        if e["event"] == "execution_start" and e["tool"] == "todo"
+        and e["execution_id"].startswith("compensate-")
+    ]
+    comp_ends = [
+        e for e in mine
+        if e["event"] == "execution_end" and e["tool"] == "todo"
+        and e["execution_id"].startswith("compensate-")
+    ]
+    assert len(comp_starts) == 1 and len(comp_ends) == 1
+    assert comp_starts[0]["execution_id"] == comp_ends[0]["execution_id"]
+    assert comp_ends[0]["ok"] is True
+    assert comp_starts[0]["step_id"] == "s1"
 
 
 def test_workflow_start_schema_does_not_expose_config(isolated_cwd, tmp_path):

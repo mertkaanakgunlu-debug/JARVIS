@@ -248,6 +248,7 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
             return resolve_confirmation(
                 agent, engine, pending, text, lang,
                 on_message=lambda full: event_bus.message("j", full),
+                set_pending_confirmation=_set_pending,
             )
 
         return run_one_response(

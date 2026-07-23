@@ -88,7 +88,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from jarvis import audit_log, policy_guard
+from jarvis import audit_log, policy_guard, tool_trace
 from jarvis.execution import approval, idempotency, workflow_store
 from jarvis.execution.redaction import redact_preview
 from jarvis.execution.args_schemas import validate_args
@@ -178,8 +178,16 @@ def _capture_file_write(args: dict[str, Any], workspace: Path) -> dict[str, Any]
 
 
 async def _compensate_file_write(
-    step: WorkflowStep, content: str, workspace: Path, tools_by_name: dict
+    step: WorkflowStep, content: str, workspace: Path, tools_by_name: dict,
+    audit: "_AuditFn",
 ) -> CompensationResult:
+    # `audit` unused here: this compensator writes to the filesystem directly
+    # (never through a registered tool's ainvoke()), so there is no tool
+    # execution to pair with execution_start/execution_end -- the
+    # "compensation" event compensate() already records is the complete
+    # audit trail for this path. Accepted for signature parity with
+    # _CompensateFn (see _compensate_todo_add, which DOES call a real tool
+    # and therefore does use it).
     captured = step.compensation_data
     if not captured:
         return CompensationResult(ok=False, note="no capture data -- cannot compensate", retryable=False)
@@ -212,7 +220,8 @@ _TODO_ADDED_ID_RE = re.compile(r"eklendi \[([0-9a-f]+)\]")
 
 
 async def _compensate_todo_add(
-    step: WorkflowStep, content: str, workspace: Path, tools_by_name: dict
+    step: WorkflowStep, content: str, workspace: Path, tools_by_name: dict,
+    audit: "_AuditFn",
 ) -> CompensationResult:
     match = _TODO_ADDED_ID_RE.search(content or "")
     if not match:
@@ -228,18 +237,35 @@ async def _compensate_todo_add(
             retryable=False,
         )
     todo_id = match.group(1)
+    delete_args = {"action": "delete", "todo_id": todo_id}
+    # Review remediation: unlike _dispatch(), which calls tool.ainvoke()
+    # inside its own policy-checked, audited path, compensators call a
+    # real registered tool directly -- this delete previously produced
+    # only the coarse "compensation" event compensate() writes, never the
+    # execution_start/execution_end pair every other risk>=2 tool call
+    # gets. Mirrors _dispatch()'s own event names/fields so this delete is
+    # indistinguishable, in the audit trail, from any other real execution.
+    execution_id = f"compensate-{step.step_id}-{secrets.token_hex(6)}"
+    await audit("execution_start", tool="todo", risk_level=2, execution_id=execution_id,
+                args_preview=redact_preview(delete_args))
     try:
-        result = await tool.ainvoke({"action": "delete", "todo_id": todo_id})
+        result = await tool.ainvoke(delete_args)
     except Exception as exc:
+        await audit("execution_end", tool="todo", risk_level=2, execution_id=execution_id,
+                     ok=False, result_preview=redact_preview(str(exc)))
         return CompensationResult(ok=False, note=f"compensating delete failed: {exc}")
     result_text = result if isinstance(result, str) else str(result)
-    if content_is_failure(result_text):
+    ok = not content_is_failure(result_text)
+    await audit("execution_end", tool="todo", risk_level=2, execution_id=execution_id,
+                ok=ok, result_preview=redact_preview(result_text))
+    if not ok:
         return CompensationResult(ok=False, note=f"compensating delete reported failure: {result_text[:150]}")
     return CompensationResult(ok=True, note=f"deleted to-do {todo_id} created by this step")
 
 
+_AuditFn = Callable[..., Awaitable[None]]
 _CaptureFn = Callable[[dict, Path], "dict | None"]
-_CompensateFn = Callable[[WorkflowStep, str, Path, dict], Awaitable[CompensationResult]]
+_CompensateFn = Callable[[WorkflowStep, str, Path, dict, _AuditFn], Awaitable[CompensationResult]]
 
 _COMPENSATORS: dict[tuple[str, str | None], tuple[_CaptureFn, _CompensateFn]] = {
     ("file_write", None): (_capture_file_write, _compensate_file_write),
@@ -357,8 +383,22 @@ class WorkflowEngine:
         self._transport = transport
         self._conversation_id = conversation_id
 
-    def _audit(self, event: str, plan: WorkflowPlan, step: WorkflowStep, **fields) -> None:
-        audit_log.record(
+    async def _audit(
+        self, event: str, plan: WorkflowPlan, step: WorkflowStep, *,
+        trace_block: bool = False, **fields,
+    ) -> None:
+        # Review remediation (efficiency): audit_log.record()/tool_trace.
+        # record() are synchronous file I/O (lock + mkdir + open + write) --
+        # calling them directly from these async methods blocked the event
+        # loop (and any concurrently streaming SSE/voice response) for the
+        # duration of each write. asyncio.to_thread offloads the write
+        # without losing ordering: awaiting this method still guarantees the
+        # row is on disk before the caller proceeds, unlike a fire-and-forget
+        # task, which would race every existing test that reads
+        # audit_log.tail()/tool_trace.load() immediately after an awaited
+        # engine call.
+        await asyncio.to_thread(
+            audit_log.record,
             event,
             transport=self._transport,
             conversation_id=self._conversation_id,
@@ -366,6 +406,26 @@ class WorkflowEngine:
             step_id=step.step_id,
             **fields,
         )
+        if trace_block:
+            # Review remediation: mirrors nodes.py's identical
+            # audit_log.record()/tool_trace.record() pairing for a block
+            # that happens BEFORE any tool executes -- on_tool_start/end
+            # (and therefore tool_trace's own execution rows) never fire
+            # for it, so this policy_decision row is the only structural
+            # block evidence the eval/oracle harness can read (nodes.py's
+            # own comment on the same pairing). Before this, workflow-path
+            # blocks (kill switch, disabled capability, external writes
+            # disabled, stale approval) were invisible to that harness even
+            # though the graph-path equivalents are visible. No-op in
+            # production: tool_trace.record() is gated on
+            # JARVIS_TOOL_TRACE=1, same as every other caller.
+            await asyncio.to_thread(
+                tool_trace.record,
+                event="policy_decision", ok=False,
+                transport=self._transport,
+                workflow_id=plan.workflow_id, step_id=step.step_id,
+                **fields,
+            )
 
     # ── Plan lifecycle ──────────────────────────────────────────────────────
 
@@ -498,7 +558,7 @@ class WorkflowEngine:
             reason = decision[4:].lstrip(":").strip() or "denied by user"
             step.status = "failed"
             step.error = f"denied: {reason}"
-            self._audit(
+            await self._audit(
                 "decision", plan, step, tool=step.capability,
                 action=req_fields.get("action", ""), risk_level=req_fields.get("risk_level", 0),
                 outcome="user_denied", reason=reason,
@@ -531,8 +591,8 @@ class WorkflowEngine:
                 f"previous approval was no longer valid ({why}); "
                 "a fresh approval request was issued -- please re-approve"
             )
-            self._audit(
-                "decision", plan, step, tool=step.capability,
+            await self._audit(
+                "decision", plan, step, trace_block=True, tool=step.capability,
                 action=req_fields.get("action", ""), risk_level=req_fields.get("risk_level", 0),
                 outcome="blocked_stale_approval", reason=why,
             )
@@ -540,7 +600,7 @@ class WorkflowEngine:
             workflow_store.save(plan)
             return plan
         approval.consume(req)
-        self._audit(
+        await self._audit(
             "decision", plan, step, tool=step.capability,
             action=req_fields.get("action", ""), risk_level=req_fields.get("risk_level", 0),
             outcome="user_approved",
@@ -571,13 +631,19 @@ class WorkflowEngine:
                 continue
             _capture_fn, compensate_fn = entry
             content = (step.envelope or {}).get("normalized_output") or ""
+
+            async def _audit_for_step(event: str, **fields) -> None:
+                await self._audit(event, plan, step, **fields)
+
             try:
-                result = await compensate_fn(step, content, self._workspace, self._tools_by_name)
+                result = await compensate_fn(
+                    step, content, self._workspace, self._tools_by_name, _audit_for_step
+                )
             except Exception as exc:  # noqa: BLE001 -- compensation must never itself crash
                 result = CompensationResult(ok=False, note=f"compensation attempt raised: {exc}")
             step.compensation_note = result.note
             step.status = "compensated" if result.ok else "compensation_failed"
-            self._audit(
+            await self._audit(
                 "compensation", plan, step, tool=step.capability,
                 ok=result.ok, retryable=result.retryable, note=redact_preview(result.note),
             )
@@ -644,7 +710,7 @@ class WorkflowEngine:
                 first = errors[0] if errors else {"loc": [], "msg": "invalid arguments"}
                 step.status = "failed"
                 step.error = f"invalid_args {first.get('loc')}: {first.get('msg')}"[:300]
-                self._audit(
+                await self._audit(
                     "decision", plan, step, tool=step.capability, action="", risk_level=0,
                     outcome="blocked_invalid_args",
                     reason=f"{first.get('loc')}: {first.get('msg')}"[:200],
@@ -657,8 +723,8 @@ class WorkflowEngine:
         if not decision.allowed:
             step.status = "failed"
             step.error = f"blocked ({decision.veto_kind}): {decision.reason}"
-            self._audit(
-                "decision", plan, step, tool=decision.tool, action=decision.action,
+            await self._audit(
+                "decision", plan, step, trace_block=True, tool=decision.tool, action=decision.action,
                 risk_level=decision.risk_level,
                 outcome="blocked_kill_switch" if decision.veto_kind == "kill_switch"
                 else "blocked_capability_disabled",
@@ -673,8 +739,8 @@ class WorkflowEngine:
         ):
             step.status = "failed"
             step.error = "blocked: external writes disabled in this profile"
-            self._audit(
-                "decision", plan, step, tool=decision.tool, action=decision.action,
+            await self._audit(
+                "decision", plan, step, trace_block=True, tool=decision.tool, action=decision.action,
                 risk_level=decision.risk_level, outcome="blocked_external_writes_disabled",
                 reason="EXTERNAL_WRITES_ENABLED=false",
             )
@@ -684,7 +750,7 @@ class WorkflowEngine:
             return
 
         if decision.requires_confirmation and getattr(self._settings, "confirmation_gate_enabled", True):
-            self._audit(
+            await self._audit(
                 "decision", plan, step, tool=decision.tool, action=decision.action,
                 risk_level=decision.risk_level, outcome="confirm_required", reason=decision.reason,
             )
@@ -714,7 +780,7 @@ class WorkflowEngine:
             return
 
         if decision.risk_level >= 2:
-            self._audit(
+            await self._audit(
                 "decision", plan, step, tool=decision.tool, action=decision.action,
                 risk_level=decision.risk_level, outcome="auto_approved", reason=decision.reason,
             )
@@ -748,7 +814,7 @@ class WorkflowEngine:
         # LangChain callback manager), so the engine writes the pair itself.
         audit_execution = spec is not None and spec.risk_level >= 2
         if audit_execution:
-            self._audit(
+            await self._audit(
                 "execution_start", plan, step, tool=step.capability,
                 risk_level=spec.risk_level, execution_id=execution_id,
                 args_preview=redact_preview(step.args),
@@ -767,7 +833,7 @@ class WorkflowEngine:
                 ok = False
 
         if audit_execution:
-            self._audit(
+            await self._audit(
                 "execution_end", plan, step, tool=step.capability,
                 risk_level=spec.risk_level, execution_id=execution_id,
                 ok=ok, result_preview=redact_preview(content),

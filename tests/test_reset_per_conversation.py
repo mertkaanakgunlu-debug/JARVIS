@@ -108,6 +108,50 @@ async def test_empty_conversation_id_resets_whatever_is_active():
 
 
 @pytest.mark.asyncio
+async def test_event_bus_notification_survives_a_concurrent_session_switch(monkeypatch):
+    """Review remediation (TOCTOU): reset_conversation_async used to decide
+    whether to fire event_bus.session(...) by comparing self.session_id
+    AFTER _reset_state_sync's lock was already released -- a concurrent
+    request that switched the active session in that exact gap made the
+    comparison see a since-changed value, silently dropping the
+    notification for a reset that legitimately targeted the active
+    conversation. was_active is now decided ATOMICALLY inside
+    _reset_state_sync's own lock, so the notification must still fire
+    (with the correct new_session_id) even if self.session_id has since
+    moved on to some third value by the time this check runs."""
+    import jarvis.agent as agent_mod
+
+    class _FakeEventBus:
+        def __init__(self):
+            self.calls: list[tuple[str, object]] = []
+
+        def session(self, session_id, topic):
+            self.calls.append((session_id, topic))
+
+    fake_bus = _FakeEventBus()
+    monkeypatch.setattr(agent_mod, "event_bus", fake_bus)
+
+    agent = _fake_agent(active_session="B", active_history=["b-msg"])
+    real_reset_state_sync = agent._reset_state_sync
+
+    def _reset_then_race(target=None):
+        result = real_reset_state_sync(target)
+        # Simulate another coroutine's chat_stream(conversation_id="C")
+        # switching the shared agent's active pointer in the gap between
+        # this method's lock release and reset_conversation_async's
+        # post-await code running.
+        agent.session_id = "C-from-concurrent-request"
+        return result
+
+    agent._reset_state_sync = _reset_then_race
+
+    archived_id, new_id = await JarvisAgent.reset_conversation_async(agent, "")  # resets active (B)
+
+    assert archived_id == "B"
+    assert fake_bus.calls == [(new_id, None)]  # fired with the REAL new id, not the raced value
+
+
+@pytest.mark.asyncio
 async def test_summary_is_scheduled_for_the_archived_non_active_session():
     agent = _fake_agent(active_session="B", turn_idx_by_session={"A": 3})
 
