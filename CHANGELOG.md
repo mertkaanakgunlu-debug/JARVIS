@@ -6,6 +6,55 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Agent Runtime rev.2 — Faz 8: Evaluation v2 + the alpha-gate instrument] — 2026-07-23
+
+The 9-phase plan's last phase. Two halves: the offline evaluation infrastructure is BUILT and
+green; the live gate itself (10-run scenario classes + the ≥20-run isolation loop against a real
+server) is now a runnable instrument whose execution is the owner's call — the plan's own framing
+("manuel alpha", thresholds partly derivable only from live data).
+
+- **Registry sweep contract test** (`tests/test_registry_sweep.py`, 157 tests): every ToolSpec
+  field validated against its closed vocabulary; the safety-model invariant `risk_level>=3 ⇒
+  requires_confirmation` pinned; dynamic-MCP dataclass defaults proven fail-closed; and the
+  previously-unchecked TOOL_SPECS ↔ `make_tools()` correspondence — a @tool without a spec (the
+  "bozuk spec'li tool sessizce girebiliyor" hole) or a spec without a tool now fails loudly, with
+  alpha-`disabled` (python_run) as the only sanctioned absence.
+- **Per-capability contract tests** (`tests/test_capability_contracts.py`, 38 tests): for each of
+  the 12 schema'd tools, a verified-valid call mints a signed ExecutionRequest and a
+  contract-violating call (per-action required field / closed Literal / XOR) lands in
+  `invalid_args_calls` with NO request — the structural reason the body can never run — plus a
+  per-capability unknown-field rejection and a mixed-batch isolation case. A completeness guard
+  fails if a 13th tool ever gains a schema without a contract case here.
+- **Property-based fuzzing** (`tests/test_property_fuzz.py`, hypothesis): `validate_args` never
+  raises and never echoes raw input on ANY dict; unknown fields always rejected; out-of-Literal
+  actions always rejected THROUGH the normalizer; redaction never lets a recognizable secret
+  survive (plain string, nested, or behind an innocent key); `digest_args` deterministic,
+  key-order-insensitive, tool-name-separated. `hypothesis` added to requirements(+lock);
+  profile registered with `derandomize=True, deadline=None` — deliberately, so property tests
+  cannot reintroduce the nondeterministic-CI class `dd339b9` just eliminated.
+- **Error-class taxonomy** (`jarvis/execution/taxonomy.py`): the plan's fixed 13 classes as ONE
+  pure-stdlib source. `eval_oracle.score()` now attaches `error_classes` to every Verdict
+  (mapping pinned against real score() output in `tests/test_taxonomy.py` — including the
+  three-way split of the "expected X to succeed" format into missing_tool_call / wrong_tool /
+  execution_failure, and the B6 shape decomposing to execution_failure + false_success_claim);
+  the driver records them; `ab_analyze.py` grew a per-class report section (invariant rows
+  tagged), re-deriving classes for pre-Faz-8 recordings via the same function.
+- **Alpha-gate instrument** (`scripts/alpha_gate.py`, linted first-class in CI):
+  `evaluate` maps recorded ab_run results onto the plan's gate table (10/10 classes, 0-target
+  invariants, VERI YOK for honestly-uncovered rows — uzun workflow E2E and non-block recovery
+  classes have no scored scenario yet) and writes `alpha_gate_report.md`; `isolation` runs the
+  plan's cheap ≥20-consecutive-run single-tool leak check live (unique tracer per fresh session,
+  cross-run contamination = any earlier marker in a later response), exiting non-zero on a leak.
+  Pure logic unit-tested (`tests/test_alpha_gate.py`, 14 tests).
+- **Live smoke on real recordings**: the taxonomy section renders against the existing champion
+  baseline (its known B6 3/5 + F16 4/5 misses decompose to `missing_tool_call 1,
+  execution_failure 2, false_success_claim 2 (invariant!), wrong_artifact 1` — the first
+  quantified view of exactly the hallucinated-success pattern this initiative targets), and
+  `alpha_gate.py evaluate` correctly verdicts that 5-run baseline **KALDI** (runs < 10, B6 red,
+  false_success_claim ≠ 0) rather than flattering it.
+
+---
+
 ## [Fix: ab_run_config.ps1's manifest missing valid_measurement on readiness timeout] — 2026-07-22
 
 Root-caused the intermittent CI failure of `test_ab_harness_guards.py::test_ps_wrapper_propagates_

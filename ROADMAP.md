@@ -168,6 +168,24 @@ running server. 986 pytest green (927+59), ruff clean. See [HANDOFF.md](HANDOFF.
 per-commit detail, the live-observed (not fixed, out of this session's scope) model tool-calling
 reliability finding, and current push status.
 
+**2026-07-23, a 17th session — Faz 8 (Evaluation v2 + the alpha-gate instrument): the 9-phase
+plan's LAST phase; offline half built and green, live gate now a runnable owner instrument.**
+Registry sweep (`tests/test_registry_sweep.py` — field vocabularies, the `L3 ⇒ confirmation`
+invariant, fail-closed dynamic-MCP defaults, and the previously-unchecked TOOL_SPECS ↔
+`make_tools()` correspondence), per-capability contract tests for all 12 schema'd tools (valid ⇒
+signed ExecutionRequest; contract-violating ⇒ `invalid_args_calls`, no request, body structurally
+unreachable), hypothesis property-fuzzing of `validate_args` + the redaction layer (derandomized —
+deliberately, to not reintroduce the CI-flake class `dd339b9` closed), the fixed 13-class error
+taxonomy (`jarvis/execution/taxonomy.py`) wired into `eval_oracle` verdicts / driver recordings /
+`ab_analyze`'s new per-class report section, and `scripts/alpha_gate.py` (`evaluate` — recorded
+runs → the plan's gate table with honest VERI YOK rows; `isolation` — the ≥20-run single-tool
+leak loop, non-zero exit on contamination). Live smoke on the real champion recordings: its known
+B6/F16 misses decompose to `false_success_claim 2 (invariant!)` and the gate correctly says
+**KALDI** for that 5-run baseline. What remains for the alpha gate to go GREEN is now purely
+OWNER-RUN measurement: a 10-run `ab_run_config.ps1` set + `alpha_gate.py isolation` + scenario
+coverage for the two honestly-uncovered rows (long-workflow E2E, non-block recovery classes). See
+[CHANGELOG.md](CHANGELOG.md) for full detail and [HANDOFF.md](HANDOFF.md) for current status.
+
 ---
 
 ## Faz 0 — Hafıza-Kritik Stabilizasyon (minimal) ✅ done (2026-07-14)
