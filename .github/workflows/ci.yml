@@ -44,9 +44,11 @@ jobs:
       - name: Test (pytest)
         run: pytest
 
-  # Best-effort companion clients -- not this project's Python core, and not
-  # gated on by the python job above. continue-on-error so a mobile/Electron
-  # break doesn't block a backend-only PR; still visible as a failed check.
+  # Best-effort companion client -- not this project's Python core, and not
+  # gated on by the python job above. continue-on-error so a mobile break
+  # doesn't block a backend-only PR; still visible as a failed check.
+  # (Electron below used to share this policy -- see that job's own comment
+  # for why it was promoted to blocking, 2026-07-23.)
   mobile:
     runs-on: windows-latest
     continue-on-error: true
@@ -62,9 +64,17 @@ jobs:
         working-directory: mobile
         run: flutter analyze
 
+  # Blocking, unlike mobile above (owner decision, 2026-07-23): Electron is
+  # no longer just a best-effort companion client -- it renders the L3
+  # confirmation prompt and completes the approve/deny round-trip (52d0b72),
+  # making it part of the safety-critical confirmation path, and it's the
+  # primary UI for the manual alpha acceptance pass (see CLAUDE.md/HANDOFF.md).
+  # A parser regression, a failing vitest suite, or a broken build here can
+  # silently reintroduce a confirmation bug or block the alpha pass itself --
+  # that's no longer acceptable to let through as a non-blocking, easy-to-miss
+  # check the way a purely cosmetic mobile lint warning is.
   electron:
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -79,8 +89,8 @@ jobs:
       # parser for /chat/stream, /chat/upload, /chat/confirm/{id}) had zero
       # automated coverage -- a future refactor could silently reintroduce
       # the confirmation-frame-leaks-as-raw-JSON bug this session fixed.
-      # Inherits this job's own continue-on-error (see the job comment
-      # above) -- same non-blocking-but-visible policy as the build step.
+      # This job is now blocking (see the job comment above), so a failure
+      # here fails CI, same as the python job.
       - name: test (vitest)
         working-directory: electron
         run: npm test

@@ -17,12 +17,15 @@ jarvis_docs/jarvis_summaries/jarvis_facts/jarvis_procedures prefer, in order
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import chromadb
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
@@ -199,7 +202,13 @@ class Memory:
         try:
             self._client.close()
         except Exception:
-            pass
+            # Review remediation: silently swallowing this hid genuine
+            # close() failures (e.g. a locked SQLite file) that would
+            # otherwise explain a leaked System / the chromadb flakiness
+            # this method exists to prevent. Never raise from close() --
+            # callers use it best-effort in finally/teardown paths -- but
+            # a warning at least surfaces it instead of hiding it entirely.
+            logger.warning("Memory.close() failed to release chromadb client", exc_info=True)
 
     # ------------------------------------------------------------------
     # Semantic memory (conversations)

@@ -263,6 +263,14 @@ def isolation(argv: list[str]) -> int:
         D.clear_trace()
         marker = f"iso{i}-{secrets.token_hex(4)}"
         e1 = D.run_chat(f"ISO{i}a", f"Su kodu aklinda tut: {marker}")
+        # Review remediation: clear_trace() ran only once, before e1, so
+        # load_trace() below reflected BOTH turns combined -- a model that
+        # (for whatever reason) called file_list during e1's "remember this"
+        # turn, but NOT during e2's actual "list files" turn, still counted
+        # as tool_ok. Re-clearing here scopes the trace to e2 alone, so
+        # tool_ok only ever credits a file_list that actually ran for the
+        # turn meant to trigger it.
+        D.clear_trace()
         e2 = D.run_chat(f"ISO{i}b", "Calisma dizinindeki dosyalari listele")
         markers.append(marker)
         responses.append(" ".join(str(e.get("response") or e.get("continuation") or "")

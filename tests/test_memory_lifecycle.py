@@ -66,6 +66,28 @@ def test_close_is_safe_to_call_more_than_once(isolated_cwd, tmp_path):
     memory.close()  # must not raise
 
 
+def test_close_failure_is_logged_not_silently_swallowed(isolated_cwd, tmp_path, monkeypatch, caplog):
+    """Review remediation: close() previously did `except Exception: pass`
+    with zero logging -- a genuine close failure (e.g. a locked SQLite file)
+    would be indistinguishable from a clean close, hiding exactly the kind
+    of evidence that would explain a leaked System / this suite's chromadb
+    flakiness. Must still never raise -- callers use this best-effort in
+    finally/teardown paths."""
+    import logging as _logging
+
+    settings = Settings(_env_file=None, chroma_dir=tmp_path / "chroma", vault_dir=tmp_path / "vault")
+    memory = Memory(settings)
+
+    def _raise():
+        raise RuntimeError("simulated locked chromadb client")
+    monkeypatch.setattr(memory._client, "close", _raise)
+
+    with caplog.at_level(_logging.WARNING, logger="jarvis.memory"):
+        memory.close()  # must not raise
+
+    assert any("close" in r.message.lower() for r in caplog.records)
+
+
 def test_distinct_chroma_dirs_get_independent_systems(isolated_cwd, tmp_path):
     """The fix's actual guarantee for test_shadow_replay_equivalence.py: two
     Memory instances on DIFFERENT paths never share a System in the first
