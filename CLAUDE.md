@@ -132,3 +132,9 @@ See `docs/SAFETY.md` for the full mechanism list and `docs/TOOLS.md` for per-too
 
 Update [HANDOFF.md](HANDOFF.md) with what changed and what's next — that's the file a new
 session reads first to avoid re-discovering context that's already been established.
+
+**Self-reference rule (owner-set, 2026-07-23, after the 5th recurrence):** HANDOFF.md must
+never state its own closing commit's SHA or its own push/CI outcome. Count the closing commit
+relationally ("N work commits and this closing HANDOFF commit"), describe session end as
+"local == origin were in sync", tie every test claim to the exact command + date, and read the
+branch tip's CI status live via `gh run list` — never from the file.
