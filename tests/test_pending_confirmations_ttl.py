@@ -114,3 +114,49 @@ def test_has_pending_confirmation_is_true_before_claim_false_after():
     assert agent.has_pending_confirmation("c1") is True
     agent.claim_pending_confirmation("c1")
     assert agent.has_pending_confirmation("c1") is False
+
+
+# ── claim_pending_confirmation: TTL-awareness (second-review finding) ───────
+#
+# A second, independent review caught a real gap in the atomic-claim fix
+# above: it was atomic but not TTL-aware. _register_pending_confirmation's
+# own staleness sweep is opportunistic -- it only runs when a NEW
+# confirmation is registered -- so if the user goes quiet past this
+# confirmation's own approval window and NOTHING new is ever registered
+# afterward, the stale entry sits in the dict indefinitely and
+# claim_pending_confirmation() would have handed it back as if still valid.
+# Since a non-affirmative transcript is routed as decision=f"deny:
+# {transcript}" (voice/session.py's resolve_confirmation) and
+# confirmation_node's deny branch never reaches the HMAC/expiry re-check at
+# all (nothing executes on a deny, so there's nothing to verify -- unlike
+# the approve path test_expired_approval_is_denied covers), the user's next
+# real, unrelated command would have been silently swallowed as a fake
+# "denial" of a possibly long-forgotten action.
+
+def test_claim_returns_none_for_a_stale_entry_even_without_a_later_registration(monkeypatch):
+    """The exact gap the second review caught: no later confirmation was
+    ever registered (so _register_pending_confirmation's own opportunistic
+    sweep never ran) -- claim_pending_confirmation() must still refuse a
+    stale entry on its own, and must not leave a zombie entry behind either
+    (the leak guard stays meaningful even though the caller sees None)."""
+    agent = _bare_agent()
+    clock = [1000.0]
+    monkeypatch.setattr("jarvis.agent.time.monotonic", lambda: clock[0])
+    agent._register_pending_confirmation("c1", {"thread_id": "t1"}, "rec")
+
+    clock[0] = 1000.0 + 301.0  # just past approval_ttl_sec (300s) -- nothing else registered
+    assert agent.claim_pending_confirmation("c1") is None
+    assert "c1" not in agent._pending_confirmations
+
+
+def test_claim_returns_the_entry_when_still_within_ttl(monkeypatch):
+    agent = _bare_agent()
+    clock = [1000.0]
+    monkeypatch.setattr("jarvis.agent.time.monotonic", lambda: clock[0])
+    agent._register_pending_confirmation("c1", {"thread_id": "t1"}, "rec")
+
+    clock[0] = 1000.0 + 5.0  # well within the TTL
+    claimed = agent.claim_pending_confirmation("c1")
+
+    assert claimed is not None
+    assert claimed["config"] == {"thread_id": "t1"}

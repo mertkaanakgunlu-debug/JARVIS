@@ -1495,13 +1495,23 @@ class JarvisAgent:
         stale confirmation answer instead of processed as a new command.
         Callers must check this before routing a transcript into
         resolve_confirmation() and fall through to a normal turn when it
-        is False. Read-only: unlike resume_and_stream(), never pops."""
+        is False. Read-only: unlike resume_and_stream(), never pops.
+
+        No production caller uses this anymore (see claim_pending_
+        confirmation() below, which superseded it and every voice loop
+        now calls directly) -- kept for its own test coverage and as a
+        cheap peek. Note it is a PLAIN membership check, same as before:
+        it does NOT account for a TTL-expired-but-not-yet-swept entry the
+        way claim_pending_confirmation() now does (second-review finding,
+        2026-07-23) -- a stale-but-still-present conf_id reads as True
+        here. Do not use this as a staleness gate; use claim_pending_
+        confirmation()'s return value instead."""
         return conf_id in self._pending_confirmations
 
     def claim_pending_confirmation(self, conf_id: str) -> dict | None:
         """Atomically take ownership of a pending confirmation, or None if
-        it's already gone (resolved through another transport, or
-        TTL-evicted).
+        it's already gone (resolved through another transport, TTL-expired,
+        or never registered).
 
         Follow-up finding (2026-07-23) on has_pending_confirmation() above:
         that check-then-act pattern is NOT atomic against a second
@@ -1518,8 +1528,36 @@ class JarvisAgent:
         only proceed to resolve_confirmation()/resume_and_stream() when
         this returns non-None, passing the claimed dict through via
         resume_and_stream()'s pre_claimed parameter so it is never looked
-        up (and never race-popped) a second time."""
-        return self._pending_confirmations.pop(conf_id, None)
+        up (and never race-popped) a second time.
+
+        Second-review finding (2026-07-23): the above made claiming atomic
+        but not TTL-aware -- _register_pending_confirmation's own staleness
+        sweep is opportunistic, only running when a NEW confirmation is
+        registered, so a stale entry could sit in the dict indefinitely if
+        the user simply goes quiet past this confirmation's own approval
+        window and then says something unrelated. Since a non-affirmative
+        transcript is routed as decision=f"deny:{transcript}" (voice/
+        session.py's resolve_confirmation) and confirmation_node's deny
+        branch never reaches the HMAC/expiry re-check at all (nothing
+        executes on a deny, so there is nothing to verify) -- unlike the
+        approve path test_expired_approval_is_denied covers -- an
+        unrelated new utterance past approval_ttl_sec would otherwise be
+        silently swallowed as a fake "denial" of a possibly long-forgotten
+        action, with the user's real command surviving only as denial
+        "reason" text. Now checks the popped entry's own age against
+        approval_ttl_sec (the same window the underlying HMAC-signed
+        ExecutionRequest itself uses, jarvis/graph/nodes.py's
+        prepare_execution_node) -- a stale entry is still removed (keeps
+        _register_pending_confirmation's leak guard meaningful) but treated
+        as if it had never been found, so the caller falls through to a
+        normal new turn exactly like the already-resolved-elsewhere case."""
+        entry = self._pending_confirmations.pop(conf_id, None)
+        if entry is None:
+            return None
+        ttl = getattr(self.settings, "approval_ttl_sec", 300)
+        if time.monotonic() - entry.get("created_at", 0) > ttl:
+            return None
+        return entry
 
     async def chat_stream(
         self,
@@ -1781,6 +1819,17 @@ class JarvisAgent:
         treating an already-claimed entry as "expired") or, if this method's own pop ran
         first, race the caller's earlier claim. Direct callers (POST /chat/confirm) that
         never pre-claim keep the old self-contained pop.
+
+        Single-use note (second-review finding, 2026-07-23): this method does NOT itself
+        enforce that a given pre_claimed dict is only ever passed in once -- it is a plain
+        dict, not a consumed-once token. That's a caller contract, not a runtime guarantee:
+        every real caller (cli.py, voice_api.py, api.py's /ws handler) obtains pre_claimed
+        from exactly one claim_pending_confirmation() call and passes it to exactly one
+        resolve_confirmation()/resume_and_stream() call, so no live path replays one. If a
+        future caller ever violated that contract, the resumed graph's own idempotency
+        journal (jarvis/execution/idempotency.py, see test_replayed_already_committed_
+        execution_is_denied) still refuses to re-dispatch an already-committed execution --
+        defense in depth, not the primary guarantee.
         """
         from langgraph.types import Command
 
