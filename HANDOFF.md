@@ -10,120 +10,127 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Last session: 2026-07-23 (17. oturum) — FAZ 8 (SON FAZ) + ELECTRON CONFIRMATION UI + BAĞIMSIZ İKİNCİ REVIEW'IN 4 BULGUSU
+## Son oturum: 2026-07-23 (19. oturum) — 18. OTURUMUN UNCOMMITTED İŞİ İKİNCİ BİR BAĞIMSIZ DEĞERLENDİRMEYLE DOĞRULANDI, EKSİK TEST KAPANDI, ELECTRON CI BLOCKING YAPILDI, 2 COMMIT PUSH'LANDI VE CANLI CI'DA YEŞİL DOĞRULANDI
 
-**Durum tek cümlede:** Agent Runtime rev.2'nin son fazı Faz 8 inşa edildi (offline eval altyapısı
-+ alpha gate enstrümanı), ardından owner'ın seçtiği Electron confirmation UI inşa edildi, sonra
-owner bu ikisinin diff'ini başka bir modele (Sonnet) bağımsız review'a soktu — 4 gerçek bulgu
-çıktı, hepsi kodda tek tek doğrulandı (biri chromadb'nin kendi kaynağına kadar inildi), hepsi
-düzeltildi ve test edildi.
+**Durum tek cümlede:** Owner, 18. oturumun uncommitted diff'ine (atomik `claim_pending_
+confirmation()` + üçüncü, korumasız `/ws` çağrı sitesi + 2 küçük bulgu) karşı yapılan İKİNCİ,
+bağımsız bir değerlendirmeyi yapıştırdı — bu değerlendirme 18. oturumun 5 teknik iddiasının
+hepsini gerçek koddan doğrulamış ve "her iki soruya da evet: Electron CI blocking yapılsın,
+düzeltmeler commit+push'lansın" kararını vermiş, ayrıca commit öncesi 2 ek doğrulama (cross-thread
+safety, 5 belirli test senaryosu) ve tam validation seti istemişti. Owner'ın kendi "dış review'ı
+ampirik doğrula, körü körüne uygulama" disiplini uygulandı: her istenen şey kör kabul edilmek
+yerine gerçek koddan tek tek doğrulandı.
 
-**COMMIT DURUMU:** bu oturumda 9 iş commit'i push'landı (Faz 8: `7d6a7af`; Electron UI: `52d0b72`;
-review'ın 4 bulgusu: `599066d`, `7136690`, `5645ae2`, `3c6c05a`; **canlı CI'da yakalanan bir
-izleme-sonrası düzeltme**: `0687772` — bkz. aşağıdaki "CI'da yakalanan" notu) + aralarında 2 docs
-commit'i (`8b451dc`, `8e3977e`) ve bu kapanış docs commit'i. Oturum sonunda local == origin
-senkrondu. Kalıcı kural gereği kapanış commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına
-`gh run list --branch langgraph-migration` ile bakın. (`.claude/settings.local.json` her zamanki
-gibi hariç.)
+**Thread-safety (yeni doğrulama, kod okunarak — sonuç: ek lock GEREKMİYOR).**
+`_pending_confirmations`'a erişebilecek her arka-plan thread'i tek tek okundu:
+- `JarvisMonitor` gerçek bir `threading.Thread` kullanıyor (`jarvis/monitor.py`) ve
+  `agent.proactive_turn()`'ü çağırıyor — ama `proactive_turn()`'ün kendi kodu (docstring değil,
+  gerçek gövde) bir L3 interrupt'ı ASLA `_pending_confirmations`'a register etmiyor, doğrudan
+  discard edip bildirim olarak dönüyor.
+- `TaskExecutor` gerçek bir `ThreadPoolExecutor` kullanıyor (`jarvis/task_executor.py`) ve
+  `agent.background_turn()`'ü çağırıyor — o da aynı şekilde, kendi kodunda, bir interrupt'ı
+  register ETMEDEN `ConfirmationRequired` fırlatıyor ("there is no resumption path for a
+  background thread_id, so the interrupt is not registered").
+- Wakeword dedektörünün `listen()`'ı `run_in_executor` ile ayrı bir thread'de çalışıyor
+  (`jarvis/voice_api.py`) ama saf blocking ses tespiti — agent/confirmation koduna hiç dokunmuyor.
 
-**CI'da yakalanan, docs commit'inden SONRA çıkan bir 5. sorun (`0687772`), CANLI DOĞRULANDI:**
-`4a37222`'i push ettikten sonra CI'ı izlerken `electron` job'ının `npm ci` adımında gerçekten
-kırıldığını gördüm — `vitest@^4.1.10` (review'a yanıt olarak eklenirken "latest" seçilmişti, ne
-sürüklediği kontrol edilmeden) kendi içinde `vite@7`'yi (esbuild 0.27/0.28 gerektiren) taşıyor;
-bu, projenin zaten sahip olduğu `vite@^5.4.0`/esbuild@0.21.5 kuşağıyla çakışan İKİNCİ bir nesil.
-Yerel npm (11.16.0) bunu gevşek çözmüş, CI'nın npm'i (workflow "20" istese de GitHub artık zorla
-Node 24'e geçiriyor, farklı bir npm geliyor) daha katıymış ve lockfile'ı reddetmiş. Düzeltme:
-`vitest@^2.1.9`'a geçildi (aynı `vite@5` kuşağını hedefleyen en yeni majör — ikinci nesil hiç
-girmiyor). Bu kez "düzelttim" demeden önce `node_modules` silinip CI'ın attığı `npm ci` komutu
-BİREBİR yerel çalıştırıldı, sonra test+build. Dürüst not: `npm audit` artık 8 önceden-var
-advisory gösteriyor (5'ten) — hepsi electron/vite/esbuild/babel'ın ZATEN var olan CVE'leri,
-vitest'in kendi vite-node/mocker'ı aynı zincire farklı yollardan değiyor; düzeltmeleri kırıcı
-sürüm atlamaları (electron 43, vite 8) gerektiriyor, bu oturumun kapsamı dışında — sessizce
-ertelenmedi, burada görünür kılındı.
+Sonuç: bu dict'e TÜM gerçek erişim (register/has/claim/pop), desteklenen her modda (CLI, CLI+voice,
+`--api` [+voice] [+wakeword] [+monitor]) tek bir asyncio event loop'una hapsedilmiş — senkron
+`dict.pop()` bu yüzden mimari olarak yeterli, ek bir `threading.Lock` gerekmiyor.
 
-`0687772`'nin CI run'ı (29989343268) canlı izlendi: **`python` job SUCCESS, `electron` job
-SUCCESS** (`npm ci`/`npm test`/`npm run build` üçü de gerçekten geçti), `mobile` job bilinen
-kozmetik `flutter analyze` hatası (continue-on-error, run'ın genel `conclusion`'ını
-etkilemiyor) — run'ın genel sonucu **success**. Bu, bugünün TÜM commit zincirinin (Faz 8'den bu
-son düzeltmeye kadar) bağımsız CI'da uçtan uca yeşil olduğunun canlı kanıtı.
+**5 istenen test senaryosu (doğrulandı/tamamlandı):**
+1. İki claim denemesinden tam biri başarılı — zaten vardı (`test_second_claim_of_the_same_id_
+   returns_none`, `tests/test_pending_confirmations_ttl.py`).
+2. Süresi dolmuş bir onay, opportunistic cleanup tetiklenmese bile reddedilir — dict'in kendi TTL
+   süpürmesi bir sonraki registration'a kadar çalışmayabilir, AMA asıl güvenlik sınırı farklı
+   (daha temel) bir katmanda zaten test ediliyor: grafiğin `confirmation_node`'undaki HMAC
+   imza/expiry doğrulaması (`jarvis/execution/approval.py`), `test_expired_approval_is_denied`
+   (`tests/test_prepare_execution_node.py`) ile. Dict'in TTL süpürmesi sadece bellek sızıntısını
+   önleyen best-effort bir mekanizma (kendi docstring'i bunu söylüyor), asıl güvenlik sınırı
+   değil — iki katman ayrı ayrı test edilmiş durumda ve aralarında dallanan bir mantık yok, o
+   yüzden ek bir entegrasyon testi orantısız görüldü.
+3. Remote `/ws` ses yolu, dışarıdan çözülmüş bir onayı yeni bir cümle olarak işler — GERÇEK
+   BOŞLUKTU, hiç testi yoktu. Yeni `tests/test_ws_remote_confirmation_claim.py` (2 test): gerçek
+   `_handle_transcript` closure'ını (`jarvis/api.py`'nin `/ws` endpoint'i)
+   `starlette.testclient.TestClient` ile gerçek bir WebSocket bağlantısı üzerinden, sahte
+   `drive_voice_session`/`RealtimeVoiceEngine` ile (gerçek ses/STT/TTS'e hiç dokunmadan) uçtan
+   uca çalıştırıyor — reimplementasyon değil, gerçek kod.
+4. Bir `pre_claimed` girdisi iki kez tüketilemez — zaten vardı (`test_claim_removes_and_returns_
+   the_entry` + `test_second_claim_of_the_same_id_returns_none` + yeni `test_resume_and_stream_
+   uses_pre_claimed_without_touching_the_dict`).
+5. Normal HTTP `/chat/confirm` yolu `pre_claimed` olmadan çalışmaya devam ediyor — zaten vardı
+   (`test_resume_and_stream_without_a_second_interrupt_completes_normally` vb., `pre_claimed=None`
+   default'unu tetikliyor); `chat_confirm()` endpoint'inin kendi kodu bu diff'te hiç değişmedi.
 
-### Faz 8 + Electron confirmation UI — özet (detay: CHANGELOG.md)
-
-Faz 8: registry sweep (157 test), per-capability contract testleri (38 test), hypothesis
-property-fuzz (derandomize profil), 13 sınıflı hata taksonomisi (`jarvis/execution/taxonomy.py`,
-tek kaynak), `scripts/alpha_gate.py` enstrümanı. Electron: paylaşılan SSE reader
-(`chatStream.js`), amber `ConfirmationOverlay`, WS `confirmation_required` dinleme,
-`conversation_id` persistence.
-
-### Bağımsız review'ın 4 bulgusu — hepsi doğrulandı ve düzeltildi
-
-Owner Sonnet'e diff'i (Faz 8 + Electron UI) bağımsız review ettirdi; 4 madde geldi, hepsi
-kodda/chromadb kaynağında tek tek doğrulandı (kör kabul edilmedi) — bu repo'nun "dış review'ı
-ampirik doğrula, körü körüne uygulama" disiplini (bkz. [[project-agent-runtime-rev2]] update
-#10'daki P0 çürütme emsali).
-
-1. **Cross-transport confirmation race (GERÇEK, düzeltildi — `599066d`).** `python -m jarvis
-   --api --voice --wakeword`'ün voice loop'u API server ile AYNI process'te, aynı `JarvisAgent`
-   + `event_bus`'ı paylaşarak çalıştığı doğrulandı. Bu oturumun Electron değişikliği HUD'u
-   `confirmation_required` WS broadcast'ini dinler hale getirdiğinden (Phase 3'ten beri
-   yayındaydı, hiç dinlenmiyordu), sesle başlayan bir onay artık HUD'dan da çözülebiliyor — ama
-   hem `voice_api.py` hem `cli.py`'nin yerel `pending_confirmation` bayrağı bundan haberdar
-   değildi: kullanıcının SONRAKİ sesli cümlesi, zaten başka yerden çözülmüş eski bir onaya
-   "evet/hayır" cevabı sanılıp yutuluyordu (sunucu tarafı tekrar-çalıştırmayı engelliyor ama
-   gerçek komutu kurtaramıyor). Düzeltme: `JarvisAgent.has_pending_confirmation()` +
-   `voice/session.is_confirmation_still_pending()` — her iki çağrı sitesi artık tüketmeden önce
-   hâlâ gerçekten bekleyen mi diye soruyor; değilse (başka yerden çözülmüş VEYA TTL ile
-   silinmiş) normal yeni tur olarak işliyor. 7 test.
-2. **`alpha_gate.py` exit-code + isolation açığı (GERÇEK, düzeltildi — `7136690`).**
-   `evaluate()` rapor ne derse desin HER ZAMAN 0 dönüyordu — artık GEÇTİ/KALDI/EKSİK
-   VERİ/HARNESS_ERROR için 0/1/2/3. `isolation`'ın hem rapor satırı hem kendi exit code'u
-   `tool_ok`'u hiç kontrol etmiyordu (file_list 0/20 başarı + sızıntı yok = eskiden "geçti"
-   sayılıyordu). `verdict_of()`/`isolation_verdict_ok()` tek kaynak yapıldı. 13 test.
-3. **ChromaDB flake kök nedeni (GERÇEK, chromadb kaynağında doğrulandı, düzeltildi —
-   `5645ae2`).** `test_shadow_replay_equivalence.py`'nin off/shadow kollarının AYNI test
-   içinde ayrı `Memory()` inşa ettiğini ama `isolated_cwd`'ın per-test chdir yaptığını (per-arm
-   değil) ve chroma_dir/vault_dir default'larının cwd-relative olduğunu doğruladım — iki kol
-   AYNI dizini paylaşıyordu. Daha da derini: `chromadb.api.shared_system_client
-   .SharedSystemClient`'ı okuyup bunun `persist_directory` string'ine keyed, process-global,
-   refcount'lu bir System cache'i olduğunu ve hiçbir yerde `close()` çağrılmadığı için
-   refcount'un asla sıfırlanmadığını (dolayısıyla iki Memory'nin aynı System'i SESSIZCE
-   paylaştığını, ve HER test dosyasının kendi System'ini süresiz sızdırdığını) doğruladım.
-   Düzeltme: her kol artık kendi workspace'ine izole chroma/vault dizini alıyor, `Memory.close()`
-   eklendi (gerçek `chromadb.Client.close()`'a sarma) ve `test_shadow_replay_equivalence.py` +
-   `test_procedure_store.py`'de kullanılıyor. Yan etki yakalandı: chroma'yı workspace içine
-   taşımak `_side_effects()`'in onu da hash'lemesine yol açtı (chroma'nın kendi iç byte'ları
-   reproducible değil) → checkpoint gibi hariç tutuldu. **Ampirik doğrulama: 4 dosya 15 ardışık
-   turda, her turda 38/38 yeşil, 0 hata.** 4 yeni test (`test_memory_lifecycle.py`).
-4. **Electron `chatStream.js` sağlamlığı (GERÇEK, düzeltildi — `3c6c05a`).** `resp.ok`
-   kontrolü yoktu (401/422 gibi non-2xx JSON gövde sessizce `{text:'', error:null}` olarak
-   yutuluyordu) ve stream sonundaki newline'sız son satır hiç işlenmiyordu — ikisi de doğrulandı
-   ve düzeltildi. Repo'nun ilk JS test altyapısı (Vitest) kuruldu, 13 senaryo (istenen 9 + 4 ek,
-   tek-byte chunk split dahil) — hepsi geçti. CI'ın electron job'ına `npm test` eklendi (job'ın
-   zaten var olan continue-on-error politikasını miras alıyor).
-
-### Canlı doğrulama (2026-07-23, bu oturumda koşuldu)
-
+**Tam validation (2026-07-23, bu değişikliklerle koşuldu):**
 ```powershell
-python -m pytest -q       # 1263 passed, 0 failed (206s) — FULL suite, yerel
-# chromadb flake tekrar testi (4 dosya x 15 tur):  DONE: 0/15 rounds failed
+python -m pytest -q       # 1271 passed, 0 failed (206s) — FULL suite (1269 + yeni 2 /ws testi)
 ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py scripts/alpha_gate.py   # All checks passed!
-cd electron && npm ci && npm test && npm run build   # vitest@2.1.9, 13/13; build clean; npm ci de dahil (CI'ın attığı komutun birebiri)
-gh run view 29989343268 --json jobs   # bu oturumun SON push'unun CI'ı: python SUCCESS, electron SUCCESS, mobile bilinen kozmetik fail (continue-on-error) — genel conclusion: success
+cd electron; rm -rf node_modules; npm ci; npm test; npm run build   # npm ci temiz (8 önceden-var advisory, değişmedi); vitest 13/13; build temiz
 ```
+
+**Electron CI blocking (owner kararı, bu değerlendirme üzerinden).** `.github/workflows/ci.yml`'nin
+`electron` job'ından `continue-on-error: true` kaldırıldı — job artık `python` job'ı gibi
+blocking. Gerekçe: Electron artık sadece "best-effort companion client" değil, L3 confirmation
+prompt'unu render eden ve approve/deny round-trip'i tamamlayan güvenlik-kritik yol (`52d0b72`) VE
+manual alpha kabul sürecinin birincil arayüzü — parser/test/build kırılması artık sessizce
+geçilemez. `mobile` job'ı bilinçli olarak best-effort kaldı (Dart/CI-altyapı gürültüsü, bu
+projenin kapsamı dışı, değişmedi).
+
+**Commit ve push durumu:** 2 iş commit'i + bu kapanış docs commit'i.
+- `ff357fc` — `fix(confirmations): atomically claim pending confirmations across transports`
+  (18. oturumun `jarvis/agent.py`/`jarvis/voice/session.py`/`jarvis/api.py`/`jarvis/cli.py`/
+  `jarvis/voice_api.py` düzeltmeleri + 3 güncellenen test dosyası + madde 3'ün yeni
+  `tests/test_ws_remote_confirmation_claim.py` dosyası).
+- `1faa2c5` — `fix(ci): bind isolation traces and gate Electron regressions`
+  (`scripts/alpha_gate.py`'nin isolation trace tur-bağlama düzeltmesi + `jarvis/memory.py`'nin
+  `Memory.close()` log'u + `tests/test_memory_lifecycle.py` + `.github/workflows/ci.yml`'nin
+  Electron blocking değişikliği).
+
+Push öncesi `git fetch` + `git rev-list --left-right --count origin/langgraph-migration...HEAD`
+ile temiz bir fast-forward doğrulandı (origin 0 commit ileride, local 2 commit ileride,
+beklenmedik remote commit yok). `git push origin langgraph-migration` → `174f8c2..1faa2c5`
+fast-forward, force yok.
+
+**`1faa2c5`'in push'unun CI run'ı (30033048953) canlı izlendi ve `gh run view --json conclusion`
+ile doğrulandı:** genel `conclusion: "success"`. Job bazında: `python` → `success` (8m46s, ruff +
+1271 pytest), `electron` → `success` (40s, `npm ci`/`npm test`/`npm run build` üçü de gerçekten
+geçti — artık blocking olarak ilk kez yeşil), `mobile` → `failure` (bilinen kozmetik `flutter
+analyze`, `continue-on-error`, genel `conclusion`'ı etkilemiyor — tasarım gereği).
+
+Kalıcı kural gereği bu kapanış docs commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına
+`gh run list --branch langgraph-migration` ile bakın. Oturum sonunda local == origin senkrondu.
+
+### Önceki oturumların özeti (17-18, detay: CHANGELOG.md)
+
+17. oturum Faz 8'i (registry sweep, per-capability contract testleri, hypothesis property-fuzz,
+13 sınıflı hata taksonomisi, `alpha_gate.py`) ve Electron'un L3 confirmation UI'ını (paylaşılan SSE
+reader, amber `ConfirmationOverlay`, WS dinleme, `conversation_id` persistence) inşa etti, sonra bu
+diff'e karşı gelen bağımsız bir review'ın 4 bulgusunu doğrulayıp düzeltti (cross-transport
+confirmation race, `alpha_gate.py`'nin exit-code/isolation açığı, chromadb flake kök nedeni,
+Electron `chatStream.js` sağlamlığı) — hepsi commit'lendi ve push'landı (`7d6a7af`..`0687772`
+arası, docs `174f8c2` ile kapandı), CI'da canlı yeşil doğrulandı. 18. oturum bu review'ın kendi
+diff'ini bağımsız olarak tekrar doğrularken cross-transport fix'in atomik olmadığını + 3. korumasız
+çağrı sitesini buldu, düzeltti, uncommitted bıraktı — bu oturum (19.) o işi commit'leyip push'ladı.
+Tam detay: `CHANGELOG.md`'nin "Electron: L3 confirmation..." ve "Independent review response..."
+girdileri.
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **CANLI HUD E2E'si (değişmedi):** server + Electron + gerçek APPROVE/DENY tıklaması —
-   `52d0b72`'nin ve bugünkü cross-transport düzeltmesinin (`599066d`) gerçek kabul testi. Bu
-   ikinciyi test etmek için: sesle bir L3 aksiyon başlat, HUD'dan onayla, SONRA sesle alakasız
-   bir şey söyle — düzeltmeden önce bu ikinci komut yutulurdu.
+1. **CANLI HUD E2E'si (değişmedi):** server + Electron + gerçek APPROVE/DENY tıklaması — `52d0b72`,
+   17. oturumun cross-transport düzeltmesi (`599066d`) VE 19. oturumun atomik claim düzeltmesinin
+   (`ff357fc`) gerçek kabul testi. Test etmek için: sesle bir L3 aksiyon başlat, HUD'dan onayla,
+   SONRA sesle alakasız bir şey söyle — düzeltmeden önce bu ikinci komut yutulurdu; şimdi ayrıca
+   eşzamanlı bir ikinci onay denemesinin (HUD + ses aynı anda) yalnız BİRİNİN kazandığını da
+   doğrulamak gerekir (atomik claim'in asıl iddiası).
 2. **Model tool-calling güvenilirliği** (14. oturumdan; taksonomiyle ölçülebilir):
    `false_success_claim`'i 0'a indirme — alpha kapısının asıl kilidi.
 3. Alpha gate'in owner-koşusu ölçümleri (10-run `ab_run_config.ps1` + `isolation`) + 2 kapsama
    boşluğu senaryosu (uzun-workflow E2E, block/veto-dışı recovery sınıfları).
-4. Branch ucunun CI'ı: `gh run list --branch langgraph-migration -L 3` ile kontrol et.
+4. Branch ucunun CI'ı: `gh run list --branch langgraph-migration -L 3` ile kontrol et (bu
+   dosyanın kendi kapanış commit'i dahil).
 5. **Yeni, küçük, bilinçli kapsam dışı bırakılan:** `Memory()` inşa eden DİĞER test dosyaları
-   (bugün yalnız en açık ilişkili ikisi — shadow-replay + procedure-store — düzeltildi) hâlâ
+   (bugüne dek yalnız en açık ilişkili ikisi — shadow-replay + procedure-store — düzeltildi) hâlâ
    `close()` çağırmıyor; her biri kendi System'ini süresiz sızdırıyor (zararsız ama gereksiz —
    process pytest'in kendisi bittiğinde zaten temizleniyor). Repo-geneli bir "her Memory()
    testi close() etsin" taraması yapılmadı — orantısız kapsam genişlemesi olurdu, ayrı bir

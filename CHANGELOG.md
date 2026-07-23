@@ -6,6 +6,56 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Second independent review: confirmation-claim atomicity verified, Electron CI made blocking] — 2026-07-23
+
+A second, independent review of the previous session's uncommitted diff (the atomic
+`claim_pending_confirmation()` fix plus a third, previously-unguarded `/ws` call site — see the
+"Independent review response" entry below) confirmed all 5 of that diff's technical claims
+directly against the code, decided both open questions from that session (make Electron CI
+blocking; commit and push), and asked for two things to be verified first: cross-thread safety of
+`_pending_confirmations`, and 5 specific test scenarios.
+
+- **Thread-safety verified by reading the code, not assumed.** Every background-thread subsystem
+  in the codebase was read directly: `JarvisMonitor` (`threading.Thread`, `monitor.py`),
+  `TaskExecutor` (`ThreadPoolExecutor`, `task_executor.py`), and the wakeword detector
+  (`run_in_executor`, `voice_api.py`). None ever touches `_pending_confirmations` —
+  `proactive_turn()` and `background_turn()` both deliberately never register a pending
+  confirmation (confirmed in their actual code, not just their docstrings: "there is no
+  resumption path for a background thread_id, so the interrupt is not registered"), and the
+  wakeword detector's `listen()` is pure blocking audio detection with no confirmation-path calls.
+  All real access to the dict is confined to coroutines on a single asyncio event loop in every
+  supported mode — the existing synchronous `dict.pop()`-based claim is architecturally
+  sufficient; no additional lock was needed.
+- **New test coverage for the one genuinely uncovered call site.** `jarvis/api.py`'s `/ws` remote
+  voice session's `_handle_transcript` closure had zero test coverage of its own before this
+  (unlike the shared `claim_pending_confirmation()`/`resolve_confirmation()` primitives it calls,
+  which were already well-tested). New `tests/test_ws_remote_confirmation_claim.py` drives the
+  real closure end-to-end via a `starlette.testclient.TestClient` WebSocket connection with a
+  stubbed `drive_voice_session`/`RealtimeVoiceEngine`, proving both the claim-succeeds and
+  claim-fails-falls-through-to-a-new-turn branches — not a reimplementation of the logic, the
+  actual code path. The other 4 requested scenarios were already covered by existing tests (one,
+  "an expired confirmation is rejected", by a different and more fundamental layer than the dict:
+  the graph's own HMAC approval-expiry check, `test_expired_approval_is_denied` in
+  `test_prepare_execution_node.py` — the dict's own TTL sweep is a best-effort memory-leak
+  mitigation, not the security boundary, per its own docstring).
+- **Electron CI is now blocking.** `.github/workflows/ci.yml`'s `electron` job no longer has
+  `continue-on-error` — it renders the safety-critical L3 confirmation prompt and is the primary
+  UI for the manual alpha pass, so a parser/test/build regression there must fail CI the same as
+  the `python` job. `mobile` stays best-effort (unrelated Dart/CI lint noise, out of this
+  project's scope).
+- Full validation before committing: `python -m pytest -q` (1271 passed — 1269 + the 2 new `/ws`
+  tests), the project's `ruff check` (clean), `cd electron && npm ci && npm test && npm run build`
+  (13/13 vitest, clean build).
+
+Landed as two commits — `fix(confirmations): atomically claim pending confirmations across
+transports` (the prior session's fixes + the new `/ws` test), `fix(ci): bind isolation traces and
+gate Electron regressions` (the isolation-trace turn-binding fix + `Memory.close()` logging + the
+CI change) — then pushed and independently confirmed green on GitHub Actions: `python` success,
+`electron` success, `mobile` failure (known cosmetic `flutter analyze`, continue-on-error, doesn't
+affect the run's overall `success` conclusion).
+
+---
+
 ## [Electron: L3 confirmation prompt + approve/deny round-trip] — 2026-07-23
 
 Closes the HUD half of docs/SAFETY.md's oldest known limit ("no Electron/mobile UI renders a
