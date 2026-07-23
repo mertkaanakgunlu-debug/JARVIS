@@ -10,111 +10,104 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Last session: 2026-07-23 (17. oturum) — FAZ 8 (SON FAZ) + ELECTRON CONFIRMATION UI
+## Last session: 2026-07-23 (17. oturum) — FAZ 8 (SON FAZ) + ELECTRON CONFIRMATION UI + BAĞIMSIZ İKİNCİ REVIEW'IN 4 BULGUSU
 
-**Durum tek cümlede:** Agent Runtime rev.2'nin son fazı Faz 8'in offline yarısı komple inşa
-edilip test edildi (5 yeni test dosyası, 234 yeni test; full suite **1246 passed, 0 failed**,
-2026-07-23 canlı koşuldu; alpha kapısı artık çalıştırılabilir bir enstrüman ve mevcut şampiyon
-kaydına dürüstçe **KALDI** diyor); ardından owner'ın seçtiği sıradaki iş — **Electron HUD'un
-L3 confirmation prompt'u** — da aynı oturumda inşa edildi (SAFETY.md'nin en eski known-limit'i;
-build + simüle-stream parser doğrulaması yapıldı, CANLI HUD E2E'si bilinçli olarak İDDİA
-EDİLMİYOR — sıradaki manuel adım o).
+**Durum tek cümlede:** Agent Runtime rev.2'nin son fazı Faz 8 inşa edildi (offline eval altyapısı
++ alpha gate enstrümanı), ardından owner'ın seçtiği Electron confirmation UI inşa edildi, sonra
+owner bu ikisinin diff'ini başka bir modele (Sonnet) bağımsız review'a soktu — 4 gerçek bulgu
+çıktı, hepsi kodda tek tek doğrulandı (biri chromadb'nin kendi kaynağına kadar inildi), hepsi
+düzeltildi ve test edildi.
 
-**COMMIT DURUMU:** owner "commit + push et" dedi — bu oturumda **3 iş commit'i (`7d6a7af`
-feat: Faz 8; `8b451dc` docs: Faz 8 kayıtları; `52d0b72` feat: Electron confirmation UI) ve bu
-kapanış docs commit'i** push'landı; oturum sonunda local == origin senkrondu. Kalıcı kural
-gereği kapanış commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına `gh run list --branch
-langgraph-migration` ile bakın. (`.claude/settings.local.json` her zamanki gibi hariç.)
+**COMMIT DURUMU:** bu oturumda 8 iş commit'i push'landı (Faz 8: `7d6a7af`; Electron UI: `52d0b72`;
+review'ın 4 bulgusu: `599066d`, `7136690`, `5645ae2`, `3c6c05a`) + aralarında 2 docs commit'i
+(`8b451dc`, `8e3977e`) ve bu kapanış docs commit'i. Oturum sonunda local == origin senkrondu.
+Kalıcı kural gereği kapanış commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına `gh run list
+--branch langgraph-migration` ile bakın. (`.claude/settings.local.json` her zamanki gibi hariç.)
 
-### Electron confirmation UI (`52d0b72`) — ne yapıldı, ne YAPILMADI
+### Faz 8 + Electron confirmation UI — özet (detay: CHANGELOG.md)
 
-- Ortak SSE reader (`electron/src/renderer/src/lib/chatStream.js`): `/chat/stream`,
-  `/chat/upload`, `/chat/confirm/{id}` için TEK parser — structured `confirmation_required` ve
-  `{"async":true}` frame'leri artık transcript'e ham JSON olarak akmıyor.
-- `ConfirmationOverlay` (App.jsx): her bekleyen çağrı `policy_guard.describe_call()` açıklamasıyla
-  listeleniyor; APPROVE / DENY + opsiyonel `deny:<gerekçe>`; Escape = deny (dismiss yok,
-  fail-closed). Karar `/chat/confirm/{id}`'ye gidiyor, devam aynı reader'dan akıyor; aynı-turn
-  İKİNCİ interrupt prompt'u yerinde değiştiriyor.
-- `useJarvisSocket` artık Phase 3'ten beri yayında olan `{type:"confirmation_required"}` WS
-  broadcast'ini de dinliyor — BAŞKA transportlarda (ses dahil) başlayan onaylar da HUD'da
-  görünüyor; çift-resolve sunucu tarafında güvenli (pending tek pop, kaybeden temiz hata).
-- HUD artık kalıcı `conversation_id` gönderiyor (localStorage) — Faz 5'in "her server restart
-  HUD konuşmasını yetim bırakır" bilinçli regresyonu kapandı.
-- **YAPILMADI:** canlı HUD round-trip'i (gerçek server + model + gerçek tıklama) — `npm run
-  build` + 7 kontrollü simüle-stream parser testi var, canlı E2E yok. Mobil (Flutter) tarafı
-  hâlâ hiçbir şey çizmiyor.
+Faz 8: registry sweep (157 test), per-capability contract testleri (38 test), hypothesis
+property-fuzz (derandomize profil), 13 sınıflı hata taksonomisi (`jarvis/execution/taxonomy.py`,
+tek kaynak), `scripts/alpha_gate.py` enstrümanı. Electron: paylaşılan SSE reader
+(`chatStream.js`), amber `ConfirmationOverlay`, WS `confirmation_required` dinleme,
+`conversation_id` persistence.
 
-### Ne inşa edildi (detay: CHANGELOG.md'nin Faz 8 girdisi)
+### Bağımsız review'ın 4 bulgusu — hepsi doğrulandı ve düzeltildi
 
-1. **Registry sweep** (`tests/test_registry_sweep.py`, 157 test): tüm ToolSpec alan
-   vokabülerleri; `L3+ ⇒ requires_confirmation` invariant'ı; dynamic-MCP fail-closed
-   default'ları; ve daha önce HİÇ denetlenmeyen TOOL_SPECS ↔ `make_tools()` eşleşmesi
-   (spec'siz @tool VEYA tool'suz spec artık gürültüyle düşer; tek meşru yokluk alpha-disabled
-   `python_run`).
-2. **Per-capability contract testleri** (`tests/test_capability_contracts.py`, 38 test): 12
-   şemalı tool'un her biri için gate üzerinden valid ⇒ imzalı ExecutionRequest / ihlal ⇒
-   `invalid_args_calls` + istek YOK (gövde yapısal olarak koşamaz) / bilinmeyen alan reddi /
-   karışık batch izolasyonu; 13. şemalı tool eklenirse completeness guard'ı patlar.
-3. **Property-fuzz** (`tests/test_property_fuzz.py`, hypothesis 6.160.0): `validate_args` hiç
-   raise etmez + raw input'u hiç echo etmez; extra=forbid ve Literal-dışı action evrensel;
-   redaction'dan tanınabilir secret sızmaz; `digest_args` deterministik. Profil
-   `derandomize=True, deadline=None` — `dd339b9`'un kapattığı CI-flake sınıfını hypothesis
-   üzerinden geri açmamak İÇİN.
-4. **13 sınıflı hata taksonomisi** (`jarvis/execution/taxonomy.py`, saf stdlib, tek kaynak):
-   `eval_oracle.score()` artık her Verdict'e `error_classes` ekliyor (mapping gerçek score()
-   çıktısına karşı `tests/test_taxonomy.py`'de pinli; "expected X to succeed" formatı
-   missing_tool_call/wrong_tool/execution_failure olarak ÜÇE ayrışıyor; B6 şekli =
-   execution_failure + false_success_claim); driver kaydediyor; `ab_analyze.py` rapora
-   invariant-etiketli sınıf kırılımı bölümü ekledi (eski kayıtlar aynı fonksiyonla yeniden
-   türetiliyor — geriye uyumlu).
-5. **Alpha gate enstrümanı** (`scripts/alpha_gate.py`; CI ruff satırında birinci-sınıf):
-   `evaluate` kayıtlı ab_run sonuçlarını plan tablosuna map'leyip
-   `results/alpha_gate_report.md` yazar (VERİ YOK satırları bilinçli boşluk); `isolation`
-   ≥20 ardışık tek-tool sızıntı döngüsünü canlı koşar (fresh session + benzersiz tracer;
-   sızıntıda non-zero exit). Saf mantık `tests/test_alpha_gate.py`'de (14 test).
+Owner Sonnet'e diff'i (Faz 8 + Electron UI) bağımsız review ettirdi; 4 madde geldi, hepsi
+kodda/chromadb kaynağında tek tek doğrulandı (kör kabul edilmedi) — bu repo'nun "dış review'ı
+ampirik doğrula, körü körüne uygulama" disiplini (bkz. [[project-agent-runtime-rev2]] update
+#10'daki P0 çürütme emsali).
 
-### Canlı smoke'lar (2026-07-23, bu oturumda koşuldu)
+1. **Cross-transport confirmation race (GERÇEK, düzeltildi — `599066d`).** `python -m jarvis
+   --api --voice --wakeword`'ün voice loop'u API server ile AYNI process'te, aynı `JarvisAgent`
+   + `event_bus`'ı paylaşarak çalıştığı doğrulandı. Bu oturumun Electron değişikliği HUD'u
+   `confirmation_required` WS broadcast'ini dinler hale getirdiğinden (Phase 3'ten beri
+   yayındaydı, hiç dinlenmiyordu), sesle başlayan bir onay artık HUD'dan da çözülebiliyor — ama
+   hem `voice_api.py` hem `cli.py`'nin yerel `pending_confirmation` bayrağı bundan haberdar
+   değildi: kullanıcının SONRAKİ sesli cümlesi, zaten başka yerden çözülmüş eski bir onaya
+   "evet/hayır" cevabı sanılıp yutuluyordu (sunucu tarafı tekrar-çalıştırmayı engelliyor ama
+   gerçek komutu kurtaramıyor). Düzeltme: `JarvisAgent.has_pending_confirmation()` +
+   `voice/session.is_confirmation_still_pending()` — her iki çağrı sitesi artık tüketmeden önce
+   hâlâ gerçekten bekleyen mi diye soruyor; değilse (başka yerden çözülmüş VEYA TTL ile
+   silinmiş) normal yeni tur olarak işliyor. 7 test.
+2. **`alpha_gate.py` exit-code + isolation açığı (GERÇEK, düzeltildi — `7136690`).**
+   `evaluate()` rapor ne derse desin HER ZAMAN 0 dönüyordu — artık GEÇTİ/KALDI/EKSİK
+   VERİ/HARNESS_ERROR için 0/1/2/3. `isolation`'ın hem rapor satırı hem kendi exit code'u
+   `tool_ok`'u hiç kontrol etmiyordu (file_list 0/20 başarı + sızıntı yok = eskiden "geçti"
+   sayılıyordu). `verdict_of()`/`isolation_verdict_ok()` tek kaynak yapıldı. 13 test.
+3. **ChromaDB flake kök nedeni (GERÇEK, chromadb kaynağında doğrulandı, düzeltildi —
+   `5645ae2`).** `test_shadow_replay_equivalence.py`'nin off/shadow kollarının AYNI test
+   içinde ayrı `Memory()` inşa ettiğini ama `isolated_cwd`'ın per-test chdir yaptığını (per-arm
+   değil) ve chroma_dir/vault_dir default'larının cwd-relative olduğunu doğruladım — iki kol
+   AYNI dizini paylaşıyordu. Daha da derini: `chromadb.api.shared_system_client
+   .SharedSystemClient`'ı okuyup bunun `persist_directory` string'ine keyed, process-global,
+   refcount'lu bir System cache'i olduğunu ve hiçbir yerde `close()` çağrılmadığı için
+   refcount'un asla sıfırlanmadığını (dolayısıyla iki Memory'nin aynı System'i SESSIZCE
+   paylaştığını, ve HER test dosyasının kendi System'ini süresiz sızdırdığını) doğruladım.
+   Düzeltme: her kol artık kendi workspace'ine izole chroma/vault dizini alıyor, `Memory.close()`
+   eklendi (gerçek `chromadb.Client.close()`'a sarma) ve `test_shadow_replay_equivalence.py` +
+   `test_procedure_store.py`'de kullanılıyor. Yan etki yakalandı: chroma'yı workspace içine
+   taşımak `_side_effects()`'in onu da hash'lemesine yol açtı (chroma'nın kendi iç byte'ları
+   reproducible değil) → checkpoint gibi hariç tutuldu. **Ampirik doğrulama: 4 dosya 15 ardışık
+   turda, her turda 38/38 yeşil, 0 hata.** 4 yeni test (`test_memory_lifecycle.py`).
+4. **Electron `chatStream.js` sağlamlığı (GERÇEK, düzeltildi — `3c6c05a`).** `resp.ok`
+   kontrolü yoktu (401/422 gibi non-2xx JSON gövde sessizce `{text:'', error:null}` olarak
+   yutuluyordu) ve stream sonundaki newline'sız son satır hiç işlenmiyordu — ikisi de doğrulandı
+   ve düzeltildi. Repo'nun ilk JS test altyapısı (Vitest) kuruldu, 13 senaryo (istenen 9 + 4 ek,
+   tek-byte chunk split dahil) — hepsi geçti. CI'ın electron job'ına `npm test` eklendi (job'ın
+   zaten var olan continue-on-error politikasını miras alıyor).
 
-- `ab_analyze.py C:\Temp\jarvis-ab champ --runs 5` → yeni taksonomi bölümü GERÇEK şampiyon
-  kaydında: `missing_tool_call 1, execution_failure 2, false_success_claim 2 (invariant!),
-  wrong_artifact 1` — 14. oturumda canlı gözlemlenen "tool çağırmadan başarı uydurma"
-  probleminin ilk sayısal görünümü.
-- `alpha_gate.py evaluate ... champ --runs 5` → **KALDI** (5 run < 10 hedef; B6 3/5;
-  false_success_claim ≠ 0) + `exit=0` doğrulandı. Gate pohpohlamıyor — tasarım bu.
+### Canlı doğrulama (2026-07-23, bu oturumda koşuldu)
 
 ```powershell
-python -m pytest -q       # 1246 passed, 0 failed (3:51) — FULL suite, 2026-07-23
-ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py scripts/alpha_gate.py   # All checks passed! (CI satırı birebir)
-git log --oneline -3      # (en üstte bu dosyayı yazan kapanış commit'i) 7d6a7af (feat: Faz 8), e694819 — 16. oturum ucu
+python -m pytest -q       # 1263 passed, 0 failed (206s) — FULL suite
+# chromadb flake tekrar testi (4 dosya x 15 tur):  DONE: 0/15 rounds failed
+ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py scripts/alpha_gate.py   # All checks passed!
+cd electron && npm test && npm run build   # 13/13 vitest passed; build clean
+git log --oneline -9      # (en üstte bu dosyayı yazan kapanış commit'i) 3c6c05a, 5645ae2, 7136690, 599066d, 8e3977e, 52d0b72, 8b451dc, 7d6a7af, e694819
 ```
-
-### Alpha kapısının YEŞİLE gitmesi için kalanlar (owner-koşusu ölçüm + 2 kapsama boşluğu)
-
-1. `ab_run_config.ps1 -Config champ -Effort none -Runs 10` (10/10 satırları için) →
-   `alpha_gate.py evaluate <root> champ --runs 10`.
-2. Server ayaktayken `alpha_gate.py isolation` (≥20 run sızıntı denetimi).
-3. İki dürüst VERİ YOK satırı için senaryo eklenmeli: uzun-workflow E2E (workflow_start'ı
-   süren skorlu driver senaryosu yok) ve block/veto-dışı hata-recovery sınıfları.
-4. Bilinen içerik engeli: false_success_claim invariant'ı şampiyonda ŞU AN 2 — model
-   tool-calling güvenilirliği işi (aşağıda, taşınan #2) çözülmeden gate yeşil OLAMAZ.
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **CANLI HUD E2E'si (Electron confirmation UI'ın kabulü):** server'ı başlat
-   (`python -m jarvis --api`), Electron'u aç, L3 bir aksiyon iste (örn. "test@... adresine
-   mail gönder"), overlay'de APPROVE/DENY'ı gerçekten tıkla; ikinci-interrupt ve
-   WS-kaynaklı (sesle başlayan) onay senaryosunu da dene. Bu yapılmadan `52d0b72`
-   "çalışıyor" SAYILMAZ — bkz. docs/SAFETY.md'nin güncellenmiş known-limit'i.
-2. **Model tool-calling güvenilirliği** (14. oturumdan; artık taksonomiyle ÖLÇÜLEBİLİR):
-   false_success_claim'i 0'a indirme işi — muhtemelen sistem promptu / tool-seçim talimatları;
-   Faz 4'ün enforce modu (hâlâ default off) yapısal çözüm adayı, önce shadow ölçümü planın
-   kendi sıralaması. Alpha gate bu iş bitmeden yeşil olamaz.
-3. Alpha gate'in owner-koşusu ölçümleri (yukarıdaki blok) + 2 kapsama boşluğu senaryosu.
+1. **CANLI HUD E2E'si (değişmedi):** server + Electron + gerçek APPROVE/DENY tıklaması —
+   `52d0b72`'nin ve bugünkü cross-transport düzeltmesinin (`599066d`) gerçek kabul testi. Bu
+   ikinciyi test etmek için: sesle bir L3 aksiyon başlat, HUD'dan onayla, SONRA sesle alakasız
+   bir şey söyle — düzeltmeden önce bu ikinci komut yutulurdu.
+2. **Model tool-calling güvenilirliği** (14. oturumdan; taksonomiyle ölçülebilir):
+   `false_success_claim`'i 0'a indirme — alpha kapısının asıl kilidi.
+3. Alpha gate'in owner-koşusu ölçümleri (10-run `ab_run_config.ps1` + `isolation`) + 2 kapsama
+   boşluğu senaryosu (uzun-workflow E2E, block/veto-dışı recovery sınıfları).
 4. Branch ucunun CI'ı: `gh run list --branch langgraph-migration -L 3` ile kontrol et.
-5. Eski kalanlar (değişmedi): `workflow_start` JSON `steps` güvenilirliği; gerçek CLI REPL
-   E2E; Faz 6 Kısım 3 Literal-terfi; Faz 5 kalanları; canlı A/B B6 sorusu; 4 worktree
-   branch; mobile flutter-analyze info/warning; chromadb yerel flakiness izlemesi (17.
-   oturumun full-suite koşusunda da GÖRÜLMEDİ — 1246/1246).
+5. **Yeni, küçük, bilinçli kapsam dışı bırakılan:** `Memory()` inşa eden DİĞER test dosyaları
+   (bugün yalnız en açık ilişkili ikisi — shadow-replay + procedure-store — düzeltildi) hâlâ
+   `close()` çağırmıyor; her biri kendi System'ini süresiz sızdırıyor (zararsız ama gereksiz —
+   process pytest'in kendisi bittiğinde zaten temizleniyor). Repo-geneli bir "her Memory()
+   testi close() etsin" taraması yapılmadı — orantısız kapsam genişlemesi olurdu, ayrı bir
+   oturumun işi olabilir.
+6. Eski kalanlar (değişmedi): `workflow_start` JSON `steps` güvenilirliği; gerçek CLI REPL E2E;
+   Faz 6 Kısım 3 Literal-terfi; Faz 5 kalanları; canlı A/B B6 sorusu; 4 worktree branch; mobile
+   flutter-analyze info/warning.
 
 ## Değişmeyen taşınan işler
 

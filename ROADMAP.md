@@ -186,6 +186,27 @@ OWNER-RUN measurement: a 10-run `ab_run_config.ps1` set + `alpha_gate.py isolati
 coverage for the two honestly-uncovered rows (long-workflow E2E, non-block recovery classes). See
 [CHANGELOG.md](CHANGELOG.md) for full detail and [HANDOFF.md](HANDOFF.md) for current status.
 
+**2026-07-23, same 17th session — Electron confirmation UI, then an independent review's 4
+findings, all verified and fixed.** After Faz 8, the owner's chosen next step (Electron
+confirmation UI — SAFETY.md's oldest known limit, HUD leg) was built and pushed. The owner then
+routed that combined diff through an independent review (a different model); all 4 findings were
+verified against real code — one traced into chromadb's own source — before any fix, not applied
+blindly. (1) A cross-transport confirmation race: the Electron change's new WS-broadcast
+listening meant a voice-initiated confirmation could now be resolved from the HUD while the voice
+loop's own local flag stayed armed, silently consuming the user's next utterance as a stale
+answer — fixed with `JarvisAgent.has_pending_confirmation()`. (2) `scripts/alpha_gate.py`'s
+`evaluate()` always exited 0 regardless of verdict, and `isolation` ignored its own recorded
+`tool_ok` — fixed with a real exit-code contract and a single-source `isolation_verdict_ok()`.
+(3) The chromadb flakiness this suite carried since 2026-07-22 was root-caused: two Memory()
+instances in one test shared the identical cwd-relative chroma dir, and chromadb's
+`SharedSystemClient` caches one System per path in a process-global refcounted registry never
+released without a `close()` this codebase never called — fixed with per-arm workspace-scoped
+dirs and a new `Memory.close()`, verified empirically via 15 consecutive clean rounds (38/38
+every round), not just reasoned about. (4) Electron's `chatStream.js` silently swallowed non-2xx
+error responses and dropped a final un-terminated line — both fixed, alongside this repo's first
+JS test infrastructure (Vitest, 13 tests) wired into CI. Full suite 1263 green. See
+[CHANGELOG.md](CHANGELOG.md) for full detail and [HANDOFF.md](HANDOFF.md) for current status.
+
 ---
 
 ## Faz 0 — Hafıza-Kritik Stabilizasyon (minimal) ✅ done (2026-07-14)

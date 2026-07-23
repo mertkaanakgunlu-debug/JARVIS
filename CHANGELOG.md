@@ -29,6 +29,56 @@ that manual E2E is the explicit next step.**
 
 ---
 
+## [Independent review response: 4 real findings across the Faz 8 + Electron diff] — 2026-07-23
+
+The owner routed this session's Faz 8 + Electron confirmation UI diff through an independent
+review (a different model). All 4 findings were verified directly against the code (one down
+into chromadb's own source) before any fix — the same "verify, don't blindly implement"
+discipline this repo's external-review responses have followed before.
+
+- **Cross-transport confirmation race (real).** Confirmed `python -m jarvis --api --voice
+  --wakeword` runs the voice loop in the SAME process as the API server, sharing one
+  `JarvisAgent`/`event_bus`. This session's Electron change made the HUD listen to the
+  `confirmation_required` WS broadcast (live since Phase 3, never consumed before) — so a
+  voice-initiated confirmation can now be resolved from the HUD while the voice loop's own
+  per-transport `pending_confirmation` flag (`jarvis/voice_api.py`, `jarvis/cli.py`) is still
+  armed, silently consuming the user's NEXT spoken sentence as a stale yes/no answer instead of
+  a new command. Fixed with `JarvisAgent.has_pending_confirmation()` +
+  `jarvis.voice.session.is_confirmation_still_pending()`, checked before routing a transcript
+  into `resolve_confirmation()` at both call sites; also closes a related pre-existing gap
+  (TTL-evicted confirmations). 7 tests.
+- **`scripts/alpha_gate.py` false-green exits (real).** `evaluate()` always `return 0`
+  regardless of the rendered verdict — no exit code ever signaled KALDI/EKSIK VERI. Fixed with a
+  real contract (0=GECTI/1=KALDI/2=EKSIK VERI/3=HARNESS_ERROR), `verdict_of()` as the single
+  source both `render_report()` and `evaluate()` read. The isolation criterion also ignored its
+  own recorded `tool_ok` — an agent that never actually calls `file_list` cannot leak anything
+  either, and the old check called that a clean pass; fixed with `isolation_verdict_ok()`. 13
+  tests.
+- **ChromaDB flakiness root cause (real, traced into chromadb's own source).** Confirmed
+  `test_shadow_replay_equivalence.py`'s off/shadow arms — two `Memory()` instances built back to
+  back in one test — resolved to the identical default `data/chroma` (cwd-relative, shared
+  since `isolated_cwd` chdirs once per TEST not per arm). Reading
+  `chromadb.api.shared_system_client.SharedSystemClient` confirmed why this was worse than a
+  coincidence: `PersistentClient` registers one `System` per `persist_directory` STRING in a
+  process-global, refcounted cache, torn down only by a matching `Client.close()` — which
+  nothing in this codebase ever called, so the two arms silently shared one System, and every
+  Memory-constructing test file leaks its own System for the process's lifetime. Fixed: each
+  arm now gets its own workspace-scoped chroma/vault dir; new `Memory.close()`; applied in
+  `test_shadow_replay_equivalence.py` and `test_procedure_store.py`. Verified empirically, not
+  just reasoned about: the four previously-flaky files ran 15 consecutive rounds, 38/38 passing
+  every round. 4 new tests (`test_memory_lifecycle.py`).
+- **Electron `chatStream.js` robustness (real).** No `resp.ok` check (a non-2xx JSON/text body
+  was silently read as an empty SSE stream — `{text:"", error:null}`, indistinguishable from a
+  real empty success) and the final line was dropped if the stream ended without a trailing
+  newline. Both fixed. This repo's first JS test infrastructure (Vitest) added — 13 scenarios
+  (the 9 requested plus a second-confirmation-frame case, a plain-text error body, a
+  single-byte-chunk adversarial split, and mid-stream-failure propagation), wired into CI's
+  electron job (inheriting its existing continue-on-error policy).
+
+Full suite 1263 passed, 0 failed; ruff clean; `npm test`/`npm run build` clean.
+
+---
+
 ## [Agent Runtime rev.2 — Faz 8: Evaluation v2 + the alpha-gate instrument] — 2026-07-23
 
 The 9-phase plan's last phase. Two halves: the offline evaluation infrastructure is BUILT and
