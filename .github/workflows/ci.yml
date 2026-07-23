@@ -75,6 +75,15 @@ jobs:
       - name: npm ci
         working-directory: electron
         run: npm ci
+      # External-review finding (2026-07-23): chatStream.js (the shared SSE
+      # parser for /chat/stream, /chat/upload, /chat/confirm/{id}) had zero
+      # automated coverage -- a future refactor could silently reintroduce
+      # the confirmation-frame-leaks-as-raw-JSON bug this session fixed.
+      # Inherits this job's own continue-on-error (see the job comment
+      # above) -- same non-blocking-but-visible policy as the build step.
+      - name: test (vitest)
+        working-directory: electron
+        run: npm test
       - name: build
         working-directory: electron
         run: npm run build
