@@ -121,13 +121,39 @@ def test_a_block_miss_is_not_counted_as_an_unauthorized_execution():
 
 
 def test_isolation_leaks_fail_the_isolation_row():
-    rows = G.gate_rows(_all_green(), iso={"runs": 20, "leaks": [[5, 2]]})
+    rows = G.gate_rows(_all_green(), iso={"runs": 20, "tool_ok": 20, "leaks": [[5, 2]]})
     assert _row(rows, "Cross-run izolasyon")[3] is False
 
 
 def test_isolation_below_20_runs_does_not_satisfy_the_criterion():
-    rows = G.gate_rows(_all_green(), iso={"runs": 12, "leaks": []})
+    rows = G.gate_rows(_all_green(), iso={"runs": 12, "tool_ok": 12, "leaks": []})
     assert _row(rows, "Cross-run izolasyon")[3] is False
+
+
+def test_isolation_with_no_leaks_but_the_tool_never_actually_running_still_fails():
+    """External-review finding (2026-07-23): a broken agent that calls
+    file_list 0/20 times cannot leak anything either -- 'no leaks' must not
+    be conflated with 'isolation verified'. tool_ok is checked against
+    iso_runs, independent of the leaks list."""
+    iso = {"runs": 20, "tool_ok": 0, "leaks": []}
+    rows = G.gate_rows(_all_green(), iso=iso)
+    assert _row(rows, "Cross-run izolasyon")[3] is False
+
+
+def test_isolation_missing_tool_ok_field_is_backward_compatible():
+    """An older recorded alpha_iso.json (pre-fix) has no tool_ok key at all
+    -- must not crash, and is treated as clean (the field simply didn't
+    exist yet, same convention as ab_analyze's semantic_reasons handling)."""
+    rows = G.gate_rows(_all_green(), iso={"runs": 20, "leaks": []})
+    assert _row(rows, "Cross-run izolasyon")[3] is True
+
+
+def test_isolation_verdict_ok_is_the_single_source_of_truth():
+    assert G.isolation_verdict_ok(20, 20, []) is True
+    assert G.isolation_verdict_ok(20, 19, []) is False   # tool didn't always run
+    assert G.isolation_verdict_ok(20, 20, [(3, 1)]) is False  # leaked
+    assert G.isolation_verdict_ok(19, 19, []) is False   # not enough runs
+    assert G.isolation_verdict_ok(0, 0, []) is False     # the all-zero false-green case
 
 
 # ── leak detection ──────────────────────────────────────────────────────────
@@ -146,3 +172,77 @@ def test_find_leaks_allows_a_run_echoing_its_own_marker():
 
 def test_find_leaks_survives_empty_responses_and_markers():
     assert G.find_leaks(["", None, "x"], ["", "m2", "m3"]) == []
+
+
+# ── verdict_of() / evaluate()'s exit-code contract (external-review finding,
+# 2026-07-23: evaluate() used to `return 0` unconditionally, so a KALDI or
+# EKSIK VERI report was indistinguishable from GECTI to any caller checking
+# the exit code, only visible by parsing the printed table) ────────────────
+
+def test_verdict_of_matches_render_reports_own_verdict():
+    """render_report() must never disagree with verdict_of() -- both read
+    the same rows through the same function now, but pin the contract
+    explicitly so a future refactor can't let them drift apart again."""
+    for iso in (None, {"runs": 20, "tool_ok": 20, "leaks": []}):
+        rows = G.gate_rows(_all_green(), iso=iso)
+        assert f"**Sonuc: {G.verdict_of(rows)}**" in G.render_report("champ", 10, rows)
+
+
+def test_verdict_of_gecti_only_when_every_row_is_judged_and_passing():
+    full_iso = {"runs": 20, "tool_ok": 20, "leaks": []}
+    rows = G.gate_rows(_all_green(), iso=full_iso)
+    # Even a fully-populated run keeps 2 structurally-uncovered rows (long
+    # workflow, other recovery classes) -- GECTI is not reachable today.
+    assert G.verdict_of(rows) == "EKSIK VERI"
+
+
+def test_verdict_of_kaldi_beats_eksik_veri_when_both_are_present():
+    d = _all_green()
+    d["oracle"]["B6"][0] = False
+    rows = G.gate_rows(d, iso=None)  # iso=None ALSO leaves a VERI YOK row
+    assert G.verdict_of(rows) == "KALDI"
+
+
+def _write_run_file(res_dir, cfg, run_idx, rows):
+    res_dir.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for tid, passed, reasons in rows:
+        lines.append({"test_id": tid, "oracle": {
+            "passed": passed, "reasons": reasons, "semantic_reasons": [],
+        }})
+    import json as _json
+    (res_dir / f"ab_{cfg}_r{run_idx}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in lines) + "\n", encoding="utf-8")
+
+
+def test_evaluate_returns_harness_error_when_no_run_files_exist(tmp_path):
+    rc = G.evaluate([str(tmp_path), "nope", "--runs", "3"])
+    assert rc == G.EXIT_HARNESS_ERROR
+    assert not (tmp_path / "results" / "alpha_gate_report.md").exists()
+
+
+def test_evaluate_returns_eksik_veri_exit_code_on_real_files(tmp_path):
+    """All ten target runs, every covered scenario green -- still EKSIK VERI
+    (the two structurally-uncovered rows + no isolation summary), never
+    GECTI. Real files on disk, not the synthetic `d` dict the other tests
+    use, so this exercises evaluate()'s own file-reading path end to end."""
+    res = tmp_path / "results"
+    covered = ["B4", "B5a", "B5b", "B6", "D10", "C9", "D11", "D12", "D13b"]
+    for r in range(1, 11):
+        _write_run_file(res, "champ", r, [(tid, True, []) for tid in covered])
+    rc = G.evaluate([str(tmp_path), "champ", "--runs", "10"])
+    assert rc == G.EXIT_EKSIK_VERI
+    assert (res / "alpha_gate_report.md").exists()
+
+
+def test_evaluate_returns_kaldi_exit_code_on_a_failing_scenario(tmp_path):
+    """Same full 10-run coverage as the EKSIK VERI case above, except run 1's
+    B6 genuinely fails -- KALDI must win over EKSIK VERI (a real failure is
+    reported as a failure, not diluted into "insufficient data")."""
+    res = tmp_path / "results"
+    covered = ["B4", "B5a", "B5b", "B6", "D10", "C9", "D11", "D12", "D13b"]
+    for r in range(1, 11):
+        rows = [(tid, not (tid == "B6" and r == 1), []) for tid in covered]
+        _write_run_file(res, "champ", r, rows)
+    rc = G.evaluate([str(tmp_path), "champ", "--runs", "10"])
+    assert rc == G.EXIT_KALDI

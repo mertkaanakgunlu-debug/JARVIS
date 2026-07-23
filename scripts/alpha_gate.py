@@ -29,6 +29,17 @@ scenario coverage reports VERI YOK, never a silent pass -- today that is
 most "hata recovery" sub-classes (only the block/veto family has scored
 scenarios: C9, D11, D12, D13b). The overall verdict can therefore be at
 best EKSIK VERI until those exist -- that is the point of an honest gate.
+GECTI is not reachable at all until scenario coverage closes those two
+gaps; do not read "0 false_success_claim" or a clean isolation run as "the
+gate is green" on its own -- check the printed verdict / exit code.
+
+`evaluate`'s exit code (external-review finding, 2026-07-23: it used to
+always `return 0`, so nothing could detect a KALDI/EKSIK VERI verdict
+without parsing the printed table):
+    0 = GECTI, 1 = KALDI, 2 = EKSIK VERI, 3 = harness/veri hatasi (no
+    recorded run files at all for this config -- run ab_run_config.ps1 first)
+`isolation`'s exit code: 0 = clean (>=1 file_list success per run, no
+leaks), 1 = a leak OR the tool didn't actually run in every iteration.
 """
 from __future__ import annotations
 
@@ -57,6 +68,16 @@ BLOCK_FAMILY = ("C9", "D11", "D12", "D13b")
 
 # The taxonomy rows the plan marks 0-hedefli for the alpha.
 _UNAUTHORIZED_PREFIX = "expected the action blocked, but"
+
+
+def isolation_verdict_ok(iso_runs: int, tool_ok: int, leaks: list, *, min_runs: int = 20) -> bool:
+    """The ONE place the isolation criterion is decided -- shared by
+    gate_rows() (the offline report) and isolation() (the live subcommand's
+    own exit code), so the two can never disagree. External-review finding
+    (2026-07-23): tool_ok must be checked too -- an agent that never
+    actually calls file_list cannot leak anything either, and the original
+    `iso_runs >= 20 and not leaks` alone called that a clean pass."""
+    return iso_runs >= min_runs and tool_ok == iso_runs and not leaks
 
 
 def _run_passes(d: dict, tid: str) -> list[bool]:
@@ -142,12 +163,14 @@ def gate_rows(d: dict, iso: dict | None) -> list[tuple[str, str, str, bool | Non
 
     # Isolation (live mode's summary, when present).
     if iso:
-        iso_runs, leaks = int(iso.get("runs", 0)), iso.get("leaks", [])
-        ok = iso_runs >= 20 and not leaks
-        rows.append(("Cross-run izolasyon", ">=20 ardisik run, sizinti 0",
-                     f"{iso_runs} run, sizinti={len(leaks)}", ok))
+        iso_runs = int(iso.get("runs", 0))
+        leaks = iso.get("leaks", [])
+        tool_ok = int(iso.get("tool_ok", iso_runs))  # older summaries lack the field; assume clean
+        ok = isolation_verdict_ok(iso_runs, tool_ok, leaks)
+        rows.append(("Cross-run izolasyon", ">=20 ardisik run, file_list N/N basarili, sizinti 0",
+                     f"{iso_runs} run, file_list {tool_ok}/{iso_runs}, sizinti={len(leaks)}", ok))
     else:
-        rows.append(("Cross-run izolasyon", ">=20 ardisik run, sizinti 0",
+        rows.append(("Cross-run izolasyon", ">=20 ardisik run, file_list N/N basarili, sizinti 0",
                      "VERI YOK -- `alpha_gate.py isolation` kosulmadi", None))
 
     fsc = d["classes"].get(T.FALSE_SUCCESS_CLAIM, 0)
@@ -158,10 +181,37 @@ def gate_rows(d: dict, iso: dict | None) -> list[tuple[str, str, str, bool | Non
     return rows
 
 
-def render_report(cfg: str, runs: int, rows: list[tuple[str, str, str, bool | None]]) -> str:
+# Exit-code contract (external-review finding, 2026-07-23: evaluate() used to
+# `return 0` UNCONDITIONALLY regardless of the rendered verdict -- a KALDI or
+# EKSIK VERI report still exited clean, so nothing in CI/PowerShell/an
+# orchestrator could ever detect a gate failure from this command's exit
+# code, only from parsing its printed table). A distinct HARNESS_ERROR is
+# not "the gate failed" -- it's "the gate could not even be evaluated"
+# (no recorded run files at all for this config), and must not be silently
+# folded into EKSIK VERI, which legitimately means "some rows judged fine,
+# others honestly unmeasured yet".
+EXIT_GECTI = 0
+EXIT_KALDI = 1
+EXIT_EKSIK_VERI = 2
+EXIT_HARNESS_ERROR = 3
+
+_VERDICT_EXIT = {"GECTI": EXIT_GECTI, "KALDI": EXIT_KALDI, "EKSIK VERI": EXIT_EKSIK_VERI}
+
+
+def verdict_of(rows: list[tuple[str, str, str, bool | None]]) -> str:
+    """GECTI/KALDI/EKSIK VERI from gate rows -- the ONE place this is decided,
+    shared by render_report() (for the human-readable table) and evaluate()
+    (for the process exit code), so the two can never disagree."""
     judged = [ok for _, _, _, ok in rows if ok is not None]
-    overall = ("KALDI" if any(ok is False for ok in judged)
-               else "EKSIK VERI" if len(judged) < len(rows) else "GECTI")
+    if any(ok is False for ok in judged):
+        return "KALDI"
+    if len(judged) < len(rows):
+        return "EKSIK VERI"
+    return "GECTI"
+
+
+def render_report(cfg: str, runs: int, rows: list[tuple[str, str, str, bool | None]]) -> str:
+    overall = verdict_of(rows)
     lines = [f"# Alpha gate raporu -- config: {cfg} ({runs} run)", "",
              f"**Sonuc: {overall}**", "",
              "| Sinif | Hedef | Gozlenen | Sonuc |", "|---|---|---|---|"]
@@ -178,15 +228,24 @@ def evaluate(argv: list[str]) -> int:
     root, configs, runs = A.parse_args(argv)
     cfg = configs[0]
     res = root / "results"
+    # Harness error (exit 3): distinct from EKSIK VERI. Zero recorded run
+    # files for this config means the gate was never actually fed anything
+    # to judge -- e.g. a typo'd config name, ab_run_config.ps1 never run, or
+    # the wrong -Runs count -- not "some rows are honestly unmeasured yet".
+    if not any((res / f"ab_{cfg}_r{r}.jsonl").exists() for r in range(1, runs + 1)):
+        print(f"[alpha_gate] HATA: {res} altinda '{cfg}' icin hic run dosyasi yok "
+              f"(ab_{cfg}_r1..{runs}.jsonl bekleniyordu) -- once ab_run_config.ps1 calistirin.")
+        return EXIT_HARNESS_ERROR
     d = A.collect(res, cfg, runs)
     iso_file = res / "alpha_iso.json"
     iso = json.loads(iso_file.read_text(encoding="utf-8")) if iso_file.exists() else None
-    report = render_report(cfg, runs, gate_rows(d, iso))
+    rows = gate_rows(d, iso)
+    report = render_report(cfg, runs, rows)
     out = res / "alpha_gate_report.md"
     out.write_text(report, encoding="utf-8")
     print(report)
     print(f"[alpha_gate] yazildi: {out}")
-    return 0
+    return _VERDICT_EXIT[verdict_of(rows)]
 
 
 def isolation(argv: list[str]) -> int:
@@ -220,9 +279,7 @@ def isolation(argv: list[str]) -> int:
     out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n[alpha_gate] izolasyon: {runs} run, file_list ok {tool_ok}/{runs}, "
           f"sizinti {len(leaks)} -> {out}")
-    # A leak is an invariant violation -- non-zero exit, same "a harness that
-    # found the bad thing must say so loudly" rule as the driver's guards.
-    return 1 if leaks else 0
+    return 0 if isolation_verdict_ok(runs, tool_ok, leaks) else 1
 
 
 def main() -> int:
