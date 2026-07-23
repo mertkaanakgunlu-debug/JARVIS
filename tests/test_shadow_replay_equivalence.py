@@ -229,18 +229,30 @@ def _normalize(value):
 def _side_effects(workspace) -> dict:
     """Every file a tool actually produced, by relative path -> content hash.
 
-    The checkpoint database is excluded on purpose and it is the one exclusion
-    that matters: shadow mode stores execution_envelopes IN graph state, so its
-    checkpoint bytes legitimately differ. That is internal persistence, not an
-    external side effect -- the distinction this test rests on. Everything else
-    under the workspace is a real artifact and must match.
+    Two exclusions, both internal persistence rather than an external side
+    effect a user would see -- the distinction this test rests on:
+      - "cp/" -- the checkpoint database. Shadow mode stores
+        execution_envelopes IN graph state, so its checkpoint bytes
+        legitimately differ.
+      - "chroma/" -- chromadb's own sqlite store (chroma_dir is now scoped
+        under each arm's workspace, closing the cross-arm chroma-sharing bug
+        an external review found; see _run_mode()'s comment). Its bytes
+        embed non-reproducible internals (telemetry ids, WAL/compaction
+        bookkeeping) even across two runs of the SAME mode with identical
+        inputs -- test_same_mode_twice_is_reproducible caught this the
+        moment chroma moved inside the scanned workspace. Not excluding
+        vault/: nothing in these fixtures' scripts calls a vault-writing
+        tool, so there is nothing there to exclude today -- a future
+        fixture that does should give vault/ the same treatment, for the
+        same reason, if it starts flaking on vault file content instead.
+    Everything else under the workspace is a real artifact and must match.
     """
     out = {}
     for p in sorted(workspace.rglob("*")):
         if not p.is_file():
             continue
         rel = str(p.relative_to(workspace)).replace("\\", "/")
-        if rel.startswith("cp/"):
+        if rel.startswith("cp/") or rel.startswith("chroma/"):
             continue
         out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
     return out
@@ -276,7 +288,28 @@ async def _run_mode(mode: str, fx: Fixture, tmp_path, monkeypatch) -> tuple[dict
     workspace = tmp_path / f"ws-{mode}"
     workspace.mkdir(parents=True)
 
-    settings = Settings(_env_file=None, execution_contract_mode=mode)
+    # External-review finding (2026-07-23): chroma_dir/vault_dir were left at
+    # Settings' defaults (Path("data/chroma"), Path("vault")), which
+    # jarvis.paths.resolve() resolves relative to CWD whenever JARVIS_HOME
+    # isn't set -- true here (this suite uses the isolated_cwd fixture, not
+    # jarvis_home). isolated_cwd chdirs ONCE per TEST, not once per
+    # _run_mode() call, so the "off" and "shadow" arms -- two SEPARATE
+    # Memory() instances constructed back to back in the SAME test -- were
+    # both resolving to the exact same directory, tied to neither arm's own
+    # `workspace`. Worse than a mere race: chromadb's PersistentClient caches
+    # one System per persist_directory STRING in a process-global registry
+    # (chromadb.api.shared_system_client.SharedSystemClient), refcounted and
+    # NEVER released without an explicit close() (which nothing here called)
+    # -- so the two arms were silently sharing one underlying chromadb System
+    # for the lifetime of the whole pytest process, a plausible source of
+    # exactly the "no such table: acquire_write" / "Failed to get segments"
+    # errors this suite has intermittently hit. Each arm now gets its own
+    # chroma/vault dir under its own workspace, and its Memory is closed
+    # (releasing the System) before this function returns.
+    settings = Settings(
+        _env_file=None, execution_contract_mode=mode,
+        chroma_dir=workspace / "chroma", vault_dir=workspace / "vault",
+    )
     llm = ScriptedLLM(fx.script)
     # nodes.py imports get_llm INSIDE its factories (resolved at call time from
     # jarvis.providers); graph.py imports it at module level. Both are patched.
@@ -284,39 +317,42 @@ async def _run_mode(mode: str, fx: Fixture, tmp_path, monkeypatch) -> tuple[dict
     monkeypatch.setattr("jarvis.graph.graph.get_llm", lambda *a, **k: llm)
 
     memory = Memory(settings)
-    # A REAL SqliteSaver, not checkpointer=None. Shadow mode makes the state
-    # bigger (execution_envelopes rides in it), so every super-step serializes
-    # and writes more -- "checkpoint yazimi" is one of the indirect mechanisms
-    # by which a mode could change behavior without touching a prompt. Running
-    # this without a checkpointer would leave exactly that mechanism untested.
-    checkpointer = make_checkpointer(workspace / "cp" / "checkpoints.db")
-    graph = build_graph(settings, workspace, memory, checkpointer=checkpointer)
+    try:
+        # A REAL SqliteSaver, not checkpointer=None. Shadow mode makes the state
+        # bigger (execution_envelopes rides in it), so every super-step serializes
+        # and writes more -- "checkpoint yazimi" is one of the indirect mechanisms
+        # by which a mode could change behavior without touching a prompt. Running
+        # this without a checkpointer would leave exactly that mechanism untested.
+        checkpointer = make_checkpointer(workspace / "cp" / "checkpoints.db")
+        graph = build_graph(settings, workspace, memory, checkpointer=checkpointer)
 
-    state = {
-        "messages": [SystemMessage(content="test"), HumanMessage(content=fx.user_query)],
-        "user_query": fx.user_query,
-        "language": "tr",
-        "memory_context": "",
-        "needs_planning": False,
-        "use_pro_agent": False,
-        "plan": "",
-        "response": "",
-        "revise_count": 0,
-        "critic_verdict": "",
-        "critique": "",
-        "transport": "test",
-        "tool_route": None,
-        "tool_calls_attempted": 0,
-        "tool_rounds": 0,
-        "seen_tool_fingerprints": [],
-        "completed_tool_fingerprints": [],
-        "tool_execution_ledger": [],
-    }
-    # Same thread_id in both arms: the checkpointer must see an identical
-    # thread identity, so any divergence comes from the mode, not the key.
-    config = {"configurable": {"thread_id": f"replay-{fx.name}"}, "recursion_limit": 25}
-    result = await graph.ainvoke(state, config)
-    return _observable(result, workspace), result, workspace
+        state = {
+            "messages": [SystemMessage(content="test"), HumanMessage(content=fx.user_query)],
+            "user_query": fx.user_query,
+            "language": "tr",
+            "memory_context": "",
+            "needs_planning": False,
+            "use_pro_agent": False,
+            "plan": "",
+            "response": "",
+            "revise_count": 0,
+            "critic_verdict": "",
+            "critique": "",
+            "transport": "test",
+            "tool_route": None,
+            "tool_calls_attempted": 0,
+            "tool_rounds": 0,
+            "seen_tool_fingerprints": [],
+            "completed_tool_fingerprints": [],
+            "tool_execution_ledger": [],
+        }
+        # Same thread_id in both arms: the checkpointer must see an identical
+        # thread identity, so any divergence comes from the mode, not the key.
+        config = {"configurable": {"thread_id": f"replay-{fx.name}"}, "recursion_limit": 25}
+        result = await graph.ainvoke(state, config)
+        return _observable(result, workspace), result, workspace
+    finally:
+        memory.close()
 
 
 # ── the equivalence assertion ────────────────────────────────────────────────

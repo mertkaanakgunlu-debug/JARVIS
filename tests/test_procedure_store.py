@@ -117,36 +117,48 @@ def test_migration_adds_columns_and_grandfathers_existing_rows_as_approved(tmp_p
 def test_draft_procedure_not_recalled_until_approved(isolated_cwd):
     settings = Settings()
     memory = Memory(settings)
-    store = ProcedureStore(isolated_cwd / "data" / "sessions.db")
+    try:
+        store = ProcedureStore(isolated_cwd / "data" / "sessions.db")
 
-    pid = store.add(
-        "budget_chart_report", "generate a monthly budget chart and PDF report",
-        "1. sync finance  2. chart  3. write report", source="agent",
-    )
-    status = default_status_for_source("agent")
-    memory.store_procedure(pid, "budget_chart_report", "generate a monthly budget chart and PDF report",
-                            "1. sync finance  2. chart  3. write report", status=status)
+        pid = store.add(
+            "budget_chart_report", "generate a monthly budget chart and PDF report",
+            "1. sync finance  2. chart  3. write report", source="agent",
+        )
+        status = default_status_for_source("agent")
+        memory.store_procedure(pid, "budget_chart_report", "generate a monthly budget chart and PDF report",
+                                "1. sync finance  2. chart  3. write report", status=status)
 
-    hits = memory.recall_procedures("generate a monthly budget chart and PDF report", n=1, distance_max=1.5)
-    assert hits == []
+        hits = memory.recall_procedures("generate a monthly budget chart and PDF report", n=1, distance_max=1.5)
+        assert hits == []
 
-    store.approve(pid)
-    memory.approve_procedure(pid, "budget_chart_report", "1. sync finance  2. chart  3. write report")
+        store.approve(pid)
+        memory.approve_procedure(pid, "budget_chart_report", "1. sync finance  2. chart  3. write report")
 
-    hits = memory.recall_procedures("generate a monthly budget chart and PDF report", n=1, distance_max=1.5)
-    assert len(hits) == 1
-    assert hits[0]["name"] == "budget_chart_report"
+        hits = memory.recall_procedures("generate a monthly budget chart and PDF report", n=1, distance_max=1.5)
+        assert len(hits) == 1
+        assert hits[0]["name"] == "budget_chart_report"
+    finally:
+        # External-review finding (2026-07-23): chromadb caches one System per
+        # persist_directory in a process-global registry, refcounted, never
+        # released without this -- see jarvis/memory.py's Memory.close()
+        # docstring. Left unclosed, every test file in this suite that
+        # constructs a Memory() (this one included, historically) leaks its
+        # System for the rest of the pytest process's lifetime.
+        memory.close()
 
 
 def test_rejected_procedure_is_removed_from_chroma(isolated_cwd):
     settings = Settings()
     memory = Memory(settings)
-    store = ProcedureStore(isolated_cwd / "data" / "sessions.db")
+    try:
+        store = ProcedureStore(isolated_cwd / "data" / "sessions.db")
 
-    pid = store.add("throwaway_proc", "a workflow nobody wants", "1. oops", source="agent")
-    memory.store_procedure(pid, "throwaway_proc", "a workflow nobody wants", "1. oops", status="draft")
-    assert memory.count_procedures() == 1
+        pid = store.add("throwaway_proc", "a workflow nobody wants", "1. oops", source="agent")
+        memory.store_procedure(pid, "throwaway_proc", "a workflow nobody wants", "1. oops", status="draft")
+        assert memory.count_procedures() == 1
 
-    store.reject(pid)
-    memory.delete_procedure(pid)
-    assert memory.count_procedures() == 0
+        store.reject(pid)
+        memory.delete_procedure(pid)
+        assert memory.count_procedures() == 0
+    finally:
+        memory.close()

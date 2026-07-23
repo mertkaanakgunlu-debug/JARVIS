@@ -175,6 +175,32 @@ class Memory:
         except ValueError:
             self._procedures_collection = self._client.get_or_create_collection("jarvis_procedures")
 
+    def close(self) -> None:
+        """Release this instance's reference to the underlying chromadb System.
+
+        External-review finding (2026-07-23): Memory had no lifecycle at
+        all -- every chromadb.PersistentClient(path=X) call is registered in
+        a process-GLOBAL cache keyed on that exact path
+        (chromadb.api.shared_system_client.SharedSystemClient), refcounted;
+        the System backing it is only ever actually torn down when the
+        refcount reaches zero via Client.close(). Never calling this meant
+        every Memory ever constructed in a process (in production, one per
+        run; in the test suite, one or more per test across ~1246 tests)
+        left its System cached forever, accumulating live SQLite
+        connections/background threads for the process's whole lifetime --
+        a real resource leak, and plausibly a contributor to this suite's
+        observed chromadb flakiness under load. Safe to call more than once
+        (chromadb's own refcount decrement floors at the "already gone"
+        case rather than raising); safe to skip in production, where the
+        process exiting reclaims everything anyway -- this exists primarily
+        for callers (tests, above all) that construct many short-lived
+        Memory instances in one process and must not leak their System.
+        """
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Semantic memory (conversations)
     # ------------------------------------------------------------------
