@@ -10,135 +10,140 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Son oturum: 2026-07-23 (19. oturum) — 18. OTURUMUN UNCOMMITTED İŞİ İKİNCİ BİR BAĞIMSIZ DEĞERLENDİRMEYLE DOĞRULANDI, EKSİK TEST KAPANDI, ELECTRON CI BLOCKING YAPILDI, 2 COMMIT PUSH'LANDI VE CANLI CI'DA YEŞİL DOĞRULANDI
+## Son oturum: 2026-07-23 (19. oturum) — 18. OTURUMUN İŞİ ÜÇ AYRI TURDA DOĞRULANDI/DÜZELTİLDİ: ATOMİK CLAIM, TTL-AWARENESS (BENİM KENDİ HATALI İLK DEĞERLENDİRMEMİN DÜZELTMESİ), VE CI'DA AYRI YAKALANAN BİR RUFF SÜRÜM KAYMASI — HEPSİ COMMIT+PUSH+CI DOĞRULANDI
 
 **Durum tek cümlede:** Owner, 18. oturumun uncommitted diff'ine (atomik `claim_pending_
-confirmation()` + üçüncü, korumasız `/ws` çağrı sitesi + 2 küçük bulgu) karşı yapılan İKİNCİ,
-bağımsız bir değerlendirmeyi yapıştırdı — bu değerlendirme 18. oturumun 5 teknik iddiasının
-hepsini gerçek koddan doğrulamış ve "her iki soruya da evet: Electron CI blocking yapılsın,
-düzeltmeler commit+push'lansın" kararını vermiş, ayrıca commit öncesi 2 ek doğrulama (cross-thread
-safety, 5 belirli test senaryosu) ve tam validation seti istemişti. Owner'ın kendi "dış review'ı
-ampirik doğrula, körü körüne uygulama" disiplini uygulandı: her istenen şey kör kabul edilmek
-yerine gerçek koddan tek tek doğrulandı.
+confirmation()` + üçüncü, korumasız `/ws` çağrı sitesi + 2 küçük bulgu) karşı yapılan bağımsız
+değerlendirmeleri art arda yapıştırdı; ilk tur (thread-safety + 5 test senaryosu + Electron CI
+blocking kararı) uygulandı ve commit+push+CI doğrulandı, AMA bir SONRAKİ tur benim kendi
+değerlendirmemdeki gerçek bir hatayı yakaladı (aşağıya bakın) — o da düzeltildi, test edildi,
+commit+push+CI doğrulandı; push sırasında BAĞIMSIZ, ilgisiz bir üçüncü sorun (ruff sürüm kayması)
+CI'da canlı yakalandı ve o da aynı oturumda kök nedeniyle düzeltildi.
 
-**Thread-safety (yeni doğrulama, kod okunarak — sonuç: ek lock GEREKMİYOR).**
-`_pending_confirmations`'a erişebilecek her arka-plan thread'i tek tek okundu:
-- `JarvisMonitor` gerçek bir `threading.Thread` kullanıyor (`jarvis/monitor.py`) ve
-  `agent.proactive_turn()`'ü çağırıyor — ama `proactive_turn()`'ün kendi kodu (docstring değil,
-  gerçek gövde) bir L3 interrupt'ı ASLA `_pending_confirmations`'a register etmiyor, doğrudan
-  discard edip bildirim olarak dönüyor.
-- `TaskExecutor` gerçek bir `ThreadPoolExecutor` kullanıyor (`jarvis/task_executor.py`) ve
-  `agent.background_turn()`'ü çağırıyor — o da aynı şekilde, kendi kodunda, bir interrupt'ı
-  register ETMEDEN `ConfirmationRequired` fırlatıyor ("there is no resumption path for a
-  background thread_id, so the interrupt is not registered").
-- Wakeword dedektörünün `listen()`'ı `run_in_executor` ile ayrı bir thread'de çalışıyor
-  (`jarvis/voice_api.py`) ama saf blocking ses tespiti — agent/confirmation koduna hiç dokunmuyor.
+### Tur 1: atomik claim + Electron CI blocking (özet — tam detay CHANGELOG.md)
 
-Sonuç: bu dict'e TÜM gerçek erişim (register/has/claim/pop), desteklenen her modda (CLI, CLI+voice,
-`--api` [+voice] [+wakeword] [+monitor]) tek bir asyncio event loop'una hapsedilmiş — senkron
-`dict.pop()` bu yüzden mimari olarak yeterli, ek bir `threading.Lock` gerekmiyor.
+Thread-safety kod okunarak doğrulandı (`JarvisMonitor`/`TaskExecutor`/wakeword thread'lerinin
+hiçbiri `_pending_confirmations`'a dokunmuyor — ek lock gerekmiyor). 5 istenen test senaryosundan
+4'ü zaten vardı; remote `/ws` yolu için gerçek `_handle_transcript` closure'ını uçtan uca çalıştıran
+yeni `tests/test_ws_remote_confirmation_claim.py` eklendi. Electron CI job'ından
+`continue-on-error` kaldırıldı (artık blocking). Commit: `ff357fc` (confirmation fix),
+`1faa2c5` (alpha_gate/Memory.close()/CI fix), docs `0c85a51` — hepsi push'landı, CI'da
+`gh run view --json` ile doğrulandı: `success` (python/electron), mobile bilinen kozmetik fail.
 
-**5 istenen test senaryosu (doğrulandı/tamamlandı):**
-1. İki claim denemesinden tam biri başarılı — zaten vardı (`test_second_claim_of_the_same_id_
-   returns_none`, `tests/test_pending_confirmations_ttl.py`).
-2. Süresi dolmuş bir onay, opportunistic cleanup tetiklenmese bile reddedilir — dict'in kendi TTL
-   süpürmesi bir sonraki registration'a kadar çalışmayabilir, AMA asıl güvenlik sınırı farklı
-   (daha temel) bir katmanda zaten test ediliyor: grafiğin `confirmation_node`'undaki HMAC
-   imza/expiry doğrulaması (`jarvis/execution/approval.py`), `test_expired_approval_is_denied`
-   (`tests/test_prepare_execution_node.py`) ile. Dict'in TTL süpürmesi sadece bellek sızıntısını
-   önleyen best-effort bir mekanizma (kendi docstring'i bunu söylüyor), asıl güvenlik sınırı
-   değil — iki katman ayrı ayrı test edilmiş durumda ve aralarında dallanan bir mantık yok, o
-   yüzden ek bir entegrasyon testi orantısız görüldü.
-3. Remote `/ws` ses yolu, dışarıdan çözülmüş bir onayı yeni bir cümle olarak işler — GERÇEK
-   BOŞLUKTU, hiç testi yoktu. Yeni `tests/test_ws_remote_confirmation_claim.py` (2 test): gerçek
-   `_handle_transcript` closure'ını (`jarvis/api.py`'nin `/ws` endpoint'i)
-   `starlette.testclient.TestClient` ile gerçek bir WebSocket bağlantısı üzerinden, sahte
-   `drive_voice_session`/`RealtimeVoiceEngine` ile (gerçek ses/STT/TTS'e hiç dokunmadan) uçtan
-   uca çalıştırıyor — reimplementasyon değil, gerçek kod.
-4. Bir `pre_claimed` girdisi iki kez tüketilemez — zaten vardı (`test_claim_removes_and_returns_
-   the_entry` + `test_second_claim_of_the_same_id_returns_none` + yeni `test_resume_and_stream_
-   uses_pre_claimed_without_touching_the_dict`).
-5. Normal HTTP `/chat/confirm` yolu `pre_claimed` olmadan çalışmaya devam ediyor — zaten vardı
-   (`test_resume_and_stream_without_a_second_interrupt_completes_normally` vb., `pre_claimed=None`
-   default'unu tetikliyor); `chat_confirm()` endpoint'inin kendi kodu bu diff'te hiç değişmedi.
+### Tur 2: BENİM KENDİ HATAM — TTL-awareness açığı gerçekti, "HMAC testi yeterli" gerekçem yanlıştı
 
-**Tam validation (2026-07-23, bu değişikliklerle koşuldu):**
+Bir SONRAKİ bağımsız değerlendirme, Tur 1'de benim "ek bir entegrasyon testi orantısız, çünkü
+güvenlik sınırı zaten `test_expired_approval_is_denied` ile test ediliyor" diye yazdığım
+gerekçenin **yanlış** olduğunu buldu — ve haklıydı, kodu tekrar okuyunca kendim de doğruladım:
+
+`claim_pending_confirmation()` atomikti ama TTL-farkında DEĞİLDİ — salt `dict.pop(conf_id, None)`,
+yaşına hiç bakmıyor. `_register_pending_confirmation()`'ın kendi TTL süpürmesi fırsatçı: yalnızca
+YENİ bir confirmation register edildiğinde çalışıyor. Kullanıcı bir onayın süresi dolana kadar
+sessiz kalıp SONRA register tetiklenmeden alakasız bir şey söylerse, stale kayıt sözlükte kalmaya
+devam ediyordu — VE `voice/session.py`'nin `resolve_confirmation()`'ı affirmative olmayan HER
+transcript'i `deny:<transcript>` kararına çeviriyor, `confirmation_node`'un deny dalı ise HMAC/expiry
+kontrolüne HİÇ uğramıyor (deny'de hiçbir şey çalıştırılmıyor, kontrol edilecek bir şey yok — bu
+kontrol yalnızca approve yolunda var, `test_expired_approval_is_denied`'ın test ettiği tam olarak
+bu). Sonuç: kullanıcının gerçek, alakasız yeni komutu sessizce eski, muhtemelen unutulmuş bir
+işlemin "denial reason"ı olarak yutulabiliyordu — tam olarak bu oturumun TÜM düzeltmelerinin
+önlemeye çalıştığı hata sınıfı, benim kendi doğrulamamda gözden kaçmış.
+
+**Hata neredeydi:** iki farklı invariant'ı birbirine karıştırdım — *güvenlik invariant'ı*
+(süresi dolmuş bir onay asla çalışmamalı — HMAC testi bunu KANITLIYOR) ile *konuşma invariant'ı*
+(süresi dolmuş bir onay kullanıcının sonraki alakasız cümlesini yutmamalı — HMAC testi BUNU HİÇ
+test ETMİYOR, çünkü deny yolu o kontrole hiç uğramıyor). "İki katman ayrı test edilmiş, aralarında
+dallanan mantık yok" gerekçem yanlıştı çünkü gerçekte dallanan bir mantık VARDI (approve vs deny),
+ben bunu görmemiştim.
+
+**Düzeltme (`10bf0fa`):** `claim_pending_confirmation()` artık pop ettiği kaydın yaşını
+`approval_ttl_sec` ile karşılaştırıyor (HMAC-imzalı `ExecutionRequest`'in kendi kullandığı AYNI
+pencere) — süresi dolmuşsa kayıt yine de sözlükten siliniyor (leak guard anlamlı kalsın diye) ama
+None dönüyor, çağıran taraf normal yeni tur olarak işliyor. `has_pending_confirmation()`
+(artık hiçbir production çağrı sitesi kullanmıyor) TTL-farkında YAPILMADI, bunun yerine
+docstring'i "TTL kontrolü yapmaz, bunun için claim_pending_confirmation()'ı kullan" diye
+netleştirildi — davranışını değiştirmek bu düzeltmeyle ilgisiz testlere dokunma riski taşıyordu.
+Yeni testler `test_pending_confirmations_ttl.py`'de: süresi dolmuş, hiç süpürülmemiş bir kaydın
+reddedildiğini VE sözlükten silindiğini kanıtlıyor.
+
+**İkinci, daha düşük önemli bulgu (kod değişikliği yapılmadı, belgelendi):** `resume_and_stream()`'in
+`pre_claimed` parametresi runtime'da tek-kullanımlık olarak ZORLANMIYOR — düz bir dict, tüketildi
+bayrağı yok. Doğru ama gerçek bir risk değil: her gerçek çağrı sitesi `claim_pending_confirmation()`'dan
+tam bir kez alıp tam bir kez kullanıyor, hiçbir canlı yol aynı nesneyi ikinci kez geçirmiyor; bu
+sözleşme ihlal edilseydi bile grafiğin kendi idempotency journal'ı (`test_replayed_already_
+committed_execution_is_denied`) ek bir savunma katmanı. Spekülatif tek-kullanımlık enforcement kodu
+eklenmedi — hiçbir canlı çağrı yolunun tetikleyemediği bir senaryo için orantısız görüldü.
+
+**Test/lint (2026-07-23, TTL düzeltmesiyle):**
 ```powershell
-python -m pytest -q       # 1271 passed, 0 failed (206s) — FULL suite (1269 + yeni 2 /ws testi)
-ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py scripts/alpha_gate.py   # All checks passed!
-cd electron; rm -rf node_modules; npm ci; npm test; npm run build   # npm ci temiz (8 önceden-var advisory, değişmedi); vitest 13/13; build temiz
+python -m pytest -q       # 1273 passed, 0 failed (206s) — FULL suite
+ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py scripts/alpha_gate.py   # All checks passed! (ruff 0.15.21)
 ```
 
-**Electron CI blocking (owner kararı, bu değerlendirme üzerinden).** `.github/workflows/ci.yml`'nin
-`electron` job'ından `continue-on-error: true` kaldırıldı — job artık `python` job'ı gibi
-blocking. Gerekçe: Electron artık sadece "best-effort companion client" değil, L3 confirmation
-prompt'unu render eden ve approve/deny round-trip'i tamamlayan güvenlik-kritik yol (`52d0b72`) VE
-manual alpha kabul sürecinin birincil arayüzü — parser/test/build kırılması artık sessizce
-geçilemez. `mobile` job'ı bilinçli olarak best-effort kaldı (Dart/CI-altyapı gürültüsü, bu
-projenin kapsamı dışı, değişmedi).
+### Tur 3: CI'da canlı yakalanan, ilgisiz üçüncü bir sorun — ruff sürüm kayması (kök nedeniyle düzeltildi)
 
-**Commit ve push durumu:** 2 iş commit'i + bu kapanış docs commit'i.
-- `ff357fc` — `fix(confirmations): atomically claim pending confirmations across transports`
-  (18. oturumun `jarvis/agent.py`/`jarvis/voice/session.py`/`jarvis/api.py`/`jarvis/cli.py`/
-  `jarvis/voice_api.py` düzeltmeleri + 3 güncellenen test dosyası + madde 3'ün yeni
-  `tests/test_ws_remote_confirmation_claim.py` dosyası).
-- `1faa2c5` — `fix(ci): bind isolation traces and gate Electron regressions`
-  (`scripts/alpha_gate.py`'nin isolation trace tur-bağlama düzeltmesi + `jarvis/memory.py`'nin
-  `Memory.close()` log'u + `tests/test_memory_lifecycle.py` + `.github/workflows/ci.yml`'nin
-  Electron blocking değişikliği).
+Tur 2'nin push'unun CI'ı `python` job'ında KIRILDI — ama pytest değil, `ruff check` adımı, 672
+yeni bulgu ile (bu oturumun hiç dokunmadığı dosyalarda: `jarvis/__main__.py`, `jarvis/agent.py`'nin
+eski satırları vb.). Kök neden doğrudan doğrulandı, tahmin edilmedi: `ci.yml`'nin `pip install ruff`'ı
+pin'siz — `ruff 0.16.0` tam bu aralıkta PyPI'a çıkmış ve `pyproject.toml`'da açık bir
+`[tool.ruff.lint].select` olmadığı için hangi kuralların uygulandığını değiştirmiş. `ruff==0.16.0`'ı
+izole bir `pip install --target` dizinine kurup AYNI ağaca karşı çalıştırarak AYNI 672 hatayı yerelde
+tekrar ürettim; `ruff==0.15.21` (bu oturumun fiilen kullandığı sürüm) aynı ağaca karşı temiz.
+Electron'un `vitest`/`vite`/`esbuild` kaymasıyla (`0687772`) BİREBİR aynı hata sınıfı — pin'siz bir
+dev-tool sürümü kaymış, kod değişikliği olmadan yeşil bir CI run'ını kırmış. Düzeltme (`b850346`):
+`ci.yml`'de `pip install ruff==0.15.21`.
 
-Push öncesi `git fetch` + `git rev-list --left-right --count origin/langgraph-migration...HEAD`
-ile temiz bir fast-forward doğrulandı (origin 0 commit ileride, local 2 commit ileride,
-beklenmedik remote commit yok). `git push origin langgraph-migration` → `174f8c2..1faa2c5`
-fast-forward, force yok.
+## Commit ve push durumu
 
-**`1faa2c5`'in push'unun CI run'ı (30033048953) canlı izlendi ve `gh run view --json conclusion`
-ile doğrulandı:** genel `conclusion: "success"`. Job bazında: `python` → `success` (8m46s, ruff +
-1271 pytest), `electron` → `success` (40s, `npm ci`/`npm test`/`npm run build` üçü de gerçekten
-geçti — artık blocking olarak ilk kez yeşil), `mobile` → `failure` (bilinen kozmetik `flutter
-analyze`, `continue-on-error`, genel `conclusion`'ı etkilemiyor — tasarım gereği).
+4 iş commit'i + bu kapanış docs commit'i, hepsi `langgraph-migration`'a push'landı:
+- `ff357fc` — atomik `claim_pending_confirmation()` (3 transport) + yeni `/ws` testi
+- `1faa2c5` — `alpha_gate.py` isolation trace + `Memory.close()` log + Electron CI blocking
+- `0c85a51` — Tur 1'in docs commit'i
+- `10bf0fa` — `claim_pending_confirmation()` TTL-awareness düzeltmesi + yeni testler
+- `b850346` — ruff sürüm pin'i (Tur 3'ün CI düzeltmesi)
+
+Her push öncesi `git fetch` + `git rev-list --left-right --count origin/langgraph-migration...HEAD`
+ile temiz fast-forward doğrulandı (beklenmedik remote commit yok, force yok). Her commit'in kendi CI
+run'ı `gh run view --json conclusion,jobs` ile doğrulandı:
+- `1faa2c5` (run 30033048953): **success** — python/electron success, mobile bilinen kozmetik fail.
+- `0c85a51` (run 30033909099): **success** — aynı dağılım.
+- `10bf0fa` (run 30041168858): **failure** — yalnızca `python`'ın `ruff` adımı (Tur 3, yukarıda),
+  `electron` yine success.
+- `b850346` (run 30041676158): **success** — python/electron success, mobile bilinen kozmetik fail.
 
 Kalıcı kural gereği bu kapanış docs commit'inin kendi SHA'sı/CI'ı burada yok — uç CI'ına
 `gh run list --branch langgraph-migration` ile bakın. Oturum sonunda local == origin senkrondu.
 
 ### Önceki oturumların özeti (17-18, detay: CHANGELOG.md)
 
-17. oturum Faz 8'i (registry sweep, per-capability contract testleri, hypothesis property-fuzz,
-13 sınıflı hata taksonomisi, `alpha_gate.py`) ve Electron'un L3 confirmation UI'ını (paylaşılan SSE
-reader, amber `ConfirmationOverlay`, WS dinleme, `conversation_id` persistence) inşa etti, sonra bu
-diff'e karşı gelen bağımsız bir review'ın 4 bulgusunu doğrulayıp düzeltti (cross-transport
-confirmation race, `alpha_gate.py`'nin exit-code/isolation açığı, chromadb flake kök nedeni,
-Electron `chatStream.js` sağlamlığı) — hepsi commit'lendi ve push'landı (`7d6a7af`..`0687772`
-arası, docs `174f8c2` ile kapandı), CI'da canlı yeşil doğrulandı. 18. oturum bu review'ın kendi
-diff'ini bağımsız olarak tekrar doğrularken cross-transport fix'in atomik olmadığını + 3. korumasız
-çağrı sitesini buldu, düzeltti, uncommitted bıraktı — bu oturum (19.) o işi commit'leyip push'ladı.
-Tam detay: `CHANGELOG.md`'nin "Electron: L3 confirmation..." ve "Independent review response..."
-girdileri.
+17. oturum Faz 8'i ve Electron'un L3 confirmation UI'ını inşa etti, sonra bağımsız bir review'ın 4
+bulgusunu doğrulayıp düzeltti — hepsi commit'lenip push'landı (`7d6a7af`..`0687772`, docs `174f8c2`),
+CI'da yeşil doğrulandı. 18. oturum bu review'ın kendi diff'ini bağımsız doğrularken cross-transport
+fix'in atomik olmadığını + 3. korumasız çağrı sitesini buldu, uncommitted bıraktı — 19. oturum
+(yukarıdaki 3 tur) o işi commit'leyip push'ladı ve kendi sürecinde 2 gerçek düzeltme daha buldu.
 
 ## SONRAKİ OTURUM — kalan iş
 
-1. **CANLI HUD E2E'si (değişmedi):** server + Electron + gerçek APPROVE/DENY tıklaması — `52d0b72`,
-   17. oturumun cross-transport düzeltmesi (`599066d`) VE 19. oturumun atomik claim düzeltmesinin
-   (`ff357fc`) gerçek kabul testi. Test etmek için: sesle bir L3 aksiyon başlat, HUD'dan onayla,
-   SONRA sesle alakasız bir şey söyle — düzeltmeden önce bu ikinci komut yutulurdu; şimdi ayrıca
-   eşzamanlı bir ikinci onay denemesinin (HUD + ses aynı anda) yalnız BİRİNİN kazandığını da
-   doğrulamak gerekir (atomik claim'in asıl iddiası).
-2. **Model tool-calling güvenilirliği** (14. oturumdan; taksonomiyle ölçülebilir):
+1. **CANLI HUD E2E'si (değişmedi):** server + Electron + gerçek APPROVE/DENY tıklaması —
+   TTL-awareness düzeltmesi dahil, atomik claim'in gerçek kabul testi. Test etmek için: sesle bir
+   L3 aksiyon başlat, onaylamadan `approval_ttl_sec` süresini bekle, SONRA alakasız bir şey söyle —
+   düzeltmeden önce bu yutulurdu, şimdi yeni bir tur olarak işlenmeli. Ayrıca eşzamanlı bir ikinci
+   onay denemesinin (HUD + ses aynı anda) yalnız BİRİNİN kazandığını da doğrulamak gerekir.
+2. **Sistemik risk, gözlem (yeni bu oturumdan):** iki ayrı pin'siz dev-tool sürümü (electron'un
+   `vitest`, şimdi Python'ın `ruff`) art arda CI'ı kırdı, ikisi de "aynı jenerasyonu hedefleyen bir
+   sürüme pinle" ile düzeltildi. CI'ın kurduğu HERHANGİ bir başka pin'siz araç var mı diye bir
+   tarama (`ci.yml`'nin tamamı) owner onayıyla ayrı bir oturumun işi olabilir — bu oturumun
+   kapsamına girmedi, yalnızca gözlem olarak not edildi.
+3. **Model tool-calling güvenilirliği** (14. oturumdan; taksonomiyle ölçülebilir):
    `false_success_claim`'i 0'a indirme — alpha kapısının asıl kilidi.
-3. Alpha gate'in owner-koşusu ölçümleri (10-run `ab_run_config.ps1` + `isolation`) + 2 kapsama
+4. Alpha gate'in owner-koşusu ölçümleri (10-run `ab_run_config.ps1` + `isolation`) + 2 kapsama
    boşluğu senaryosu (uzun-workflow E2E, block/veto-dışı recovery sınıfları).
-4. Branch ucunun CI'ı: `gh run list --branch langgraph-migration -L 3` ile kontrol et (bu
+5. Branch ucunun CI'ı: `gh run list --branch langgraph-migration -L 3` ile kontrol et (bu
    dosyanın kendi kapanış commit'i dahil).
-5. **Yeni, küçük, bilinçli kapsam dışı bırakılan:** `Memory()` inşa eden DİĞER test dosyaları
-   (bugüne dek yalnız en açık ilişkili ikisi — shadow-replay + procedure-store — düzeltildi) hâlâ
-   `close()` çağırmıyor; her biri kendi System'ini süresiz sızdırıyor (zararsız ama gereksiz —
-   process pytest'in kendisi bittiğinde zaten temizleniyor). Repo-geneli bir "her Memory()
-   testi close() etsin" taraması yapılmadı — orantısız kapsam genişlemesi olurdu, ayrı bir
-   oturumun işi olabilir.
-   `electron/`'da `npm audit` 8 önceden-var advisory gösteriyor (electron/vite/esbuild/babel'ın
-   kendi CVE'leri, bu oturumdan önce de vardı) — düzeltmeleri kırıcı sürüm atlamaları (electron
-   43, vite 8) gerektiriyor, bilinçli olarak ertelendi.
-6. Eski kalanlar (değişmedi): `workflow_start` JSON `steps` güvenilirliği; gerçek CLI REPL E2E;
+6. **Yeni, küçük, bilinçli kapsam dışı bırakılan:** `Memory()` inşa eden DİĞER test dosyaları hâlâ
+   `close()` çağırmıyor (zararsız, sızıntı pytest bitince temizleniyor) — repo-geneli bir tarama
+   yapılmadı, ayrı bir oturumun işi olabilir. `electron/`'da `npm audit` 8 önceden-var advisory
+   gösteriyor — kırıcı sürüm atlamaları gerektiriyor, bilinçli olarak ertelendi.
+7. Eski kalanlar (değişmedi): `workflow_start` JSON `steps` güvenilirliği; gerçek CLI REPL E2E;
    Faz 6 Kısım 3 Literal-terfi; Faz 5 kalanları; canlı A/B B6 sorusu; 4 worktree branch; mobile
    flutter-analyze info/warning.
 

@@ -6,6 +6,67 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [CI: ruff pinned after an unpinned version bump broke a green run] — 2026-07-23
+
+The very next push after the TTL-awareness fix below failed CI on the `python` job's lint step
+with 672 new findings across files this session never touched -- `ci.yml`'s `pip install ruff`
+was unpinned, and ruff 0.16.0 had just shipped to PyPI, changing what rules apply with no
+explicit `[tool.ruff.lint].select` in `pyproject.toml` (only an `ignore` list). Confirmed, not
+assumed: ruff 0.15.21 (installed in an isolated `pip install --target` directory, this repo's de
+facto version all session) reports clean against the exact same tree; ruff 0.16.0 installed the
+same way reproduces the identical 672 errors locally. Same failure class as `0687772` (Electron's
+`vitest` picking up a breaking transitive `vite`/`esbuild` bump) -- an unpinned dev-tool version
+drifted mid-project and broke a previously-green run with no code change of its own. Fixed by
+pinning `pip install ruff==0.15.21` in `ci.yml`. Confirmed green on the next push (`python` and
+`electron` both success).
+
+---
+
+## [Third review: claim_pending_confirmation() made TTL-aware, closing a real conversation-eating bug] — 2026-07-23
+
+A third review of the same confirmation-claim work found a real, live gap the previous
+verification pass had missed: `claim_pending_confirmation()` was atomic but not TTL-aware.
+
+`_register_pending_confirmation()`'s own staleness sweep is opportunistic -- it only runs when a
+NEW confirmation is registered. If the user goes quiet past this confirmation's own approval
+window and nothing new is ever registered afterward, the stale entry sat in the dict indefinitely,
+and `claim_pending_confirmation()` would hand it back as if still valid. Since a non-affirmative
+transcript is routed as `decision=f"deny:{transcript}"` (`voice/session.py`'s
+`resolve_confirmation()`), and `confirmation_node`'s deny branch never reaches the HMAC/expiry
+re-check at all (nothing executes on a deny, so there's nothing to verify -- unlike the approve
+path `test_expired_approval_is_denied` covers), the user's next real, unrelated command would have
+been silently swallowed as a fake "denial" of a possibly long-forgotten action, with the real
+command surviving only as denial "reason" text logged to the audit log.
+
+**This corrects an overclaim in the previous entry below and in HANDOFF.md.** That entry treated
+"an expired confirmation is rejected" as satisfied by `test_expired_approval_is_denied` alone --
+true for the *security* invariant (an expired approval can never execute), but that test only
+covers the approve path through a real compiled-graph interrupt; it says nothing about the
+*conversation* invariant (an expired confirmation must not swallow the user's next unrelated
+utterance), which the deny path never even reaches HMAC verification for. Conflating the two was
+the actual error, not the presence or absence of an integration test.
+
+Fix: `claim_pending_confirmation()` now checks the popped entry's own age against
+`approval_ttl_sec` (the same window the underlying HMAC-signed `ExecutionRequest` itself uses) --
+a stale entry is still removed from the dict (keeping the leak guard meaningful) but treated as if
+never found, so the caller falls through to a normal new turn exactly like the
+already-resolved-elsewhere case. `has_pending_confirmation()` (superseded, no production caller
+left) is documented as NOT TTL-aware rather than changed, since changing its behavior risked
+touching tests unrelated to this fix for a function nothing in production still calls. New tests
+in `test_pending_confirmations_ttl.py` prove a stale, never-swept entry is refused and removed.
+
+Also addressed, lower severity: a review noted `resume_and_stream()`'s `pre_claimed` parameter
+isn't a runtime-enforced single-use token -- any dict, used any number of times. True, and now
+documented as a caller contract rather than a runtime guarantee: every real call site obtains
+`pre_claimed` from exactly one `claim_pending_confirmation()` call and uses it exactly once, so no
+live path replays one; the graph's own idempotency journal (`test_replayed_already_committed_
+execution_is_denied`) is defense-in-depth if that contract were ever violated. Not adding
+speculative single-use-enforcement machinery for a scenario no current caller can trigger.
+
+Full validation: `python -m pytest -q` (1273 passed), project `ruff check` (clean).
+
+---
+
 ## [Second independent review: confirmation-claim atomicity verified, Electron CI made blocking] — 2026-07-23
 
 A second, independent review of the previous session's uncommitted diff (the atomic
