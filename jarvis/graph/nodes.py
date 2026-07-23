@@ -1097,7 +1097,24 @@ def make_confirmation_node(settings):
         ]
         decision = _interrupt({"tools": tools_info, "count": len(confirmable)})
 
-        # decision is the value passed to Command(resume=...) on resume
+        # decision is the value passed to Command(resume=...) on resume.
+        # Fail-closed vocabulary check (review remediation): before this,
+        # anything that wasn't a string starting with "deny" silently fell
+        # through to the approve path below -- "yes", "", a typo, a stray
+        # non-string value all executed the pending L3 action. This is the
+        # exact "anything not starting with deny approves" bug
+        # jarvis.execution.workflow_approval's exact decision allowlist was
+        # written to close for the workflow-engine gate; this gate is the
+        # one POST /chat/confirm's unvalidated `decision: str` field (and
+        # every other resume_and_stream() caller) actually drives, so it
+        # needs the identical fix. An invalid decision is normalized into an
+        # explicit deny (with the original value quoted as the reason) and
+        # falls through into the SAME deny-handling branch below rather than
+        # duplicating it.
+        dl = decision.strip().lower() if isinstance(decision, str) else ""
+        if dl != "approve" and dl != "deny" and not dl.startswith("deny:"):
+            decision = f"deny:invalid confirmation response {decision!r}"
+
         if isinstance(decision, str) and decision.lower().startswith("deny"):
             guidance = decision[4:].lstrip(":").strip()
             for tc in confirmable:

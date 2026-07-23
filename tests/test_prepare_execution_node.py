@@ -198,6 +198,30 @@ async def test_interrupt_payload_carries_the_execution_id(isolated_cwd, monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_decision", ["yes", "", "invalid", "cancel", "approve please", None, 123])
+async def test_invalid_decision_is_denied_not_silently_approved(isolated_cwd, monkeypatch, bad_decision):
+    """Review remediation: before this fix, anything that wasn't a string
+    starting with "deny" fell through to the approve path -- "yes", "",
+    a typo, a stray non-string resume value all executed the pending L3
+    action. This is the chat-turn gate POST /chat/confirm's unvalidated
+    `decision: str` field actually drives, so it must fail closed exactly
+    like jarvis.execution.workflow_approval's exact allowlist already does
+    for the workflow-engine gate."""
+    settings = _settings()
+    state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
+    monkeypatch.setattr("langgraph.types.interrupt", lambda payload: bad_decision)
+
+    node = make_confirmation_node(settings)
+    result = await node(state)
+
+    assert result["confirmation_result"] == "denied"
+    assert any(
+        "not executed" in m.content or "not authorized" in m.content
+        for m in result["messages"] if hasattr(m, "content")
+    )
+
+
+@pytest.mark.asyncio
 async def test_args_changed_after_approval_is_denied(isolated_cwd, monkeypatch):
     """The repair scenario: prepare_execution signed a request for the
     ORIGINAL args, but by the time confirmation_node checks, the pending
