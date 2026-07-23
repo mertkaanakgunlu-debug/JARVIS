@@ -88,6 +88,22 @@ def is_affirmative(text: str) -> bool:
     return any(t == w or t.startswith(w + " ") or t.startswith(w + ",") for w in _AFFIRMATIVE_WORDS)
 
 
+def is_confirmation_still_pending(agent: Any, pending: PendingConfirmation) -> bool:
+    """Guard both voice loops' "next transcript = this confirmation's
+    answer" routing decision against a STALE PendingConfirmation.
+
+    External-review finding (2026-07-23): this flag is per-transport local
+    state (see the module docstring above) with no way to learn that the
+    same conf_id was already resolved elsewhere -- the Electron HUD's
+    /chat/confirm round-trip (since this same session) or another client,
+    or evicted by JarvisAgent._register_pending_confirmation's own TTL
+    sweep. Call this BEFORE routing a transcript into resolve_confirmation()
+    and fall through to a normal new turn when it returns False, so the
+    user's actual next utterance is never silently swallowed as a
+    yes/no answer to something already settled."""
+    return agent.has_pending_confirmation(pending.conf_id)
+
+
 async def resolve_confirmation(
     agent: Any,
     engine: RealtimeVoiceEngine,

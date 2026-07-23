@@ -1048,6 +1048,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
         from jarvis.voice.text import is_exit_phrase
         from jarvis.voice.session import (
             drive_voice_session, STOP_SESSION, PendingConfirmation, resolve_confirmation,
+            is_confirmation_still_pending,
         )
     except ImportError as exc:
         _print_error(
@@ -1102,17 +1103,24 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
         # utterance as its yes/no answer -- checked before exit-phrase/model-
         # switch detection so e.g. "hayır" during a pending confirmation
         # denies it rather than being misread as an unrelated command.
+        # External-review finding (2026-07-23): only if it's STILL actually
+        # pending on the agent -- a long enough pause lets JarvisAgent's own
+        # TTL sweep evict it (_register_pending_confirmation), and without
+        # this check the next real utterance would be silently consumed as
+        # a stale yes/no answer instead of a new command.
         if pending_confirmation is not None:
             pending, pending_confirmation = pending_confirmation, None
+            if is_confirmation_still_pending(agent, pending):
 
-            async def _resolve():
-                await resolve_confirmation(
-                    agent, engine, pending, text, lang,
-                    on_message=lambda full: _print_jarvis(full, agent.current_model_label),
-                    set_pending_confirmation=_set_pending,
-                )
+                async def _resolve():
+                    await resolve_confirmation(
+                        agent, engine, pending, text, lang,
+                        on_message=lambda full: _print_jarvis(full, agent.current_model_label),
+                        set_pending_confirmation=_set_pending,
+                    )
 
-            return _resolve()
+                return _resolve()
+            # Resolved elsewhere or TTL-evicted -- fall through as a new turn.
 
         if is_exit_phrase(text):
             farewell = "Goodbye, Sir." if lang != "tr" else "Güle güle, efendim."

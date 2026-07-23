@@ -6,6 +6,14 @@ confirmable tool call in the resumed turn) was fed straight into TTS, so
 the literal JSON -- tool name and args included -- was spoken aloud
 instead of a new spoken confirmation question, and no PendingConfirmation
 was re-armed for the next transcript to resolve it.
+
+Also covers is_confirmation_still_pending() (external-review finding,
+2026-07-23): both voice loops' PendingConfirmation flag is per-transport
+local state with no way to learn the same conf_id was already resolved
+through a different transport (the Electron HUD's /chat/confirm, since
+this same session) or TTL-evicted by JarvisAgent's own sweep -- without
+this guard the caller would silently consume the user's next, unrelated
+utterance as a stale yes/no answer.
 """
 from __future__ import annotations
 
@@ -13,18 +21,24 @@ import json
 
 import pytest
 
-from jarvis.voice.session import PendingConfirmation, resolve_confirmation
+from jarvis.voice.session import (
+    PendingConfirmation, is_confirmation_still_pending, resolve_confirmation,
+)
 
 
 class _FakeAgent:
-    def __init__(self, streams):
+    def __init__(self, streams, pending_ids=("conf-1",)):
         self._streams = list(streams)
         self.calls: list[tuple[str, str]] = []
+        self._pending = set(pending_ids)
 
     async def resume_and_stream(self, conf_id, decision):
         self.calls.append((conf_id, decision))
         for token in self._streams.pop(0):
             yield token
+
+    def has_pending_confirmation(self, conf_id):
+        return conf_id in self._pending
 
 
 class _FakeEngine:
@@ -90,3 +104,42 @@ async def test_non_affirmative_transcript_denies_with_the_transcript_as_reason()
     )
 
     assert agent.calls == [("conf-1", "deny:no, cancel that")]
+
+
+# ── is_confirmation_still_pending (external-review finding, 2026-07-23) ─────
+
+def test_still_pending_when_the_agent_still_holds_the_conf_id():
+    agent = _FakeAgent([], pending_ids=("conf-1",))
+    assert is_confirmation_still_pending(agent, PendingConfirmation("conf-1", {})) is True
+
+
+def test_not_pending_once_resolved_through_another_transport():
+    """The Electron HUD case: /chat/confirm/{id} already popped conf_id out
+    of the agent's registry (approved or denied from the HUD) while the
+    voice loop's local flag was still armed for the SAME id."""
+    agent = _FakeAgent([], pending_ids=())  # nothing pending -- already resolved
+    assert is_confirmation_still_pending(agent, PendingConfirmation("conf-1", {})) is False
+
+
+def test_not_pending_once_ttl_evicted():
+    """A different id is pending (a later confirmation), but NOT the stale
+    one the voice loop is still holding -- the TTL-sweep-eviction case."""
+    agent = _FakeAgent([], pending_ids=("conf-2",))
+    assert is_confirmation_still_pending(agent, PendingConfirmation("conf-1", {})) is False
+
+
+def test_a_real_jarvis_agent_reports_pending_state_honestly(isolated_cwd):
+    """Same check, against the REAL JarvisAgent.has_pending_confirmation --
+    not just the fake's mirror of it."""
+    from jarvis.agent import JarvisAgent
+    from jarvis.config import Settings
+
+    agent = JarvisAgent.__new__(JarvisAgent)  # bypass heavy __init__; only this dict is needed
+    agent._pending_confirmations = {}
+    agent.settings = Settings(_env_file=None)
+
+    assert agent.has_pending_confirmation("c1") is False
+    agent._register_pending_confirmation("c1", {"configurable": {}}, recorder=None)
+    assert agent.has_pending_confirmation("c1") is True
+    agent._pending_confirmations.pop("c1")  # simulates resume_and_stream()'s own pop
+    assert agent.has_pending_confirmation("c1") is False

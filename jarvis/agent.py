@@ -1479,6 +1479,25 @@ class JarvisAgent:
             "config": config, "recorder": recorder, "created_at": now,
         }
 
+    def has_pending_confirmation(self, conf_id: str) -> bool:
+        """True if *conf_id* is still an actually-resumable interrupt.
+
+        External-review finding (2026-07-23): every voice loop (this
+        module's own docstring on _register_pending_confirmation predates
+        the Electron HUD listening to the confirmation_required WS
+        broadcast -- it does now) holds a PER-TRANSPORT local flag whose
+        only job is "the next transcript is this confirmation's yes/no
+        answer" (jarvis/voice/session.py's PendingConfirmation, Faz 4 /
+        BUG-4). That flag has no way to learn a DIFFERENT transport (the
+        HUD's /chat/confirm, another client) already resolved the same
+        conf_id, or that the TTL sweep above evicted it -- so the user's
+        next, unrelated spoken sentence would silently be consumed as a
+        stale confirmation answer instead of processed as a new command.
+        Callers must check this before routing a transcript into
+        resolve_confirmation() and fall through to a normal turn when it
+        is False. Read-only: unlike resume_and_stream(), never pops."""
+        return conf_id in self._pending_confirmations
+
     async def chat_stream(
         self,
         user_input: str,

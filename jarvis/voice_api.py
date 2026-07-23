@@ -193,7 +193,7 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
         from jarvis.voice.engine import RealtimeVoiceEngine, get_shared_voice_models
         from jarvis.voice.io_duplex import DuplexAudioIO
         from jarvis.voice.wakeword import WakewordDetector
-        from jarvis.voice.session import drive_voice_session, resolve_confirmation
+        from jarvis.voice.session import drive_voice_session, resolve_confirmation, is_confirmation_still_pending
     except ImportError as exc:
         logger.warning("[voice] Dependencies unavailable (%s) — voice disabled.", exc)
         return
@@ -242,14 +242,23 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
         nonlocal pending_confirmation
 
         # Faz 4 / BUG-4: a pending confirmation always consumes the *next*
-        # utterance as its yes/no answer, not a new command.
+        # utterance as its yes/no answer, not a new command -- UNLESS it was
+        # already resolved through a different transport in the meantime
+        # (external-review finding, 2026-07-23: the Electron HUD now also
+        # listens for confirmation_required over WS and can approve/deny it
+        # from /chat/confirm, since this same session). Without this check
+        # the user's next spoken sentence would be silently consumed as a
+        # stale yes/no answer instead of processed as a new command.
         if pending_confirmation is not None:
             pending, pending_confirmation = pending_confirmation, None
-            return resolve_confirmation(
-                agent, engine, pending, text, lang,
-                on_message=lambda full: event_bus.message("j", full),
-                set_pending_confirmation=_set_pending,
-            )
+            if is_confirmation_still_pending(agent, pending):
+                return resolve_confirmation(
+                    agent, engine, pending, text, lang,
+                    on_message=lambda full: event_bus.message("j", full),
+                    set_pending_confirmation=_set_pending,
+                )
+            # Resolved elsewhere or TTL-evicted -- treat this utterance as a
+            # brand-new turn, falling through below.
 
         return run_one_response(
             agent, engine, text, lang, transport="voice-local", set_pending_confirmation=_set_pending,
