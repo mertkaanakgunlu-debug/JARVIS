@@ -51,9 +51,9 @@ _AUDIO = np.zeros(16000, dtype=np.float32)
 def test_default_forces_turkish_into_transcribe():
     m = _FakeModel()
     stt = _stt_with(m)  # default whisper_language == "tr"
-    text, lang = stt.transcribe(_AUDIO)
+    result = stt.transcribe(_AUDIO)
     assert m.calls[0]["language"] == "tr"
-    assert lang == "tr"
+    assert result.lang == "tr"
 
 
 def test_beam_size_setting_is_honored():
@@ -68,9 +68,9 @@ def test_auto_passes_none_and_keeps_the_tr_char_backstop():
     # decoded text trip the backstop and correct the tag to "tr".
     m = _FakeModel(text="işçi çalışması")
     stt = _stt_with(m, whisper_language="auto")
-    _, lang = stt.transcribe(_AUDIO)
+    result = stt.transcribe(_AUDIO)
     assert m.calls[0]["language"] is None
-    assert lang == "tr"
+    assert result.lang == "tr"
 
 
 def test_forced_en_does_not_get_re_tagged_tr_by_the_backstop():
@@ -78,6 +78,15 @@ def test_forced_en_does_not_get_re_tagged_tr_by_the_backstop():
     # the backstop only runs in auto mode.
     m = _FakeModel(text="the çı character appears")
     stt = _stt_with(m, whisper_language="en")
-    _, lang = stt.transcribe(_AUDIO)
+    result = stt.transcribe(_AUDIO)
     assert m.calls[0]["language"] == "en"
-    assert lang == "en"
+    assert result.lang == "en"
+
+
+def test_transcribe_returns_stt_timing():
+    """Faz F: stt_s was already computed for the [stt] log line but
+    previously discarded before reaching any consumer."""
+    m = _FakeModel()
+    stt = _stt_with(m)
+    result = stt.transcribe(_AUDIO)
+    assert result.stt_s >= 0.0

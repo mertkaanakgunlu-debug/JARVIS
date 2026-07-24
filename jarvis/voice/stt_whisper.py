@@ -9,6 +9,7 @@ import logging
 import os
 import sysconfig
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -18,6 +19,17 @@ logger = logging.getLogger(__name__)
 
 # Turkish-specific characters absent from most other languages.
 _TR_CHARS = frozenset("şŞğĞüÜöÖçÇıİ")
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    """Faz F (WAV replay harness): stt_s was already computed for the [stt]
+    log line but discarded otherwise -- a dataclass return (not a growing
+    positional tuple) so a future field doesn't silently reorder every
+    existing text, lang = ... call site into a bug."""
+    text: str
+    lang: str
+    stt_s: float
 
 
 class WhisperSTT:
@@ -100,8 +112,8 @@ class WhisperSTT:
         except Exception:
             return requested
 
-    def transcribe(self, audio: np.ndarray) -> tuple[str, str]:
-        """audio: float32 mono samples @16kHz. Returns (text, language_code)."""
+    def transcribe(self, audio: np.ndarray) -> TranscriptionResult:
+        """audio: float32 mono samples @16kHz."""
         self._ensure_model()
         # Decoder language lock (review remediation): passing language= stops
         # Whisper's per-utterance classifier from mis-firing on short Turkish
@@ -129,4 +141,4 @@ class WhisperSTT:
             self.settings.whisper_model, self.settings.whisper_device, self._device,
             self.settings.whisper_compute_type, beam_size, forced, audio_s, stt_s, rtf,
         )
-        return text, lang
+        return TranscriptionResult(text=text, lang=lang, stt_s=stt_s)

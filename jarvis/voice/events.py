@@ -23,6 +23,9 @@ class FinalTranscript:
     """End-of-turn (sustained silence) reached; this is the authoritative transcript."""
     text: str
     lang: str
+    # Faz F (WAV replay harness): Whisper already computes this for its own
+    # [stt] log line -- previously discarded before reaching any consumer.
+    stt_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,12 @@ class TurnEnded:
     first time (Faz D, docs/eval's voice-observability work)."""
     reason: Literal["silence", "max_duration"]
     captured_audio_duration_s: float
+    # Faz F (WAV replay harness): per-frame VAD probability was computed for
+    # every frame of the utterance (gating speech-start/end) but never
+    # aggregated anywhere a consumer could read it. 0.0 for an empty turn
+    # (no frames to aggregate).
+    vad_prob_max: float = 0.0
+    vad_prob_mean: float = 0.0
 
 
 # Playback completion is signaled by RealtimeVoiceEngine.speak_stream() returning

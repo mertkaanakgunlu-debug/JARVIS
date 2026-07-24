@@ -157,6 +157,11 @@ class RealtimeVoiceEngine:
         # barge-in fires, then the segmenter picks up normally from there.
         barge_in_tail: deque[np.ndarray] = deque(maxlen=self._barge_in_gate.min_frames)
 
+        # Faz F (WAV replay harness): per-frame VAD probability, parallel to
+        # `buffer`, aggregated into TurnEnded's vad_prob_max/mean. Reset
+        # alongside buffer at every point buffer itself is reset/reseeded.
+        vad_probs: list[float] = []
+
         async for frame in self._audio_io.raw_frames():
             prob = vad.process_chunk(frame)
             yield MicLevel(source="input", rms=self._audio_io.mic_level())
@@ -167,6 +172,12 @@ class RealtimeVoiceEngine:
                     self._barge_in_gate.reset()
                     self.abort_playback()
                     buffer = list(barge_in_tail)
+                    # The tail's own per-frame probabilities weren't tracked
+                    # in parallel (barge_in_tail only ever held raw frames) --
+                    # starting fresh here means a barge-in utterance's
+                    # aggregate honestly reflects only the frames captured
+                    # AFTER the barge-in fired, not a fabricated full history.
+                    vad_probs = []
                     barge_in_tail.clear()
                     self._segmenter.force_speaking()
                     yield BargeIn()
@@ -175,25 +186,33 @@ class RealtimeVoiceEngine:
             signal = self._segmenter.push(prob)
             if isinstance(signal, SpeechStartedSignal):
                 buffer = [frame]
+                vad_probs = [prob]
                 yield SpeechStarted()
             elif isinstance(signal, TurnEndedSignal):
                 audio = np.concatenate(buffer) if buffer else np.array([], dtype=np.float32)
                 buffer = []
+                probs_this_turn, vad_probs = vad_probs, []
                 # Faz D (voice observability): yielded BEFORE the (potentially
                 # seconds-long) STT call, and even for an empty turn -- see
                 # TurnEnded's own docstring for why this ordering/inclusion
                 # matters (a consumer needs a "capture just ended" signal
                 # distinct from "STT finished", and an empty turn previously
                 # had no observable signal at all here).
-                yield TurnEnded(reason=signal.reason, captured_audio_duration_s=audio.size / 16000)
+                yield TurnEnded(
+                    reason=signal.reason,
+                    captured_audio_duration_s=audio.size / 16000,
+                    vad_prob_max=max(probs_this_turn) if probs_this_turn else 0.0,
+                    vad_prob_mean=(sum(probs_this_turn) / len(probs_this_turn)) if probs_this_turn else 0.0,
+                )
                 if audio.size == 0:
                     continue
                 loop = asyncio.get_running_loop()
-                text, lang = await loop.run_in_executor(None, self._models.stt.transcribe, audio)
-                if text.strip():
-                    yield FinalTranscript(text=text, lang=lang)
+                result = await loop.run_in_executor(None, self._models.stt.transcribe, audio)
+                if result.text.strip():
+                    yield FinalTranscript(text=result.text, lang=result.lang, stt_s=result.stt_s)
             elif self._segmenter.is_speaking:
                 buffer.append(frame)
+                vad_probs.append(prob)
 
     async def speak_stream(self, text_iter: AsyncIterator[str], lang: str = "en") -> None:
         """Sentence-chunked streaming TTS — starts speaking before the full LLM

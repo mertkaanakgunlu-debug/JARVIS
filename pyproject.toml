@@ -18,6 +18,16 @@ include = ["jarvis*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Faz F (WAV replay harness): voice_e2e tests drive real Silero VAD + real
+# Whisper against a local model cache -- deliberately EXCLUDED from the
+# normal/CI run (network-free, no model download, deterministic fake-STT
+# tests only) and left for a manual/scheduled run with a model-cache
+# strategy. addopts applies to every invocation; pass `-m voice_e2e`
+# explicitly (which overrides addopts) to run only these.
+markers = [
+    "voice_e2e: real Silero VAD + real Whisper against a local model cache -- not run automatically, see docs/eval/acceptance_matrix.md's Faz F notes",
+]
+addopts = "-m 'not voice_e2e'"
 
 # GPT-5.6 review remediation, Faz 7 (verdict #21): CI lint gate.
 [tool.ruff]
