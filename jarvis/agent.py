@@ -21,6 +21,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -62,6 +63,8 @@ from jarvis.llm_trace import LlmTraceRecorder  # runtime truth: actual provider 
 from jarvis.run_context import RunContext, write_run_manifest  # Agent Runtime rev.2, Faz 5
 from jarvis.tool_registry import get_spec  # Faz 4
 from jarvis.mcp_integration import McpToolManager  # Faz 5
+
+logger = logging.getLogger(__name__)
 
 
 # ── Phase 3: confirmation gate ────────────────────────────────────────────────
@@ -1478,6 +1481,10 @@ class JarvisAgent:
         self._pending_confirmations[conf_id] = {
             "config": config, "recorder": recorder, "created_at": now,
         }
+        logger.info(
+            "[confirm] registered conf_id=%s ttl_sec=%s",
+            conf_id, getattr(self.settings, "approval_ttl_sec", 300),
+        )
 
     def has_pending_confirmation(self, conf_id: str) -> bool:
         """True if *conf_id* is still an actually-resumable interrupt.
@@ -1553,10 +1560,18 @@ class JarvisAgent:
         normal new turn exactly like the already-resolved-elsewhere case."""
         entry = self._pending_confirmations.pop(conf_id, None)
         if entry is None:
+            logger.info("[confirm] claim miss conf_id=%s (unknown/already-claimed)", conf_id)
             return None
         ttl = getattr(self.settings, "approval_ttl_sec", 300)
-        if time.monotonic() - entry.get("created_at", 0) > ttl:
+        age = time.monotonic() - entry.get("created_at", 0)
+        if age > ttl:
+            logger.info(
+                "[confirm] claim expired conf_id=%s age_sec=%.1f ttl_sec=%s", conf_id, age, ttl,
+            )
             return None
+        logger.info(
+            "[confirm] claimed conf_id=%s age_sec=%.1f ttl_sec=%s", conf_id, age, ttl,
+        )
         return entry
 
     async def chat_stream(

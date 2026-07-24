@@ -93,7 +93,7 @@ async def run_one_response(
         (--api mode; see jarvis/api.py's _wire_routers()) -- the standalone
         CLI --voice loop has no such executor and is unaffected.
     """
-    from jarvis.voice.session import parse_confirm_marker, describe_confirmation, PendingConfirmation
+    from jarvis.voice.session import parse_confirm_marker, arm_and_speak_confirmation
 
     event_bus.message("u", text)
     event_bus.state("thinking")
@@ -140,19 +140,17 @@ async def run_one_response(
         logger.error("[voice] turn error: %s", exc, exc_info=True)
 
     if confirm_marker is not None:
-        question = describe_confirmation(confirm_marker, lang)
-        event_bus.message("j", question)
-
-        async def _question_stream(t=question):
-            yield t
-
+        # Arm-before-speak via the shared helper (see arm_and_speak_confirmation):
+        # the next-transcript ownership is set before the question TTS, so a
+        # barge-in cancelling this turn mid-question still leaves it armed.
         try:
-            await engine.speak_stream(_question_stream(), lang=lang)
+            await arm_and_speak_confirmation(
+                engine, confirm_marker, lang,
+                set_pending_confirmation=set_pending_confirmation,
+                on_message=lambda q: event_bus.message("j", q),
+            )
         except Exception as exc:
             logger.error("[voice] confirmation prompt TTS error: %s", exc, exc_info=True)
-
-        if set_pending_confirmation is not None:
-            set_pending_confirmation(PendingConfirmation(confirm_marker["id"], confirm_marker["payload"]))
         return
 
     if response_chunks:

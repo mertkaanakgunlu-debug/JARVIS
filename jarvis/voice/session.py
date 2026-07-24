@@ -82,7 +82,13 @@ def describe_confirmation(marker: dict, lang: str = "en") -> str:
 
 
 def is_affirmative(text: str) -> bool:
-    t = (text or "").strip().lower()
+    # Strip trailing sentence punctuation before matching (same class of fix as
+    # text._normalize / the exit-phrase regex): STT emits "Evet." with a period,
+    # which failed the exact "evet" match and got routed as a DENY -- confirmed
+    # live 2026-07-24 (audit log: user_denied reason "Evet."). Only trailing
+    # punctuation is stripped, so a mid-word comma variant ("evet, lütfen") still
+    # matches the startswith(w + ",") branch below.
+    t = (text or "").strip().lower().rstrip(".,!?…")
     if not t:
         return False
     return any(t == w or t.startswith(w + " ") or t.startswith(w + ",") for w in _AFFIRMATIVE_WORDS)
@@ -102,6 +108,45 @@ def is_confirmation_still_pending(agent: Any, pending: PendingConfirmation) -> b
     user's actual next utterance is never silently swallowed as a
     yes/no answer to something already settled."""
     return agent.has_pending_confirmation(pending.conf_id)
+
+
+async def arm_and_speak_confirmation(
+    engine: RealtimeVoiceEngine,
+    marker: dict,
+    lang: str,
+    *,
+    set_pending_confirmation: Callable[["PendingConfirmation | None"], None] | None = None,
+    on_message: Callable[[str], None] | None = None,
+) -> None:
+    """Arm the next transcript to resolve THIS confirmation, THEN speak the
+    question. The ordering is the entire point.
+
+    Review remediation (2026-07-24): each voice loop runs a turn as a
+    cancellable task (drive_voice_session). Previously set_pending_confirmation()
+    was called AFTER `await engine.speak_stream(question)`, so a barge-in that
+    cancelled the task while the question was still being spoken skipped the arm
+    entirely -- the user's next utterance, even a prompt "evet", was then treated
+    as a brand-new turn instead of the confirmation's answer. Arming BEFORE any
+    callback or await means a mid-question cancellation still leaves the
+    confirmation resolvable.
+
+    Shared by all three voice confirmation sites (cli._run_voice_response,
+    voice_api.run_one_response, and resolve_confirmation's second-interrupt
+    re-arm below) so this ordering can never drift back apart in one copy.
+    """
+    pending = PendingConfirmation(marker["id"], marker["payload"])
+    if set_pending_confirmation is not None:
+        set_pending_confirmation(pending)  # BEFORE any callback / await
+    logger.info("[confirm] armed conf_id=%s", marker.get("id"))
+
+    question = describe_confirmation(marker, lang)
+    if on_message is not None:
+        on_message(question)
+
+    async def _question_stream(t=question):
+        yield t
+
+    await engine.speak_stream(_question_stream(), lang=lang)
 
 
 async def resolve_confirmation(
@@ -157,16 +202,14 @@ async def resolve_confirmation(
     await engine.speak_stream(_collecting(), lang=lang)
 
     if confirm_marker is not None:
-        question = describe_confirmation(confirm_marker, lang)
-        if on_message:
-            on_message(question)
-
-        async def _question_stream(t=question):
-            yield t
-
-        await engine.speak_stream(_question_stream(), lang=lang)
-        if set_pending_confirmation is not None:
-            set_pending_confirmation(PendingConfirmation(confirm_marker["id"], confirm_marker["payload"]))
+        # Second interrupt in the resumed turn -- re-arm via the shared helper so
+        # this next-transcript ownership is set BEFORE the question TTS, same as
+        # the first-interrupt sites (arm_and_speak_confirmation's docstring).
+        await arm_and_speak_confirmation(
+            engine, confirm_marker, lang,
+            set_pending_confirmation=set_pending_confirmation,
+            on_message=on_message,
+        )
         return
 
     if on_message and chunks:

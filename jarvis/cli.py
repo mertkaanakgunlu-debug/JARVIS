@@ -980,7 +980,7 @@ async def _run_voice_response(
     tells the enclosing loop the *next* transcript is the yes/no answer, not
     a new command (see jarvis/voice/session.py's resolve_confirmation).
     """
-    from jarvis.voice.session import parse_confirm_marker, describe_confirmation, PendingConfirmation
+    from jarvis.voice.session import parse_confirm_marker, arm_and_speak_confirmation
 
     console.print("[dim]Thinking...[/dim]", end="\r")
     response_chunks: list[str] = []
@@ -1009,19 +1009,19 @@ async def _run_voice_response(
         _print_error(f"TTS error: {exc}")
 
     if confirm_marker is not None:
-        question = describe_confirmation(confirm_marker, lang)
-        console.print(f"[bold yellow]JARVIS (confirmation):[/bold yellow] {question}")
-
-        async def _single(t=question):
-            yield t
-
+        # Arm-before-speak via the shared helper (see arm_and_speak_confirmation):
+        # set_pending_confirmation runs before the question TTS, so a barge-in
+        # cancelling this turn mid-question still leaves the confirmation armed.
         try:
-            await engine.speak_stream(_single(), lang)
+            await arm_and_speak_confirmation(
+                engine, confirm_marker, lang,
+                set_pending_confirmation=set_pending_confirmation,
+                on_message=lambda q: console.print(
+                    f"[bold yellow]JARVIS (confirmation):[/bold yellow] {q}"
+                ),
+            )
         except Exception as exc:
             _print_error(f"TTS error: {exc}")
-
-        if set_pending_confirmation is not None:
-            set_pending_confirmation(PendingConfirmation(confirm_marker["id"], confirm_marker["payload"]))
         return
 
     if llm_error:
