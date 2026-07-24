@@ -312,6 +312,14 @@ class Settings(BaseSettings):
 
     whisper_device: str = "auto"         # "auto" | "cuda" | "cpu"
     whisper_compute_type: str = "auto"   # "auto" | "int8" | "float16" | "int8_float16"
+    # Decoder-forced language. "auto" = Whisper detects per utterance (its
+    # classifier mis-fires on short Turkish phrases -> Russian/etc., the live
+    # `разденьемся` incident). "tr"/"en" force the decode; default "tr" for this
+    # Turkish-primary assistant. The _TR_CHARS metadata backstop in
+    # stt_whisper.py only runs in "auto" mode.
+    whisper_language: Literal["auto", "tr", "en"] = "tr"
+    whisper_model: str = "large-v3-turbo"  # any faster-whisper model id (e.g. "small" for a CPU box)
+    whisper_beam_size: int = 5             # 1 is much faster; measure accuracy/latency before lowering the default
 
     voice_silence_duration: float = 1.5  # seconds of silence before VAD stops recording
     voice_chunk_ms: int = 50             # vestigial post-Faz-3 (Silero VAD replaced RMS-threshold

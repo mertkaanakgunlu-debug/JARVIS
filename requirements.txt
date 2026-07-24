@@ -77,6 +77,8 @@ imap-tools>=1.0
 
 # Voice I/O (Iteration 3)
 faster-whisper>=1.1      # STT — CTranslate2 based, multilingual, no PyTorch
+                          # GPU accel (optional, Windows): see requirements-gpu-windows.txt
+                          # — cuBLAS/cuDNN 9 wheels, ~1.3 GB, NOT in the lockfile / CI.
 sounddevice>=0.4         # Audio capture + playback
 edge-tts>=7.0            # TTS — cloud fallback tier only as of Faz 3 (Piper is primary)
 miniaudio>=1.14          # MP3 decode for edge-tts fallback output (pure Python)
