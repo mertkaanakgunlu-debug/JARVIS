@@ -6,6 +6,41 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Voice pipeline hardening — GPU, confirmation, Turkish, exit (live-tested)] — 2026-07-24
+
+Live `--voice` testing on the owner's machine drove this pass. Each external-review claim was
+verified against real code first, and the live run then both validated fixes and exposed two more
+bugs (a confirmation loop can only be proven by actually speaking to it).
+
+- **GPU enabled for Whisper STT.** The RTX 4070 sat idle while STT ran on CPU (10–20 s/utterance).
+  ctranslate2 4.8.1 needs cuBLAS + cuDNN 9 at load time (the driver alone lets
+  `get_cuda_device_count()` succeed but the model load throws → CPU fallback). Installing
+  `nvidia-cublas-cu12` + `nvidia-cudnn-cu12` (9.25) fixed it with no code change (the existing
+  `_register_cuda_dll_dirs()` PATH mechanism works); smoke-tested at **RTF ~0.13 (~8x realtime)**.
+  Wheels (~1.3 GB) live in a new `requirements-gpu-windows.txt`, deliberately **not** in the
+  lockfile CI installs every run.
+- **Confirmation arm-before-speak race (live).** `set_pending_confirmation()` ran *after* the
+  question TTS, so a barge-in cancelling the turn mid-question skipped the arm and the next "evet"
+  became a new turn. One shared `arm_and_speak_confirmation()` helper now arms before any await,
+  wired into all three voice sites (cli / voice_api / resolve_confirmation).
+- **`is_affirmative("Evet.")` returned False (live, audit-log-caught).** STT emits a trailing
+  period; the exact "evet" match missed it, so an approval was recorded as `user_denied reason
+  "Evet."`. Now strips trailing punctuation — same class of fix as the exit regex below.
+- **Turkish decoder lock.** `transcribe()` passed no `language=`, so short Turkish phrases
+  mis-detected (a command decoded as Russian, live). New `whisper_language` (default `tr`) forces
+  the decode; the `_TR_CHARS` backstop is scoped to `auto`.
+- **"Gülen" exit variant.** "güle güle" → Whisper "Gülen.", missed by the 0.82 fuzzy threshold; a
+  controlled `fullmatch` regex now catches it without widening to bare "Güle".
+- **Telemetry, not guesswork.** Per-transcribe `[stt] … actual_device=… rtf=…` and confirmation
+  lifecycle `[confirm] registered/armed/claimed/expired age_sec/ttl_sec` logs.
+
+Full suite 1314 green, ruff clean (pinned 0.15.21). **Still open, marked in ROADMAP:** voice input
+capture / "listening" reliability (utterances dropped — 3 "evet"s, only 1 reached the audit log;
+"güle güle" never captured), wake-word model not loading, and the owner's direction to establish a
+**text-command reliability baseline first**, then isolate the voice-input track.
+
+---
+
 ## [CI: ruff pinned after an unpinned version bump broke a green run] — 2026-07-23
 
 The very next push after the TTL-awareness fix below failed CI on the `python` job's lint step

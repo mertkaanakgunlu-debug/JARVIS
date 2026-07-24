@@ -46,12 +46,23 @@ python -m venv .venv
 # 2. Install dependencies
 pip install -r requirements.txt
 
+# 2b. (Optional, Windows GPU) enable Faster-Whisper on the GPU — ~1.3 GB of
+#     cuBLAS/cuDNN 9 wheels, NOT installed by CI. Speech-to-text runs CPU-only
+#     without this; with it, STT is ~8x realtime on an RTX 4070.
+pip install -r requirements-gpu-windows.txt
+#     Verify (forces CUDA so a missing lib fails loudly instead of silently
+#     falling back to CPU):
+#       $env:WHISPER_DEVICE="cuda"; python -m jarvis --voice
+#     The "CUDA libraries unavailable — falling back to CPU" line must be absent.
+
 # 3. Pull embedding model (requires Ollama running)
 ollama pull nomic-embed-text
 
 # 4. Configure secrets
 copy .env.example .env
 # Edit .env: add GEMINI_API_KEY, TAVILY_API_KEY, and optionally GOOGLE_CLOUD_PROJECT
+# Voice knobs (WHISPER_DEVICE / WHISPER_LANGUAGE / WHISPER_MODEL / WHISPER_BEAM_SIZE)
+# are documented in .env.example; defaults are auto-device + Turkish decode.
 ```
 
 ## Running

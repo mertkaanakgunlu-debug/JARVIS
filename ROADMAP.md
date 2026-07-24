@@ -36,6 +36,51 @@ Faz 1+2 = "hafıza + zeka" ilk bloğu (ikisi de yerel).
 
 ---
 
+## Voice pipeline follow-ups (opened 2026-07-24 from live testing)
+
+Live `--voice` testing enabled the RTX 4070 for Whisper and fixed confirmation arm-before-speak,
+the `is_affirmative("Evet.")` trailing-period bug, Turkish language lock, and the "gülen" exit
+variant (all committed + tested). The live run also surfaced the **real current blocker** and
+prompted a strategy change:
+
+### 🔴 P0 — Voice input capture / "listening" reliability (the actual blocker)
+
+Utterances are being **dropped**, not mis-handled: the owner had to say "evet" 3 times but only
+1 reached the audit log; "güle güle" said twice was **never captured** (had to Ctrl+C). There is
+also **no "listening" indicator**, so the user can't tell whether JARVIS is capturing. This is a
+VAD / continuous-listen / mic-gating problem, not a logic problem (the confirmation, exit, and
+language fixes above are all verified correct in isolation). Candidate angles: `voice_silence_
+duration` (1.5 s) tuning, the continuous-listen loop's turn-gating in `drive_voice_session`, a
+speech-started/mic-level indicator in the CLI (`on_speech_started`/`on_mic_level` callbacks already
+exist but the CLI loop doesn't surface them), and whether an interface-driven test (Electron HUD)
+sidesteps the raw-mic capture issue entirely. **Highest-priority voice item.**
+
+### 🟡 Wake-word model not loading
+
+`openwakeword` "hey_jarvis" fails to load every run → falls back to continuous listen. Separate
+from the STT GPU work; investigate the model file / onnxruntime path.
+
+### Strategy (owner direction, 2026-07-24): text-command reliability baseline FIRST
+
+Before sinking more time into the voice-input problem, **prove the brain is flawless over text**
+(the alpha gate + `--profile test` harness already measure this — extend to the owner's real daily
+commands). Only once text is perfect, isolate voice input as its own dedicated track. If text works
+perfectly, the remaining gap is *entirely* the voice/audio pipeline, which is far easier to debug
+in isolation than tangled with logic bugs.
+
+### Deferred features (not regressions)
+
+- **`weather_forecast` tool (new capability, not a regression).** "Yarın hava nasıl?" currently
+  routes to `conversation` with zero tools (no weather tool, no `hava/yağmur/...` router pattern),
+  so the model ungrounded-hallucinates. Proper fix: an Open-Meteo-backed `weather_forecast` tool
+  (keyless API, geocoding, `Europe/Istanbul`), a new `weather` router domain, and a system-prompt
+  rule "never claim current weather/prices/traffic/news without a verified tool result". Owner-
+  deferred from the voice-hardening patch; effort M.
+- **Whisper beam-size A/B.** `whisper_beam_size` is now configurable (default 5). Measure beam 1 vs
+  beam 5 on a fixed ~20-utterance Turkish corpus (p50/p95 latency + RTF + word/intent accuracy) on
+  the GPU before changing the default — beam 1 is a real speed candidate, but not unmeasured. STT
+  latency telemetry (`[stt] ... rtf=`) is already emitted to support this.
+
 ## What's actually next: Agent Runtime rev.2 (started 2026-07-20)
 
 The table above (this file's original local-first plan) is now done or hardware-gated (Faz 6
