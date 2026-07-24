@@ -64,13 +64,25 @@ def _normalize(s: str) -> str:
     return s.strip().lower().rstrip(".,!?")
 
 
+# Controlled ASR-variant match for the Turkish farewell (review remediation,
+# owner-confirmed live: "güle güle" -> Whisper "Gülen.", session did not exit).
+# Whisper frequently drops the inter-word space and/or appends a trailing 'n',
+# and the 0.82 fuzzy pass below misses it ("gülen" vs "güle güle" ratio ~0.57).
+# `fullmatch` (not search) + this exact shape so "Gülen'i ara" / "Gülen hakkında
+# bilgi ver" are NOT exits, and narrow enough to exclude a bare "güle".
+_TR_EXIT_ASR_RE = re.compile(r"^(?:g[üu]len|g[üu]le(?:n)?\s+g[üu]le(?:n)?)$", re.IGNORECASE)
+
+
 def is_exit_phrase(text: str) -> bool:
     """Return True when the transcribed text is a farewell/exit utterance.
 
     Uses fuzzy matching (0.82 similarity threshold) to catch STT variants like
-    "gulei gulei" → "gule gule" or "goodbyes" → "goodbye".
+    "gulei gulei" → "gule gule" or "goodbyes" → "goodbye", plus a controlled
+    regex for the specific "gülen" mis-transcription the fuzzy pass can't reach.
     """
     norm = _normalize(text)
+    if _TR_EXIT_ASR_RE.fullmatch(norm):
+        return True
     for phrase in _EXIT_PHRASES:
         if norm == phrase or norm.startswith(phrase + " "):
             return True
