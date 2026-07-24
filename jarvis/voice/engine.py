@@ -30,6 +30,7 @@ from jarvis.voice.events import (
     FinalTranscript,
     MicLevel,
     SpeechStarted,
+    TurnEnded,
     VoiceEvent,
 )
 from jarvis.voice.io_base import AudioIO
@@ -178,6 +179,13 @@ class RealtimeVoiceEngine:
             elif isinstance(signal, TurnEndedSignal):
                 audio = np.concatenate(buffer) if buffer else np.array([], dtype=np.float32)
                 buffer = []
+                # Faz D (voice observability): yielded BEFORE the (potentially
+                # seconds-long) STT call, and even for an empty turn -- see
+                # TurnEnded's own docstring for why this ordering/inclusion
+                # matters (a consumer needs a "capture just ended" signal
+                # distinct from "STT finished", and an empty turn previously
+                # had no observable signal at all here).
+                yield TurnEnded(reason=signal.reason, captured_audio_duration_s=audio.size / 16000)
                 if audio.size == 0:
                     continue
                 loop = asyncio.get_running_loop()

@@ -16,6 +16,20 @@ from rich.prompt import Prompt
 from jarvis import paths
 from jarvis.agent import JarvisAgent, AVAILABLE_MODELS, ConfirmationRequired
 from jarvis.config import Settings
+from jarvis.voice.state import VoiceState
+
+# Faz D (voice observability): display() returns one of these keys; mapped to
+# a human-readable status line the CLI overwrites in place (same "[dim]...[/dim]",
+# end="\r" idiom the old static "Thinking..." print used).
+_VOICE_STATE_LABELS = {
+    "idle": "Idle",
+    "listening": "Listening...",
+    "speech_detected": "Speech detected...",
+    "transcribing": "Transcribing...",
+    "thinking": "Thinking...",
+    "awaiting_confirmation": "Awaiting your answer...",
+    "speaking": "Speaking...",
+}
 
 
 # ── Agent Runtime rev.2, Faz 5 ──────────────────────────────────────────────
@@ -204,6 +218,39 @@ def _print_banner(settings: Settings, monitor_active: bool = False) -> None:
     monitor_str = "  ·  [green]monitor ✓[/green]" if monitor_active else ""
     console.print(
         f"[dim]  User: [bold]{settings.user_name}[/bold]  ·  {model_str}{monitor_str}[/dim]\n"
+    )
+
+
+def _print_voice_diagnostics(engine) -> None:
+    """Faz D (voice observability): startup diagnostics for --voice mode --
+    which mic/speaker were actually picked, the fixed sample rate, and
+    whether Whisper actually loaded onto the requested device (owner's own
+    real incident: CUDA silently falling back to CPU with no visible sign
+    short of reading logs). Best-effort throughout -- a diagnostics print
+    must never itself crash voice mode startup, so every lookup is guarded."""
+    import sounddevice as sd
+
+    audio_io = engine._audio_io
+    settings = getattr(audio_io, "_settings", None)
+
+    def _device_name(selector, kind: str) -> str:
+        try:
+            info = sd.query_devices(selector or None, kind)
+            return f"{info['name']} (#{info.get('index', '?')})"
+        except Exception as exc:  # noqa: BLE001
+            return f"unavailable ({exc})"
+
+    input_sel = getattr(settings, "audio_input_device", None)
+    output_sel = getattr(settings, "audio_output_device", None)
+    sample_rate = getattr(audio_io, "_sample_rate", "unknown")
+    stt_device = getattr(getattr(engine, "_models", None), "stt", None)
+    stt_device = getattr(stt_device, "_device", None) or "not loaded"
+
+    console.print(
+        f"[dim]Input device:  {_device_name(input_sel, 'input')}\n"
+        f"Output device: {_device_name(output_sel, 'output')}\n"
+        f"Sample rate:   {sample_rate} Hz\n"
+        f"STT device:    {stt_device}[/dim]\n"
     )
 
 
@@ -967,7 +1014,7 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
 
 async def _run_voice_response(
     agent: JarvisAgent, engine, text: str, lang: str, settings: Settings,
-    set_pending_confirmation=None,
+    set_pending_confirmation=None, state=None,
 ) -> None:
     """One turn's response: agent.chat_stream() -> engine.speak_stream(), sentence-
     chunked so TTS starts before generation finishes. Runs as a cancellable task
@@ -979,10 +1026,14 @@ async def _run_voice_response(
     swapped for a natural spoken question, and set_pending_confirmation()
     tells the enclosing loop the *next* transcript is the yes/no answer, not
     a new command (see jarvis/voice/session.py's resolve_confirmation).
+
+    state (Faz D): drive_voice_session() already set response="thinking" the
+    moment this turn's transcript arrived (before this function was even
+    scheduled) -- this function's own job is only to flip to "speaking"
+    around its own speak_stream() call.
     """
     from jarvis.voice.session import parse_confirm_marker, arm_and_speak_confirmation
 
-    console.print("[dim]Thinking...[/dim]", end="\r")
     response_chunks: list[str] = []
     llm_error: list[BaseException] = []
     confirm_marker: dict | None = None
@@ -1004,6 +1055,8 @@ async def _run_voice_response(
             return
 
     try:
+        if state is not None:
+            state.set_response("speaking")
         await engine.speak_stream(_collecting_stream(), lang=lang)
     except Exception as exc:
         _print_error(f"TTS error: {exc}")
@@ -1019,6 +1072,7 @@ async def _run_voice_response(
                 on_message=lambda q: console.print(
                     f"[bold yellow]JARVIS (confirmation):[/bold yellow] {q}"
                 ),
+                state=state,
             )
         except Exception as exc:
             _print_error(f"TTS error: {exc}")
@@ -1074,6 +1128,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
 
     console.print("[dim]Loading voice models (first run downloads several hundred MB)...[/dim]")
     await engine.load()
+    _print_voice_diagnostics(engine)
 
     ww_detector = None
     if wakeword:
@@ -1093,6 +1148,25 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
     def _set_pending(p: "PendingConfirmation | None") -> None:
         nonlocal pending_confirmation
         pending_confirmation = p
+
+    # Faz D (voice observability): one shared, orchestration-owned VoiceState
+    # per session -- drive_voice_session() mutates its capture axis;
+    # _run_voice_response()/arm_and_speak_confirmation()/resolve_confirmation()
+    # (all reached from _handle_transcript below) mutate its response axis.
+    # See jarvis/voice/state.py's module docstring for why this lives here and
+    # not in the engine. mic_level fires once per audio frame (far too often
+    # to print each time) -- the latest value is only ever surfaced piggybacked
+    # on the state line's own, much rarer, redraw trigger.
+    _telemetry = {"mic_rms": 0.0}
+
+    def _on_mic_level(event) -> None:
+        _telemetry["mic_rms"] = event.rms
+
+    def _render_voice_state(s) -> None:
+        label = _VOICE_STATE_LABELS.get(s.display, s.display)
+        console.print(f"[dim]{label} (mic {_telemetry['mic_rms']:.3f})[/dim]", end="\r")
+
+    voice_state = VoiceState(on_change=_render_voice_state)
 
     async def _handle_transcript(text: str, lang: str):
         nonlocal pending_confirmation
@@ -1124,6 +1198,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
                         on_message=lambda full: _print_jarvis(full, agent.current_model_label),
                         set_pending_confirmation=_set_pending,
                         pre_claimed=claimed,
+                        state=voice_state,
                     )
 
                 return _resolve()
@@ -1154,7 +1229,7 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
                 _print_error(str(e))
             return None
 
-        return _run_voice_response(agent, engine, text, lang, settings, _set_pending)
+        return _run_voice_response(agent, engine, text, lang, settings, _set_pending, voice_state)
 
     def _on_barge_in() -> None:
         console.print("[dim](interrupted)[/dim]")
@@ -1171,6 +1246,8 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
                 outcome = await drive_voice_session(
                     engine, _handle_transcript,
                     on_barge_in=_on_barge_in,
+                    on_mic_level=_on_mic_level,
+                    state=voice_state,
                     stop_after_first_turn=wakeword,
                 )
             finally:

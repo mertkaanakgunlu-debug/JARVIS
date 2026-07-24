@@ -46,7 +46,11 @@ class _PlaybackBuffer:
         with self._lock:
             self._chunks.append(chunk)
 
-    def pull(self, n: int) -> np.ndarray:
+    def pull(self, n: int) -> tuple[np.ndarray, bool]:
+        """Returns (samples, underran) -- underran is True when fewer than n
+        samples were actually available and the tail was zero-padded (Faz D:
+        this was previously silently discarded -- DuplexAudioIO.underrun_count
+        was declared but never incremented anywhere)."""
         out = np.zeros(n, dtype=np.float32)
         filled = 0
         with self._lock:
@@ -60,7 +64,7 @@ class _PlaybackBuffer:
                 if self._offset >= len(head):
                     self._chunks.popleft()
                     self._offset = 0
-        return out
+        return out, filled < n
 
     def clear(self) -> None:
         with self._lock:
@@ -88,23 +92,32 @@ class DuplexAudioIO:
 
         self._last_input_rms = 0.0
         self.underrun_count = 0
+        # Faz D (voice observability): input stream `status` previously only
+        # ever reached logger.debug -- no counter existed for a user/HUD to
+        # ever learn a real capture problem (buffer overflow, device glitch)
+        # occurred at all.
+        self.input_overflow_count = 0
 
     # ── Capture ─────────────────────────────────────────────────────────────
 
-    async def start(self) -> None:
-        def _input_callback(indata, frames, time_info, status) -> None:
-            if status:
-                logger.debug("[voice] input stream status: %s", status)
-            mono = indata[:, 0].copy()
-            self._mic_queue.put(mono)
+    def _input_callback(self, indata, frames, time_info, status) -> None:
+        # Faz D: a bound method (not a closure defined inline in start()) so
+        # it's directly unit-testable without a real PortAudio stream -- see
+        # tests/test_voice_telemetry.py.
+        if status:
+            logger.debug("[voice] input stream status: %s", status)
+            self.input_overflow_count += 1
+        mono = indata[:, 0].copy()
+        self._mic_queue.put(mono)
 
+    async def start(self) -> None:
         self._input_stream = sd.InputStream(
             samplerate=self._sample_rate,
             channels=1,
             dtype="float32",
             blocksize=self._frame_samples,
             device=self._settings.audio_input_device or None,
-            callback=_input_callback,
+            callback=self._input_callback,
         )
         self._input_stream.start()
 
@@ -125,23 +138,31 @@ class DuplexAudioIO:
     def mic_level(self) -> float:
         return self._last_input_rms
 
+    def queue_depth(self) -> int:
+        """Frames buffered but not yet consumed by raw_frames() -- Faz D
+        (voice observability): previously computable but never exposed,
+        the one telemetry value a "is capture keeping up?" diagnostic needs
+        that queue.Queue itself already tracks for free."""
+        return self._mic_queue.qsize()
+
     # ── Playback ────────────────────────────────────────────────────────────
+
+    def _output_callback(self, outdata, frames, time_info, status) -> None:
+        if status:
+            logger.debug("[voice] output stream status: %s", status)
+        chunk, underran = self._playback_buffer.pull(frames)
+        if underran:
+            self.underrun_count += 1
+        outdata[:, 0] = chunk
 
     def _open_output_stream(self, rate: int) -> None:
         self._close_output_stream()
-
-        def _output_callback(outdata, frames, time_info, status) -> None:
-            if status:
-                logger.debug("[voice] output stream status: %s", status)
-            chunk = self._playback_buffer.pull(frames)
-            outdata[:, 0] = chunk
-
         self._output_stream = sd.OutputStream(
             samplerate=rate,
             channels=1,
             dtype="float32",
             device=self._settings.audio_output_device or None,
-            callback=_output_callback,
+            callback=self._output_callback,
         )
         self._output_rate = rate
         self._output_stream.start()

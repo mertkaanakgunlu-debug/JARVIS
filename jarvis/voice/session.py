@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from jarvis.voice.engine import RealtimeVoiceEngine
-from jarvis.voice.events import BargeIn, FinalTranscript, MicLevel, SpeechStarted
+from jarvis.voice.events import BargeIn, FinalTranscript, MicLevel, SpeechStarted, TurnEnded
+from jarvis.voice.state import VoiceState
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +118,15 @@ async def arm_and_speak_confirmation(
     *,
     set_pending_confirmation: Callable[["PendingConfirmation | None"], None] | None = None,
     on_message: Callable[[str], None] | None = None,
+    state: VoiceState | None = None,
 ) -> None:
     """Arm the next transcript to resolve THIS confirmation, THEN speak the
     question. The ordering is the entire point.
+
+    state (Faz D): set to "speaking" for the question's TTS, then
+    "awaiting_confirmation" once it's been spoken -- the caller's next
+    FinalTranscript is expected to be the user's yes/no answer, and the
+    state should say so until it arrives.
 
     Review remediation (2026-07-24): each voice loop runs a turn as a
     cancellable task (drive_voice_session). Previously set_pending_confirmation()
@@ -146,7 +153,11 @@ async def arm_and_speak_confirmation(
     async def _question_stream(t=question):
         yield t
 
+    if state is not None:
+        state.set_response("speaking")
     await engine.speak_stream(_question_stream(), lang=lang)
+    if state is not None:
+        state.set_response("awaiting_confirmation")
 
 
 async def resolve_confirmation(
@@ -159,6 +170,7 @@ async def resolve_confirmation(
     on_message: Callable[[str], None] | None = None,
     set_pending_confirmation: Callable[["PendingConfirmation | None"], None] | None = None,
     pre_claimed: dict | None = None,
+    state: VoiceState | None = None,
 ) -> None:
     """Resume the turn agent.resume_and_stream() left interrupted, using
     `transcript` (the user's reply to describe_confirmation's question) as
@@ -199,6 +211,8 @@ async def resolve_confirmation(
             chunks.append(token)
             yield token
 
+    if state is not None:
+        state.set_response("speaking")
     await engine.speak_stream(_collecting(), lang=lang)
 
     if confirm_marker is not None:
@@ -209,6 +223,7 @@ async def resolve_confirmation(
             engine, confirm_marker, lang,
             set_pending_confirmation=set_pending_confirmation,
             on_message=on_message,
+            state=state,
         )
         return
 
@@ -245,6 +260,7 @@ async def drive_voice_session(
     on_speech_started: Callable[[], None] | None = None,
     on_barge_in: Callable[[], None] | None = None,
     on_mic_level: Callable[[MicLevel], None] | None = None,
+    state: VoiceState | None = None,
     stop_after_first_turn: bool = False,
 ) -> str:
     """Consumes engine.events() and drives turns.
@@ -262,9 +278,23 @@ async def drive_voice_session(
     where the caller wants to re-gate on the wake phrase between turns rather
     than keep listening indefinitely.
 
+    state (Faz D): the caller CONSTRUCTS and owns this jarvis.voice.state.
+    VoiceState instance (with its own on_change callback already attached)
+    and passes it in here -- this function only ever mutates its capture
+    axis (LISTENING/SPEECH_DETECTED/TRANSCRIBING). The SAME instance must
+    also be passed to arm_and_speak_confirmation()/resolve_confirmation()
+    (above) and the caller's own turn-response function (cli.py's
+    _run_voice_response) so the response axis (THINKING/AWAITING_
+    CONFIRMATION/SPEAKING) is set by the ONE place that actually knows an
+    agent turn or TTS call is happening -- this function has no visibility
+    into either. None (the default) skips all state tracking.
+
     Returns "exit" | "turn_complete" | "ended" (engine.events() itself finished,
     e.g. because something outside this call closed the engine).
     """
+    if state is not None:
+        state.set_capture("listening")
+
     events_iter = engine.events().__aiter__()
     next_event_task: asyncio.Task = asyncio.ensure_future(events_iter.__anext__())
     turn_task: asyncio.Task | None = None
@@ -283,6 +313,12 @@ async def drive_voice_session(
                     if exc is not None:
                         logger.error("[voice] turn task error: %s", exc, exc_info=exc)
                 turn_task = None
+                # A completed turn that left a confirmation armed must NOT be
+                # reset to idle here -- awaiting_confirmation means the turn's
+                # own code (arm_and_speak_confirmation) deliberately wants this
+                # state to persist until the user's next utterance resolves it.
+                if state is not None and state.response != "awaiting_confirmation":
+                    state.set_response("idle")
                 if stop_after_first_turn:
                     return "turn_complete"
 
@@ -296,6 +332,9 @@ async def drive_voice_session(
                 if isinstance(event, FinalTranscript):
                     if not event.text.strip():
                         continue
+                    if state is not None:
+                        state.set_capture("listening")  # capture done; back to baseline
+                        state.set_response("thinking")
                     result = await on_transcript(event.text, event.lang)
                     if result is STOP_SESSION:
                         return "exit"
@@ -304,8 +343,13 @@ async def drive_voice_session(
                             turn_task.cancel()
                         turn_task = asyncio.ensure_future(result)
                 elif isinstance(event, SpeechStarted):
+                    if state is not None:
+                        state.set_capture("speech_detected")
                     if on_speech_started:
                         on_speech_started()
+                elif isinstance(event, TurnEnded):
+                    if state is not None:
+                        state.set_capture("transcribing")
                 elif isinstance(event, BargeIn):
                     if turn_task is not None and not turn_task.done():
                         turn_task.cancel()
@@ -314,6 +358,9 @@ async def drive_voice_session(
                         except asyncio.CancelledError:
                             pass
                         turn_task = None
+                        if state is not None:
+                            state.set_response("idle")
+                            state.set_capture("speech_detected")  # the interruption IS new speech
                         if on_barge_in:
                             on_barge_in()
                 elif isinstance(event, MicLevel):
