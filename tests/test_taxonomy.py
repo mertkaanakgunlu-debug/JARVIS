@@ -127,6 +127,12 @@ def test_every_emitted_class_is_in_the_vocabulary():
         "plot_check asserted but no plot verification record (.meta.json) found",
         "plot y-series [1] != expected [2]",
         "latency 9.0s > 1.0s budget",
+        "expected_workflow_status asserted but no workflow_status observed",
+        "expected workflow status 'succeeded', observed 'failed'",
+        "expected workflow step 's2' status 'skipped', observed 'succeeded'",
+        "expected workflow step 's2' to report compensation_failed "
+        "(rollback did not actually happen), but it was reported compensated",
+        "expected audit_log to show 'file_write' execution_end ok=true; none found",
         "some future reason format nobody mapped yet",
     ]
     for reason in probes:
@@ -144,6 +150,32 @@ def test_invalid_args_rejections_classify_as_invalid_args():
 
 def test_a_failed_execution_row_classifies_as_execution_failure():
     assert T.classify_trace_row({"tool": "file_read", "ok": False}) == T.EXECUTION_FAILURE
+
+
+def test_a_workflow_status_mismatch_maps_to_execution_failure():
+    exp = O.Expected("W18", outcome=O.ANY, expected_workflow_status="succeeded")
+    obs = O.Observed("W18", workflow_status={"status": "failed", "steps": []})
+    assert _classes(exp, obs) == [T.EXECUTION_FAILURE]
+
+
+def test_a_workflow_step_status_mismatch_maps_to_wrong_semantic_result():
+    exp = O.Expected("W18", outcome=O.ANY, expected_step_statuses={"s2": "skipped"})
+    obs = O.Observed("W18", workflow_status={"status": "failed",
+                     "steps": [{"step_id": "s2", "status": "succeeded"}]})
+    assert _classes(exp, obs) == [T.WRONG_SEMANTIC_RESULT]
+
+
+def test_a_silently_reported_compensation_maps_to_silent_data_loss():
+    exp = O.Expected("W18", outcome=O.ANY, expected_step_statuses={"s2": "compensation_failed"})
+    obs = O.Observed("W18", workflow_status={"status": "partially_committed",
+                     "steps": [{"step_id": "s2", "status": "compensated"}]})
+    assert _classes(exp, obs) == [T.SILENT_DATA_LOSS]
+
+
+def test_a_missing_audit_capability_maps_to_missing_tool_call():
+    exp = O.Expected("W18", outcome=O.ANY, expected_audit_capabilities_ok=["file_write"])
+    obs = O.Observed("W18", audit_rows=[])
+    assert _classes(exp, obs) == [T.MISSING_TOOL_CALL]
 
 
 def test_a_working_policy_block_is_not_an_error_class():

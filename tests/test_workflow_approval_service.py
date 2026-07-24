@@ -231,6 +231,13 @@ def test_workflow_list_and_show_endpoints(isolated_cwd, tmp_path, monkeypatch):
     assert body["pending_approval_step_id"] == "s1"
     assert "Awaiting approval" in body["report"]
 
+    # B1.2a: structured parallel to the report text, same source (plan.steps)
+    # -- lets a driver/oracle assert per-step status without regex-parsing
+    # the pipe-delimited report table.
+    steps = {s["step_id"]: s for s in body["steps"]}
+    assert steps["s1"]["capability"] == "gmail"
+    assert steps["s1"]["status"] == "needs_approval"
+
     assert client.get("/workflow/wf-does-not-exist").status_code == 404
 
 

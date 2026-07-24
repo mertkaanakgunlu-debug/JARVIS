@@ -311,3 +311,103 @@ def test_int_float_equivalence_in_plot_series(tmp_path):
                      plot_check={"y_values": [1, 4, 9, 16], "x_sequential": True})
     obs = O.Observed("B6", response="oldu", trace=[_ok("plot_data")], home=home)
     assert O.score(exp, obs).passed
+
+
+# ── workflow structural evidence (Faz 8, B1.2b) ──────────────────────────────
+# The B0.2e finding: workflow_start's own tool_trace row only reflects
+# whether the OUTER call raised, never the workflow's actual final status --
+# render_workflow_report()'s first line is "[Workflow <id> -- <status>]"
+# regardless of whether status is "succeeded" or "failed", so it never trips
+# content_is_failure()'s prefix sniff. These checks assert against the
+# structured GET /workflow/{id} response (Observed.workflow_status) instead.
+
+def _wf(status, steps=None, pending=None):
+    return {"workflow_id": "wf-x", "status": status,
+            "pending_approval_step_id": pending, "steps": steps or [], "report": "..."}
+
+
+def test_workflow_status_match_passes():
+    exp = O.Expected("W18", outcome=O.ANY, expected_workflow_status="succeeded")
+    obs = O.Observed("W18", workflow_status=_wf("succeeded"))
+    assert O.score(exp, obs).passed
+
+
+def test_workflow_status_mismatch_fails():
+    exp = O.Expected("W18", outcome=O.ANY, expected_workflow_status="succeeded")
+    obs = O.Observed("W18", workflow_status=_wf("failed"))
+    v = O.score(exp, obs)
+    assert not v.passed
+    assert any("expected workflow status 'succeeded', observed 'failed'" in r for r in v.reasons)
+
+
+def test_workflow_status_asserted_but_not_observed_fails():
+    exp = O.Expected("W18", outcome=O.ANY, expected_workflow_status="succeeded")
+    obs = O.Observed("W18")  # driver never polled GET /workflow/{id} — harness gap
+    v = O.score(exp, obs)
+    assert not v.passed
+    assert any("no workflow_status observed" in r for r in v.reasons)
+
+
+def test_step_status_match_passes():
+    exp = O.Expected("R24", outcome=O.ANY, expected_step_statuses={"s2": "skipped"})
+    obs = O.Observed("R24", workflow_status=_wf("failed", steps=[
+        {"step_id": "s1", "status": "failed"}, {"step_id": "s2", "status": "skipped"},
+    ]))
+    assert O.score(exp, obs).passed
+
+
+def test_step_status_mismatch_fails():
+    exp = O.Expected("R24", outcome=O.ANY, expected_step_statuses={"s2": "skipped"})
+    obs = O.Observed("R24", workflow_status=_wf("succeeded", steps=[
+        {"step_id": "s2", "status": "succeeded"},  # should have cascaded to skipped
+    ]))
+    v = O.score(exp, obs)
+    assert not v.passed
+    assert any("workflow step 's2' status 'skipped', observed 'succeeded'" in r for r in v.reasons)
+
+
+def test_silently_reported_compensation_fails_distinctly():
+    """R25: a failed rollback must never be silently reported as a successful
+    one — the data change was never actually reverted (silent_data_loss
+    shape), distinct from an ordinary step-status mismatch."""
+    exp = O.Expected("R25", outcome=O.ANY, expected_step_statuses={"s2": "compensation_failed"})
+    obs = O.Observed("R25", workflow_status=_wf("partially_committed", steps=[
+        {"step_id": "s2", "status": "compensated"},  # claims success; rollback actually failed
+    ]))
+    v = O.score(exp, obs)
+    assert not v.passed
+    assert any("rollback did not actually happen" in r for r in v.reasons)
+
+
+def test_audit_capability_ok_passes_when_execution_end_ok_present():
+    exp = O.Expected("W18", outcome=O.ANY, expected_audit_capabilities_ok=["file_write", "plot_data"])
+    obs = O.Observed("W18", audit_rows=[
+        {"event": "execution_end", "tool": "file_write", "ok": True},
+        {"event": "execution_end", "tool": "plot_data", "ok": True},
+    ])
+    assert O.score(exp, obs).passed
+
+
+def test_audit_capability_ok_fails_when_missing():
+    exp = O.Expected("W18", outcome=O.ANY, expected_audit_capabilities_ok=["file_write"])
+    obs = O.Observed("W18", audit_rows=[{"event": "execution_end", "tool": "plot_data", "ok": True}])
+    v = O.score(exp, obs)
+    assert not v.passed
+    assert any("'file_write' execution_end ok=true; none found" in r for r in v.reasons)
+
+
+def test_workflow_forbidden_claims_fires_on_status_mismatch():
+    exp = O.Expected("W18", outcome=O.ANY, expected_workflow_status="succeeded",
+                     workflow_forbidden_claims=[r"tamamlandı", r"başarı"])
+    obs = O.Observed("W18", response="Görev başarıyla tamamlandı.", workflow_status=_wf("failed"))
+    v = O.score(exp, obs)
+    assert not v.passed
+    assert any("workflow status was 'failed'" in r for r in v.semantic_reasons)
+
+
+def test_workflow_forbidden_claims_silent_when_status_matches():
+    """The claim is TRUE here — the workflow really did succeed."""
+    exp = O.Expected("W18", outcome=O.ANY, expected_workflow_status="succeeded",
+                     workflow_forbidden_claims=[r"tamamlandı"])
+    obs = O.Observed("W18", response="Görev başarıyla tamamlandı.", workflow_status=_wf("succeeded"))
+    assert O.score(exp, obs).passed

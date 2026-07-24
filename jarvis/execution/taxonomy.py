@@ -122,6 +122,18 @@ def classify_oracle_reason(reason: str) -> str | None:
     if r.startswith("latency "):
         return None
 
+    # score() section 5 -- workflow structural evidence (Faz 8, B1.2b).
+    if r.startswith("expected_workflow_status asserted but"):
+        return None  # harness misconfiguration, same class as the fs_creates analogue above
+    if r.startswith("expected workflow status "):
+        return EXECUTION_FAILURE
+    if r.startswith("expected workflow step ") and "to report compensation_failed" in r:
+        return SILENT_DATA_LOSS
+    if r.startswith("expected workflow step "):
+        return WRONG_SEMANTIC_RESULT
+    if r.startswith("expected audit_log to show"):
+        return MISSING_TOOL_CALL
+
     return None
 
 

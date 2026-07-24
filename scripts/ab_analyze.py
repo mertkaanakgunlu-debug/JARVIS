@@ -8,8 +8,10 @@ written by manual_test_driver.py) for each config label and produces:
     — compose on tool turns — warm calls only)
   - POOLED warm percentiles (2026-07-19 Faz 4): p50/p90/p95/min/max over all
     scored-scenario samples of a config. With only N=5 samples per scenario a
-    per-scenario p95 is meaningless; the pool (13 scored × N) is what the
-    model-selection thresholds are defined on. Cold turns (model load) are
+    per-scenario p95 is meaningless; the pool (len(SCORED) scenarios × N runs
+    -- 13 at Faz 4, grown to 18 at Faz 8 when the workflow/recovery scenarios
+    were added, see docs/eval/acceptance_matrix.md) is what the model-
+    selection thresholds are defined on. Cold turns (model load) are
     excluded from the pool and counted separately.
   - per-turn token / LLM-call aggregates when the run recorded them (runs
     before 2026-07-19 lack the last_turn_* fields — shown as "-")
@@ -35,10 +37,16 @@ except ModuleNotFoundError:  # run as a script: sys.path[0] is scripts/
     from jarvis.execution.taxonomy import ERROR_CLASSES, classify_verdict_reasons
 
 # Order = driver TESTS order; scored = has an EXPECTED entry in the driver.
+# Faz 8 (alpha-gate acceptance matrix, B1.2d): W18/R20/R21/R23/R24 added --
+# without also adding them here, collect()'s d["oracle"] never sees their
+# recorded verdicts (populated only `for tid in ORDER: if tid in SCORED`,
+# below), so alpha_gate.py's per-class rows would silently stay VERI YOK
+# even with real driver coverage recorded in the run files.
 ORDER = ["A1", "A2", "A3", "B4", "B5a", "B5b", "B6", "C7", "C8", "C9",
-         "D10", "D11", "D12", "D13b", "E14", "E15", "F16", "G17a", "G17b"]
+         "D10", "D11", "D12", "D13b", "E14", "E15", "F16", "G17a", "G17b",
+         "W18", "R20", "R21", "R23", "R24"]
 SCORED = {"A3", "B4", "B5a", "B5b", "B6", "C7", "C9", "D10", "D11", "D12",
-          "D13b", "F16", "G17b"}
+          "D13b", "F16", "G17b", "W18", "R20", "R21", "R23", "R24"}
 
 # Decision-matrix inputs (reviewer, 2026-07-19).
 SAFETY = ["C9", "D11", "D12", "D13b"]     # must be n/n each, no exceptions
@@ -376,7 +384,7 @@ def main():
         lines.append(f"- {cfg.upper()} toplam chat suresi/run (medyan): "
                      f"{fmt(med(walls), 0, 's')}  (runs={len(walls)})")
 
-    lines += ["", "## Pooled warm percentiles (13 skorlu senaryo havuzu; cold turnler haric)", "",
+    lines += ["", f"## Pooled warm percentiles ({len(SCORED)} skorlu senaryo havuzu; cold turnler haric)", "",
               "| Konfig | e2e p50 | e2e p90 | e2e p95 | e2e min-max | n | llm p50 | llm p90 | llm p95 | n | cold |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
     for cfg in configs:

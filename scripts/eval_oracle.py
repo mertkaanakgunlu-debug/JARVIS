@@ -63,6 +63,23 @@ class Expected:
     # "the PNG shows the requested data" is correctness.
     plot_check: dict | None = None
     max_latency_s: float | None = None
+    # Faz 8 (alpha-gate acceptance matrix, B1.2b) -- workflow structural
+    # evidence. docs/eval/workflow_e2e_spike.md's B0.2e finding: a
+    # workflow_start tool_trace row only ever reflects whether the OUTER
+    # call raised, never whether the workflow's OWN steps/final status
+    # matched expectations (render_workflow_report()'s first line is
+    # "[Workflow <id> -- <status>]" regardless of whether status is
+    # "succeeded" or "failed" -- it never trips content_is_failure()'s
+    # [ERROR]/[BLOCKED] prefix sniff). These fields assert against the
+    # structured GET /workflow/{id} response instead of that text.
+    expected_workflow_status: str | None = None                # e.g. "succeeded" | "partially_committed"
+    expected_step_statuses: dict[str, str] | None = None       # step_id -> expected status
+    expected_audit_capabilities_ok: list[str] = field(default_factory=list)  # capability names
+    # response must NOT match if the workflow's actual status disagrees
+    # with expected_workflow_status -- the workflow-scenario analogue of
+    # forbidden_claims (which is gated on trace-level `succeeded`, almost
+    # always True here since the OUTER workflow_start call rarely raises).
+    workflow_forbidden_claims: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -73,6 +90,14 @@ class Observed:
     confirmation: bool = False                 # did the turn return confirmation_required?
     trace: list[dict] = field(default_factory=list)  # tool_trace rows for THIS scenario
     home: Path | None = None                   # JARVIS_HOME, for fs_creates/plot_check checks
+    # Faz 8 (B1.2b) -- workflow structural evidence, from two NEW sources
+    # tool_trace.jsonl cannot provide (see workflow_e2e_spike.md B0.2e):
+    # the parsed GET /workflow/{id} JSON (status/pending_approval_step_id/
+    # steps/report) and this scenario's audit_log.jsonl rows (execution_
+    # start/end pairs for steps that actually ran -- tool_trace only ever
+    # sees a workflow step's BLOCKED path, never its normal dispatch).
+    workflow_status: dict | None = None
+    audit_rows: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -295,6 +320,43 @@ def score(expected: Expected, observed: Observed) -> Verdict:
     if expected.max_latency_s is not None and observed.elapsed_s is not None:
         if observed.elapsed_s > expected.max_latency_s:
             add(f"latency {observed.elapsed_s:.1f}s > {expected.max_latency_s:.1f}s budget")
+
+    # 5) workflow structural evidence (Faz 8, B1.2b) — never trust the
+    # workflow_start tool call's own trace row alone; see the field
+    # docstrings above and workflow_e2e_spike.md's B0.2e finding.
+    if expected.expected_workflow_status is not None:
+        if observed.workflow_status is None:
+            add("expected_workflow_status asserted but no workflow_status observed")
+        elif observed.workflow_status.get("status") != expected.expected_workflow_status:
+            add(f"expected workflow status {expected.expected_workflow_status!r}, "
+                f"observed {observed.workflow_status.get('status')!r}")
+
+    if expected.expected_step_statuses:
+        steps_by_id = {s["step_id"]: s for s in (observed.workflow_status or {}).get("steps", [])}
+        for step_id, want in expected.expected_step_statuses.items():
+            got = steps_by_id.get(step_id, {}).get("status")
+            if got == want:
+                continue
+            if want == "compensation_failed" and got == "compensated":
+                # A failed rollback silently reported as a successful one --
+                # the data change was never actually reverted (silent_data_loss
+                # shape), distinct from an ordinary wrong-status mismatch.
+                add(f"expected workflow step {step_id!r} to report compensation_failed "
+                    "(rollback did not actually happen), but it was reported compensated")
+            else:
+                add(f"expected workflow step {step_id!r} status {want!r}, observed {got!r}")
+
+    for cap in expected.expected_audit_capabilities_ok:
+        if not any(r.get("event") == "execution_end" and r.get("tool") == cap and r.get("ok")
+                   for r in observed.audit_rows):
+            add(f"expected audit_log to show {cap!r} execution_end ok=true; none found")
+
+    if expected.workflow_forbidden_claims and observed.workflow_status is not None:
+        if observed.workflow_status.get("status") != expected.expected_workflow_status:
+            for pat in expected.workflow_forbidden_claims:
+                if re.search(pat, observed.response, re.I):
+                    add(f"response claims success ({pat!r}) but workflow status was "
+                        f"{observed.workflow_status.get('status')!r}", True)
 
     return Verdict(id=expected.id, passed=not reasons, reasons=reasons,
                    semantic_reasons=semantic,

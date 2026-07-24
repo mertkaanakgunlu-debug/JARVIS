@@ -1,7 +1,10 @@
 """Manual E2E test driver for the JARVIS API under `--profile test`.
 
-Drives the 16-scenario manual test list (2026-07-16 round 2 baseline) against a
-running server and records every response verbatim:
+Drives the manual test scenario list (started as 16 scenarios, 2026-07-16 round
+2 baseline; the Gate Core acceptance matrix's W18/R20/R21/R23 workflow/recovery
+scenarios were added Faz 8, see docs/eval/acceptance_matrix.md -- TESTS below is
+the current, authoritative count, not this historical number) against a running
+server and records every response verbatim:
 
     # terminal 1 — isolated server (JARVIS_TEST_HOME optional but recommended,
     # required for the killswitch steps D13a/D13c):
@@ -173,6 +176,93 @@ def clear_trace() -> None:
         pass
 
 
+def load_audit_log(workflow_id: str | None = None) -> list[dict]:
+    """audit_log.jsonl rows, optionally filtered to one workflow_id.
+
+    Faz 8 (B1.2c) -- the B0.2e finding: WorkflowEngine._dispatch() writes
+    execution_start/execution_end ONLY to audit_log.jsonl, never to
+    tool_trace.jsonl (that only ever sees a workflow step's BLOCKED path).
+    A workflow scenario's actual step evidence lives here, not in
+    load_trace(). Unlike tool_trace.jsonl, this file is never cleared
+    per-scenario (it's genuinely append-only across the whole server
+    lifetime) -- workflow_id is the exact, unique filter, not "since last
+    clear_trace()".
+    """
+    if HOME_DATA is None:
+        return []
+    f = HOME_DATA / "audit_log.jsonl"
+    if not f.exists():
+        return []
+    rows = []
+    for line in f.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if workflow_id is None or row.get("workflow_id") == workflow_id:
+            rows.append(row)
+    return rows
+
+
+def get_workflow_status(workflow_id: str) -> dict | None:
+    """GET /workflow/{workflow_id} -- structured {status, pending_approval_step_id,
+    steps, report}. None on any transport error (the caller treats this the
+    same as "harness could not measure", never a silent pass)."""
+    try:
+        return get_json(f"/workflow/{workflow_id}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  !! get_workflow_status({workflow_id}): {e!r}")
+        return None
+
+
+def _latest_workflow_id(since_ts: str) -> str | None:
+    """The most recent workflow_id recorded in audit_log.jsonl at/after
+    since_ts. NOT a regex on the chat response text -- live-verified (Faz
+    8, B1.2c) that the agent's final reply is the MODEL'S OWN natural-
+    language summary of workflow_start's tool result, never the raw
+    "[Workflow <id> -- <status>]" report text verbatim (that raw text only
+    ever reaches the model as a ToolMessage). Every _audit() event
+    (workflow_engine.py) carries workflow_id directly, so the audit log is
+    the correct structural source, not the response.
+
+    since_ts bounds the search to THIS scenario's turn: audit_log.jsonl is
+    genuinely append-only for the server's whole lifetime (never cleared
+    per-scenario, unlike tool_trace.jsonl) -- without a lower bound, a
+    workflow that was never triggered this turn (e.g. the model failed to
+    call workflow_start at all) would silently match an EARLIER scenario's
+    workflow_id instead of honestly reporting "none found"."""
+    candidates = [(r.get("ts", ""), r["workflow_id"]) for r in load_audit_log()
+                  if r.get("workflow_id") and r.get("ts", "") >= since_ts]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0])
+    return candidates[-1][1]
+
+
+def run_workflow_chat(test_id: str, message: str) -> dict:
+    """Like run_chat, but for a scenario that triggers workflow_start: also
+    locates the workflow_id this turn created (via the audit log, see
+    _latest_workflow_id) and polls its structured status + this workflow's
+    audit_log rows, so the oracle can score against real engine-observed
+    evidence instead of the chat response text alone (see
+    docs/eval/workflow_e2e_spike.md's B0.2e finding). workflow_start's own
+    tool body awaits engine.advance() to completion before returning, so by
+    the time run_chat returns (directly, or via run_chat's own /tasks
+    polling if the turn diverted async) the workflow has already run every
+    ready step -- no separate polling/retry loop needed here for a
+    workspace-only workflow."""
+    since = time.strftime("%Y-%m-%dT%H:%M:%S")
+    entry = run_chat(test_id, message)
+    workflow_id = _latest_workflow_id(since)
+    if not workflow_id:
+        print(f"  !! no workflow_id found in audit log for {test_id}")
+        return entry
+    entry["workflow_id"] = workflow_id
+    entry["workflow_status"] = get_workflow_status(workflow_id)
+    entry["audit_rows"] = load_audit_log(workflow_id)
+    return entry
+
+
 def post_json(path: str, body: dict, timeout: int = 240) -> dict:
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -279,6 +369,36 @@ def run_chat(test_id: str, message: str, decision: str | None = None) -> dict:
     elif resp.get("async"):
         entry["async_task"] = resp
         print(f"  [ASYNC diverted] {resp}")
+        # Faz 8 (B1.2c) -- a realistic multi-step prompt routinely exceeds
+        # _should_async()'s 40-word threshold or hits a legacy async hint
+        # (e.g. "grafik"); without polling to completion, entry["response"]
+        # is never populated and every downstream check (W18/R24's
+        # workflow_id extraction, any forbidden_claims/grounded_claims
+        # check) silently sees an empty string. See GET /tasks/{task_id}'s
+        # docstring in jarvis/api.py for why this endpoint didn't exist
+        # until this same investigation added it.
+        task_id = resp.get("task_id")
+        if task_id:
+            deadline = time.time() + 180
+            final = None
+            while time.time() < deadline:
+                try:
+                    final = get_json(f"/tasks/{task_id}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"  !! poll /tasks/{task_id} error: {e!r}")
+                    break
+                if final.get("status") in ("done", "failed", "cancelled"):
+                    break
+                time.sleep(2)
+            if final and final.get("status") in ("done", "failed", "cancelled"):
+                entry["response"] = final.get("result_text") or ""
+                entry["async_final_status"] = final["status"]
+                entry["elapsed_s"] = round(time.time() - t0, 1)
+                print(f"  [ASYNC completed | {final['status']} | {entry['elapsed_s']}s]"
+                      f"\n  {entry['response']}")
+            else:
+                print(f"  !! ASYNC task {task_id} did not complete within "
+                      f"{int(deadline - t0)}s (last poll: {final})")
     else:
         entry["response"] = resp.get("response")
         entry["model_label"] = resp.get("model")
@@ -387,6 +507,35 @@ TESTS = {
     # again with the same JARVIS_TEST_HOME → manual_test_driver.py G17b
     "G17a": lambda: run_chat("G17a", "En sevdiğim şehir İzmir, bunu aklında tut"),
     "G17b": lambda: run_chat("G17b", "En sevdiğim şehir neydi?"),
+    # Faz 8 (alpha-gate acceptance matrix, B1.2c) -- the 4 recovery/workflow
+    # sub-classes that are genuine live-model behavior properties (the other
+    # 3 -- invalid-args repair, timeout, compensation failure -- already have
+    # real, deterministic pytest coverage against the engine mechanism
+    # itself; see docs/eval/acceptance_matrix.md's revision notes).
+    "W18": lambda: run_workflow_chat(
+        "W18",
+        "workflow_start aracını kullanarak şu görevi çalıştır (tek tek ayrı "
+        "araç çağrıları yapma, mutlaka workflow_start ile başlat): birinci "
+        "adımda 'workflow_notu.txt' dosyasına 'toplanti notu' yaz. İkinci "
+        "adımda (birinci adıma bağımlı olarak) aynı dosyayı oku. Üçüncü "
+        "adımda (bağımsız), Y ekseni değerleri 2, 4, 6, 8 olan ve X "
+        "ekseninde veri noktalarının sıra numaralarını (1, 2, 3, 4) "
+        "kullanan bir çizgi grafiği oluştur ve PNG olarak kaydet.",
+    ),
+    "R20": lambda: run_chat("R20", "olmayan_dosya_xyz123.txt adlı dosyayı oku"),
+    "R21": lambda: run_chat("R21", "Toplantıyı sil."),
+    "R23": lambda: run_chat(
+        "R23", "Vault'ta 'proje planı 2026' ile ilgili bir not var mı? Kontrol et."
+    ),
+    "R24": lambda: run_workflow_chat(
+        "R24",
+        "workflow_start aracını kullanarak şunu çalıştır (tek tek ayrı araç "
+        "çağrıları yapma, mutlaka workflow_start ile başlat). Adım id'lerini "
+        "tam olarak 's1' ve 's2' kullan. s1: 'kesinlikle_var_olmayan_dosya_982.txt' "
+        "adlı dosyayı oku (bu dosyanın var olmadığını biliyorum, hata vermesi "
+        "bekleniyor -- bu kasıtlı bir test adımı). s2 (s1'e bağımlı olarak): "
+        "'sonuc.txt' dosyasına 'tamam' yaz.",
+    ),
 }
 
 # Scenarios that DELIBERATELY continue the previous one in the same session and
@@ -473,6 +622,27 @@ EXPECTED = {
                                      r"kaydetme|paylaşma|aklımda değil|elimde"],
                        forbidden_response=[r"[İi]stanbul", r"[Aa]nkara", r"[Bb]ursa",
                                            r"[Aa]ntalya", r"[Aa]dana", r"[Kk]onya"]),
+    # Faz 8 (B1.2c) -- see docs/eval/workflow_e2e_spike.md for why this scores
+    # against GET /workflow/{id}'s structured status (Observed.workflow_status),
+    # never the response text alone: workflow_start's own trace row only
+    # reflects whether the OUTER tool call raised, not the workflow's actual
+    # final state.
+    "W18": E.Expected("W18", outcome=E.ANY, expected_workflow_status="succeeded",
+                       expected_audit_capabilities_ok=["file_write", "file_read", "plot_data"],
+                       workflow_forbidden_claims=[r"tamamla", r"başar"]),
+    "R20": E.Expected("R20", expected_tool="file_read", outcome=E.ANY,
+                       forbidden_claims=[r"okudum", r"içeri[ğg]i"]),
+    "R21": E.Expected("R21", outcome=E.CLARIFY, required_any=[r"\?", r"hangi"]),
+    # Unconditional (forbidden_response, not forbidden_claims): a fuzzy
+    # semantic search has no ground truth this harness can verify, so
+    # absolute/verified language is wrong regardless of whether vault_search
+    # found something or came back empty.
+    "R23": E.Expected("R23", expected_tool="vault_search", outcome=E.ANY,
+                       forbidden_response=[r"kesinlikle (do[ğg]ru|onay)",
+                                           r"garanti (ediyorum|ederim)", r"do[ğg]ruland[ıi]"]),
+    "R24": E.Expected("R24", outcome=E.ANY, expected_workflow_status="failed",
+                       expected_step_statuses={"s2": "skipped"},
+                       workflow_forbidden_claims=[r"başar", r"tamamla"]),
 }
 
 
@@ -490,6 +660,10 @@ def _score(tid: str, entry: dict) -> None:
         confirmation=bool(entry.get("confirmation")),
         trace=load_trace(),
         home=Path(TEST_HOME),
+        # Faz 8 (B1.2c) -- populated only by run_workflow_chat(); None/[]
+        # for every ordinary chat scenario (harmless no-ops in score()).
+        workflow_status=entry.get("workflow_status"),
+        audit_rows=entry.get("audit_rows") or [],
     )
     v = E.score(exp, obs)
     VERDICTS.append(v)

@@ -962,6 +962,24 @@ async def workflow_show(workflow_id: str, request: Request):
         "status": plan.status,
         "pending_approval_step_id": plan.pending_approval_step_id,
         "report": render_workflow_report(plan),
+        # Agent Runtime rev.2, Faz 8 (alpha-gate acceptance matrix, B1.2a):
+        # structured parallel to _step_table's own text rendering (same
+        # fields, same source -- jarvis.execution.workflow.WorkflowStep),
+        # added so a driver/oracle can assert per-step status (e.g. "step s2
+        # is skipped because s1 failed") without regex-parsing the
+        # pipe-delimited report text. `report` is unchanged -- this is
+        # purely additive.
+        "steps": [
+            {
+                "step_id": s.step_id,
+                "capability": s.capability,
+                "status": s.status,
+                "error": s.error,
+                "execution_id": s.execution_id,
+                "compensation_note": s.compensation_note,
+            }
+            for s in plan.steps
+        ],
     }
 
 
@@ -993,6 +1011,30 @@ async def workflow_resolve(workflow_id: str, body: WorkflowResolveRequest, reque
         "status": outcome.plan.status if outcome.plan is not None else None,
         "report": outcome.report,
     }
+
+
+@app.get("/tasks/{task_id}")
+async def get_task(task_id: str, request: Request):
+    """Poll a background task submitted via /chat's or /chat/stream's async-
+    heuristic diversion ({"async": true, "task_id": ...}) -- task_executor.py's
+    own module docstring has always promised this endpoint ("result arrives
+    via push + GET /tasks/{task_id}"), but it was never actually wired up
+    here. Discovered (Faz 8, B1.2c) while building the W18/R24 alpha-gate
+    workflow scenarios: a realistic multi-step prompt routinely exceeds
+    _should_async()'s 40-word threshold, or mentions a legacy async hint
+    like "grafik", and diverts -- with no HTTP path to ever retrieve the
+    eventual result, a pure-HTTP client (the driver, or any client that
+    isn't the CLI/FCM-push path) had no way to complete such a turn at all.
+    """
+    _check_auth(request)
+    agent = get_agent()
+    executor = getattr(agent, "_task_executor", None)
+    if executor is None:
+        raise HTTPException(status_code=503, detail="Task executor not initialized")
+    task = executor.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+    return task.to_dict()
 
 
 class ResetRequest(BaseModel):
