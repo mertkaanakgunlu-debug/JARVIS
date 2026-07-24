@@ -36,37 +36,58 @@ Faz 1+2 = "hafıza + zeka" ilk bloğu (ikisi de yerel).
 
 ---
 
-## Voice pipeline follow-ups (opened 2026-07-24 from live testing)
+## Voice pipeline follow-ups (opened 2026-07-24 from live testing; updated 2026-07-24/25)
 
 Live `--voice` testing enabled the RTX 4070 for Whisper and fixed confirmation arm-before-speak,
 the `is_affirmative("Evet.")` trailing-period bug, Turkish language lock, and the "gülen" exit
 variant (all committed + tested). The live run also surfaced the **real current blocker** and
-prompted a strategy change:
+prompted a strategy change (see below) — that strategy's Faz B0-B2 (text) and Faz D/F/E (voice
+observability/PTT) are now built; see HANDOFF.md for the full session detail.
 
-### 🔴 P0 — Voice input capture / "listening" reliability (the actual blocker)
+### 🔴 P0 — Voice input capture reliability (STILL OPEN — observability built, the drop itself is not fixed)
 
 Utterances are being **dropped**, not mis-handled: the owner had to say "evet" 3 times but only
-1 reached the audit log; "güle güle" said twice was **never captured** (had to Ctrl+C). There is
-also **no "listening" indicator**, so the user can't tell whether JARVIS is capturing. This is a
+1 reached the audit log; "güle güle" said twice was **never captured** (had to Ctrl+C). This is a
 VAD / continuous-listen / mic-gating problem, not a logic problem (the confirmation, exit, and
-language fixes above are all verified correct in isolation). Candidate angles: `voice_silence_
-duration` (1.5 s) tuning, the continuous-listen loop's turn-gating in `drive_voice_session`, a
-speech-started/mic-level indicator in the CLI (`on_speech_started`/`on_mic_level` callbacks already
-exist but the CLI loop doesn't surface them), and whether an interface-driven test (Electron HUD)
-sidesteps the raw-mic capture issue entirely. **Highest-priority voice item.**
+language fixes above are all verified correct in isolation).
+
+**What Faz D/F closed (2026-07-24/25):** the "no listening indicator" half is fixed — `jarvis/
+voice/state.py`'s two-axis `VoiceState` now drives a live CLI status line (`on_speech_started`/
+`on_mic_level`/state transitions are all wired, not dropped, into `cli.py`), plus a startup
+diagnostics block (device/sample-rate/actual STT device) and two real dead-telemetry bugs fixed
+(`io_duplex.py`'s `underrun_count` was declared but never incremented; input overflow now has a
+real counter). The WAV-replay harness (`jarvis/voice/io_wav.py` + `tests/test_wav_replay*.py`) now
+gives a tool this investigation didn't have before: replay a captured dropped-utterance recording
+through the real VAD/STT pipeline in isolation — if it transcribes correctly there, the drop is
+downstream (device/PortAudio/mic-gating), not VAD/STT itself.
+
+**What's still open:** the drop mechanism itself has not been root-caused or fixed. Next concrete
+step: capture a REAL dropped-utterance recording (or reproduce live with the new state indicator
+now visible) and replay it through `WavAudioIO` to localize which side of the VAD/STT-vs-device
+boundary it's on, per the harness's own stated separation power (`docs/eval/acceptance_matrix.md`'s
+Faz F section). **Still the highest-priority voice item.**
 
 ### 🟡 Wake-word model not loading
 
 `openwakeword` "hey_jarvis" fails to load every run → falls back to continuous listen. Separate
-from the STT GPU work; investigate the model file / onnxruntime path.
+from the STT GPU work; investigate the model file / onnxruntime path. Faz E added `--ptt`
+(press-to-arm push-to-talk) as a reliable alternative to continuous-listen/wake-word while this
+and the P0 above remain open — `python -m jarvis --ptt` bypasses both.
 
-### Strategy (owner direction, 2026-07-24): text-command reliability baseline FIRST
+### Strategy (owner direction, 2026-07-24): text-command reliability baseline FIRST — Faz B0-B2 done, alpha gate not yet GEÇTİ
 
-Before sinking more time into the voice-input problem, **prove the brain is flawless over text**
-(the alpha gate + `--profile test` harness already measure this — extend to the owner's real daily
-commands). Only once text is perfect, isolate voice input as its own dedicated track. If text works
-perfectly, the remaining gap is *entirely* the voice/audio pipeline, which is far easier to debug
-in isolation than tangled with logic bugs.
+The metin-first sprint (plan: `C:\Users\mertk\.claude\plans\benim-karar-m-metin-first-partitioned-
+leaf.md`) built the harness this strategy called for: the alpha gate's two structural `VERİ YOK`
+rows are now real scored/mechanism rows (Faz B1), and a 40-60-scenario Owner Extended Corpus was
+drafted and live-verified (Faz B2). **Not yet true:** the alpha gate is not yet actually GEÇTİ —
+the owner's own 10x measurement run (`ab_run_config.ps1 -Runs 10` + `alpha_gate.py isolation` +
+`evaluate`) hasn't happened yet, and two live-model-reliability gaps were found and honestly
+documented rather than worked around: `workflow_start` isn't reliably invoked by the configured
+local model even when named explicitly, and `plot_data` is sometimes shown as Python source instead
+of called (2/2 reproduced). See HANDOFF.md's "next session" list and the two eval docs'
+disposition notes for detail. Once real, these are text-brain findings, not voice-specific — but
+they're exactly the kind of thing "prove text is flawless first" was designed to surface before
+voice input capture gets isolated as its own fully independent track.
 
 ### Deferred features (not regressions)
 
