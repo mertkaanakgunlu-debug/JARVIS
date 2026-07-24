@@ -74,6 +74,17 @@ def main() -> None:
         help='Enable wake-word mode: say "Hey JARVIS" before each turn (requires --voice)',
     )
     parser.add_argument(
+        "--ptt",
+        action="store_true",
+        help=(
+            "Push-to-talk mode: press Enter, speak one utterance (VAD still "
+            "ends it on silence -- this is press-to-ARM, not real hold-to-talk "
+            "key-down/up), then answer. Faz E: a reliable alternative to "
+            "continuous listen/wake-word while voice-input capture reliability "
+            "is still being hardened -- see ROADMAP.md. Implies --voice."
+        ),
+    )
+    parser.add_argument(
         "--api",
         action="store_true",
         help="Start as FastAPI REST server (default port 8000)",
@@ -158,7 +169,10 @@ def main() -> None:
         except KeyboardInterrupt:
             console.print("\n[dim]Monitor durduruldu.[/dim]")
     else:
-        run(voice=args.voice or args.wakeword, wakeword=args.wakeword, monitor=args.monitor)
+        run(
+            voice=args.voice or args.wakeword or args.ptt,
+            wakeword=args.wakeword, ptt=args.ptt, monitor=args.monitor,
+        )
 
 
 if __name__ == "__main__":

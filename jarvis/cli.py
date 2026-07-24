@@ -1094,7 +1094,9 @@ async def _run_voice_response(
         _print_jarvis("".join(response_chunks), agent.current_model_label)
 
 
-async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=None) -> None:
+async def _run_voice_loop(
+    agent: JarvisAgent, wakeword: bool = False, ptt: bool = False, monitor=None,
+) -> None:
     try:
         from jarvis.voice.engine import RealtimeVoiceEngine
         from jarvis.voice.io_duplex import DuplexAudioIO
@@ -1119,7 +1121,14 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
     loop = asyncio.get_running_loop()
 
     _print_banner(settings, monitor_active=monitor is not None)
-    if wakeword:
+    if ptt:
+        # Faz E: press-to-ARM, not real hold-to-talk key-down/up -- Enter
+        # starts listening for one utterance, VAD still ends it on silence.
+        # A deliberately simpler, more reliable alternative to continuous
+        # listen/wake-word while voice-input capture reliability is still
+        # being hardened (see ROADMAP.md's P0).
+        console.print('[gold3]Push-to-talk mode.[/gold3] Press [bold]Enter[/bold], then speak.')
+    elif wakeword:
         console.print('[gold3]Wake-word mode.[/gold3] Say "[bold]Hey JARVIS[/bold]" to activate, then speak.')
     else:
         console.print("[gold3]Voice mode active.[/gold3] Speak naturally — JARVIS listens automatically.")
@@ -1131,7 +1140,11 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
     _print_voice_diagnostics(engine)
 
     ww_detector = None
-    if wakeword:
+    if ptt:
+        # Deliberately simpler than the wake-word/PTT race in voice_api.py:
+        # this mode never touches the wake-word model at all.
+        console.print("[gold3]Ready.[/gold3]\n")
+    elif wakeword:
         console.print("[dim]Loading wake-word model (hey_jarvis)...[/dim]")
         ww_detector = WakewordDetector()
         ok = await loop.run_in_executor(None, ww_detector.load)
@@ -1236,7 +1249,11 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
 
     try:
         while True:
-            if wakeword and ww_detector is not None:
+            if ptt:
+                console.print("[dim]Press Enter to speak...[/dim]", end="\r")
+                await loop.run_in_executor(None, input)
+                console.print("[gold3]Listening...[/gold3]              ")
+            elif wakeword and ww_detector is not None:
                 console.print('[dim]Waiting for "Hey JARVIS"...[/dim]', end="\r")
                 await loop.run_in_executor(None, ww_detector.listen)
                 console.print("[gold3]Hey! Listening...[/gold3]              ")
@@ -1248,22 +1265,22 @@ async def _run_voice_loop(agent: JarvisAgent, wakeword: bool = False, monitor=No
                     on_barge_in=_on_barge_in,
                     on_mic_level=_on_mic_level,
                     state=voice_state,
-                    stop_after_first_turn=wakeword,
+                    stop_after_first_turn=wakeword or ptt,
                 )
             finally:
                 await engine.stop()
 
-            if outcome == "exit" or not wakeword:
+            if outcome == "exit" or not (wakeword or ptt):
                 break
-            # outcome == "turn_complete" and wakeword=True: loop back and
-            # re-gate on the wake phrase for the next command.
+            # outcome == "turn_complete" and wakeword/ptt=True: loop back and
+            # re-gate (wake phrase, or the next Enter press) for the next command.
     except KeyboardInterrupt:
         console.print("\n[dim]JARVIS offline. Goodbye.[/dim]")
     finally:
         await agent.close_mcp_tools()  # Faz 5: don't leave a launched browser process behind
 
 
-def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> None:
+def run(voice: bool = False, wakeword: bool = False, ptt: bool = False, monitor: bool = False) -> None:
     settings = Settings()
     if not settings.gemini_api_key and not settings.use_vertex:
         console.print(
@@ -1295,8 +1312,8 @@ def run(voice: bool = False, wakeword: bool = False, monitor: bool = False) -> N
             f"zamanlayıcı: her {settings.monitor_schedule_interval_sec} sn[/dim green]"
         )
     try:
-        if voice or wakeword:
-            asyncio.run(_run_voice_loop(agent, wakeword=wakeword, monitor=monitor_instance))
+        if voice or wakeword or ptt:
+            asyncio.run(_run_voice_loop(agent, wakeword=wakeword, ptt=ptt, monitor=monitor_instance))
         else:
             asyncio.run(_run_loop(agent, monitor=monitor_instance))
     except KeyboardInterrupt:
