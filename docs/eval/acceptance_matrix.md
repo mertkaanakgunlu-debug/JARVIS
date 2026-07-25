@@ -107,8 +107,11 @@ option each time. The model has the tool; it does not choose it.
    own natural-language summary** of the tool's result, never the raw report text verbatim (that raw
    text only ever reaches the model as a `ToolMessage`). Fixed by reading `workflow_id` directly from
    `audit_log.jsonl` instead (every `_audit()` event already carries it) — `manual_test_driver.py`'s
-   `_latest_workflow_id()`, bounded to timestamps at/after the scenario's own turn so a stale earlier
-   workflow's id is never silently reused.
+   `_latest_workflow_id()`, bounded to the scenario's own turn so a stale earlier workflow's id is
+   never silently reused. **Revised 2026-07-25** (external review): that bound was a second-resolution
+   timestamp, which cannot separate two workflows created inside the same wall-clock second. It is now
+   the audit log's ROW COUNT taken before the request — exact regardless of clock resolution, since the
+   file is append-only. Pinned by `tests/test_driver_workflow_id.py`.
 
 **Disposition, per this document's own honesty discipline:** W18 and R24 stay VERI YOK in the gate —
 their prompts and scoring logic are correctly designed (proven by R20/R21/R23 passing on the identical
@@ -122,6 +125,33 @@ not universal); or accept that this model reliably prefers direct sequential too
 enough to fit in one extended turn, and redesign W18/R24 around a task that structurally CANNOT be done
 without the workflow engine (e.g. one step's approval-pause genuinely blocking a later step, rather than
 three independently-executable file/plot operations a model can just do directly).
+
+## Gate Core integrity — the corpus is pinned (added 2026-07-25, external-review finding)
+
+Nothing previously tied a `GEÇTİ` to *the scenarios that produced it*. A gate prompt quietly
+reworded until the model passes, an `Expected` loosened, a scenario dropped from the driver — every
+one of those produced an identical-looking green table, so two gate results were not soundly
+comparable across time. That is the same class of false-clean reading as the `tool_ok` default
+described below.
+
+`docs/eval/gate_core_manifest.json` now pins it: `schema_version`, `corpus_version`,
+`required_runs`/`required_isolation_runs`, `driver_commit`, and a SHA-256 per Gate Core scenario over
+**both** its driver prompt (the lambda's own source) and its oracle `Expected` spec, plus two
+aggregate digests. The scenario set is derived from `alpha_gate.py`'s row constants rather than
+re-listed, so adding a class to the gate cannot forget to pin its scenario.
+
+- Mint/refresh: `python scripts/alpha_gate.py manifest --write --config <name>`
+- Verify standalone: `python scripts/alpha_gate.py manifest` (exit 0/1/2)
+- `evaluate` checks it as a first-class **gate row**: drift is `KALDI`, an absent/older-schema
+  manifest is `VERİ YOK`. A gate that silently re-scoped itself has not passed, whatever the other
+  rows say.
+
+**Isolation result files (same review, same discipline):** `gate_rows()` used to default a missing
+`tool_ok` to `runs` — "older summaries lack the field; assume clean". But `{"runs": 20, "leaks": []}`
+cannot show whether `file_list` ever actually ran, and an agent that never called the tool cannot leak
+anything either, so a stale pre-`tool_ok` `alpha_iso.json` scored green on evidence it never
+contained. A missing `tool_ok` is now `VERİ YOK`. New isolation summaries carry `schema_version` and
+`driver_commit` so format can be told apart rather than guessed.
 
 ## What this matrix does NOT yet cover (honest gaps, carried forward, not silently dropped)
 

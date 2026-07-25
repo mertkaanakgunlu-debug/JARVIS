@@ -10,145 +10,193 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Son oturum: 2026-07-24/25 — METİN-ÖNCE SPRINT: 6/7 FAZ TAMAMLANDI (B0→B1→B2→D→F→E); FAZ C (GERÇEK ENTEGRASYON) BİLİNÇLİ OLARAK ERTELENDİ
+## Son oturum: 2026-07-25 — DIŞ İNCELEME REMEDIATION: 2 CANLI RUNTIME BUG'I + TRANSPORT PARITY + GÖZLEMLENEBİLİRLİK + GATE BÜTÜNLÜĞÜ
 
-**Durum tek cümlede:** Owner'ın "metin-first, PTT-first" stratejik yönlendirmesi tam bir sprint
-planına dönüştürüldü (owner'ın 9 mimari revizyonuyla), yürütüldü ve büyük ölçüde canlı doğrulandı;
-yalnızca en riskli faz (Faz C — gerçek Takvim/Gmail entegrasyonu) owner'ın açık isteğiyle bu
-oturumda BAŞLATILMADI, taze bir oturuma bırakıldı.
+**Durum tek cümlede:** Owner bir önceki sprint'in (B0→B1→B2→D→F→E) dış incelemesini getirdi;
+inceleme kod üzerinde tek tek doğrulandı (**hepsi isabetliydi, biri hariç — aşağıya bakın**),
+önerilen düzeltme sırasının **kodla kapatılabilir 1-4. maddeleri tamamlandı**; 5-7. maddeler
+(W18/R24 redesign, corpus'u 40-60'a çıkarma, Faz C) canlı model koşusu veya owner kararı
+gerektirdiği için AÇIK bırakıldı.
 
-### Plan dosyası
-`C:\Users\mertk\.claude\plans\benim-karar-m-metin-first-partitioned-leaf.md` (v2 — owner'ın 9
-revizyonu uygulandıktan sonra onaylandı). Sıra: A (owner-run, ayrı) → B0 → B1 → B2 → D → F → E → C.
+### İncelemenin doğrulanması — bir madde yanlıştı
 
-### Faz B0 — Acceptance matrix + workflow feasibility spike (docs-only)
-`docs/eval/acceptance_matrix.md` + `docs/eval/workflow_e2e_spike.md` yazıldı. **Gerçek bulgu:**
-`WorkflowEngine._dispatch()`'in `execution_start`/`execution_end` audit kayıtları yalnız
-`audit_log.jsonl`'e yazılıyor, `tool_trace.jsonl`'e değil (o yalnız blok/veto yolunda yazıyor) —
-oracle'ın mevcut trace-tabanlı scoring'i workflow senaryolarını hep sahte-FAIL ederdi. Ayrıca "diğer
-recovery sınıfları" tek satırdan 7 bağımsız yargılanabilir sınıfa bölündü.
+İnceleme "GitHub tarafında bu branch için workflow run veya combined status göremedim; 'push
+yapıldı, CI yeşil' denemez" diyordu. **Bu yanlış:** `gh run list --branch langgraph-migration`
+önceki oturumun 6+1 commit'inin push edildiğini ve branch ucunun (`e5a46e3`) CI'ının
+`completed success` olduğunu gösteriyor. Diğer tüm P1/P2 bulguları kodda birebir doğrulandı.
 
-### Faz B1 — Alpha gate'in iki `VERİ YOK` satırı kapatıldı
-`eval_oracle.py`'ye workflow-farkında scoring (`Observed.workflow_status`/`audit_rows`,
-`Expected.expected_workflow_status`/`expected_step_statuses`/`expected_audit_capabilities_ok`/
-`workflow_forbidden_claims`). `jarvis/api.py`'ye **yeni `GET /tasks/{task_id}` endpoint'i**
-eklendi — `task_executor.py`'nin kendi docstring'i bunu hep vaat ediyordu ama hiç var olmamıştı;
-canlı test sırasında keşfedildi (gerçekçi çok-adımlı bir prompt `_should_async()`'in 40-kelime
-eşiğini rutin olarak aşıyor ve async'e sapıyor, ve o zamana kadar sonucu almanın HİÇBİR HTTP yolu
-yoktu). `alpha_gate.py`'nin "diğer recovery sınıfları" satırı artık 7 satır: 4'ü gerçek
-driver/canlı-model senaryosu (W18, R20, R21, R23), 3'ü (invalid-args repair, timeout, compensation
-failure) **mekanizma testi** — gerçek pytest'i her `evaluate()` çağrısında subprocess olarak yeniden
-çalıştırıyor (`mechanism_row()`, testlerde injectable), çünkü bunlar canlı bir modelin sabit bir
-zamanlamada zorlayamayacağı motor-içi özellikler ve zaten gerçek, deterministik pytest kapsamları
-vardı (`test_bounded_repair.py`, `test_timeout_enforcement.py`, `test_workflow_compensation.py`).
+### 1. `--ptt` tek-tur sözleşmesi + ses state yaşam döngüsü (CANLI BUG)
 
-### Faz B2 — Owner Extended Corpus, canlı doğrulandı
-`docs/eval/owner_extended_corpus.md`: owner'ın 15 sınıflık tablosu için 40-60 senaryo tasarımı;
-27 driver ID'si (`test` profilinde çalışabilenler) `manual_test_driver.py`'ye eklendi. **Gerçek yerel
-sunucu + Ollama modeline karşı 2 tur canlı koşuldu:** 1. tur 13/18 geçti; 5 başarısızlığın 3'ü bu
-corpus'un kendi tasarım hatasıydı (düzeltildi: R21'in aynı prompt'unu tekrarlayan bir kopya,
-`required_any` regex'i çok dar, `OC28b`'de unutulan `decision="approve"`), 2. tur (düzeltmelerden
-sonra) 6/7 geçti.
+`drive_voice_session()` `stop_after_first_turn`'ü YALNIZCA izlenen bir coroutine tamamlandığında
+işletiyordu. `on_transcript` işi senkron bitirip `None` döndürdüğünde hiç turn_task oluşmadığı
+için koşul hiç değerlendirilmiyordu. **Canlı erişilebilir yol:** `cli.py`'nin
+`_detect_model_switch` dalı ("flash modeline geç") modeli değiştirir, kendi `speak_stream()`'ini
+bekler ve `None` döner — yani `--ptt` modunda cevap konuşulur ama mikrofon açık kalır, Enter
+kapısına HİÇ dönülmez. Artık senkron tur da turu bitiriyor.
 
-### Faz D — Ses gözlemlenebilirlik: iki-eksenli state reducer + telemetri
-Yeni `jarvis/voice/state.py` (`VoiceState` — orchestration-owned, engine-owned DEĞİL, owner'ın
-mimari düzeltmesi gereği: full-duplex ses LISTENING+SPEAKING'in aynı anda doğru olmasını
-gerektiriyor). Yeni `TurnEnded` event'i (`jarvis/voice/events.py`), engine VAD turn-end'i
-STT'den ÖNCE yayınlıyor (önceden FinalTranscript'e kadar hiçbir sinyal yoktu, boş bir tur bile
-sessizce `continue` ediyordu). `cli.py`'de statik "Thinking..." yerine canlı state satırı +
-başlangıç diagnostics (`_print_voice_diagnostics`: cihaz, örnekleme hızı, gerçek STT cihazı).
-`io_duplex.py`'de **2 gerçek ölü telemetri düzeltildi**: `underrun_count` tanımlıydı ama hiç
-artırılmıyordu (düzeltildi + test edildi); input overflow yalnız `logger.debug`'a gidiyordu, yeni
-`input_overflow_count` + `queue_depth()` eklendi.
+İkinci yarısı: `finally` bloğu yalnız task'ları dispose ediyordu, capture ekseni girişte
+`listening` yapılıp hiç temizlenmiyordu — her çağıran hemen ardından `engine.stop()` çağırdığı
+için reducer fiziksel olarak kapalı bir mikrofonu "dinliyor" diye raporluyordu (en görünür yeri:
+Enter'ı bekleyen PTT kapısı). Artık iki eksen de baseline'a dönüyor, `awaiting_confirmation`
+korunarak (o, oturumu meşru olarak aşan tek durum).
 
-### Faz F — WAV replay harness, iki katman
-Yeni `jarvis/voice/io_wav.py` (`WavAudioIO`) — `AudioIO` Protocol'ünün gerçekten saf-ekleme
-olduğunu kanıtladı (engine hiç değişmedi). `WhisperSTT.transcribe()` artık `TranscriptionResult`
-dataclass'ı (`stt_s` dahil) döndürüyor; `TurnEnded` `vad_prob_max`/`mean` kazandı — üçü de
-"hesaplanıp atılan" alanlardı. İki test katmanı: `test_wav_replay.py` (normal CI, sahte VAD+STT,
-ağ/model bağımlılığı yok, 13 test) ve `test_wav_replay_e2e.py` (`voice_e2e` marker'ı,
-`pyproject.toml`'un `addopts`'u ile normal koşudan HARİÇ — gerçek Silero VAD + gerçek Whisper +
-gerçek Piper-sentezlenmiş `tests/audio/*.wav`). **Canlı bulgu:** tek kelimelik çıplak "Evet."
-Piper→Whisper'da GÜVENİLİR DEĞİL (gözlenen: "Devleti."/"Rövlet." — ayrı çalıştırmalarda farklı),
-aynı ifade doğal cümle bağlamıyla ("Evet, onaylıyorum.") güvenilir. Silinmedi — dürüst bir
-`xfail` olarak kaydedildi (gerçek gözlenen transkriptlerle) ki gelecekte düzelirse fark edilsin.
+**Bu iki davranışı SABİTLEYEN 3 test vardı** (`state.capture == "listening"` / `response ==
+"thinking"` oturum bittikten sonra) — gerçek sözleşmeye çekildiler. Yeni
+`tests/test_ptt_single_turn.py`: planın Faz E'de isteyip yazılmamış olan deterministik
+press-to-arm → tek utterance → VAD-stop testi, `WavAudioIO` + gerçek engine + gerçek
+`drive_voice_session` ile. **Düzeltme öncesi kodda 3'ü kırmızı olduğu ölçülerek doğrulandı.**
 
-### Faz E — CLI push-to-talk
-Yeni `--ptt` bayrağı (`--voice`'u ima eder, `--wakeword` gibi). Press-to-ARM, gerçek
-hold-to-talk DEĞİL (owner'ın düzeltmesi gereği): Enter'a bas → VAD sessizlikle bitirsin.
-`--voice`'un mevcut sürekli-dinleme davranışı tamamen değişmedi. **Canlı interaktif doğrulanmadı**
-(gerçek bir Enter tuşuna basmayı bu ajan tetikleyemez) — owner'ın canlı geçişi bekliyor, Faz A'nın
-sesli-onay dumanı gibi. Electron HUD'un düz-Space handler'ının `/voice/ptt/start` değil
-remote-audio session'ı tetiklediği yeniden doğrulandı (B0'daki bulguyla aynı, regresyon değil) —
-iki meşru, farklı kullanım durumu (uzak-akış mikrofon vs. yerel backend mikrofonu), Alt+Space
-kablolaması hâlâ yapılmadı, plan'ın kendi koşullu ifadesine göre ("gerekirse") ertelendi.
+Ayrıca bir sıralama kusuru: transcript geldiğinde capture-önce/response-sonra sırası bir anlık
+`(listening, idle)` çiftinden geçiyor ve bu wire'a "STT bitti → listening → thinking" diye tek
+karelik bir orb titremesi olarak yansıyordu. Response-önce yapıldı (test:
+`test_transcription_to_thinking_does_not_flicker_through_listening`, ters sırada kırmızı olduğu
+ölçüldü).
 
-### Faz C — BİLİNÇLİ OLARAK BAŞLATILMADI (owner kararı, bu oturumun sonunda)
+### 2. Transport parity — reducer üç taşıyıcıya da bağlandı
 
-Owner'a Faz C'ye başlamadan önce 3 soru soruldu, cevaplar kaydedildi (whoever bu fazı alırsa):
-- **Kimlik bilgisi:** mevcut OAuth token'ları (`data/.calendar_token.json`, Gmail) yeniden
-  kullanılacak — `paths.py`'nin `JARVIS_HOME` yönlendirmesiyle integration home kendi kopyalarını
-  bunlardan türetsin, ayrı bir consent akışı GEREKMİYOR.
-- **Takvim:** owner önceden oluşturmayacak — runner ilk çalıştırmada `calendars().insert()` ile
-  "JARVIS Integration Tests" takvimini kendisi oluştursun (idempotent, zaten varsa yeniden kullansın).
-- **Gmail self-send adresi:** `mertkaanakgunlu@gmail.com` (CLAUDE.md'nin userEmail'i).
-- **Zamanlama:** owner bu oturumda DURDURALIM dedi — Faz C (en riskli, gerçek yan etkili) taze bir
-  oturumda ele alınacak.
+Faz D'nin `VoiceState`'i yalnız `cli.py`'ye ulaşmıştı; `voice_api.py` (yerel wakeword/PTT loop) ve
+`api.py`'nin uzak `/ws` audio session'ı kendi `event_bus.state()` literal'lerini elle
+serpiştiriyordu — aynı state makinesi için iki ayrı sözleşme, reducer'ın öncelik kuralları
+(iki eksenin aynı anda canlı olması, `awaiting_confirmation`'ın rutin ilerlemeyi ezmesi) HUD'a hiç
+ulaşmıyordu.
 
-Plan dosyasının Faz C bölümü (armed-guardrail checklist, allowlist policy_guard'da, dedicated
-`calendar_target_id` parametrizasyonu, structured event/message ID, domain-specific postcondition
-kind'ları) hâlâ geçerli — hiçbir kod yazılmadı, yalnızca yukarıdaki 3 parametre netleşti.
+Üçü de artık oturum başına TEK bir `VoiceState` kuruyor ve onu `drive_voice_session` /
+`run_one_response` / `arm_and_speak_confirmation` / `resolve_confirmation`'a geçiriyor. HUD'un
+yayınlanmış wire sözlüğü (`listening|speaking|thinking|working|idle`, kaynak:
+`electron/src/renderer/src/hooks/useJarvisSocket.js`) dar olduğu için collapse TEK bir tabloda
+yapılıyor (`state.py`'nin `_HUD_STATE`'i) + `hud_state_emitter()` tekrarları bastırıyor.
+`awaiting_confirmation` bilinçli olarak `listening`'e eşleniyor (mikrofon gerçekten yes/no için
+açık; soruyu HUD zaten kendi confirmation overlay'inde gösteriyor) — wire sözlüğünü genişletmek
+canlı HUD E2E'si hiç yapılmamış bir Electron değişikliği gerektirirdi.
 
-### Test/lint (2026-07-24/25, bu oturumdaki her fazın SONUNDA ayrı ayrı koşuldu)
+### 3. `/voice-status` — telemetri artık gerçekten gözlemlenebilir
+
+Faz D sayaçları ÖLÇÜLEBİLİR yapmıştı ama hiçbir şey onları birleştirmiyordu; tek okuyucu, hiçbir
+şey olmadan önce bir kez çalışan 4 statik alanlık bir startup print'iydi. Yeni
+`jarvis/voice/diagnostics.py`: tek `VoiceDiagnosticsSnapshot` (cihazlar, örnekleme hızı, gerçek STT
+cihazı, mic RMS, queue depth, input status/overflow, output underrun, son turun VAD max/mean +
+turn-end reason + captured audio + stt_s, capture/response/display/hud_state) + süreç-içi canlı
+oturum kayıt defteri. İki yüzey aynı snapshot'ı okuyor, drift edemezler:
+
+- CLI: `--ptt` kapısında `/voice-status` yazın (sesli modun tek yazılı giriş noktası orası);
+  mikrofon açılmadan tablo basılır. Startup print'i de aynı snapshot'ın üstüne indi.
+- API: authenticated `GET /voice/status`. Oturum yoksa 200 + `session_active: false` (hata değil —
+  "ses çalışmıyor" başlı başına teşhis cevabıdır).
+
+Bunun için `RealtimeVoiceEngine` son tur metriklerini artık SAKLIYOR (`last_turn_metrics`) —
+eskiden yalnızca `TurnEnded`/`FinalTranscript` ile yayınlanıp kayboluyorlardı.
+
+**`input_overflow_count` semantiği düzeltildi** (incelemenin P1 sayaç bulgusu): PortAudio'nun
+`CallbackFlags`'i HERHANGİ bir durum bildirdiğinde truthy, dolayısıyla her truthy `status`'u
+overflow saymak ismin verdiği sözü abartıyordu. Artık iki sayaç: `input_status_count` (dürüst
+"PortAudio bir şey bildirdi") ve yalnız gerçek `status.input_overflow` sayan
+`input_overflow_count`.
+
+### 4. Alpha gate bütünlüğü — corpus artık pinlenmiş
+
+- **`tool_ok` eksikse artık `VERİ YOK`.** Eskiden `iso.get("tool_ok", iso_runs)` ile "eski format,
+  temiz varsay" deniyordu; `{"runs": 20, "leaks": []}` dosyası `file_list`'in hiç çalışıp
+  çalışmadığını gösteremez ve aracı hiç çağırmayan bir ajan zaten sızdıramaz — yani bayat bir dosya
+  hiç içermediği kanıtla yeşile dönüyordu.
+- **Yeni `docs/eval/gate_core_manifest.json`** (14 senaryo): `schema_version`, `corpus_version`,
+  `required_runs`/`required_isolation_runs`, `driver_commit` + her Gate Core senaryosu için hem
+  driver prompt'unun (lambda'nın kendi kaynağı) hem oracle `Expected`'ının SHA-256'sı, artı iki
+  toplam digest. Senaryo kümesi `alpha_gate.py`'nin satır sabitlerinden TÜRETİLİYOR, yeniden
+  listelenmiyor — gate'e sınıf eklemek senaryoyu pinlemeyi unutamaz.
+  `manifest --write` üretir, `manifest` doğrular, **`evaluate` bunu birinci sınıf gate satırı
+  olarak kontrol eder**: drift = `KALDI`, manifest yok/eski şema = `VERİ YOK`.
+- Yeni isolation özetleri `schema_version` + `driver_commit` damgası taşıyor.
+
+### 5. İki P2 daha kapatıldı
+
+- **`_latest_workflow_id()` determinizmi:** alt sınır saniye çözünürlüklü `time.strftime()`
+  karşılaştırmasıydı; aynı saniyede oluşan iki workflow ayırt edilemiyordu. Artık istekten ÖNCE
+  alınan audit log SATIR SAYISI (append-only dosyada saat çözünürlüğünden bağımsız olarak kesin).
+  Yeni `tests/test_driver_workflow_id.py`.
+- **Çıplak "Evet." xfail'i `strict=True` yapıldı:** yorumu "gelecekte düzelirse fark edilsin
+  (XPASS)" diyordu ama `strict=False` bunu ZORLAMIYORDU — non-strict bir XPASS koşuyu
+  düşürmez. **Bu, `voice_e2e` katmanında çalıştırılmamış bir sözleşme değişikliğidir** (gerçek
+  Whisper/Piper gerektirir, owner koşmalı).
+
+Yan etki olarak: `manual_test_driver.py`'nin import anında `sys.stdout`'u sarmalaması, pytest'in
+capture buffer'ının sahipliğini alıp GC'de kapattığı için onu import eden HER testi teardown'da
+"I/O operation on closed file" ile öldürüyordu. Rewrap artık koşullu (zaten UTF-8 ise atlanır) +
+`alpha_gate._load_driver()` ayrıca throwaway bir stdout gösteriyor.
+
+### 6. Self-review'de bulunan 2 kusur (owner talebiyle diff baştan gözden geçirildi)
+
+Yukarıdaki iş bittikten sonra owner review istedi; kendi diff'imde iki gerçek kusur çıktı, ikisi de
+düzeltildi ve regresyon testleri **düzeltme kaldırılarak kırmızı olduğu ölçülerek** doğrulandı:
+
+- **`None` dalı uçuşta olan önceki turu eziyordu (1. maddenin kendi regresyonu).** `result is None`
+  geldiğinde tur-sonu işlemi KOŞULSUZ uygulanıyordu; daha önceki bir `turn_task` hâlâ
+  çalışıyorsa response ekseni `idle` yapılıyordu (duyulabilir TTS'in üstüne "sessizlik") ve
+  `stop_after_first_turn` ile `turn_complete` dönülüp o tur `finally`'de İPTAL ediliyordu. Artık
+  `turn_task is None` guard'ı var; çalışan tur her ikisine de kendisi sahip.
+  Test: `test_a_synchronous_turn_does_not_cancel_an_in_flight_earlier_turn` (guard kaldırılınca
+  `finished == []` ile turun iptal edildiği ölçüldü).
+- **Kayıt yapmadan düşen remote `/ws` oturumu, yerel loop'un diagnostics kaydını siliyordu.**
+  `engine.load()` patlarsa `audio_io` set ama registration yapılmamış olur; `_stop_audio_session`
+  o durumda `restore_session(None)` çağırıp registry'yi temizliyordu — yerel loop kendini yalnız
+  bir kez kaydettiği için `/voice/status` süreç ömrü boyunca "oturum yok" derdi. Ayrı bir sentinel
+  ile "hiç kaydedilmedi" durumu `None`'dan ayrıldı.
+
+**Bu revizyonda kabul edilen, bilinçli sınırlar:** CLI `/voice-status` yalnız `--ptt` kapısında
+erişilebilir (sesli modda yazılı girişin tek noktası orası; `--wakeword` `ww_detector.listen`'de
+bloklu, düz `--voice`'ta hiç kapı yok) — sunucu tarafını `GET /voice/status` kapsıyor.
+`scenario_digests` `inspect.getsource(lambda)` kullandığı için çok satırlı bir lambda'da
+beklenenden fazla satır yakalayıp yanlış-pozitif drift üretebilir; anti-gaming kontrolü için
+güvenli yön bu.
+
+### Test/lint (2026-07-25, self-review düzeltmeleri dahil, bu oturumun sonunda)
 ```powershell
-python -m pytest -q         # her faz sonrası: 1338 → 1338 → 1338 → 1375 → 1389+5 deselected (voice_e2e)
-ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/alpha_gate.py scripts/ab_launch_server.py
-# her fazda: All checks passed!
+python -m pytest -q                      # 1454 passed, 5 deselected (voice_e2e), ~3.5 dk
+python -m ruff check jarvis scripts tests # All checks passed!
 ```
-Bir ara full-suite koşusunda 5 test (test_procedure_store/test_shell_workspace/test_todo_bg_analysis
-— hiçbiri bu oturumda dokunulan dosyalarla ilgili değil) geçici olarak başarısız oldu; izole
-çalıştırıldıklarında ve full-suite'in hemen sonraki tekrar koşusunda (aynı kod, 1375/1375) hepsi
-geçti — pre-existing full-suite-sırası kararsızlığı, bu oturumun değişiklikleriyle ilgisiz bir
-regresyon değil.
+Önceki oturuma göre +65 test (bu oturumda 4 yeni test dosyası + mevcutlara eklemeler).
+`voice_e2e` katmanı (5 test) koşulmadı — gerçek Whisper/Piper model cache'i gerektiriyor.
 
-### Owner'ın canlı doğrulanmasını bekleyen (bu ajan tetikleyemez)
-- Faz A: sesli onay dumanı ("Yarın 15.00'e test etkinliği ekle" → "Evet." → audit'te ilk
-  `user_approved` + `execution_end` + gerçek takvimde etkinlik + "Güle güle" çıkışı).
-- Faz E: `--ptt` modunun gerçek Enter-tuşu + gerçek mikrofonla interaktif geçişi.
-- Faz D/F'nin canlı mikrofon üzerinde gözlemlenmesi (state satırı, `/voice-status` benzeri
-  diagnostics, WAV-replay'in ima ettiği "sorun VAD/STT'de mi yoksa cihaz/PortAudio'da mı" ayrımı).
+### Commit durumu
 
-### Commit ve push durumu
+Bu oturumda **2 iş commit'i** (ses altsistemi remediation'ı; eval/gate bütünlüğü) ve bu kapanış
+HANDOFF commit'i. Kalıcı kural gereği bu kapanış commit'inin kendi SHA'sı/push/CI sonucu burada
+yazılmaz. Oturum sonunda **local == origin senkrondu**. Branch ucunun CI durumuna
+`gh run list --branch langgraph-migration` ile canlı bakın.
 
-Bu oturumda **6 iş commit'i** (B0→B1→B2→D→F→E, her biri kendi pytest+ruff doğrulamasıyla) + bu
-kapanış docs commit'i. Kalıcı kural gereği bu kapanış commit'inin kendi SHA'sı/CI'ı burada yok.
-Oturum sonunda **local, origin'in 6 iş commit'i + bu docs commit'i kadar ilerisindeydi — push
-EDİLMEDİ** (owner'dan push için ayrı bir istek gelmedi; git safety protokolü gereği push açık
-istek olmadan yapılmaz). Branch ucunun CI durumuna `gh run list --branch langgraph-migration`
-ile canlı bakın — bu commit'ler henüz push edilmediği için CI'a hiç girmediler.
+`.claude/settings.local.json` bilinçli olarak commit EDİLMEDİ — oturum-yerel izin listesi birikimi,
+bu işin parçası değil.
+
+### Kapsam dışı bırakılanlar (bilinçli, gizlenmedi)
+
+- **W18/R24 redesign (incelemenin 5. maddesi):** approval-pause/bağımlılık gerektiren, doğrudan
+  tool çağrılarıyla eşdeğer biçimde yapılamayacak bir workflow tasarımı — canlı model koşusu
+  gerektirir, bu ajan tetikleyemez. Alpha gate bu yüzden HÂLÂ `EKSİK VERİ`; bu oturum gate'in
+  ölçüm bütünlüğünü düzeltti, gate'i GEÇTİ'ye taşımadı.
+- **Corpus'u gerçek 40-60'a çıkarma (6. madde):** 31 tasarım ID'si / 27 wired turn olduğu gibi.
+- **Faz C (7. madde):** owner'ın önceki kararıyla erteli.
 
 ## SONRAKİ OTURUM — kalan iş (öncelik sırası)
 
-1. **Push kararı** — owner isterse bu 6+1 commit'i `origin/langgraph-migration`'a push edin,
-   `gh run list` ile CI'ı canlı doğrulayın.
-2. **Faz C** — gerçek Takvim/Gmail entegrasyon runner'ı. Yukarıdaki 3 parametre netleşti (mevcut
-   token'lar, runner-oluşturur takvim, self-send adresi); plan dosyasının Faz C bölümü (armed
-   guardrail, allowlist, structured ID, domain postcondition, teardown) hâlâ geçerli tasarım.
-   **En riskli faz — gerçek yan etki üretir, dikkatli ilerleyin.**
-3. **Alpha gate'i gerçekten GEÇTİ'ye taşımak** — B1 mekanizmayı kurdu ama owner'ın kendi
-   `ab_run_config.ps1 -Runs 10` + `alpha_gate.py isolation --runs 20` + `evaluate --runs 10`
-   koşusu hâlâ yapılmadı. Ayrıca W18/R24'ün workflow_start güvenilirlik boşluğu (aşağıya bakın)
-   kapanmadan bu iki satır de facto VERİ YOK kalır.
-4. **İki gerçek model-yeteneği bulgusu, owner'ın bilmesi gereken:**
-   - `workflow_start` canlı modelle güvenilir tetiklenmiyor (4 denemede hiç, açıkça isimlendirerek
-     bile) — `docs/eval/acceptance_matrix.md`'nin disposition notuna bakın.
-   - `plot_data` bazen çağrılmak yerine Python kodu gösteriyor (2/2 tekrarlandı, B6'da güvenilir
-     çalışırken) — `docs/eval/owner_extended_corpus.md`'ye bakın.
-5. Faz A + Faz E'nin owner tarafından canlı doğrulanması (yukarıya bakın).
+1. **Owner'ın canlı doğrulaması** (bu ajan tetikleyemez):
+   - `--ptt` gerçek Enter + gerçek mikrofonla: bir tur → Enter kapısına dönüş; ayrıca
+     "flash modeline geç" deyip kapının GERÇEKTEN geri geldiğini görmek (bu oturumun 1. bug'ı).
+   - `--ptt` kapısında `/voice-status` yazıp tablonun canlı sayaçları gösterdiği.
+   - Faz A: sesli onay dumanı (audit'te `user_approved` + `execution_end` + gerçek takvim etkinliği).
+2. **Alpha gate'i gerçekten GEÇTİ'ye taşımak** — `ab_run_config.ps1 -Runs 10` +
+   `alpha_gate.py isolation --runs 20` + `evaluate --runs 10`. **Ön koşul:** W18/R24'ün
+   `workflow_start` güvenilirlik boşluğu (`docs/eval/acceptance_matrix.md`'nin disposition notu).
+   Gate Core manifest'i corpus değişirse `manifest --write` ile yeniden mintlenmeli.
+3. **Faz C** — gerçek Takvim/Gmail entegrasyon runner'ı. 3 parametre netleşti (mevcut token'lar,
+   runner-oluşturur takvim, self-send adresi `mertkaanakgunlu@gmail.com`); plan dosyasının Faz C
+   bölümü hâlâ geçerli tasarım. **En riskli faz — gerçek yan etki üretir.**
+4. **İki gerçek model-yeteneği bulgusu (değişmedi):** `workflow_start` canlı modelle güvenilir
+   tetiklenmiyor (4/4 denemede hiç); `plot_data` bazen çağrılmak yerine Python kodu gösteriyor
+   (2/2, B6'da güvenilir çalışırken).
+5. **Owner Extended Corpus'u 40-60'a çıkarma.**
 6. Eski kalanlar (değişmedi): 4 worktree branch read-through (ayrı go-ahead bekliyor); Electron
    `npm audit` 8 advisory; mobile flutter-analyze; canlı HUD E2E (onay approve/deny tıklaması);
-   Alt+Space'in `/voice/ptt/start`'a Electron'da kablolanması (Faz E'de "gerekirse" olarak
-   ertelendi); wake-word modelinin neden yüklenmediği (openwakeword, düşük öncelik).
+   Alt+Space'in `/voice/ptt/start`'a Electron'da kablolanması; wake-word modelinin neden
+   yüklenmediği (openwakeword, düşük öncelik).
 
 ## Değişmeyen taşınan işler
 
