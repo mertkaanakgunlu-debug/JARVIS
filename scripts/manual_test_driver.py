@@ -35,7 +35,18 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+# Force UTF-8 on a legacy Windows console (the scenario prompts are Turkish;
+# a cp1254 stdout raises UnicodeEncodeError mid-run). Conditional, because
+# this module is ALSO imported for reading -- pytest reads TESTS/EXPECTED to
+# pin the Gate Core manifest, and there sys.stdout is pytest's capture
+# object: wrapping it hands ownership of pytest's own buffer to a wrapper
+# that closes it on garbage-collection, which kills every test in the
+# session at teardown with "I/O operation on closed file". Skipping when the
+# stream is already UTF-8 costs nothing (the rewrap would have been a no-op)
+# and removes the landmine.
+if (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "") != "utf8":
+    if getattr(sys.stdout, "buffer", None) is not None:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import eval_oracle as E  # sibling module (scripts/ is sys.path[0] when run as a script)
 
@@ -215,28 +226,43 @@ def get_workflow_status(workflow_id: str) -> dict | None:
         return None
 
 
-def _latest_workflow_id(since_ts: str) -> str | None:
-    """The most recent workflow_id recorded in audit_log.jsonl at/after
-    since_ts. NOT a regex on the chat response text -- live-verified (Faz
-    8, B1.2c) that the agent's final reply is the MODEL'S OWN natural-
-    language summary of workflow_start's tool result, never the raw
-    "[Workflow <id> -- <status>]" report text verbatim (that raw text only
-    ever reaches the model as a ToolMessage). Every _audit() event
-    (workflow_engine.py) carries workflow_id directly, so the audit log is
-    the correct structural source, not the response.
+def audit_log_len() -> int:
+    """Row count of audit_log.jsonl right now -- the lower bound
+    _latest_workflow_id() uses to scope its search to one turn."""
+    return len(load_audit_log())
 
-    since_ts bounds the search to THIS scenario's turn: audit_log.jsonl is
+
+def _latest_workflow_id(since_row: int) -> str | None:
+    """The workflow_id of the newest workflow appearing in audit_log.jsonl
+    AFTER row index since_row. NOT a regex on the chat response text --
+    live-verified (Faz 8, B1.2c) that the agent's final reply is the
+    MODEL'S OWN natural-language summary of workflow_start's tool result,
+    never the raw "[Workflow <id> -- <status>]" report text verbatim (that
+    raw text only ever reaches the model as a ToolMessage). Every _audit()
+    event (workflow_engine.py) carries workflow_id directly, so the audit
+    log is the correct structural source, not the response.
+
+    since_row bounds the search to THIS scenario's turn: audit_log.jsonl is
     genuinely append-only for the server's whole lifetime (never cleared
-    per-scenario, unlike tool_trace.jsonl) -- without a lower bound, a
+    per-scenario, unlike tool_trace.jsonl), so without a lower bound a
     workflow that was never triggered this turn (e.g. the model failed to
     call workflow_start at all) would silently match an EARLIER scenario's
-    workflow_id instead of honestly reporting "none found"."""
-    candidates = [(r.get("ts", ""), r["workflow_id"]) for r in load_audit_log()
-                  if r.get("workflow_id") and r.get("ts", "") >= since_ts]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda pair: pair[0])
-    return candidates[-1][1]
+    workflow_id instead of honestly reporting "none found".
+
+    A ROW OFFSET, not a timestamp (review finding, 2026-07-25): the bound
+    used to be time.strftime()'s second-resolution string compared with
+    `ts >= since`. Two workflows created inside the same wall-clock second
+    are indistinguishable to that comparison, so the scenario could be
+    scored against the wrong workflow's status and audit rows -- and, worse,
+    a workflow started in the same second by anything else sharing the
+    server would qualify. An append-only file's length taken before the
+    request is exact regardless of clock resolution.
+    """
+    rows = load_audit_log()[since_row:]
+    for row in reversed(rows):
+        if row.get("workflow_id"):
+            return row["workflow_id"]
+    return None
 
 
 def run_workflow_chat(test_id: str, message: str) -> dict:
@@ -251,7 +277,7 @@ def run_workflow_chat(test_id: str, message: str) -> dict:
     polling if the turn diverted async) the workflow has already run every
     ready step -- no separate polling/retry loop needed here for a
     workspace-only workflow."""
-    since = time.strftime("%Y-%m-%dT%H:%M:%S")
+    since = audit_log_len()
     entry = run_chat(test_id, message)
     workflow_id = _latest_workflow_id(since)
     if not workflow_id:

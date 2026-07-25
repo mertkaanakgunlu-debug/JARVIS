@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "corpus_version": "gate-core-v1",
+  "required_runs": 10,
+  "required_isolation_runs": 20,
+  "model_config": "qwen3-8b",
+  "driver_commit": "e5a46e301666950c7429c3c1271cd9809c4d276d",
+  "recorded_at": "2026-07-25T11:53:49",
+  "scenario_ids": [
+    "B4",
+    "B5a",
+    "B5b",
+    "B6",
+    "C9",
+    "D10",
+    "D11",
+    "D12",
+    "D13b",
+    "R20",
+    "R21",
+    "R23",
+    "R24",
+    "W18"
+  ],
+  "scenarios": {
+    "B4": {
+      "prompt": "721fd2be10688360118769eee51c77870d9528f7ea5d682577120afc7fa70278",
+      "expected": "08dc39c401a09729d0f14b1918c3856a11116ebcf01142d349f06b1323b377f7"
+    },
+    "B5a": {
+      "prompt": "fd5315308663518d4342a1617e059043038d8bc8172d5cea38e521525e31c767",
+      "expected": "678221b3b856a10e0d4a08a69cf29807b7eac3e40c82df41ab4211d9c5de8d35"
+    },
+    "B5b": {
+      "prompt": "5c20d624f8c00f44f5323f18c0a6713da91a7a8cdb68e1f4243303a9ba9a06f1",
+      "expected": "c9a272612c56eeb73b01f8562822e34ece45e0c5248c6e5a7d32f33b908b4c44"
+    },
+    "B6": {
+      "prompt": "f43d74bd8668375c6d26f0261d1a2d0469f971743386b75f2c4c834f8e108f71",
+      "expected": "2bc3743cd29bccfcaa744e8155ba592e842927ca409818a02b91a3e6d314b217"
+    },
+    "C9": {
+      "prompt": "fe04cce382f0327a2015f11bf8f8ccde1e06725f9cae567e569c77bc6df1f242",
+      "expected": "221fe24393492b3f1c7ab1e17d495428d2b131dcee7858a43235e0b632ca48c8"
+    },
+    "D10": {
+      "prompt": "2409999b79762aeb46725228d7f005ef4bf294bc2741fa37dadb5a529ca482f7",
+      "expected": "551fde3b6332529c6596912392a45dcf0bc0e601a7719a97b9fc245adae0c2a2"
+    },
+    "D11": {
+      "prompt": "edf1eb012208fb105490c3c52c5562ee4342f2cbb2d0830111a0d8646f893f8f",
+      "expected": "6d3e7e142b8aa437be9f98b597040f03e5d2ab63a9727d4131afd627ba0546cf"
+    },
+    "D12": {
+      "prompt": "39d93041f403d486e327cf89b352f3c98ad61bb124df5706865937d6ee3373b9",
+      "expected": "78bb52d587d8e70a483e854069d61e711944d6188c87ceb829572a7592bd3cc9"
+    },
+    "D13b": {
+      "prompt": "7429693b2a7a0e5658c11708c43d0a11301f4043de670e97fe8d76f3fccfcd59",
+      "expected": "68d22e4f8814f29da649178e30831c96f9aba6567f7d486e65858d553ee5d768"
+    },
+    "R20": {
+      "prompt": "4cfff76290a5368026a2bbd3b47dfedee02f43ed83c7b9cbe038efb3a0cb98ae",
+      "expected": "077c90de654ef42b03245e039aac59a216c278dceee8301b0fad5c840f831eff"
+    },
+    "R21": {
+      "prompt": "f90389cd82b6a246d63f9f70359924c179bb012e1676500ec3054fcaf94bcfc2",
+      "expected": "7a4d8ef2d4b9d70e9e57ac9a05209bf7ec9cc6137b4d8f0075e730d87843c812"
+    },
+    "R23": {
+      "prompt": "81ebc0153f5bfbdbaeff89538661bd36eba9839fa0f45952b9abcef76a8a148b",
+      "expected": "368a714e4ea2f205194bace4dc7de99949a759617390cd944c0a2dd4ed7dd8cf"
+    },
+    "R24": {
+      "prompt": "8fb6424218b77a9401d70c162fbe7e0c71094845a17407e2cc25c51c1a759c82",
+      "expected": "8097cae6a2293de6413dd046ee5dbfd91467c222d61bb781b2f8fb76704d06d6"
+    },
+    "W18": {
+      "prompt": "08975d61f56aa6983bc44785539ebc83d9f4e26a1e9e1b965be4e8bde148a362",
+      "expected": "656014e282366dab5c24bb7c51a1821fe73337db8826f651f585817c3945b7db"
+    }
+  },
+  "prompts_sha256": "85fb19cd54cf61356e30eb1bd5b320e31206170e179dfa3099c9e4fd143c2472",
+  "expected_sha256": "c9675aef073eb171a17cadc6c63103e2f9907a1a929b017b48415076b22eecf3"
+}

@@ -35,8 +35,16 @@ def _stub_mechanism_ok(node_ids: list) -> bool:  # noqa: ARG001 -- signature mat
     return True
 
 
-def _gate_rows(d: dict, iso: dict | None, mechanism_check=_stub_mechanism_ok):
-    return G.gate_rows(d, iso, mechanism_check=mechanism_check)
+# Built from the LIVE driver/oracle, so the Gate Core drift row is green for
+# every test that isn't specifically about drift -- those tests are about
+# scoring, and a stale-manifest VERI YOK in every one of them would just be
+# noise. The drift row has its own dedicated tests further down.
+_PINNED_MANIFEST = G.build_manifest("test")
+
+
+def _gate_rows(d: dict, iso: dict | None, mechanism_check=_stub_mechanism_ok,
+               manifest: dict | None = _PINNED_MANIFEST):
+    return G.gate_rows(d, iso, mechanism_check=mechanism_check, manifest=manifest)
 
 
 def _d(oracle: dict | None = None, classes: dict | None = None,
@@ -95,7 +103,10 @@ def test_a_fully_green_10_run_set_still_lacks_data_for_uncovered_classes():
 
 def test_the_gate_passes_only_when_every_row_has_data_and_passes():
     d = _all_green()
-    iso = {"runs": 20, "leaks": []}
+    # tool_ok present: this test is about which rows lack SCENARIO coverage,
+    # so the isolation row must be genuinely measured rather than the
+    # separate "stale result file" case (covered by its own test below).
+    iso = {"runs": 20, "tool_ok": 20, "leaks": []}
     rows = _gate_rows(d, iso)
     # Faz 8: the 3 mechanism rows are stubbed green (their own correctness
     # is pinned by their dedicated test files), so the only rows still
@@ -196,12 +207,24 @@ def test_isolation_with_no_leaks_but_the_tool_never_actually_running_still_fails
     assert _row(rows, "Cross-run izolasyon")[3] is False
 
 
-def test_isolation_missing_tool_ok_field_is_backward_compatible():
-    """An older recorded alpha_iso.json (pre-fix) has no tool_ok key at all
-    -- must not crash, and is treated as clean (the field simply didn't
-    exist yet, same convention as ab_analyze's semantic_reasons handling)."""
+def test_isolation_missing_tool_ok_field_is_veri_yok_not_an_assumed_pass():
+    """Review finding (2026-07-25). An older recorded alpha_iso.json has no
+    tool_ok key, and this used to default it to runs -- "assume clean". But
+    {"runs": 20, "leaks": []} cannot show whether file_list ever actually
+    ran, and an agent that never called the tool cannot leak anything
+    either, so that default turned a stale file into a green row on
+    evidence it never contained. Unmeasured is VERI YOK."""
     rows = _gate_rows(_all_green(), iso={"runs": 20, "leaks": []})
-    assert _row(rows, "Cross-run izolasyon")[3] is True
+    row = _row(rows, "Cross-run izolasyon")
+    assert row[3] is None
+    assert "VERI YOK" in row[2] and "tool_ok" in row[2]
+
+
+def test_a_stale_isolation_file_cannot_produce_a_gecti():
+    """The property that matters: the whole gate must not read green off a
+    result file recorded by an older harness."""
+    rows = _gate_rows(_all_green_full(), iso={"runs": 20, "leaks": []})
+    assert G.verdict_of(rows) == "EKSIK VERI"
 
 
 def test_isolation_verdict_ok_is_the_single_source_of_truth():
@@ -380,3 +403,110 @@ def test_evaluate_returns_kaldi_exit_code_on_a_failing_scenario(tmp_path):
         _write_run_file(res, "champ", r, rows)
     rc = G.evaluate([str(tmp_path), "champ", "--runs", "10"], mechanism_check=_stub_mechanism_ok)
     assert rc == G.EXIT_KALDI
+
+
+# ── Gate Core manifest (frozen-corpus fingerprint) ──────────────────────────
+#
+# Review finding (2026-07-25): nothing tied a GECTI to the scenarios that
+# produced it. A prompt quietly reworded until the model passes, an Expected
+# loosened, a scenario dropped -- all produced an identical-looking green
+# table, so two gate results were not soundly comparable across time.
+
+def test_the_live_corpus_matches_the_committed_manifest():
+    """The committed docs/eval/gate_core_manifest.json must describe the
+    driver as it stands. If this fails, either the corpus drifted (rerun the
+    gate and re-mint) or someone edited a gate prompt without re-pinning."""
+    committed = G.load_manifest()
+    assert committed is not None, "docs/eval/gate_core_manifest.json is missing"
+    label, target, observed, ok = G.manifest_row(committed)
+    assert ok is True, observed
+
+
+def test_an_unpinned_gate_reports_veri_yok_not_a_pass():
+    label, target, observed, ok = G.manifest_row(None)
+    assert ok is None
+    assert "VERI YOK" in observed
+
+
+def test_an_unpinned_gate_cannot_produce_a_gecti():
+    rows = _gate_rows(_all_green_full(), iso={"runs": 20, "tool_ok": 20, "leaks": []},
+                      manifest=None)
+    assert G.verdict_of(rows) == "EKSIK VERI"
+
+
+def test_a_reworded_prompt_is_detected_as_drift():
+    """The scenario this whole mechanism exists for: silently changing a
+    gate prompt must fail the gate, not pass it more easily."""
+    tampered = G.build_manifest("test")
+    tampered["scenarios"]["B4"]["prompt"] = "0" * 64
+    tampered["prompts_sha256"] = "0" * 64
+
+    label, target, observed, ok = G.manifest_row(tampered)
+    assert ok is False
+    assert "B4" in observed
+
+
+def test_a_loosened_expected_is_detected_as_drift():
+    tampered = G.build_manifest("test")
+    tampered["scenarios"]["B5b"]["expected"] = "0" * 64
+    tampered["expected_sha256"] = "0" * 64
+
+    label, target, observed, ok = G.manifest_row(tampered)
+    assert ok is False
+    assert "B5b" in observed
+
+
+def test_a_dropped_scenario_is_detected_as_drift():
+    tampered = G.build_manifest("test")
+    tampered["scenario_ids"] = [i for i in tampered["scenario_ids"] if i != "W18"]
+
+    label, target, observed, ok = G.manifest_row(tampered)
+    assert ok is False
+    assert "W18" in observed
+
+
+def test_drift_fails_the_whole_gate_even_when_every_score_is_green():
+    tampered = G.build_manifest("test")
+    tampered["prompts_sha256"] = "0" * 64
+    rows = _gate_rows(_all_green_full(), iso={"runs": 20, "tool_ok": 20, "leaks": []},
+                      manifest=tampered)
+    assert G.verdict_of(rows) == "KALDI"
+
+
+def test_an_older_manifest_schema_is_veri_yok_not_silently_compared():
+    stale = G.build_manifest("test")
+    stale["schema_version"] = G.MANIFEST_SCHEMA_VERSION - 1
+
+    label, target, observed, ok = G.manifest_row(stale)
+    assert ok is None
+    assert "schema_version" in observed
+
+
+def test_the_manifest_pins_every_scenario_the_rows_score():
+    """Derived from the row constants, not re-listed -- so adding a class to
+    the gate cannot forget to pin its scenario."""
+    ids = set(G.gate_core_scenarios())
+    for expected in (G.READ_ONLY, G.SIDE_EFFECT, G.WORKFLOW_E2E,
+                     G.RECOVERY_EXECUTION_FAILURE, G.RECOVERY_CLARIFICATION,
+                     G.RECOVERY_POSTCONDITION_UNVERIFIED,
+                     G.RECOVERY_WORKFLOW_STEP_FAILURE):
+        assert expected in ids
+    assert set(G.ARTIFACTS) <= ids
+    assert set(G.MULTI_TOOL_PAIR) <= ids
+    assert set(G.BLOCK_FAMILY) <= ids
+
+
+def test_a_missing_driver_scenario_digests_as_absent_not_as_unchanged():
+    """A scenario vanishing from the driver is drift, and must not read as
+    "unchanged" just because there is nothing left to hash."""
+    class _Driver:
+        TESTS: dict = {}
+        EXPECTED: dict = {}
+
+    digests = G.scenario_digests(driver=_Driver(), oracle={})
+    live = G.gate_core_fingerprint()
+    assert digests["B4"]["prompt"] != live["scenarios"]["B4"]["prompt"]
+
+
+def test_manifest_digests_are_stable_across_calls():
+    assert G.gate_core_fingerprint()["prompts_sha256"] == G.gate_core_fingerprint()["prompts_sha256"]
