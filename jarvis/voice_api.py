@@ -71,9 +71,27 @@ async def _wait_for_activation(ww_detector, wakeword: bool, loop: asyncio.Abstra
     return False
 
 
+def _set_response(state, value: str) -> None:
+    """Move the response axis, whether or not this caller wired a reducer.
+
+    Transport-parity review finding (2026-07-25): Faz D's VoiceState reached
+    only cli.py, so this module and api.py's /ws session kept hand-picking
+    event_bus.state() literals at each call site -- two transports, two
+    different state contracts, and no way for the HUD to see the reducer's
+    priority rules (a capture axis and a response axis being simultaneously
+    active, awaiting_confirmation outranking routine progress). Both callers
+    now pass a VoiceState; the event_bus fallback stays only so a state-less
+    caller still produces wire frames instead of silently going dark.
+    """
+    if state is not None:
+        state.set_response(value)
+    else:
+        event_bus.state(value)
+
+
 async def run_one_response(
     agent, engine, text: str, lang: str,
-    transport: str = "voice-local", set_pending_confirmation=None,
+    transport: str = "voice-local", set_pending_confirmation=None, state=None,
 ) -> None:
     """One turn's response, as a cancellable task (see jarvis/voice/session.py) —
     a BargeIn event interrupts this mid-flight. Public (no leading underscore):
@@ -96,7 +114,7 @@ async def run_one_response(
     from jarvis.voice.session import parse_confirm_marker, arm_and_speak_confirmation
 
     event_bus.message("u", text)
-    event_bus.state("thinking")
+    _set_response(state, "thinking")
 
     executor = getattr(agent, "_task_executor", None)
     if executor is not None and executor.should_async(text):
@@ -106,7 +124,7 @@ async def run_one_response(
             "This will take a moment -- I'm working on it in the background and will let "
             "you know when it's done."
         )
-        event_bus.state("speaking")
+        _set_response(state, "speaking")
 
         async def _ack_stream(t=ack):
             yield t
@@ -133,7 +151,7 @@ async def run_one_response(
             response_chunks.append(token)
             yield token
 
-    event_bus.state("speaking")
+    _set_response(state, "speaking")
     try:
         await engine.speak_stream(_collecting_stream(), lang=lang)
     except Exception as exc:
@@ -148,6 +166,7 @@ async def run_one_response(
                 engine, confirm_marker, lang,
                 set_pending_confirmation=set_pending_confirmation,
                 on_message=lambda q: event_bus.message("j", q),
+                state=state,
             )
         except Exception as exc:
             logger.error("[voice] confirmation prompt TTS error: %s", exc, exc_info=True)
@@ -192,6 +211,7 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
         from jarvis.voice.io_duplex import DuplexAudioIO
         from jarvis.voice.wakeword import WakewordDetector
         from jarvis.voice.session import drive_voice_session, resolve_confirmation
+        from jarvis.voice.state import VoiceState, hud_state_emitter
     except ImportError as exc:
         logger.warning("[voice] Dependencies unavailable (%s) — voice disabled.", exc)
         return
@@ -228,6 +248,19 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
 
     pending_confirmation = None
 
+    # Transport parity (2026-07-25): ONE reducer per loop, exactly like
+    # cli.py's --voice session. drive_voice_session() drives its capture
+    # axis, run_one_response()/arm_and_speak_confirmation()/
+    # resolve_confirmation() drive its response axis, and hud_state_emitter
+    # turns each real change into a single {"type":"state"} frame -- so the
+    # HUD sees the same state machine the CLI does instead of this module's
+    # former hand-placed literals.
+    voice_state = VoiceState(on_change=hud_state_emitter(event_bus.state))
+
+    # Make this loop's engine/reducer readable by GET /voice/status.
+    from jarvis.voice.diagnostics import register_session
+    register_session(engine, voice_state)
+
     def _set_pending(p) -> None:
         nonlocal pending_confirmation
         pending_confirmation = p
@@ -260,16 +293,15 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
                     on_message=lambda full: event_bus.message("j", full),
                     set_pending_confirmation=_set_pending,
                     pre_claimed=claimed,
+                    state=voice_state,
                 )
             # Resolved elsewhere or TTL-evicted -- treat this utterance as a
             # brand-new turn, falling through below.
 
         return run_one_response(
-            agent, engine, text, lang, transport="voice-local", set_pending_confirmation=_set_pending,
+            agent, engine, text, lang, transport="voice-local",
+            set_pending_confirmation=_set_pending, state=voice_state,
         )
-
-    def _on_barge_in() -> None:
-        event_bus.state("listening")
 
     while True:
         try:
@@ -292,18 +324,21 @@ async def _voice_loop(agent, settings, wakeword: bool) -> None:
                 await asyncio.sleep(0.5)
                 continue
 
-            event_bus.state("listening")
             await engine.start()
             try:
+                # No hand-placed listening/idle frames around this any more:
+                # drive_voice_session() sets capture on entry and back to
+                # idle on exit, and voice_state's emitter turns each real
+                # change into one wire frame (including the barge-in
+                # transition the old _on_barge_in callback used to publish).
                 await drive_voice_session(
                     engine, _handle_transcript,
-                    on_barge_in=_on_barge_in,
+                    state=voice_state,
                     stop_after_first_turn=True,
                 )
             finally:
                 await engine.stop()
                 release(LOCAL_OWNER)
-            event_bus.state("idle")
 
         except asyncio.CancelledError:
             event_bus.state("idle")

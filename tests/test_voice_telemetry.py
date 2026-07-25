@@ -79,28 +79,56 @@ def test_output_callback_does_not_increment_when_fully_supplied():
     assert io.underrun_count == 0
 
 
-def test_input_overflow_count_starts_at_zero():
-    assert _io().input_overflow_count == 0
+class _Flags:
+    """Stand-in for sounddevice.CallbackFlags: truthy whenever PortAudio
+    reported anything, with a separate input_overflow attribute for the
+    specific condition that means microphone audio was actually dropped."""
+
+    def __init__(self, *, input_overflow: bool = False, other: bool = False):
+        self.input_overflow = input_overflow
+        self._truthy = input_overflow or other
+
+    def __bool__(self) -> bool:
+        return self._truthy
 
 
-def test_input_callback_increments_overflow_count_on_a_real_status():
+def test_input_status_and_overflow_counts_start_at_zero():
+    io = _io()
+    assert io.input_status_count == 0
+    assert io.input_overflow_count == 0
+
+
+def test_a_real_input_overflow_increments_both_counters():
     io = _io()
     indata = np.zeros((512, 1), dtype=np.float32)
-    io._input_callback(indata, 512, None, "input overflow")
+    io._input_callback(indata, 512, None, _Flags(input_overflow=True))
+    assert io.input_status_count == 1
     assert io.input_overflow_count == 1
+
+
+def test_a_non_overflow_status_counts_as_status_but_not_as_overflow():
+    """The review finding: CallbackFlags is truthy for ANY reported
+    condition (e.g. a priming/output flag), so counting every truthy status
+    as an input overflow overstated the specific failure the name promises."""
+    io = _io()
+    indata = np.zeros((512, 1), dtype=np.float32)
+    io._input_callback(indata, 512, None, _Flags(other=True))
+    assert io.input_status_count == 1
+    assert io.input_overflow_count == 0
 
 
 def test_input_callback_does_not_increment_on_a_clean_status():
     io = _io()
     indata = np.zeros((512, 1), dtype=np.float32)
     io._input_callback(indata, 512, None, None)
+    assert io.input_status_count == 0
     assert io.input_overflow_count == 0
 
 
 def test_input_callback_still_queues_the_frame_regardless_of_status():
     io = _io()
     indata = np.full((4, 1), 3.0, dtype=np.float32)
-    io._input_callback(indata, 4, None, "overflow")
+    io._input_callback(indata, 4, None, _Flags(input_overflow=True))
     assert io.queue_depth() == 1
     frame = io._mic_queue.get_nowait()
     assert np.all(frame == 3.0)

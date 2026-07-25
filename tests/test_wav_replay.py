@@ -256,3 +256,44 @@ async def test_stt_receives_the_exact_accumulated_speech_buffer():
     # silence appended after it (the silence is what triggers the turn-end,
     # not part of the "utterance").
     assert stt.calls[0].size >= 10 * ENGINE_FRAME_SAMPLES
+
+
+# ── Retained per-turn metrics (feeds /voice-status) ─────────────────────────
+
+async def _engine_after_replay(audio_io, fake_vad, fake_stt):
+    """Same as _drive_to_completion but hands back the ENGINE, so a test can
+    inspect what it retained rather than only what it yielded."""
+    from jarvis.config import Settings
+
+    models = VoiceModels(vad=fake_vad, stt=fake_stt, tts=None)
+    engine = RealtimeVoiceEngine(audio_io, Settings(_env_file=None), models=models)
+    await engine.load()
+    [e async for e in engine.events()]
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_the_engine_retains_the_last_turn_metrics_it_yielded():
+    """TurnEnded/FinalTranscript carry these numbers to whoever consumes
+    events() at that instant and are then gone, so "how did the last turn
+    actually go?" had nothing to read. jarvis/voice/diagnostics.py (the
+    /voice-status surfaces) reads them from here."""
+    engine = await _engine_after_replay(
+        WavAudioIO(_speech_then_silence(), trailing_silence_s=1.6), _FakeVAD(), _FakeStt(),
+    )
+
+    m = engine.last_turn_metrics
+    assert m["turn_end_reason"] == "silence"
+    assert m["captured_audio_duration_s"] > 0
+    assert m["vad_prob_max"] == 1.0
+    assert 0.0 < m["vad_prob_mean"] <= 1.0
+    assert m["stt_s"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_metrics_start_empty_and_stay_empty_when_no_turn_happens():
+    engine = await _engine_after_replay(
+        WavAudioIO(np.zeros(ENGINE_FRAME_SAMPLES * 20, dtype=np.float32), trailing_silence_s=0.0),
+        _FakeVAD(), _FakeStt(),
+    )
+    assert engine.last_turn_metrics == {}

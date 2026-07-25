@@ -393,11 +393,24 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
     audio_io = None
     audio_task: "asyncio.Task | None" = None
     pending_confirmation = None  # Faz 4 / BUG-4 — see jarvis/voice/session.py
+    # GET /voice/status reporter displaced by this session. A distinct
+    # sentinel, not None: a session that failed BEFORE registering (e.g.
+    # engine.load() raised) still reaches _stop_audio_session with audio_io
+    # set, and restoring a plain None there would clear the LOCAL loop's
+    # registration -- which registers once at startup and would then never
+    # re-register, leaving /voice/status reporting "no session" for the rest
+    # of the process's life while one is running.
+    _voice_diag_unregistered = object()
+    previous_voice_diag = _voice_diag_unregistered
 
     async def _stop_audio_session(reason: str) -> None:
-        nonlocal audio_io, audio_task
+        nonlocal audio_io, audio_task, previous_voice_diag
         if audio_io is None and audio_task is None:
             return
+        if previous_voice_diag is not _voice_diag_unregistered:
+            from jarvis.voice.diagnostics import restore_session
+            restore_session(previous_voice_diag)
+            previous_voice_diag = _voice_diag_unregistered
         from jarvis.voice.session_manager import release
         from jarvis.voice_api import resume_local_voice
 
@@ -460,6 +473,7 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
         from jarvis.voice.io_remote_ws import RemoteWsAudioIO
         from jarvis.voice.engine import RealtimeVoiceEngine, get_shared_voice_models
         from jarvis.voice.session import drive_voice_session, resolve_confirmation
+        from jarvis.voice.state import VoiceState, hud_state_emitter
         from jarvis.voice_api import pause_local_voice, run_one_response
 
         # Electron's main process always spawns the backend with --wakeword
@@ -476,6 +490,21 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
         def _set_pending(p) -> None:
             nonlocal pending_confirmation
             pending_confirmation = p
+
+        # Transport parity (2026-07-25): the remote /ws session gets the same
+        # single reducer per session as cli.py's --voice loop and
+        # voice_api.py's local loop -- see jarvis/voice/state.py. This was the
+        # third transport left driving the HUD from ad-hoc per-site literals.
+        voice_state = VoiceState(on_change=hud_state_emitter(event_bus.state))
+
+        # A remote session takes over reporting for GET /voice/status while
+        # it runs (the local loop is paused above, so there is no contest),
+        # and _stop_audio_session hands reporting back to whatever was
+        # registered before -- normally the local loop, which is still
+        # running underneath, merely paused.
+        from jarvis.voice.diagnostics import register_session as _register_voice_session
+        nonlocal previous_voice_diag
+        previous_voice_diag = _register_voice_session(engine, voice_state)
 
         async def _handle_transcript(text: str, lang: str):
             nonlocal pending_confirmation
@@ -499,15 +528,17 @@ async def ws_endpoint(websocket: WebSocket, token: str | None = None):
                         on_message=lambda full: event_bus.message("j", full),
                         set_pending_confirmation=_set_pending,
                         pre_claimed=claimed,
+                        state=voice_state,
                     )
                 # Resolved elsewhere or TTL-evicted -- fall through as a new turn.
             return run_one_response(
-                agent, engine, text, lang, transport="voice-remote", set_pending_confirmation=_set_pending,
+                agent, engine, text, lang, transport="voice-remote",
+                set_pending_confirmation=_set_pending, state=voice_state,
             )
 
         async def _run_session() -> None:
             try:
-                await drive_voice_session(engine, _handle_transcript)
+                await drive_voice_session(engine, _handle_transcript, state=voice_state)
             except Exception as exc:
                 logger.error("[voice] remote audio session error: %s", exc, exc_info=True)
             finally:
@@ -564,6 +595,26 @@ async def voice_ptt_start(request: Request):
     if not ok:
         raise HTTPException(status_code=503, detail="Voice loop not running")
     return {"ok": True}
+
+
+@app.get("/voice/status")
+async def voice_status(request: Request):
+    """Live voice diagnostics — the observable half of Faz D's telemetry.
+
+    Faz D added the counters (queue depth, input status/overflow, output
+    underruns, per-turn VAD probabilities, the device Whisper really loaded
+    onto) but exposed none of them: the only reader was a four-line CLI
+    print at startup, before anything had happened. This serves the exact
+    same jarvis.voice.diagnostics snapshot the CLI's /voice-status renders,
+    so the two surfaces cannot drift.
+
+    200 with session_active=False when no voice session is running in this
+    process — "voice isn't running" is a diagnostic answer, not an error,
+    and a HUD polling this shouldn't have to treat it as a failure.
+    """
+    _check_auth(request)
+    from jarvis.voice.diagnostics import current_snapshot
+    return current_snapshot().to_dict()
 
 
 @app.post("/voice/local/pause")

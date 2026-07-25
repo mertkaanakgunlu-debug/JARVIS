@@ -83,8 +83,13 @@ async def test_evet_onayliyorum_is_transcribed_and_recognized_as_affirmative(rea
            "sentence context ('Evet, onaylıyorum.', tested above) is "
            "reliable. Kept as an honest xfail rather than deleted so a "
            "future STT/VAD change that fixes this is noticed (XPASS), not "
-           "silently re-broken later.",
-    strict=False,
+           "silently re-broken later. strict=True (review finding, "
+           "2026-07-25): non-strict, that stated intent was not actually "
+           "enforced -- a non-strict XPASS does not fail the run, so a fix "
+           "would have passed unnoticed and the xfail would have sat here "
+           "indefinitely, ready to mask a later re-break. Strict makes the "
+           "fix an explicit, actionable failure: delete the marker.",
+    strict=True,
 )
 async def test_bare_evet_word_is_a_known_unreliable_short_utterance(real_models):
     models, settings = real_models

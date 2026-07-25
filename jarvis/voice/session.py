@@ -268,15 +268,27 @@ async def drive_voice_session(
     on_transcript(text, lang) is awaited for each FinalTranscript with non-blank
     text. Its return value controls what happens next:
       - STOP_SESSION       -> end the session now, return "exit"
-      - None               -> nothing to track (e.g. it already spoke a quick
-                               synchronous confirmation itself) -- keep going
+      - None               -> the callback ALREADY finished this turn
+                               synchronously (it awaited its own speak_stream
+                               before returning, e.g. cli.py's model-switch
+                               branch) -- there is no task to track, so the
+                               turn is over the moment it returns
       - a coroutine object -> wrapped in a cancellable task tracked as "the
                                current turn"; a later BargeIn cancels it
 
-    stop_after_first_turn: return "turn_complete" as soon as one turn's tracked
-    coroutine finishes naturally (not via barge-in) -- used by wakeword mode,
-    where the caller wants to re-gate on the wake phrase between turns rather
-    than keep listening indefinitely.
+    stop_after_first_turn: return "turn_complete" as soon as one turn finishes
+    naturally (not via barge-in) -- used by wakeword and PTT mode, where the
+    caller wants to re-gate on the wake phrase / the next Enter press between
+    turns rather than keep listening indefinitely.
+
+    Review remediation (2026-07-25): "one turn finishes" originally meant ONLY
+    a tracked coroutine completing, so a callback that handled the utterance
+    synchronously and returned None never satisfied stop_after_first_turn --
+    the session kept running with the mic open and never returned to the
+    caller's gate. Live-reachable in --ptt: "flash modeline geç" takes cli.py's
+    _detect_model_switch branch, which speaks its own confirmation and returns
+    None, so the press-Enter gate was never re-armed for the next utterance.
+    A synchronous turn now completes the session the same as a tracked one.
 
     state (Faz D): the caller CONSTRUCTS and owns this jarvis.voice.state.
     VoiceState instance (with its own on_change callback already attached)
@@ -333,12 +345,43 @@ async def drive_voice_session(
                     if not event.text.strip():
                         continue
                     if state is not None:
-                        state.set_capture("listening")  # capture done; back to baseline
+                        # Response BEFORE capture, deliberately. Both orders
+                        # end at the same pair, but going capture-first passes
+                        # through (listening, idle) for one notification --
+                        # which collapses to a wire "listening" frame between
+                        # the STT "thinking" and the turn's own "thinking",
+                        # i.e. a visible one-frame flicker on the HUD orb the
+                        # instant transcription completes. Response-first
+                        # passes through (transcribing, thinking) instead,
+                        # whose display still resolves to transcribing -- the
+                        # same wire value as before, so nothing is emitted.
                         state.set_response("thinking")
+                        state.set_capture("listening")  # capture done; back to baseline
                     result = await on_transcript(event.text, event.lang)
                     if result is STOP_SESSION:
                         return "exit"
-                    if result is not None:
+                    if result is None:
+                        # Synchronously-completed turn (see the docstring): the
+                        # callback already spoke whatever it had to before
+                        # returning, so apply the exact same end-of-turn
+                        # handling a tracked turn_task gets above -- including
+                        # the awaiting_confirmation carve-out, since a
+                        # synchronous branch can arm a confirmation too.
+                        #
+                        # ...but only when nothing else is in flight. An
+                        # EARLIER turn_task still running owns both the
+                        # response axis (it is mid-speak_stream) and the
+                        # session's completion; claiming "idle" on its behalf
+                        # would report silence over audible TTS, and returning
+                        # "turn_complete" would cancel it outright via the
+                        # finally below. Leave both to that turn's own
+                        # completion branch, which handles them correctly.
+                        if turn_task is None:
+                            if state is not None and state.response != "awaiting_confirmation":
+                                state.set_response("idle")
+                            if stop_after_first_turn:
+                                return "turn_complete"
+                    else:
                         if turn_task is not None and not turn_task.done():
                             turn_task.cancel()
                         turn_task = asyncio.ensure_future(result)
@@ -369,3 +412,21 @@ async def drive_voice_session(
     finally:
         await _dispose_task(turn_task)
         await _dispose_task(next_event_task)
+        # Review remediation (2026-07-25): every caller calls engine.stop()
+        # immediately after this returns, so leaving capture on "listening"
+        # (set on entry, never cleared) meant the reducer claimed a mic that
+        # is physically closed -- most visibly at the --ptt/--wakeword gate,
+        # which sits between turns showing "listening" while it waits for
+        # Enter / the wake phrase. The session is over here by definition;
+        # both axes go back to baseline.
+        #
+        # awaiting_confirmation is the one response state that legitimately
+        # OUTLIVES the session: wakeword/PTT mode returns "turn_complete"
+        # between turns while a question is still unanswered, and the caller's
+        # pending_confirmation survives across drive_voice_session() calls to
+        # be resolved by the next utterance. Same carve-out as the two
+        # end-of-turn resets above.
+        if state is not None:
+            state.set_capture("idle")
+            if state.response != "awaiting_confirmation":
+                state.set_response("idle")

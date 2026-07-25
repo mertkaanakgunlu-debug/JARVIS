@@ -32,6 +32,31 @@ _DISPLAY_PRIORITY: tuple[str, ...] = (
     "thinking", "speaking", "listening",
 )
 
+# The HUD/WS wire vocabulary is narrower than this reducer's own, and is a
+# published contract: electron/src/renderer/src/hooks/useJarvisSocket.js
+# documents {type:"state", value:"listening"|"speaking"|"thinking"|"working"
+# |"idle"}, and the renderer's orb animations switch on exactly those
+# strings. So the collapse to it happens HERE, in one table, rather than
+# each transport hand-picking its own event_bus.state() literals at each
+# call site (what voice_api.py/api.py did before this reducer reached them
+# -- the drift the transport-parity review finding was about).
+#
+# awaiting_confirmation maps to "listening" deliberately: the mic really is
+# open for the user's spoken yes/no. The HUD renders the question itself
+# through its own confirmation overlay (the structured SSE frame + WS
+# broadcast), not through the orb's state, so nothing is lost by collapsing
+# it here -- and widening the wire vocabulary would need a matching Electron
+# change that no live HUD E2E has covered yet.
+_HUD_STATE: dict[str, str] = {
+    "idle": "idle",
+    "listening": "listening",
+    "speech_detected": "listening",   # mic open, user mid-utterance
+    "transcribing": "thinking",       # STT running -- work, not capture, to a viewer
+    "thinking": "thinking",
+    "speaking": "speaking",
+    "awaiting_confirmation": "listening",
+}
+
 
 @dataclass
 class VoiceState:
@@ -69,3 +94,30 @@ class VoiceState:
             if label in active:
                 return label
         return "idle"
+
+    @property
+    def hud_state(self) -> str:
+        """display, collapsed onto the HUD/WS wire vocabulary (_HUD_STATE)."""
+        return _HUD_STATE.get(self.display, "idle")
+
+
+def hud_state_emitter(emit: Callable[[str], None]) -> Callable[["VoiceState"], None]:
+    """VoiceState.on_change callback that forwards hud_state to `emit`
+    (event_bus.state) and SUPPRESSES repeats.
+
+    The dedupe is the point: on_change fires on either axis, and several
+    reducer states collapse to the same wire value (listening ->
+    speech_detected is still "listening"; thinking -> transcribing is still
+    "thinking"). Without this, a single utterance would emit a handful of
+    identical {"type":"state"} frames to every connected HUD client.
+    """
+    last: list[str | None] = [None]
+
+    def _on_change(state: "VoiceState") -> None:
+        value = state.hud_state
+        if value == last[0]:
+            return
+        last[0] = value
+        emit(value)
+
+    return _on_change

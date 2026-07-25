@@ -105,6 +105,14 @@ class RealtimeVoiceEngine:
 
         self._speaking = False
 
+        # Faz D telemetry, retained rather than only yielded. TurnEnded/
+        # FinalTranscript carry these numbers to whoever is consuming
+        # events() at that instant and are then gone -- so a later "how did
+        # the last turn actually go?" question (jarvis/voice/diagnostics.py,
+        # the /voice-status surfaces) had nothing to read. Last turn only:
+        # this is a diagnostic, not a history.
+        self.last_turn_metrics: dict = {}
+
     async def load(self) -> None:
         """Loads shared models if none were injected via the constructor (the
         local --voice/wakeword loop's normal path); a remote-audio session
@@ -198,16 +206,29 @@ class RealtimeVoiceEngine:
                 # matters (a consumer needs a "capture just ended" signal
                 # distinct from "STT finished", and an empty turn previously
                 # had no observable signal at all here).
-                yield TurnEnded(
+                turn_ended = TurnEnded(
                     reason=signal.reason,
                     captured_audio_duration_s=audio.size / 16000,
                     vad_prob_max=max(probs_this_turn) if probs_this_turn else 0.0,
                     vad_prob_mean=(sum(probs_this_turn) / len(probs_this_turn)) if probs_this_turn else 0.0,
                 )
+                # Retained for /voice-status BEFORE being yielded, so the
+                # numbers are readable even for an empty turn (which returns
+                # below without ever reaching STT) and even if whoever is
+                # consuming events() stops consuming right here.
+                self.last_turn_metrics = {
+                    "turn_end_reason": turn_ended.reason,
+                    "captured_audio_duration_s": turn_ended.captured_audio_duration_s,
+                    "vad_prob_max": turn_ended.vad_prob_max,
+                    "vad_prob_mean": turn_ended.vad_prob_mean,
+                    "stt_s": None,  # filled in below once STT has actually run
+                }
+                yield turn_ended
                 if audio.size == 0:
                     continue
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(None, self._models.stt.transcribe, audio)
+                self.last_turn_metrics["stt_s"] = result.stt_s
                 if result.text.strip():
                     yield FinalTranscript(text=result.text, lang=result.lang, stt_s=result.stt_s)
             elif self._segmenter.is_speaking:

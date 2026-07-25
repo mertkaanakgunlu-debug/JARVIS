@@ -86,8 +86,14 @@ def _install_common_stubs(monkeypatch, agent, calls):
     monkeypatch.setattr(voice_api, "pause_local_voice", lambda: None)
     monkeypatch.setattr(voice_api, "resume_local_voice", lambda: None)
 
-    async def _stub_run_one_response(agent_arg, engine, text, lang, *, transport, set_pending_confirmation=None):
-        calls.append(("run_one_response", text))
+    async def _stub_run_one_response(
+        agent_arg, engine, text, lang, *, transport, set_pending_confirmation=None, state=None,
+    ):
+        # `state` (the per-session VoiceState) is accepted and recorded rather
+        # than ignored: transport parity means this /ws session threads the
+        # same reducer the CLI does, and a stub that silently dropped it would
+        # hide a future regression where the wiring is lost.
+        calls.append(("run_one_response", text, state is not None))
         if text == "first utterance" and set_pending_confirmation is not None:
             set_pending_confirmation(PendingConfirmation("conf-1", {"tools": []}))
 
@@ -142,7 +148,7 @@ def test_claim_succeeds_routes_into_resolve_confirmation(monkeypatch):
     _run_remote_audio_session(monkeypatch, agent, calls)
 
     assert calls == [
-        ("run_one_response", "first utterance"),
+        ("run_one_response", "first utterance", True),
         ("resolve_confirmation", "conf-1", "second utterance", {"claimed": "conf-1"}),
     ]
 
@@ -162,6 +168,6 @@ def test_externally_resolved_confirmation_is_treated_as_a_new_utterance(monkeypa
     _run_remote_audio_session(monkeypatch, agent, calls)
 
     assert calls == [
-        ("run_one_response", "first utterance"),
-        ("run_one_response", "second utterance"),
+        ("run_one_response", "first utterance", True),
+        ("run_one_response", "second utterance", True),
     ]

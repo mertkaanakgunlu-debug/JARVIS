@@ -221,37 +221,67 @@ def _print_banner(settings: Settings, monitor_active: bool = False) -> None:
     )
 
 
-def _print_voice_diagnostics(engine) -> None:
+def _print_voice_diagnostics(engine, state=None) -> None:
     """Faz D (voice observability): startup diagnostics for --voice mode --
     which mic/speaker were actually picked, the fixed sample rate, and
     whether Whisper actually loaded onto the requested device (owner's own
     real incident: CUDA silently falling back to CPU with no visible sign
     short of reading logs). Best-effort throughout -- a diagnostics print
-    must never itself crash voice mode startup, so every lookup is guarded."""
-    import sounddevice as sd
+    must never itself crash voice mode startup.
 
-    audio_io = engine._audio_io
-    settings = getattr(audio_io, "_settings", None)
+    Now a thin renderer over jarvis.voice.diagnostics.collect(), which the
+    API's GET /voice/status serves too, so the two surfaces cannot report
+    different things (the review's "telemetry is measurable but not
+    observable" finding)."""
+    from jarvis.voice.diagnostics import collect
 
-    def _device_name(selector, kind: str) -> str:
-        try:
-            info = sd.query_devices(selector or None, kind)
-            return f"{info['name']} (#{info.get('index', '?')})"
-        except Exception as exc:  # noqa: BLE001
-            return f"unavailable ({exc})"
-
-    input_sel = getattr(settings, "audio_input_device", None)
-    output_sel = getattr(settings, "audio_output_device", None)
-    sample_rate = getattr(audio_io, "_sample_rate", "unknown")
-    stt_device = getattr(getattr(engine, "_models", None), "stt", None)
-    stt_device = getattr(stt_device, "_device", None) or "not loaded"
-
+    snap = collect(engine, state)
     console.print(
-        f"[dim]Input device:  {_device_name(input_sel, 'input')}\n"
-        f"Output device: {_device_name(output_sel, 'output')}\n"
-        f"Sample rate:   {sample_rate} Hz\n"
-        f"STT device:    {stt_device}[/dim]\n"
+        f"[dim]Input device:  {snap.input_device}\n"
+        f"Output device: {snap.output_device}\n"
+        f"Sample rate:   {snap.sample_rate if snap.sample_rate is not None else 'unknown'} Hz\n"
+        f"STT device:    {snap.stt_device}[/dim]\n"
     )
+
+
+def _print_voice_status(engine, state=None) -> None:
+    """`/voice-status`: the LIVE half of the same snapshot -- the counters
+    that answer "is capture keeping up right now?", which the startup print
+    (all-static fields, printed once before anything has happened) never
+    could."""
+    from jarvis.voice.diagnostics import collect
+
+    snap = collect(engine, state)
+
+    def _n(value, suffix: str = "") -> str:
+        return "—" if value is None else f"{value}{suffix}"
+
+    lines = [
+        f"Input device:   {snap.input_device}",
+        f"Output device:  {snap.output_device}",
+        f"Sample rate:    {_n(snap.sample_rate, ' Hz')}",
+        f"STT device:     {snap.stt_device}",
+        "",
+        f"State:          capture={_n(snap.capture)}  response={_n(snap.response)}"
+        f"  display={_n(snap.display)}",
+        f"Mic RMS:        {snap.mic_rms:.4f}",
+        f"Queue depth:    {_n(snap.queue_depth)} frame(s)",
+        f"Input status:   {_n(snap.input_status_count)} flagged"
+        f"  ({_n(snap.input_overflow_count)} real overflow)",
+        f"Out underruns:  {_n(snap.output_underrun_count)}",
+        "",
+        f"Last turn:      end={_n(snap.last_turn_end_reason)}"
+        f"  audio={_n(round(snap.last_captured_audio_s, 2) if snap.last_captured_audio_s is not None else None, 's')}"
+        f"  stt={_n(round(snap.last_stt_s, 2) if snap.last_stt_s is not None else None, 's')}",
+        f"Last turn VAD:  max={_n(round(snap.last_vad_prob_max, 3) if snap.last_vad_prob_max is not None else None)}"
+        f"  mean={_n(round(snap.last_vad_prob_mean, 3) if snap.last_vad_prob_mean is not None else None)}",
+    ]
+    console.print(Panel(
+        Text("\n".join(lines), style="white"),
+        title="[gold3]voice status[/gold3]",
+        border_style="gold3",
+        padding=(0, 1),
+    ))
 
 
 def _print_jarvis(text: str, model_label: str) -> None:
@@ -1105,6 +1135,9 @@ async def _run_voice_loop(
         from jarvis.voice.session import (
             drive_voice_session, STOP_SESSION, PendingConfirmation, resolve_confirmation,
         )
+        from jarvis.voice.diagnostics import (
+            clear_session as clear_voice_session, register_session as register_voice_session,
+        )
     except ImportError as exc:
         _print_error(
             f"Voice dependencies not installed: {exc}\n"
@@ -1181,6 +1214,11 @@ async def _run_voice_loop(
 
     voice_state = VoiceState(on_change=_render_voice_state)
 
+    # Make this session readable by anything else in the process that wants a
+    # snapshot (jarvis/voice/diagnostics.py). Registered once, for the
+    # session's whole lifetime -- cleared in the outer finally below.
+    register_voice_session(engine, voice_state)
+
     async def _handle_transcript(text: str, lang: str):
         nonlocal pending_confirmation
         console.print(f"[bold blue]{settings.user_name}:[/bold blue] {text}   ")
@@ -1250,8 +1288,18 @@ async def _run_voice_loop(
     try:
         while True:
             if ptt:
-                console.print("[dim]Press Enter to speak...[/dim]", end="\r")
-                await loop.run_in_executor(None, input)
+                # The press-to-arm gate doubles as the only typed-input point
+                # in voice mode, so it's also where /voice-status lives: type
+                # it instead of pressing a bare Enter and the mic stays shut
+                # while the snapshot prints. Anything else (including the
+                # bare Enter that is the normal case) arms as usual.
+                console.print(
+                    "[dim]Press Enter to speak (or /voice-status)...[/dim]", end="\r",
+                )
+                typed = (await loop.run_in_executor(None, input) or "").strip().lower()
+                if typed in ("/voice-status", "/voice_status", "/status"):
+                    _print_voice_status(engine, voice_state)
+                    continue
                 console.print("[gold3]Listening...[/gold3]              ")
             elif wakeword and ww_detector is not None:
                 console.print('[dim]Waiting for "Hey JARVIS"...[/dim]', end="\r")
@@ -1277,6 +1325,7 @@ async def _run_voice_loop(
     except KeyboardInterrupt:
         console.print("\n[dim]JARVIS offline. Goodbye.[/dim]")
     finally:
+        clear_voice_session()
         await agent.close_mcp_tools()  # Faz 5: don't leave a launched browser process behind
 
 

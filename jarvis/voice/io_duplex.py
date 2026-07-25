@@ -94,8 +94,16 @@ class DuplexAudioIO:
         self.underrun_count = 0
         # Faz D (voice observability): input stream `status` previously only
         # ever reached logger.debug -- no counter existed for a user/HUD to
-        # ever learn a real capture problem (buffer overflow, device glitch)
-        # occurred at all.
+        # ever learn a real capture problem occurred at all.
+        #
+        # Two counters, not one (review finding, 2026-07-25): PortAudio's
+        # CallbackFlags is truthy for ANY condition it reports, so counting
+        # every truthy `status` as an overflow overstated the specific
+        # failure the name promised. input_status_count is the honest
+        # "PortAudio flagged something" tally; input_overflow_count now only
+        # counts a real input_overflow, which is the one that actually means
+        # dropped microphone audio.
+        self.input_status_count = 0
         self.input_overflow_count = 0
 
     # ── Capture ─────────────────────────────────────────────────────────────
@@ -106,7 +114,13 @@ class DuplexAudioIO:
         # tests/test_voice_telemetry.py.
         if status:
             logger.debug("[voice] input stream status: %s", status)
-            self.input_overflow_count += 1
+            self.input_status_count += 1
+            # getattr, not status.input_overflow: sounddevice's CallbackFlags
+            # is the normal case, but the callback is also driven directly by
+            # tests (and, in principle, by any other PortAudio binding) with
+            # a plainer status object that has no such attribute.
+            if getattr(status, "input_overflow", False):
+                self.input_overflow_count += 1
         mono = indata[:, 0].copy()
         self._mic_queue.put(mono)
 
