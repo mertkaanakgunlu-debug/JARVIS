@@ -95,10 +95,10 @@ class TestCleaningLeavesMeaningAlone:
         """clean_title slices the ORIGINAL string at offsets found in the
         folded one, which is only sound while folding is 1:1. "İ".lower() is
         two code points in Python."""
-        from jarvis.nlu.event_text import _foldable
+        from jarvis.nlu.temporal import fold_indexable
 
         for sample in ["İstanbul toplantı", "ŞİRKET GEZİSİ", "Ağustos pikniği", "ẞ test"]:
-            assert len(_foldable(sample)) == len(sample), sample
+            assert len(fold_indexable(sample)) == len(sample), sample
 
 
 class TestTitleQuality:

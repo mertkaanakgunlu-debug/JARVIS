@@ -22,6 +22,13 @@ of midnight could be gated one way and executed the other.
 tests/test_temporal_resolver.py asserts the independence directly rather than
 leaving it as an intention.
 
+**3. It reads the user's sentence, not only the model's arguments.**
+`utterance_ambiguity()` and `weekday_conflict()` near the bottom exist because
+live measurement showed the first two properties are not enough on their own:
+a model that resolves an ambiguous expression ITSELF hands the gate
+confident-looking arguments, and the gate has no way to know the request was
+vague. Arguments are the model's interpretation; the sentence is the request.
+
 Scope note: this resolves the expressions a user actually says to a personal
 assistant. It is deliberately NOT a general natural-language date library —
 an unrecognized expression returns ok=False with an honest reason, which the
@@ -77,6 +84,21 @@ _FOLD_MAP = str.maketrans({
 def fold(text: str) -> str:
     """Turkish-safe casefold: diacritics → ASCII, then lowercase."""
     return text.translate(_FOLD_MAP).lower().strip()
+
+
+def fold_indexable(text: str) -> str:
+    """fold() without the strip, and guaranteed to preserve length, so a match
+    offset in the folded string is a valid offset in the original.
+
+    jarvis/nlu/event_text.py slices the ORIGINAL title at offsets found in the
+    folded one, which is only sound while folding is 1:1. str.lower() is not
+    always: "İ".lower() is two code points in Python (i + combining dot). The
+    translation table already maps İ away, but resting a slice on that is the
+    kind of assumption that holds until someone pastes a title from somewhere
+    unexpected.
+    """
+    translated = text.translate(_FOLD_MAP)
+    return "".join(c.lower() if len(c.lower()) == 1 else c for c in translated)
 
 
 # Turkish attaches case endings to the thing being named, and a model relays

@@ -28,6 +28,15 @@ the direction that matters:
 A false positive on a person's name is more damaging than leaving a typo in
 place — "Baran" silently rewritten to the wrong "Barış" in a meeting invite is
 a mistake the user cannot see happening.
+
+**Status: nothing calls this yet.** That is deliberate and follows from the
+line above about Contacts being opt-in: with Contacts off, no source can reach
+the auto band from an inflected form, so every answer the calendar path would
+get is "leave it alone" — a code path with no observable behaviour. Wiring it
+is a two-step the owner controls: enable `google_contacts_enabled` (one OAuth
+re-consent), then surface the ask band through the confirmation prompt that
+already exists. Same Part-1/Part-2 split as Faz 7's workflow runtime. Do not
+read this module as "names are being corrected today".
 """
 
 from __future__ import annotations

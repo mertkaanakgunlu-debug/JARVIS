@@ -37,8 +37,8 @@ from __future__ import annotations
 import re
 
 from jarvis.nlu import temporal
-from jarvis.nlu.temporal import _FOLD_MAP as _FOLD_TABLE
 from jarvis.nlu.temporal import fold
+from jarvis.nlu.temporal import fold_indexable as _foldable
 
 __all__ = [
     "clean_title", "title_quality", "description_is_restatement", "TitleCleaning",
@@ -94,21 +94,6 @@ _CLOCK_SPAN = re.compile(r"^\d{1,2}[:.]\d{2}$|^\d{1,2}\s*(am|pm)$")
 _QUESTION = re.compile(r"(\?|\b(mi|mı|mu|mü|misin|mısın|musun|müsün)\b)", re.IGNORECASE)
 
 _MAX_REASONABLE_TITLE = 80
-
-
-def _foldable(text: str) -> str:
-    """fold() but guaranteed to preserve length, so a match offset in the
-    folded string is a valid offset in the original.
-
-    clean_title() slices the ORIGINAL string at offsets found in the folded
-    one. That is only sound if folding is 1:1, and str.lower() is not always:
-    "İ".lower() is two code points in Python (i + combining dot). The
-    translation table already maps İ away, but relying on that for
-    correctness of a slice is the kind of assumption that holds until someone
-    pastes a title from somewhere unexpected.
-    """
-    translated = text.translate(_FOLD_TABLE)
-    return "".join(c.lower() if len(c.lower()) == 1 else c for c in translated)
 
 
 class TitleCleaning:
