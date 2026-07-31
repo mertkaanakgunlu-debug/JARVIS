@@ -106,14 +106,19 @@ alıntılıyordu. Artık yorumları soyuyor.
 
 ## CI — canlı bakın, ama bilinen durum şu
 
-`gh run list --branch langgraph-migration` ile bakın. Bu oturumda öğrenilen iki şey:
+`gh run list --branch langgraph-migration` ile bakın — **ama satır özeti yetmez.** Job düzeyine
+inin: `gh run view <id> --json jobs -q '.jobs[] | "\(.name): \(.conclusion)"'`.
 
-1. **`gh run list`'in "success" dediği bir koşuda bir job başarısız olabilir.** 2026-07-25 koşusu
-   listede success görünüyor ama `--json jobs` ile bakınca **mobile job'ı failure**. Job durumuna
-   bakın, satır özetine değil.
-2. **`mobile` job'ı en az 2026-07-25'ten beri kırmızı** — 71 sorunun tamamı info/warning
-   (65× `withOpacity` deprecation, + `assets/fonts/` ve `assets/wake/` git'te hiç yok; boş dizin
-   izlenmiyor). Kod regresyonu değil, ve owner mobil yüzeyi geriye aldı. **Owner kararı bekliyor.**
+Sebebi: **`mobile` job'ı `continue-on-error: true`** (owner kararı, 2026-07-23; aynı gün `electron`
+bloke edici yapıldı çünkü L3 onay ekranını render ediyor). Yani mobile başarısızken bile koşu
+"success" görünür — bu doğru bir özet, yanıltıcı değil, ama tavsiye niteliğindeki job'lar hakkında
+hiçbir şey söylemez. Bu oturumda run özetlerini karşılaştırıp "mobile 07-25'te geçiyordu, yeni bir
+şey bozdu" diye var olmayan bir regresyon arandı; job düzeyi bakınca o koşuda da failure'dı.
+
+**`mobile` en az 2026-07-25'ten beri başarısız** — 71 bulgunun tamamı info/warning
+(65× `withOpacity` deprecation, + `assets/fonts/` ve `assets/wake/` git'te hiç yok çünkü boş dizin
+izlenmiyor). Kod regresyonu değil, bloke etmiyor, ve owner mobil yüzeyi geriye aldı.
+**Owner kararı bekliyor: temizlensin mi, mobil fazına mı bırakılsın.**
 
 **`python` job'ı 07-25'te geçip 07-31'de kaldı — bu gerçek bir regresyondu ve düzeltildi.**
 `test_explicit_output_is_confined_to_the_workspace` **ortama bağlıydı**: `files._resolve()` ev
