@@ -543,8 +543,21 @@ def make_verification_node(settings=None):
                 # on the turn's critical path, and "keep asking the model
                 # until it stops lying" is not a bounded operation.
                 if "llm" not in _repair_llm:
-                    role = "reasoning" if state.get("use_pro_agent", False) else "fast"
-                    _repair_llm["llm"] = get_llm(role, settings)
+                    # Always the reasoning tier, never the turn's own role.
+                    #
+                    # Post-MVP Faz 2.5 made most single-tool turns fast, and
+                    # inheriting that here would retry a contradicted answer on
+                    # the exact tier that just produced it -- with one round
+                    # allowed and an honest failure report as the alternative,
+                    # spending the retry on the same model is spending it on
+                    # nothing. The plan's own role table says so directly:
+                    # "critical error repair" is reasoning work.
+                    #
+                    # Cost note: with a cloud tier configured this makes the
+                    # repair a paid call. It is bounded to one, and only fires
+                    # in enforce mode after the gate has already caught a
+                    # provably wrong answer.
+                    _repair_llm["llm"] = get_llm("reasoning", settings)
                 repair_messages = [
                     m for m in messages if not isinstance(m, ToolMessage)
                 ] + [SystemMessage(content=repair_instruction(verdict))]

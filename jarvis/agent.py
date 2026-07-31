@@ -36,6 +36,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphInterrupt, GraphRecursionError
 
 from jarvis.execution.redaction import redact_preview  # Agent Runtime rev.2, Faz 1
+from jarvis.graph.role_router import for_unattended_turn, select_role
 from jarvis.graph.tool_router import classify_query
 from jarvis.graph.tool_accounting import (  # Faz 1.1: shared outcome judgement
     content_is_failure,
@@ -261,11 +262,20 @@ class _HudEventCallback(BaseCallbackHandler):
 # `sig in q` probes false-positived on Turkish morphology ("ok" in "çok",
 # "hi" in "tarihi", "hey" in "heyecanlıyım").
 def _route_query(query: str, needs_planning: bool):
-    """One place for every entry point: classify + derive the role choice.
-    conversation ⇒ fast role, zero tools; anything tool-shaped (or /think)
-    ⇒ reasoning role. Returns (route, use_pro_agent)."""
+    """One place for every entry point: classify the query, then pick the tier.
+
+    Returns (ToolRoute, RoleDecision). The two answer different questions and
+    are kept separate on purpose: the route decides WHICH TOOLS the model sees
+    this turn, the decision decides WHICH MODEL sees them.
+
+    Post-MVP Faz 2.5: the tier used to be derived here in one line —
+    conversation ⇒ fast, anything tool-shaped ⇒ reasoning — which made a single
+    calendar lookup as expensive as an open research task. That rule now lives
+    in jarvis/graph/role_router.py with its reasoning, its safety direction and
+    its own tests.
+    """
     route = classify_query(query)
-    return route, needs_planning or route.primary_domain != "conversation"
+    return route, select_role(query, route, needs_planning)
 
 
 def _build_env_block(workspace: Path) -> str:
@@ -873,7 +883,7 @@ class JarvisAgent:
     def last_turn_trace(self) -> dict | None:
         """The last foreground turn's actual provider/model rollup (or None).
 
-        Keys: requested_role, provider, model, billable, billing,
+        Keys: requested_role, role_reason, provider, model, billable, billing,
         fallback_used, response_fallback_used, turn_had_any_fallback, calls,
         input_tokens, output_tokens — see LlmTraceRecorder.turn_summary.
         """
@@ -1401,7 +1411,8 @@ class JarvisAgent:
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
-        tool_route, use_pro_agent = _route_query(clean_input, needs_planning)
+        tool_route, role_decision = _route_query(clean_input, needs_planning)
+        use_pro_agent = role_decision.use_pro_agent
 
         # BUG-8: serialize the whole turn — self._history/_turn/session_id are
         # read at the start and written back at the end; a concurrent caller
@@ -1465,7 +1476,8 @@ class JarvisAgent:
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,
-                requested_role="reasoning" if use_pro_agent else "fast",
+                requested_role=role_decision.role,
+                role_reason=role_decision.reason,
             )
             config = {
                 # transport/conversation_id: read back via RunnableConfig by
@@ -1783,7 +1795,8 @@ class JarvisAgent:
         """
         needs_planning = user_input.strip().lower().startswith("/think")
         clean_input = re.sub(r"^/think\s*", "", user_input).strip()
-        tool_route, use_pro_agent = _route_query(clean_input, needs_planning)
+        tool_route, role_decision = _route_query(clean_input, needs_planning)
+        use_pro_agent = role_decision.use_pro_agent
 
         # BUG-8: serialize the whole turn (see chat() for why) — held across
         # the yields too, since the generator can sit parked mid-stream while
@@ -1846,7 +1859,8 @@ class JarvisAgent:
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,
-                requested_role="reasoning" if use_pro_agent else "fast",
+                requested_role=role_decision.role,
+                role_reason=role_decision.reason,
             )
             config = {
                 # See chat()'s identical block for why transport/
@@ -2211,7 +2225,10 @@ class JarvisAgent:
         try:
             await self.connect_mcp_tools()  # no-op after the first real connect
             needs_planning = False
-            tool_route, use_pro_agent = _route_query(prompt, needs_planning)
+            tool_route, role_decision = _route_query(prompt, needs_planning)
+            # Faz 2.5: nobody is watching this one — see for_unattended_turn.
+            role_decision = for_unattended_turn(role_decision)
+            use_pro_agent = role_decision.use_pro_agent
             state = {
                 "messages": [
                     SystemMessage(content=_proactive_system_prompt(self.settings)),
@@ -2242,7 +2259,8 @@ class JarvisAgent:
             # thing I asked".
             recorder = LlmTraceRecorder(
                 usage=self.usage,
-                requested_role="reasoning" if use_pro_agent else "fast",
+                requested_role=role_decision.role,
+                role_reason=role_decision.reason,
             )
             config = {
                 "configurable": {
@@ -2348,7 +2366,11 @@ class JarvisAgent:
             ctx.facts_block, ctx.procedure_block,
             transport=transport,
         )
-        tool_route, use_pro_agent = _route_query(user_query, False)
+        tool_route, role_decision = _route_query(user_query, False)
+        # Faz 2.5: a job the user sent to the background has nobody waiting on
+        # it, so it keeps the reasoning tier — see for_unattended_turn.
+        role_decision = for_unattended_turn(role_decision)
+        use_pro_agent = role_decision.use_pro_agent
         state = {
             "messages": [SystemMessage(content=system_prompt), HumanMessage(content=user_query)],
             "user_query": user_query,
@@ -2368,7 +2390,8 @@ class JarvisAgent:
         # /status label is left untouched (same rule as proactive_turn).
         recorder = LlmTraceRecorder(
             usage=self.usage,
-            requested_role="reasoning" if use_pro_agent else "fast",
+            requested_role=role_decision.role,
+            role_reason=role_decision.reason,
         )
         config = {
             "configurable": {

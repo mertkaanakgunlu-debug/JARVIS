@@ -185,6 +185,10 @@ class JarvisEventBus:
             "provider": t.get("provider"),
             "model": t.get("model"),
             "role": t.get("requested_role"),
+            # Faz 2.5 — the rule that chose the role (role_router.py). The HUD
+            # is where the owner drives every live test, and "why was that
+            # slow" is otherwise unanswerable from the screen.
+            "role_reason": t.get("role_reason"),
             "latency_ms": t.get("latency_ms"),
             "total_llm_ms": t.get("total_llm_ms"),
             "input_tokens": t.get("input_tokens"),

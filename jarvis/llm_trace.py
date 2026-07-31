@@ -80,8 +80,14 @@ class LlmTraceRecorder(BaseCallbackHandler):
     untouched; this one has a single responsibility: runtime truth.
     """
 
-    def __init__(self, usage: Any = None, requested_role: str = "fast") -> None:
+    def __init__(self, usage: Any = None, requested_role: str = "fast",
+                 role_reason: str = "") -> None:
         self.requested_role = requested_role
+        # Post-MVP Faz 2.5: WHICH rule chose that role. requested_role alone
+        # says a turn ran slow; it cannot say whether the router misjudged the
+        # request or the request was genuinely hard, and those need opposite
+        # fixes. See jarvis/graph/role_router.py.
+        self.role_reason = role_reason
         self.traces: list[LlmCallTrace] = []
         self._usage = usage  # UsageTracker or None (trace-only)
         self._pending: dict[str, dict] = {}  # run_id -> tier meta + start time
@@ -248,6 +254,7 @@ class LlmTraceRecorder(BaseCallbackHandler):
         )
         return {
             "requested_role": self.requested_role,
+            "role_reason": self.role_reason,
             "provider": final.provider,
             "model": final.model,
             "billable": final.billable,
