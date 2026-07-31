@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
     from jarvis.fcm_sender import FcmSender
 
 logger = logging.getLogger(__name__)
+
+
+from jarvis.graph.tool_router import _fold
 
 
 def _registry_async_hints() -> set[str]:
@@ -49,25 +53,54 @@ def _registry_async_hints() -> set[str]:
 # don't literally contain its name (kept alongside the registry-derived set
 # below rather than replaced by it, so this stays a strict superset of the
 # pre-Faz-4 behavior).
+#
+# Narrowed 2026-07-31. These were matched as BARE SUBSTRINGS against ordinary
+# Turkish, so several entries hijacked normal interactive requests:
+#   "grafik"   -- the owner's own core loop ("...ve grafikle", "grafigi cizgi
+#                 yap") answered {"async": true, task_id} in ~0s over HTTP while
+#                 the identical sentence stayed interactive in the CLI, which
+#                 never consults this heuristic. Charting is fast; it does not
+#                 belong here at all.
+#   "rapor"    -- fires on "raporu goster", a read.
+#   "arastir"  -- an ordinary lookup; only DEEP research is long-running.
+#   "finansal" -- fires on "finansal durumum nedir", a summary read.
+#   "3d"       -- two characters, matched anywhere inside a word.
+# The long-running intents they were meant to catch are kept below in forms a
+# user does not type by accident.
 _LEGACY_ASYNC_HINTS = {
-    "deep_research", "deep research", "araştır", "sentez", "rapor", "report",
-    "grafik", "simülasyon", "simulasyon", "3d", "3 boyutlu", "wave_simulate",
-    "wave simulate", "finance sync", "finansal", "index_doc", "plot_volume",
-    "plot_3d", "plot_surface", "latex", "compile", "seismic", "sismik",
-    "subagent", "sub-agent", "alt ajan",
+    "deep_research", "deep research", "derinlemesine araştır", "derin araştırma",
+    "sentez", "rapor hazırla", "rapor oluştur", "report", "simülasyon",
+    "simulasyon", "3 boyutlu", "wave_simulate", "wave simulate", "finance sync",
+    "index_doc", "plot_volume", "plot_3d", "plot_surface", "latex", "compile",
+    "seismic", "sismik", "subagent", "sub-agent", "alt ajan",
 }
 
 # Keywords that trigger automatic async mode when found in a query
 ASYNC_KEYWORDS = _registry_async_hints() | _LEGACY_ASYNC_HINTS
 
+# Stem-anchored, diacritic-folded matching -- the same two conventions
+# jarvis/graph/tool_router.py already proved out, reusing its _fold() so the two
+# heuristics cannot drift:
+#   * anchored at the START of a word only. Turkish agglutinates, so a trailing
+#     \b would break every suffixed form ("rapor hazırla" must still match
+#     "rapor hazırlar mısın"). Unanchored matching is what let the old bare "3d"
+#     fire from inside an unrelated word.
+#   * folded to ASCII, because casual typing and ASR routinely drop ç/ğ/ı/ö/ş/ü.
+#     Measured here: "derinlemesine arastir" missed "derinlemesine araştır"
+#     entirely before folding, so the one hint that most needs to reach the
+#     background executor was the one that didn't.
+_ASYNC_PATTERNS = [
+    re.compile(r"\b" + re.escape(_fold(kw)), re.IGNORECASE) for kw in ASYNC_KEYWORDS
+]
+
 
 def _should_async(query: str, force: bool = False) -> bool:
     if force:
         return True
-    lower = query.lower()
+    lower = _fold(query)
     if len(lower.split()) > 40:
         return True
-    return any(kw in lower for kw in ASYNC_KEYWORDS)
+    return any(p.search(lower) for p in _ASYNC_PATTERNS)
 
 
 @dataclass

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -72,6 +73,13 @@ class _FakeResumeAgent:
         # an empty snapshot.interrupts, i.e. "no second interrupt happened".
         self._graph = SimpleNamespace(aget_state=AsyncMock(return_value=SimpleNamespace(interrupts=())))
         self._last_turn_trace = dict(_STALE_TRACE)
+        # The REAL setter, not a stub: resume_and_stream stores the rolled-up
+        # trace through it (it also broadcasts model_status to the HUD), and
+        # this test exists to assert exactly that storage happens. A local
+        # reimplementation could drift from production and still pass.
+        self._record_turn_trace = types.MethodType(
+            JarvisAgent._record_turn_trace, self
+        )
         # get_tuple -> None makes the method take its documented fallback
         # path (rebuild history manually) -- no checkpointer machinery needed.
         self._checkpointer = SimpleNamespace(get_tuple=lambda cfg: None)

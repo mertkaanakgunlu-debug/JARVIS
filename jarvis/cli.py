@@ -15,6 +15,7 @@ from rich.prompt import Prompt
 
 from jarvis import paths
 from jarvis.agent import JarvisAgent, AVAILABLE_MODELS, ConfirmationRequired
+from jarvis.providers.labels import label_for_provider
 from jarvis.config import Settings
 from jarvis.voice.state import VoiceState
 
@@ -206,18 +207,38 @@ def _detect_model_switch(user_input: str) -> str | None:
 # ── UI helpers ─────────────────────────────────────────────────────────────────
 
 def _print_banner(settings: Settings, monitor_active: bool = False) -> None:
+    """Announce the routing that will ACTUALLY be used, local tier first.
+
+    Until 2026-07-31 this printed only a cloud model, chosen from
+    `settings.use_vertex` — which means "CLOUD_TIER is set", not "cloud calls
+    can happen". With the project's local-first default (`CLOUD_POLICY=off`)
+    that produced a banner reading "Vertex AI · fast: gemini-…" on a machine
+    where no cloud call was structurally possible and every answer came from
+    local Ollama. The owner hit exactly this while testing.
+
+    Local is named first because it is the primary tier; cloud is shown as what
+    it is — an escalation path — and only when policy actually permits one.
+    """
     console.print(BANNER)
     console.print(Rule(style="gold3 dim"))
-    if settings.use_vertex:
-        model_str = (
-            f"Vertex AI  ·  fast: [bold]{settings.vertex_model_fast}[/bold]  "
-            f"·  pro: [bold]{settings.vertex_model_primary}[/bold]"
-        )
+
+    parts = [f"Local: [bold]{settings.local_model}[/bold]"]
+    policy = getattr(settings, "cloud_policy", "auto")
+    if policy == "off":
+        parts.append("Cloud: [dim]kapalı (CLOUD_POLICY=off)[/dim]")
     else:
-        model_str = f"Cloud: [bold]{settings.effective_cloud_model}[/bold]"
+        cloud_model = (
+            settings.vertex_model_fast if settings.use_vertex
+            else settings.effective_cloud_model
+        )
+        tier = "Vertex" if settings.use_vertex else "AI Studio"
+        suffix = " (yalnız açık seçimde)" if policy == "explicit" else ""
+        parts.append(f"Cloud: [bold]{cloud_model}[/bold] · {tier}{suffix}")
+
     monitor_str = "  ·  [green]monitor ✓[/green]" if monitor_active else ""
     console.print(
-        f"[dim]  User: [bold]{settings.user_name}[/bold]  ·  {model_str}{monitor_str}[/dim]\n"
+        f"[dim]  User: [bold]{settings.user_name}[/bold]  ·  "
+        f"{'  ·  '.join(parts)}{monitor_str}[/dim]\n"
     )
 
 
@@ -322,8 +343,7 @@ def _show_model_menu(agent: JarvisAgent) -> None:
             last_provider = provider
 
         active_mark = " [gold3]★[/gold3]" if mid == current_id else ""
-        _PROVIDER_LABELS = {"vertex": "Vertex", "aistudio": "AI Studio", "gemini": "Gemini", "groq": "Groq", "local": "Ollama"}
-        provider_str = _PROVIDER_LABELS.get(provider, provider.title())
+        provider_str = label_for_provider(provider)
         table.add_row(str(i), label + active_mark, provider_str, desc)
 
     console.print(table)
@@ -433,9 +453,12 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
             summaries_count = agent.memory.count_summaries()
             active = agent._active_model_id or settings.effective_cloud_model
             cost = agent.usage.session_cost
+            from jarvis.memory import GEMINI_EMBED_MODEL
             ef_label = {
                 "ollama": "Ollama nomic-embed-text (local)",
-                "gemini": "Gemini text-embedding-004",
+                # Read from the constant, not retyped: this line said
+                # "text-embedding-004" long after that id was retired.
+                "gemini": f"Gemini {GEMINI_EMBED_MODEL.removeprefix('models/')}",
                 "default": "default ONNX",
             }[agent.memory._embedding_backend]
             total_sessions = agent.session_store.total_sessions()
@@ -1331,10 +1354,20 @@ async def _run_voice_loop(
 
 def run(voice: bool = False, wakeword: bool = False, ptt: bool = False, monitor: bool = False) -> None:
     settings = Settings()
-    if not settings.gemini_api_key and not settings.use_vertex:
+    # Only a MISSING credential that the config actually intends to use is worth
+    # warning about. Under the project's local-first default (CLOUD_POLICY=off)
+    # no cloud call can happen at all, so this used to warn about an unset
+    # GEMINI_API_KEY on a perfectly healthy, fully-local install — training the
+    # owner to ignore a startup warning, which is worse than printing nothing.
+    if (
+        getattr(settings, "cloud_policy", "auto") != "off"
+        and not settings.gemini_api_key
+        and not settings.use_vertex
+    ):
         console.print(
-            "[yellow]Warning:[/yellow] GEMINI_API_KEY not set and Vertex AI not configured — "
-            "set GEMINI_API_KEY or CLOUD_TIER=vertex in .env."
+            "[yellow]Warning:[/yellow] CLOUD_POLICY is not 'off' but no cloud tier is "
+            "configured — set GEMINI_API_KEY or CLOUD_TIER=vertex in .env, or set "
+            "CLOUD_POLICY=off to run fully local."
         )
 
     # Start background monitor daemon if requested

@@ -1106,9 +1106,11 @@ async def get_task(task_id: str, request: Request):
     here. Discovered (Faz 8, B1.2c) while building the W18/R24 alpha-gate
     workflow scenarios: a realistic multi-step prompt routinely exceeds
     _should_async()'s 40-word threshold, or mentions a legacy async hint
-    like "grafik", and diverts -- with no HTTP path to ever retrieve the
-    eventual result, a pure-HTTP client (the driver, or any client that
+    like "rapor hazırla", and diverts -- with no HTTP path to ever retrieve
+    the eventual result, a pure-HTTP client (the driver, or any client that
     isn't the CLI/FCM-push path) had no way to complete such a turn at all.
+    (The example used to be "grafik", which was removed from the hint list on
+    2026-07-31 for firing on ordinary interactive requests.)
     """
     _check_auth(request)
     agent = get_agent()

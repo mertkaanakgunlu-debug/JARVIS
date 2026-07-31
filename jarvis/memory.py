@@ -73,6 +73,13 @@ def _build_ollama_ef(settings: "Settings"):
         return None
 
 
+# The Gemini embedding model actually used. Named here rather than inline so
+# user-facing labels cannot drift from it -- jarvis/cli.py's /status readout
+# said "Gemini text-embedding-004" until 2026-07-31, a model id retired on
+# 2026-07-15 and no longer served.
+GEMINI_EMBED_MODEL = "models/gemini-embedding-2"
+
+
 def _build_gemini_ef(api_key: str):
     """Return a ChromaDB-compatible embedding function using Gemini's embedding model.
 
@@ -89,7 +96,7 @@ def _build_gemini_ef(api_key: str):
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
         embedder = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-2",
+            model=GEMINI_EMBED_MODEL,
             google_api_key=api_key,
             task_type="retrieval_document",
         )
@@ -106,6 +113,13 @@ def _build_gemini_ef(api_key: str):
                 return self(input)
 
             def name(self) -> str:
+                # Deliberately NOT renamed to match GEMINI_EMBED_MODEL. ChromaDB
+                # persists this string with the collection and compares it on
+                # open; changing it invalidates the vector space of any
+                # collection already embedded under the old name (see this
+                # module's EF-conflict ValueError fallback). It is a stored
+                # identifier, not a readout — user-facing labels must use
+                # GEMINI_EMBED_MODEL instead, which is what actually embeds.
                 return "gemini-text-embedding-004"
 
         return _GeminiEF()

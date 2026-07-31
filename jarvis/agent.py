@@ -376,8 +376,19 @@ def _load_system_prompt(
     open_todos_block: str = "",
     facts_block: str = "",
     procedure_block: str = "",
+    transport: str = "unknown",
 ) -> str:
-    from jarvis.prompts.prompt_loader import PromptContext, load_system_prompt
+    """Compose the system prompt for one turn.
+
+    `transport` selects the response-format rule (markdown on screen, plain
+    speech for voice) via surface_for_transport. It defaults to "unknown", which
+    maps to the text surface — the safe default: a spoken markdown header reads
+    badly, but a screen answer forbidden from using a table is worse, and that
+    ban applied to every surface until 2026-07-31.
+    """
+    from jarvis.prompts.prompt_loader import (
+        PromptContext, load_system_prompt, surface_for_transport,
+    )
     return load_system_prompt(PromptContext(
         user_name=settings.user_name,
         memory_context=memory_context,
@@ -389,6 +400,7 @@ def _load_system_prompt(
         env_block=env_block,
         detected_language=detected_language,
         user_query=user_query,
+        surface=surface_for_transport(transport),
     ))
 
 
@@ -580,8 +592,29 @@ def _strip_images_for_storage(messages: list[Any]) -> list[Any]:
 
 # ── Model catalogue (Revizyon 2 — Gemini-only, 5 entries) ─────────────────────
 
+def _local_model_entry() -> tuple[str, str, str, str]:
+    """The local tier's menu row, named from config rather than hardcoded.
+
+    This row read "Qwen2.5 7B Instruct (local)" until 2026-07-31 while
+    LOCAL_MODEL had been qwen3:8b since the model-selection decision — the menu
+    named a model the router would never load. Deriving it means the label
+    cannot drift from the setting again.
+    """
+    from jarvis.config import Settings
+    try:
+        model = Settings().local_model
+    except Exception:  # noqa: BLE001 -- a menu label must not break startup
+        model = "local"
+    return (
+        f"local/{model}",
+        f"{model} (local)",
+        "local",
+        "Ollama · default fast+reasoning router",
+    )
+
+
 AVAILABLE_MODELS: list[tuple[str, str, str, str]] = [
-    ("local/qwen2.5-7b",               "Qwen2.5 7B Instruct (local)",  "local",    "Ollama · RTX 4070 · default fast+reasoning router"),
+    _local_model_entry(),
     ("vertex/gemini-2.5-pro",          "Gemini 2.5 Pro (Vertex)",      "vertex",   "Vertex credits · orchestrator + vision"),
     ("vertex/gemini-2.5-flash",        "Gemini 2.5 Flash (Vertex)",    "vertex",   "Vertex credits · sub-agent executor"),
     ("aistudio/gemini-2.5-flash",      "Gemini 2.5 Flash (AI Studio)", "aistudio", "50 RPD free · mid fallback"),
@@ -828,6 +861,27 @@ class JarvisAgent:
         """
         return self._last_turn_trace
 
+    def _record_turn_trace(self, trace: dict | None) -> None:
+        """Store the turn's provider/model rollup AND announce it to the HUD.
+
+        Single setter on purpose: six call sites (chat/chat_stream/resume, each
+        with a recursion-stop branch) all did the bare assignment, so a broadcast
+        added to any one of them would have been silently missing from the other
+        five. A falsy trace is ignored — turn_summary() returns None when no LLM
+        call succeeded, and the last known-true label beats overwriting it with
+        nothing.
+
+        The HUD had no source for this at all before 2026-07-31 and hardcoded a
+        Gemini label off its animation state; see EventBus.model_status.
+        """
+        if not trace:
+            return
+        self._last_turn_trace = trace
+        try:
+            event_bus.model_status(trace)
+        except Exception:  # noqa: BLE001 -- a HUD readout must never fail a turn
+            logger.debug("model_status broadcast failed", exc_info=True)
+
     async def _acquire_state_lock(self) -> None:
         """Acquire _state_lock without blocking the calling event loop's thread."""
         await asyncio.get_running_loop().run_in_executor(None, self._state_lock.acquire)
@@ -884,6 +938,12 @@ class JarvisAgent:
                 self._last_turn_trace = None
                 self._last_turn_used_pro = None
                 self._pending_confirmations.clear()
+                # Clear the HUD readout too, for the same reason /status is
+                # cleared: a live badge showing the ARCHIVED session's model is
+                # a claim about the current one. event_bus.emit is thread-safe,
+                # which matters here — _reset_state_sync also runs under
+                # asyncio.to_thread.
+                event_bus.model_status(None)
             else:
                 old_session_id = target_session_id
                 had_content = self.session_store.last_turn_idx(target_session_id) > 0
@@ -1341,6 +1401,7 @@ class JarvisAgent:
                 self._env_block, clean_input, ctx.entities_block,
                 ctx.past_sessions_block, ctx.open_todos_block,
                 ctx.facts_block, ctx.procedure_block,
+                transport=transport,
             )
 
             human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
@@ -1427,8 +1488,7 @@ class JarvisAgent:
                 # or episodic memory (early return skips both).
                 response = await self._recursion_stop_response(config, transport)
                 trace = recorder.turn_summary()
-                if trace:
-                    self._last_turn_trace = trace
+                self._record_turn_trace(trace)
                 event_bus.state("idle")
                 return response, self.current_model_label
             # Patch 1.1: the pre-router "if '429' in str(exc): rebuild the
@@ -1491,8 +1551,7 @@ class JarvisAgent:
             # (one UsageTracker.record per real LLM call) -- no post-hoc
             # rescan of result["messages"] needed anymore.
             trace = recorder.turn_summary()
-            if trace:
-                self._last_turn_trace = trace
+            self._record_turn_trace(trace)
 
             # Patch 1.2 (Faz 1D): history gets the canonical exchange only —
             # prior turns + [user message, (tool summary), final answer]. The
@@ -1723,6 +1782,7 @@ class JarvisAgent:
                 self._env_block, clean_input, ctx.entities_block,
                 ctx.past_sessions_block, ctx.open_todos_block,
                 ctx.facts_block, ctx.procedure_block,
+                transport=transport,
             )
 
             human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
@@ -1815,8 +1875,7 @@ class JarvisAgent:
                 # [ERROR] frame), and the half-finished turn is not persisted.
                 msg = await self._recursion_stop_response(config, transport)
                 stream_trace = recorder.turn_summary()
-                if stream_trace:
-                    self._last_turn_trace = stream_trace
+                self._record_turn_trace(stream_trace)
                 event_bus.state("idle")
                 yield msg
                 return
@@ -1851,8 +1910,7 @@ class JarvisAgent:
             # Runtime truth: streaming fires the same on_chat_model_start/
             # on_llm_end callbacks, so the trace is just as real here.
             stream_trace = recorder.turn_summary()
-            if stream_trace:
-                self._last_turn_trace = stream_trace
+            self._record_turn_trace(stream_trace)
 
             # Patch 1.2 (Faz 1D): same canonical-exchange compaction as chat().
             # (Pre-1.2 this rebuilt history from the checkpoint to PRESERVE raw
@@ -2028,8 +2086,7 @@ class JarvisAgent:
                 msg = await self._recursion_stop_response(config, "resume")
                 if recorder is not None:
                     resumed_trace = recorder.turn_summary()
-                    if resumed_trace:
-                        self._last_turn_trace = resumed_trace
+                    self._record_turn_trace(resumed_trace)
                 event_bus.state("idle")
                 yield msg
                 return
@@ -2067,8 +2124,7 @@ class JarvisAgent:
             # first), and this method didn't roll the recorder up either.
             if recorder is not None:
                 resumed_trace = recorder.turn_summary()
-                if resumed_trace:
-                    self._last_turn_trace = resumed_trace
+                self._record_turn_trace(resumed_trace)
 
             # Patch 1.2 (Faz 1D): canonical-exchange compaction. The user
             # message of THIS turn isn't a local here (the turn began in
@@ -2272,6 +2328,7 @@ class JarvisAgent:
             self._env_block, user_query, ctx.entities_block,
             ctx.past_sessions_block, ctx.open_todos_block,
             ctx.facts_block, ctx.procedure_block,
+            transport=transport,
         )
         tool_route, use_pro_agent = _route_query(user_query, False)
         state = {

@@ -82,3 +82,103 @@ export function useFakeMetrics(state) {
   }, [state])
   return m
 }
+
+
+// ── Static demo fixtures (shown ONLY when the WebSocket is disconnected) ─────
+//
+// Moved here from App.jsx on 2026-07-31 so that every invented value in the HUD
+// lives in one file whose name says what it is. They were previously mixed in
+// with real rendering code, which is how a hardcoded "Routing to Gemini 2.5
+// Pro" line and a vault count of 2847 stayed in the product long after the
+// project went local-first.
+//
+// Reachable only on the `connected === false` branch, where the badge reads
+// "○ OFFLINE · DEMO DATA". Nothing here may be rendered while connected —
+// tests/test_no_synthetic_live_data.py enforces that.
+export const PLACEHOLDER_EVENTS = [
+  { time: '10:00', title: 'EE-302 · Lecture',           where: 'Hall B-204',      kind: 'live' },
+  { time: '14:00', title: 'Office Hours · Prof. Yıldız', where: 'EE-411',          kind: 'idle' },
+  { time: '17:30', title: 'Senior Project standup',      where: 'Discord · Voice', kind: 'idle' },
+  { time: '21:00', title: 'Gym',                         where: 'Campus rec',      kind: 'idle' },
+  { time: '23:59', title: 'Physics Lab Report · DUE',    where: 'Submit · Moodle', kind: 'red'  },
+]
+
+export const PLACEHOLDER_PROJECTS = [
+  { title: 'EE-302 · Differential Eq · PSet 3',  progress: 84, due: '+ 2d 04h', stage: 'Compiling LaTeX',    tag: 'homework'  },
+  { title: 'Senior · Mark VII Web Dashboard',     progress: 47, due: '+ 12d',    stage: 'FastAPI · WebSocket',tag: 'project'   },
+  { title: 'PHYS-201 · Lab Report',               progress: 92, due: '+ 06h',    stage: 'Final review',       tag: 'homework'  },
+  { title: 'Vault migration → Obsidian sync',     progress: 30, due: '— soon',   stage: 'Designing schema',   tag: 'internal'  },
+]
+
+export const PLACEHOLDER_VAULT_ENTRIES = [
+  { title: 'favorite editor → Neovim',         tag: 'memory', ts: '5d ago'    },
+  { title: 'Mark VII · architecture sketch',   tag: 'note',   ts: 'today'     },
+  { title: 'Laplace transforms · cheatsheet',  tag: 'note',   ts: 'yesterday' },
+  { title: 'Conversation · 2026-05-09',         tag: 'convo',  ts: '1d ago'   },
+  { title: 'report · em-pset2.pdf',            tag: 'report', ts: '3d ago'    },
+]
+
+export const TASK_BY_STATE = {
+  idle: {
+    name: '—',
+    steps: [],
+  },
+  listening: {
+    name: 'Awaiting voice input…',
+    steps: [
+      { label: "Wake-word detected · 'Jarvis…'",  done: true,   t: '00:00.04' },
+      { label: 'Faster-Whisper STT streaming',     active: true, t: '00:01.12' },
+      { label: 'Intent classification' },
+    ],
+  },
+  thinking: {
+    name: 'EE-302 · Differential Equations · PSet 3',
+    steps: [
+      { label: 'Parse PDF problem set',             done: true,   t: '00:01.20' },
+      { label: 'Extract 6 problems via pdf.read',   done: true,   t: '00:02.84' },
+      { label: 'Delegate Q1–Q4 to MathAgent',       done: true,   t: '00:04.12' },
+      { label: 'Q5 — Laplace transform · Gemini',   active: true, t: '00:14.07' },
+      { label: 'Compose LaTeX report' },
+      { label: 'Compile PDF · pdflatex' },
+    ],
+  },
+  speaking: {
+    name: "Briefing · today's schedule",
+    steps: [
+      { label: 'Recall vault/notes/calendar.md',   done: true,   t: '00:00.18' },
+      { label: 'Compose response (Gemini Flash)',   done: true,   t: '00:00.44' },
+      { label: 'TTS · edge-tts · streaming',        active: true, t: '00:01.92' },
+    ],
+  },
+  working: {
+    name: 'Compile report → em-pset3.pdf',
+    steps: [
+      { label: 'report.write → em-pset3.tex',      done: true,   t: '00:08.41' },
+      { label: 'pdflatex pass 1',                   done: true,   t: '00:11.06' },
+      { label: 'pdflatex pass 2 (cross-refs)',      active: true, t: '00:13.80' },
+      { label: 'Move to vault/reports/' },
+    ],
+  },
+}
+
+export const TRANSCRIPT_BY_STATE = {
+  idle: [
+    { who: 'j', text: 'All systems nominal. Three projects active, two with deadlines this week. Shall I begin?' },
+  ],
+  listening: [
+    { who: 'j', text: 'Welcome back, sir. How can I be of service?' },
+    { who: 'u', text: '' },
+  ],
+  thinking: [
+    { who: 'u', text: '/think solve problem 5 from the differential equations pset I uploaded yesterday' },
+    { who: 'j', text: 'Routing to Gemini 2.5 Pro — the Laplace inverse on this one needs partial fractions. Working on it.' },
+  ],
+  speaking: [
+    { who: 'u', text: "what's on the agenda today" },
+    { who: 'j', text: "Three items, sir. EE-302 office hours at fourteen hundred, your physics lab report is due at twenty-three fifty-nine, and Mertcan asked you to call back regarding the senior project — I've left the relevant notes in the vault." },
+  ],
+  working: [
+    { who: 'u', text: 'render the EM pset to PDF and drop it in reports' },
+    { who: 'j', text: 'Compiling. Two passes for the cross-references. Estimated thirty-two seconds.' },
+  ],
+}

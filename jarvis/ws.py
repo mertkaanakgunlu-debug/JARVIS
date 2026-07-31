@@ -148,9 +148,50 @@ class JarvisEventBus:
     def task_update(self, name: str, steps: list) -> None:
         self.emit({"type": "task", "name": name, "steps": steps})
 
-    def metrics(self, cpu: float, gpu: float, ram: float, vram: float, latency: int) -> None:
+    def metrics(self, cpu: float | None, gpu: float | None, ram: float | None,
+                vram: float | None, latency: int | None) -> None:
+        """Push system metrics. Any field may be None, meaning NOT MEASURABLE.
+
+        None is not a formatting detail -- it is the whole point. A metric the
+        host cannot measure (no psutil, no pynvml) must reach the HUD as null so
+        it can render "olculemiyor", never as a plausible number. Until
+        2026-07-31 the absent-psutil branch of _push_metrics_loop() filled these
+        with random.uniform() and the HUD displayed the result next to a live
+        badge; the owner had no way to tell a real reading from a fabricated one.
+        """
         self.emit({"type": "metrics", "cpu": cpu, "gpu": gpu,
                    "ram": ram, "vram": vram, "latency": latency})
+
+    def model_status(self, trace: dict | None) -> None:
+        """Announce which provider/model actually authored the last answer.
+
+        Sourced from JarvisAgent.last_turn_trace -- LlmTraceRecorder.turn_summary
+        already resolves "which call wrote the visible text" (preferring compose
+        over agent), so this re-labels nothing and measures nothing new.
+
+        `trace=None` means no turn has run yet on this process. Every field is
+        emitted as null in that case, deliberately: the HUD hardcoded
+        `state === 'thinking' ? 'Gemini 2.5 Pro' : 'Gemini 2.5 Flash'` until
+        2026-07-31 and so announced a cloud model while qwen3:8b answered
+        locally. A readout with no value must say so.
+
+        `latency_ms` is the real round-trip of the authoring call. The metrics
+        frame carried a hardcoded `latency=0` before this existed, which the HUD
+        rendered as "0 ms" -- a number no round-trip ever takes.
+        """
+        t = trace or {}
+        self.emit({
+            "type": "model_status",
+            "provider": t.get("provider"),
+            "model": t.get("model"),
+            "role": t.get("requested_role"),
+            "latency_ms": t.get("latency_ms"),
+            "total_llm_ms": t.get("total_llm_ms"),
+            "input_tokens": t.get("input_tokens"),
+            "output_tokens": t.get("output_tokens"),
+            "fallback_used": t.get("fallback_used"),
+            "cold_start": t.get("cold_start"),
+        })
 
     def calendar(self, events: list) -> None:
         self.emit({"type": "calendar", "events": events})
@@ -209,46 +250,65 @@ _metrics_task: Optional[asyncio.Task] = None
 _start_time = time.time()
 
 
+def _round_or_none(value: float | None, digits: int) -> float | None:
+    """round(), but None passes through as None (not measurable stays that way)."""
+    return None if value is None else round(value, digits)
+
+
 async def _push_metrics_loop() -> None:
-    """Push CPU/RAM/etc. to HUD every 5 s using psutil (if available)."""
+    """Push CPU/RAM/GPU to the HUD every 5 s.
+
+    A metric this host cannot measure is sent as None, never substituted:
+      * no psutil  -> cpu/ram are None
+      * no pynvml  -> gpu/vram are None (NOT 0.0 -- an idle-looking zero is a
+        claim about the GPU, and "we did not look" is not the same claim)
+
+    Both substitutions existed before 2026-07-31: the absent-psutil branch
+    fabricated all four with random.uniform(), and the pynvml failure path left
+    gpu/vram at their 0.0 initialisers. Both reached the HUD indistinguishable
+    from real readings.
+    """
     try:
         import psutil  # type: ignore
         has_psutil = True
     except ImportError:
         has_psutil = False
+        logger.warning(
+            "psutil is not installed -- CPU/RAM will be reported as unmeasurable "
+            "rather than estimated. Install psutil for real readings."
+        )
 
     while True:
         await asyncio.sleep(5)
         if not event_bus._clients:
             continue
         try:
+            cpu: float | None = None
+            ram: float | None = None
+            gpu: float | None = None
+            vram: float | None = None
+
             if has_psutil:
-                cpu  = psutil.cpu_percent(interval=None)
-                ram  = psutil.virtual_memory().used / 1024 ** 3
-                # GPU via nvidia-ml-py3 (optional)
-                gpu  = 0.0
-                vram = 0.0
-                try:
-                    import pynvml  # type: ignore
-                    pynvml.nvmlInit()
-                    h    = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    util = pynvml.nvmlDeviceGetUtilizationRates(h)
-                    mem  = pynvml.nvmlDeviceGetMemoryInfo(h)
-                    gpu  = float(util.gpu)
-                    vram = mem.used / 1024 ** 3
-                except Exception:
-                    pass
-            else:
-                import random
-                cpu  = random.uniform(20, 50)
-                ram  = random.uniform(12, 18)
-                gpu  = random.uniform(30, 70)
-                vram = random.uniform(4, 7)
+                cpu = psutil.cpu_percent(interval=None)
+                ram = psutil.virtual_memory().used / 1024 ** 3
+
+            # GPU via nvidia-ml-py3 (optional). Independent of psutil: a host can
+            # have one and not the other, so each stays None on its own.
+            try:
+                import pynvml  # type: ignore
+                pynvml.nvmlInit()
+                h    = pynvml.nvmlDeviceGetHandleByIndex(0)
+                util = pynvml.nvmlDeviceGetUtilizationRates(h)
+                mem  = pynvml.nvmlDeviceGetMemoryInfo(h)
+                gpu  = float(util.gpu)
+                vram = mem.used / 1024 ** 3
+            except Exception:  # noqa: BLE001 -- absent/failed NVML => not measurable
+                pass
 
             event_bus.metrics(
-                cpu=round(cpu, 1), gpu=round(gpu, 1),
-                ram=round(ram, 2), vram=round(vram, 2),
-                latency=0,
+                cpu=_round_or_none(cpu, 1), gpu=_round_or_none(gpu, 1),
+                ram=_round_or_none(ram, 2), vram=_round_or_none(vram, 2),
+                latency=None,
             )
         except Exception as exc:
             logger.debug("Metrics push error: %s", exc)
@@ -435,6 +495,15 @@ async def live_data_snapshot(agent, settings) -> None:
         stats = _build_usage_stats(agent)
         if stats:
             await event_bus.broadcast(stats)
+    except Exception:
+        pass
+    # Which model actually answered last — otherwise a client connecting
+    # mid-session has no provider/model value until the NEXT turn broadcasts
+    # one, which is exactly the gap the HUD used to paper over with a
+    # hardcoded "Gemini 2.5 Flash". None here is correct and renders as "no
+    # value yet": nothing has run.
+    try:
+        event_bus.model_status(getattr(agent, "last_turn_trace", None))
     except Exception:
         pass
 

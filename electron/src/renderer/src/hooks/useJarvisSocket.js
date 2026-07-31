@@ -8,6 +8,18 @@
  *   {type:"tool_call", kind:"tool"|"cloud"|"local"|"note", body:"..."}
  *   {type:"task",    name:"...", steps:[{label,done?,active?,t?}]}
  *   {type:"metrics", cpu, gpu, ram, vram, latency}
+ *       Any field may be null, meaning THE HOST CANNOT MEASURE IT (no psutil,
+ *       no NVML). Render null as "—"/"ölçülemiyor" — never substitute a
+ *       plausible default. The server used to fabricate these with
+ *       random.uniform() and this hook seeded them with invented numbers; both
+ *       were removed 2026-07-31.
+ *   {type:"model_status", provider, model, role, latency_ms, total_llm_ms,
+ *                         input_tokens, output_tokens, fallback_used, cold_start}
+ *       Which provider/model ACTUALLY authored the last answer, from the
+ *       server's own turn trace. All-null means no turn has run yet. Before
+ *       this frame existed the HUD derived a model label from its animation
+ *       state ('thinking' ? 'Gemini 2.5 Pro' : 'Gemini 2.5 Flash') and so
+ *       announced a cloud model while qwen3:8b answered locally.
  *   {type:"calendar",events:[{time,title,where,kind}]}
  *   {type:"vault",   entries:[{title,tag,ts}], count:N}
  *   {type:"progress",jobsDone:N,jobsTotal:N,runtime:"...",tokensIn:N,tokensOut:N}
@@ -35,7 +47,15 @@ function useJarvisSocket(apiUrl, apiKey, options = {}) {
   const [transcript, setTranscript] = useState([])
   const [feedLines, setFeedLines]   = useState([])
   const [task, setTask]             = useState({ name: '—', steps: [] })
-  const [metrics, setMetrics]       = useState({ cpu: 28, gpu: 64, ram: 14.2, vram: 5.7, latency: 312 })
+  // null = not yet reported / not measurable. Seeded with invented numbers
+  // (cpu:28, gpu:64, ram:14.2, vram:5.7, latency:312) until 2026-07-31, which
+  // meant a freshly-connected HUD displayed a full set of readings before the
+  // server had sent a single metrics frame.
+  const [metrics, setMetrics]       = useState({ cpu: null, gpu: null, ram: null, vram: null, latency: null })
+  const [modelStatus, setModelStatus] = useState({
+    provider: null, model: null, role: null, latency_ms: null,
+    input_tokens: null, output_tokens: null, fallback_used: null, cold_start: null,
+  })
   const [calEvents, setCalEvents]   = useState([])
   const [vaultData, setVaultData]   = useState({ entries: [], count: 0 })
   const [progress, setProgress]     = useState({ jobsDone: 0, jobsTotal: 0, runtime: '00:00:00', tokensIn: 0, tokensOut: 0 })
@@ -113,6 +133,22 @@ function useJarvisSocket(apiUrl, apiKey, options = {}) {
           setMetrics(m => ({ ...m, ...msg }))
           break
 
+        case 'model_status':
+          // Replace wholesale, don't merge: a cleared status (session reset)
+          // arrives as all-null and must actually clear. Merging would keep
+          // showing the archived session's model.
+          setModelStatus({
+            provider: msg.provider ?? null,
+            model: msg.model ?? null,
+            role: msg.role ?? null,
+            latency_ms: msg.latency_ms ?? null,
+            input_tokens: msg.input_tokens ?? null,
+            output_tokens: msg.output_tokens ?? null,
+            fallback_used: msg.fallback_used ?? null,
+            cold_start: msg.cold_start ?? null,
+          })
+          break
+
         case 'calendar':
           setCalEvents(msg.events || [])
           break
@@ -184,7 +220,7 @@ function useJarvisSocket(apiUrl, apiKey, options = {}) {
 
   return {
     connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos,
-    micLevel, sendRaw,
+    micLevel, modelStatus, sendRaw,
   }
 }
 

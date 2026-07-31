@@ -4,6 +4,10 @@
  */
 import React, { useRef, useEffect, useState, useCallback } from 'react'
 import { readChatSse } from '../lib/chatStream'
+import {
+  NO_VALUE, isMissing, fmtText, describeModel, describeModelCaption,
+} from '../lib/display'
+import { renderMarkdown } from '../lib/markdown'
 
 // ── Panel chrome ──────────────────────────────────────────────────────────────
 export function Panel({ title, id, status = 'live', live = true, children, scroll = false }) {
@@ -27,16 +31,25 @@ export function Panel({ title, id, status = 'live', live = true, children, scrol
 }
 
 // ── Current Task ──────────────────────────────────────────────────────────────
-export function CurrentTask({ state, taskName, steps = [] }) {
+export function CurrentTask({ state, taskName, steps = [], modelStatus }) {
+  // Routing is the real provider/model of the last answer plus the role the
+  // router actually asked for. It read
+  //   state === 'thinking' ? 'Gemini 2.5 Pro' : 'Gemini 2.5 Flash'
+  // until 2026-07-31 — a label derived from an animation state, which meant the
+  // panel confidently named a cloud model on a local-only install.
+  const routing = describeModel(modelStatus)
+  const role = modelStatus?.role
   return (
     <Panel title="Current Task" id="ID/0x0A1" live>
       <div className="kv">
         <span className="k">Subject</span>
-        <span className="v cyan glow">{taskName || '—'}</span>
+        <span className="v cyan glow">{fmtText(taskName)}</span>
       </div>
       <div className="kv">
         <span className="k">Routing</span>
-        <span className="v">{state === 'thinking' ? 'Gemini 2.5 Pro' : 'Gemini 2.5 Flash'}</span>
+        <span className={routing === NO_VALUE ? 'v dim' : 'v'}>
+          {routing}{routing !== NO_VALUE && role ? ` · ${role}` : ''}
+        </span>
       </div>
       <div className="kv">
         <span className="k">Mode</span>
@@ -115,14 +128,20 @@ export function SubagentsPanel({ active = [] }) {
 // ── System Metrics ─────────────────────────────────────────────────────────────
 function MeterRow({ label, value, max = 100, sub, danger }) {
   const segs = 18
-  const lit  = Math.round((value / max) * segs)
+  // An unmeasurable value lights ZERO segments and reads "—". Previously
+  // Math.round(null) === 0, so "no psutil" and "0% CPU" were pixel-identical:
+  // a full, confident-looking meter bar at rest.
+  const missing = isMissing(value)
+  const lit  = missing ? 0 : Math.round((value / max) * segs)
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
         <span className="k-label">{label}</span>
-        <span className="numeric cyan" style={{ fontSize: 10 }}>{Math.round(value)}{sub}</span>
+        <span className={missing ? 'numeric dim' : 'numeric cyan'} style={{ fontSize: 10 }}>
+          {missing ? NO_VALUE : `${Math.round(value)}${sub}`}
+        </span>
       </div>
-      <div className="meter">
+      <div className={missing ? 'meter dim' : 'meter'}>
         {Array.from({ length: segs }).map((_, i) => (
           <div key={i} className={`seg ${i < lit ? (danger && i >= segs - 2 ? 'alert' : i >= segs - 4 ? 'warn' : 'on') : ''}`} />
         ))}
@@ -131,21 +150,28 @@ function MeterRow({ label, value, max = 100, sub, danger }) {
   )
 }
 
-export function SystemMetrics({ cpu, gpu, ram, vram, mic, voice, model, latency }) {
+export function SystemMetrics({ cpu, gpu, ram, vram, mic, voice, modelStatus, latency }) {
+  const rtt = isMissing(latency) ? NO_VALUE : `${Math.round(latency)} ms`
   return (
     <Panel title="System Metrics" id="ID/0x0E5">
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
         <MeterRow label="CPU"          value={cpu}   sub="%" />
-        <MeterRow label="GPU · RTX 4070" value={gpu}   sub="%" />
+        <MeterRow label="GPU"          value={gpu}   sub="%" />
         <MeterRow label="RAM"          value={ram}   sub=" GB" max={32} />
         <MeterRow label="VRAM"         value={vram}  sub=" GB" max={12} danger />
         <MeterRow label="MIC LEVEL"    value={mic}   sub="%" />
         <MeterRow label="VOICE OUT"    value={voice} sub="%" />
       </div>
       <div className="hr" />
-      <div className="kv"><span className="k">Active model</span><span className="v cyan">{model}</span></div>
-      <div className="kv"><span className="k">Round-trip</span><span className="v">{latency} ms</span></div>
-      <div className="kv"><span className="k">Network</span><span className="v">Tailscale · 100.84.12.7</span></div>
+      {/* Real values from the server's model_status frame. This row used to be
+          a hardcoded Gemini label chosen by animation state, and Round-trip
+          rendered the server's hardcoded latency=0 as "0 ms". */}
+      <div className="kv"><span className="k">Active model</span><span className="v cyan">{describeModel(modelStatus)}</span></div>
+      <div className="kv"><span className="k">Round-trip</span><span className="v">{rtt}</span></div>
+      {/* Network was a literal "Tailscale · 100.84.12.7". Nothing reports the
+          transport yet, so it says so rather than naming an address that may
+          not exist. */}
+      <div className="kv"><span className="k">Network</span><span className="v dim">YAKINDA</span></div>
     </Panel>
   )
 }
@@ -304,8 +330,12 @@ export function Transcript({ turns = [], typing = false }) {
         {turns.map((t, i) => (
           <div key={i} className="turn">
             <span className={`who${t.who === 'j' ? ' j' : ''}`}>{t.who === 'j' ? 'JARVIS' : 'USER'}</span>
+            {/* JARVIS's replies are markdown on the text surface (the ban was
+                lifted 2026-07-31); the user's own typing is not, and is shown
+                verbatim. renderMarkdown returns React elements, never HTML —
+                model output can quote arbitrary pages and files. */}
             <span className={`msg${t.who === 'j' ? ' j' : ''}`}>
-              {t.text}
+              {t.who === 'j' ? renderMarkdown(t.text) : t.text}
               {i === turns.length - 1 && typing && <span className="caret" />}
             </span>
           </div>
@@ -342,11 +372,14 @@ export function TopBar({ state, clock, panelVis = {}, onTogglePanel, onSetAllPan
     return () => document.removeEventListener('mousedown', handler)
   }, [menuOpen])
 
+  // 'thinking' said 'REASONING · CLOUD' unconditionally — a routing claim, and
+  // a false one on a local-only install. The state alone knows nothing about
+  // which tier ran; it is just an animation state.
   const stateText = {
     idle:      'STANDBY',
     listening: 'LISTENING',
     speaking:  'RESPONDING',
-    thinking:  'REASONING · CLOUD',
+    thinking:  'REASONING',
     working:   'EXECUTING TASK',
   }[state] || 'STANDBY'
 
@@ -454,6 +487,13 @@ export function BottomBar({
         },
         body: JSON.stringify({
           message: msg, language: '',
+          // Anything typed at this bar is a request the user is sitting in
+          // front of, waiting for. The server's async heuristic is a guess made
+          // from keywords; here we know. Without this the HUD inherited every
+          // false positive of that heuristic — "…ve grafikle" came back as
+          // {"async": true, task_id} in ~0s while the identical sentence
+          // answered interactively in the CLI, which never consults it.
+          force_sync: true,
           ...(conversationId ? { conversation_id: conversationId } : {}),
         }),
       })
@@ -571,13 +611,19 @@ export function BottomBar({
 }
 
 // ── Center stage caption ──────────────────────────────────────────────────────
-export function CenterCaption({ state, name }) {
+export function CenterCaption({ state, name, modelStatus, ttsEngine }) {
+  // Both subtitles were hardcoded and both were wrong on this install:
+  //   'VOICE SYNTH · EDGE-TTS'      — the real engine is Piper
+  //                                   (jarvis/voice/tts_piper.py); edge-tts is
+  //                                   only an optional cloud fallback.
+  //   'GEMINI 2.5 PRO · CLOUD ROUTE' — announced while qwen3:8b answered locally.
+  // They now read from real values, and say so when there is none.
   const lines = {
     idle:      ['AT YOUR SERVICE.', 'ALL SYSTEMS NOMINAL.'],
     listening: ['LISTENING…', 'AWAITING INSTRUCTION'],
-    speaking:  ['SPEAKING', 'VOICE SYNTH · EDGE-TTS'],
-    thinking:  ['REASONING', 'GEMINI 2.5 PRO · CLOUD ROUTE'],
-    working:   ['EXECUTING', name || 'RUNNING TASK'],
+    speaking:  ['SPEAKING', ttsEngine ? `VOICE SYNTH · ${String(ttsEngine).toUpperCase()}` : 'VOICE SYNTH'],
+    thinking:  ['REASONING', describeModelCaption(modelStatus)],
+    working:   ['EXECUTING', fmtText(name) === NO_VALUE ? 'RUNNING TASK' : name],
   }[state] || ['STANDBY', '']
   return (
     <>

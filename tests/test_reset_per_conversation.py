@@ -124,9 +124,22 @@ async def test_event_bus_notification_survives_a_concurrent_session_switch(monke
     class _FakeEventBus:
         def __init__(self):
             self.calls: list[tuple[str, object]] = []
+            self.model_statuses: list[object] = []
 
         def session(self, session_id, topic):
             self.calls.append((session_id, topic))
+
+        def model_status(self, trace):
+            # Kept OUT of `calls`, which this test asserts by exact equality:
+            # the subject here is which session id the notification carries,
+            # and an unrelated event appearing in that list would make the
+            # assertion fail for a reason it is not about.
+            #
+            # Recorded separately rather than dropped, because the emission is
+            # real and worth seeing: _reset_state_sync clears the HUD's
+            # provider/model readout, so a reset cannot leave the ARCHIVED
+            # session's model displayed as if it were current.
+            self.model_statuses.append(trace)
 
     fake_bus = _FakeEventBus()
     monkeypatch.setattr(agent_mod, "event_bus", fake_bus)
@@ -149,6 +162,9 @@ async def test_event_bus_notification_survives_a_concurrent_session_switch(monke
 
     assert archived_id == "B"
     assert fake_bus.calls == [(new_id, None)]  # fired with the REAL new id, not the raced value
+    # The reset also clears the HUD's model readout — otherwise the archived
+    # session's provider/model stays on screen labelled as the live one.
+    assert fake_bus.model_statuses == [None]
 
 
 @pytest.mark.asyncio

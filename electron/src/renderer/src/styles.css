@@ -358,6 +358,33 @@ svg.wire .arc-bright{ stroke: var(--hud-cyan); fill:none; stroke-width: 1.5;
   animation: blink 1s steps(2) infinite; box-shadow: 0 0 6px var(--hud-cyan); }
 @keyframes blink{ 50%{ opacity: 0 } }
 
+/* markdown in JARVIS replies (lib/markdown.jsx) — the text-surface prompt was
+   allowed to emit markdown on 2026-07-31; without these the transcript showed
+   browser-default margins that broke the panel's density. Tuned to sit inside
+   an 11px transcript line, not to look like a document. */
+.md-p{ margin: 0 0 6px; }
+.md-p:last-child{ margin-bottom: 0 }
+.md-h{ margin: 8px 0 4px; font-size: 11px; letter-spacing:.08em;
+  text-transform: uppercase; color: var(--hud-cyan); }
+.md-h:first-child{ margin-top: 0 }
+.md-list{ margin: 0 0 6px; padding-left: 16px; }
+.md-list li{ margin-bottom: 2px }
+.md-code{ font-family: var(--font-mono); font-size: 10px;
+  background: rgba(34,211,238,.10); border: 1px solid rgba(34,211,238,.20);
+  border-radius: 3px; padding: 0 4px; word-break: break-all; }
+.md-pre{ margin: 0 0 6px; padding: 6px 8px; overflow-x: auto;
+  background: rgba(0,0,0,.35); border: 1px solid var(--hud-line-dim);
+  border-radius: 4px; }
+.md-pre code{ font-family: var(--font-mono); font-size: 10px;
+  background: none; border: 0; padding: 0; white-space: pre; }
+/* Tables scroll inside their own box: a wide table must never widen the panel. */
+.md-table{ display:block; overflow-x:auto; width:100%; margin: 0 0 6px;
+  border-collapse: collapse; font-size: 10px; }
+.md-table th, .md-table td{ border: 1px solid var(--hud-line-dim);
+  padding: 2px 6px; text-align: left; white-space: nowrap; }
+.md-table th{ color: var(--hud-cyan); font-weight: 600;
+  letter-spacing:.06em; text-transform: uppercase; }
+
 /* subagent rows */
 .sa{ display:flex; align-items:center; gap: 10px; font-size: 11px; padding: 4px 0;
   border-bottom: 1px dashed rgba(34,211,238,.12); }

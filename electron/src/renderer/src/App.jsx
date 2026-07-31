@@ -18,8 +18,16 @@ import {
 import useJarvisSocket from './hooks/useJarvisSocket'
 import useRemoteAudioSession from './hooks/useRemoteAudioSession'
 import useClock from './hooks/useClock'
-import { useFakeMic, useFakeFeed, useFakeMetrics } from './hooks/useFakeData'
+// Every invented value the HUD can show comes from this one module, and only
+// on the disconnected branch. See its header and
+// tests/test_no_synthetic_live_data.py.
+import {
+  useFakeMic, useFakeFeed, useFakeMetrics,
+  PLACEHOLDER_EVENTS, PLACEHOLDER_PROJECTS, PLACEHOLDER_VAULT_ENTRIES,
+  TASK_BY_STATE, TRANSCRIPT_BY_STATE,
+} from './hooks/useFakeData'
 import { readChatSse } from './lib/chatStream'
+import { NO_VALUE } from './lib/display'
 
 // Stable per-install conversation id (Faz 5 removed the server's silent
 // auto-resume guess; the API has accepted an explicit conversation_id since
@@ -86,95 +94,6 @@ function useUptime() {
   const pad = n => n.toString().padStart(2,'0')
   const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60
   return `${pad(h)}:${pad(m)}:${pad(sec)}`
-}
-
-// ── Static placeholder data (rich; shown when WS offline) ────────────────────
-const PLACEHOLDER_EVENTS = [
-  { time: '10:00', title: 'EE-302 · Lecture',           where: 'Hall B-204',      kind: 'live' },
-  { time: '14:00', title: 'Office Hours · Prof. Yıldız', where: 'EE-411',          kind: 'idle' },
-  { time: '17:30', title: 'Senior Project standup',      where: 'Discord · Voice', kind: 'idle' },
-  { time: '21:00', title: 'Gym',                         where: 'Campus rec',      kind: 'idle' },
-  { time: '23:59', title: 'Physics Lab Report · DUE',    where: 'Submit · Moodle', kind: 'red'  },
-]
-
-const PLACEHOLDER_PROJECTS = [
-  { title: 'EE-302 · Differential Eq · PSet 3',  progress: 84, due: '+ 2d 04h', stage: 'Compiling LaTeX',    tag: 'homework'  },
-  { title: 'Senior · Mark VII Web Dashboard',     progress: 47, due: '+ 12d',    stage: 'FastAPI · WebSocket',tag: 'project'   },
-  { title: 'PHYS-201 · Lab Report',               progress: 92, due: '+ 06h',    stage: 'Final review',       tag: 'homework'  },
-  { title: 'Vault migration → Obsidian sync',     progress: 30, due: '— soon',   stage: 'Designing schema',   tag: 'internal'  },
-]
-
-const PLACEHOLDER_VAULT_ENTRIES = [
-  { title: 'favorite editor → Neovim',         tag: 'memory', ts: '5d ago'    },
-  { title: 'Mark VII · architecture sketch',   tag: 'note',   ts: 'today'     },
-  { title: 'Laplace transforms · cheatsheet',  tag: 'note',   ts: 'yesterday' },
-  { title: 'Conversation · 2026-05-09',         tag: 'convo',  ts: '1d ago'   },
-  { title: 'report · em-pset2.pdf',            tag: 'report', ts: '3d ago'    },
-]
-
-const TASK_BY_STATE = {
-  idle: {
-    name: '—',
-    steps: [],
-  },
-  listening: {
-    name: 'Awaiting voice input…',
-    steps: [
-      { label: "Wake-word detected · 'Jarvis…'",  done: true,   t: '00:00.04' },
-      { label: 'Faster-Whisper STT streaming',     active: true, t: '00:01.12' },
-      { label: 'Intent classification' },
-    ],
-  },
-  thinking: {
-    name: 'EE-302 · Differential Equations · PSet 3',
-    steps: [
-      { label: 'Parse PDF problem set',             done: true,   t: '00:01.20' },
-      { label: 'Extract 6 problems via pdf.read',   done: true,   t: '00:02.84' },
-      { label: 'Delegate Q1–Q4 to MathAgent',       done: true,   t: '00:04.12' },
-      { label: 'Q5 — Laplace transform · Gemini',   active: true, t: '00:14.07' },
-      { label: 'Compose LaTeX report' },
-      { label: 'Compile PDF · pdflatex' },
-    ],
-  },
-  speaking: {
-    name: "Briefing · today's schedule",
-    steps: [
-      { label: 'Recall vault/notes/calendar.md',   done: true,   t: '00:00.18' },
-      { label: 'Compose response (Gemini Flash)',   done: true,   t: '00:00.44' },
-      { label: 'TTS · edge-tts · streaming',        active: true, t: '00:01.92' },
-    ],
-  },
-  working: {
-    name: 'Compile report → em-pset3.pdf',
-    steps: [
-      { label: 'report.write → em-pset3.tex',      done: true,   t: '00:08.41' },
-      { label: 'pdflatex pass 1',                   done: true,   t: '00:11.06' },
-      { label: 'pdflatex pass 2 (cross-refs)',      active: true, t: '00:13.80' },
-      { label: 'Move to vault/reports/' },
-    ],
-  },
-}
-
-const TRANSCRIPT_BY_STATE = {
-  idle: [
-    { who: 'j', text: 'All systems nominal. Three projects active, two with deadlines this week. Shall I begin?' },
-  ],
-  listening: [
-    { who: 'j', text: 'Welcome back, sir. How can I be of service?' },
-    { who: 'u', text: '' },
-  ],
-  thinking: [
-    { who: 'u', text: '/think solve problem 5 from the differential equations pset I uploaded yesterday' },
-    { who: 'j', text: 'Routing to Gemini 2.5 Pro — the Laplace inverse on this one needs partial fractions. Working on it.' },
-  ],
-  speaking: [
-    { who: 'u', text: "what's on the agenda today" },
-    { who: 'j', text: "Three items, sir. EE-302 office hours at fourteen hundred, your physics lab report is due at twenty-three fifty-nine, and Mertcan asked you to call back regarding the senior project — I've left the relevant notes in the vault." },
-  ],
-  working: [
-    { who: 'u', text: 'render the EM pset to PDF and drop it in reports' },
-    { who: 'j', text: 'Compiling. Two passes for the cross-references. Estimated thirty-two seconds.' },
-  ],
 }
 
 // ── Drop overlay ──────────────────────────────────────────────────────────────
@@ -484,7 +403,7 @@ export default function App() {
   // Live data from WebSocket
   const {
     connected, state, transcript, feedLines, task, metrics, calEvents, vaultData, progress, todos,
-    micLevel: wsMicLevel, sendRaw,
+    micLevel: wsMicLevel, modelStatus, sendRaw,
   } = useJarvisSocket(apiUrl, apiKey, {
     onPanelControl: handlePanelControl,
     onAudioChunk: (buf) => remoteAudio.handleAudioChunk(buf),
@@ -580,30 +499,55 @@ export default function App() {
     }
   }, [dropFile, dropQuery, apiUrl, apiKey, conversationId, handleConfirmationRequired])
 
-  // Fake data fallback (active when disconnected)
+  // ── LIVE DATA INTEGRITY INVARIANT (2026-07-31) ─────────────────────────────
+  // While `connected` is true NO field may show a synthetic, placeholder,
+  // state-derived or random value. Absent data renders as "—"/"veri yok"; the
+  // demo data below is reachable ONLY when disconnected, where the badge
+  // already reads "○ OFFLINE · DEMO DATA".
+  //
+  // Every `connected && X.length ? X : fake` below used to be exactly that:
+  // truthy-length guards that silently swapped in demo content whenever a real
+  // stream happened to be empty. So a live HUD showed an animated mic meter
+  // with no voice session, an activity feed of tool calls that never ran
+  // ("Gemini 2.5 Pro escalation", "report.compile → report.pdf · 312 KB"), a
+  // vault count of 2847, and invented calendar entries — all under a LIVE badge.
+  // The owner had no way to tell which panels were real.
   const fakeMic      = useFakeMic(state)
   const fakeFeed     = useFakeFeed(state)
   const fakeMetrics  = useFakeMetrics(state)
 
-  // Faz 3: real (not simulated) level once a voice session (local or remote)
-  // is actively pushing mic_level events; falls back to the animated fake
-  // meter otherwise. The *5 scale is a starting heuristic (ambient room noise
-  // measured ~0.00002 RMS, speech ~0.14 during verification) -- recalibrate
-  // once seen live, this can't be judged from text alone.
+  // Faz 3: real (not simulated) level once a voice session (local or remote) is
+  // actively pushing mic_level events. The *5 scale is a starting heuristic
+  // (ambient room noise measured ~0.00002 RMS, speech ~0.14 during
+  // verification) -- recalibrate once seen live.
   const realMicLevel = wsMicLevel != null ? Math.min(1, wsMicLevel.rms * 5) : null
-  const micLevel = connected && realMicLevel != null ? realMicLevel : fakeMic
-  const feed     = connected && feedLines.length ? feedLines : fakeFeed
+  // null (not 0) when connected with no voice session: "not measured" is not
+  // "silent". Voice is parked, so this is the normal state today.
+  //
+  // The ORB still animates on null, and that is intended, not an oversight:
+  // JarvisOrb falls through to its state-driven amplitude (null > 0 is false),
+  // which is decoration — a breathing sphere asserts nothing about the
+  // microphone. The invariant governs READOUTS, and the numeric one beside it
+  // (micPct) correctly reads "—". Freezing the orb would cost the HUD its life
+  // without making anything more honest.
+  const micLevel = connected ? realMicLevel : fakeMic
+  const micPct   = micLevel == null ? null : Math.round(micLevel * 100)
+  const feed     = connected ? feedLines : fakeFeed
   const met      = connected ? metrics : fakeMetrics
 
   const clock  = useClock()
   const uptime = useUptime()
 
-  const activeAgents = state === 'thinking' ? ['math', 'writer']
-    : state === 'working'   ? ['coder', 'shell']
-    : state === 'speaking'  ? ['vault']
+  // Nothing reports which sub-agents are actually running, so when connected
+  // this is empty rather than guessed. It used to be derived from the animation
+  // state -- 'thinking' displayed 'math' and 'writer' as busy regardless of
+  // what the turn was doing.
+  const activeAgents = connected ? []
+    : state === 'thinking' ? ['math', 'writer']
+    : state === 'working'  ? ['coder', 'shell']
+    : state === 'speaking' ? ['vault']
     : []
 
-  // Use live data when connected, rich placeholders when offline
   const calendarEvents  = connected ? calEvents : PLACEHOLDER_EVENTS
   const projects        = connected
     ? todos.map(t => ({
@@ -614,14 +558,16 @@ export default function App() {
         tag: t.category || 'other',
       }))
     : PLACEHOLDER_PROJECTS
-  const vaultEntries    = connected && vaultData.entries.length ? vaultData.entries : PLACEHOLDER_VAULT_ENTRIES
+  const vaultEntries    = connected ? vaultData.entries : PLACEHOLDER_VAULT_ENTRIES
   const vaultCount      = connected ? vaultData.count : 2847
-  const displayTask     = (connected && task.name) ? task : TASK_BY_STATE[state] || TASK_BY_STATE.idle
-  // Merge WS voice messages + locally typed chat messages; fall back to placeholder
+  const displayTask     = connected ? task : (TASK_BY_STATE[state] || TASK_BY_STATE.idle)
+  // Merge WS voice messages + locally typed chat messages. When connected an
+  // empty conversation stays empty -- the scripted TRANSCRIPT_BY_STATE demo
+  // dialogue must never appear as if JARVIS had said it.
   const mergedMessages    = [...transcript, ...localChat]
-  const displayTranscript = mergedMessages.length > 0
+  const displayTranscript = connected
     ? mergedMessages
-    : (TRANSCRIPT_BY_STATE[state] || [])
+    : (mergedMessages.length > 0 ? mergedMessages : (TRANSCRIPT_BY_STATE[state] || []))
 
   // Progress: use WS data or zeroes (no fake placeholders)
   const cloudSpend = progress.cloudSpend ?? '0.0000'
@@ -669,7 +615,7 @@ export default function App() {
 
         {/* Left column */}
         <div className="slot-l1" style={{ display: 'flex', minHeight: 0 }}>
-          {panelVis.task && <CurrentTask state={state} taskName={displayTask.name} steps={displayTask.steps} />}
+          {panelVis.task && <CurrentTask state={state} taskName={displayTask.name} steps={displayTask.steps} modelStatus={modelStatus} />}
         </div>
         <div className="slot-l2" style={{ display: 'flex', minHeight: 0 }}>
           {panelVis.subagents && <SubagentsPanel active={activeAgents} />}
@@ -677,10 +623,10 @@ export default function App() {
         <div className="slot-l3" style={{ display: 'flex', minHeight: 0 }}>
           {panelVis.metrics && <SystemMetrics
             cpu={met.cpu} gpu={met.gpu} ram={met.ram} vram={met.vram}
-            mic={Math.round(micLevel * 100)}
-            voice={state === 'speaking' ? Math.round(micLevel * 100) : 0}
-            model={state === 'thinking' ? 'Gemini 2.5 Pro' : 'Gemini 2.5 Flash'}
-            latency={met.latency}
+            mic={micPct}
+            voice={state === 'speaking' ? micPct : null}
+            modelStatus={modelStatus}
+            latency={modelStatus.latency_ms ?? met.latency}
           />}
         </div>
 
@@ -691,17 +637,21 @@ export default function App() {
             <OrbitalRings size={560} accent={accent} />
             <JarvisOrb size={420} state={state} accent={accent} micLevel={micLevel} />
           </div>
-          <CenterCaption state={state} name={displayTask.name} />
+          <CenterCaption state={state} name={displayTask.name} modelStatus={modelStatus} />
           <div style={{ display: 'flex', gap: 18, alignItems: 'center', marginTop: 4 }}>
             <span className="dim" style={{ fontSize: 9, letterSpacing: '.22em' }}>VOICE I/O</span>
             <VoiceBars state={state} accent={accent} count={28} />
-            <span className="dim numeric" style={{ fontSize: 10 }}>{Math.round(micLevel * 100)}%</span>
+            <span className="dim numeric" style={{ fontSize: 10 }}>
+              {micPct == null ? NO_VALUE : `${micPct}%`}
+            </span>
           </div>
-          {/* Connection status dot */}
+          {/* Connection status. OFFLINE names the demo data explicitly: every
+              placeholder in this file is reachable only on this branch, and the
+              badge is the reader's one signal that what they see is invented. */}
           <div style={{ position: 'absolute', bottom: 8, right: 8, fontSize: 9,
             color: connected ? 'var(--hud-cyan)' : 'var(--hud-amber)',
             letterSpacing: '.14em', textTransform: 'uppercase' }}>
-            {connected ? '● LIVE' : '○ OFFLINE'}
+            {connected ? '● LIVE' : '○ OFFLINE · DEMO DATA'}
           </div>
         </div>
 

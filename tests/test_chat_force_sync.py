@@ -21,9 +21,11 @@ Two facts worth keeping straight, because they are easy to conflate:
     TaskExecutor and ConfirmationRequired. Measuring one and claiming the other
     would be dishonest, which is why the gate needs this flag.
 
-These tests pin _should_offload's precedence. They deliberately do NOT assert
-anything about which keywords the heuristic contains: narrowing that list is a
-product decision about phone UX, left to the owner.
+These tests pin _should_offload's precedence. The keyword list itself was a
+product decision left open when this file was written; the owner made it on
+2026-07-31 (narrow the list so ordinary interactive requests stop diverting),
+so the keyword-dependent expectations below now assert the NARROWED behavior
+rather than the original bug.
 """
 from __future__ import annotations
 
@@ -37,6 +39,11 @@ MVP_PROMPT = (
     "bir excel tablosuna donustur ve grafikle"
 )
 
+# A request that genuinely IS long-running, used to exercise the branch where
+# the heuristic (not a flag) makes the call. Kept separate from MVP_PROMPT so
+# narrowing the list again cannot silently turn every test here into a no-op.
+LONG_RUNNING_PROMPT = "bu konuyu derinlemesine arastir ve bir rapor hazirla"
+
 
 class _Executor:
     """Stands in for TaskExecutor: only should_async is consulted here."""
@@ -45,10 +52,45 @@ class _Executor:
         return _should_async(message, force)
 
 
-def test_the_mvp_prompt_really_does_trip_the_heuristic():
-    """Guards the premise. If this ever goes False the bug was fixed elsewhere
-    and the rest of this file is testing a hypothetical."""
-    assert _should_async(MVP_PROMPT) is True
+def test_the_mvp_prompt_no_longer_trips_the_heuristic():
+    """The narrowing, pinned. "grafik" was a bare substring in the hint list, so
+    the owner's own MVP sentence diverted to the background executor and /chat
+    answered {"async": true} in ~0s. Charting is fast and interactive; it must
+    not divert on the keyword alone."""
+    assert _should_async(MVP_PROMPT) is False
+
+
+def test_ordinary_requests_that_used_to_divert_stay_interactive():
+    """Each of these tripped a bare-substring hint ("grafik", "rapor",
+    "finansal", "arastir") while being an ordinary interactive request."""
+    for prompt in (
+        "grafigi cizgi grafik yap",
+        "grafiği çizgi grafik yap",
+        "raporu goster",
+        "finansal durumum nedir",
+        "su siteyi arastir bakalim",
+    ):
+        assert _should_async(prompt) is False, prompt
+
+
+def test_genuinely_long_running_requests_still_divert():
+    """The narrowing must not disable the feature. Both diacritic spellings, so
+    the ASCII-folded matching stays covered."""
+    for prompt in (
+        LONG_RUNNING_PROMPT,
+        "bu konuyu derinlemesine araştır",
+        "bana bir rapor hazirla",
+        "dalga simulasyonu calistir",
+        "latex compile et",
+    ):
+        assert _should_async(prompt) is True, prompt
+
+
+def test_hints_are_stem_anchored_not_bare_substrings():
+    """Hints must start at a word boundary. Unanchored matching is what let the
+    old two-character "3d" hint fire from inside an unrelated word."""
+    assert _should_async("x3design dosyasini ac") is False
+    assert _should_async("3 boyutlu gorsellestirme yap") is True
 
 
 def test_force_sync_keeps_the_mvp_prompt_interactive():
@@ -57,10 +99,19 @@ def test_force_sync_keeps_the_mvp_prompt_interactive():
     assert _should_offload(_Executor(), body) is False
 
 
-def test_without_force_sync_the_mvp_prompt_is_offloaded():
-    body = ChatRequest(message=MVP_PROMPT)
+def test_without_any_flag_the_heuristic_decides():
+    """The default path still consults the heuristic — force_sync short-circuits
+    it, it does not replace it."""
+    assert _should_offload(_Executor(), ChatRequest(message=LONG_RUNNING_PROMPT)) is True
+    assert _should_offload(_Executor(), ChatRequest(message=MVP_PROMPT)) is False
 
-    assert _should_offload(_Executor(), body) is True
+
+def test_force_sync_overrides_a_genuinely_long_running_request():
+    """The HUD sends force_sync on everything typed at its command bar: the user
+    is sitting there waiting, which beats any keyword guess."""
+    body = ChatRequest(message=LONG_RUNNING_PROMPT, force_sync=True)
+
+    assert _should_offload(_Executor(), body) is False
 
 
 def test_force_async_wins_over_force_sync():
