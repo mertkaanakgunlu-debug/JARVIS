@@ -55,6 +55,65 @@ def test_new_session_is_latest_session(tmp_path):
     assert store.latest_session() == sid
 
 
+# ── id collision (found live 2026-08-01 by the Faz 2.5 A/B harness) ─────────
+
+def test_new_session_survives_an_id_collision(tmp_path, monkeypatch):
+    """A repeated id used to raise sqlite3.IntegrityError out of the turn.
+
+    The id is YYYYMMDD + random hex, so the space resets daily and the draws
+    are a birthday problem, not a sequence: at 4 hex digits (65 536/day) a
+    measurement run of ~150 sessions had roughly a 1-in-6 chance of colliding,
+    and one did -- 75 turns into a 100-turn run.
+
+    Forcing the FIRST draw to repeat an existing id is the whole point: with 8
+    hex digits a natural collision will never be observed again, so only a
+    forced one can prove the retry is there. Without it this test passes on
+    the broken code too.
+    """
+    store = _store(tmp_path)
+    first = store.new_session()
+
+    draws = iter([first.split("-", 1)[1], "beefcafe", "beefcafe"])
+
+    class _FixedUUID:
+        hex = property(lambda self: next(draws).ljust(32, "0"))
+
+    monkeypatch.setattr("jarvis.session_store.uuid.uuid4", lambda: _FixedUUID())
+
+    second = store.new_session()
+    assert second != first
+    assert store.session_exists(second)
+
+
+def test_new_session_id_keeps_its_entropy_budget(tmp_path):
+    """Pins the width, because no behavioural test can.
+
+    Narrowing the random part back to 4 hex digits does not break any
+    behaviour -- the retry above absorbs it -- so a mutation that reverts it
+    survives every other test in this file while quietly restoring 65 536
+    ids/day and the collision rate that caused the incident. The retry makes
+    a repeat survivable; the width is what keeps it from happening.
+    """
+    suffix = _store(tmp_path).new_session().split("-", 1)[1]
+    assert len(suffix) >= 8, "session id entropy was reduced -- see the retry docstring"
+
+
+def test_new_session_gives_up_rather_than_spinning(tmp_path, monkeypatch):
+    """If every draw collides, something other than chance is wrong -- say so
+    instead of looping forever."""
+    store = _store(tmp_path)
+    first = store.new_session()
+    suffix = first.split("-", 1)[1]
+
+    class _AlwaysSame:
+        hex = suffix.ljust(32, "0")
+
+    monkeypatch.setattr("jarvis.session_store.uuid.uuid4", lambda: _AlwaysSame())
+
+    with pytest.raises(RuntimeError, match="unique session id"):
+        store.new_session()
+
+
 # ── Agent Runtime rev.2, Faz 5: session_exists() ────────────────────────────
 
 def test_session_exists_true_for_a_real_session(tmp_path):

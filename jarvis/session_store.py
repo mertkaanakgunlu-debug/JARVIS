@@ -31,6 +31,11 @@ from langchain_core.load import dumps as lc_dumps, loads as lc_loads
 from langchain_core.messages import BaseMessage
 
 
+# Bounded, not a while-loop: with 8 hex digits, needing a 6th attempt means
+# something other than chance is wrong (a clock stuck on one date, a corrupt
+# uuid source), and spinning forever would hide it.
+_NEW_SESSION_ATTEMPTS = 5
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id           TEXT PRIMARY KEY,
@@ -148,15 +153,43 @@ class SessionStore:
     # ── Session management ────────────────────────────────────────────────────
 
     def new_session(self, topic_hint: str | None = None) -> str:
-        sid = date.today().strftime("%Y%m%d") + "-" + uuid.uuid4().hex[:4]
+        """Open a new session and return its id.
+
+        Retries on id collision. This used to be a single INSERT of
+        ``YYYYMMDD-<4 hex>``, which is 65 536 ids per day with nothing to
+        catch a repeat -- the second one raised
+        ``sqlite3.IntegrityError: UNIQUE constraint failed: sessions.id``
+        straight out of whatever turn happened to be running.
+
+        Found live, 2026-08-01, by the Faz 2.5 A/B harness: ~150 sessions in
+        one day is roughly a 1-in-6 chance of a birthday collision, and it
+        killed the run 75 turns in. Rare in hand use, near-certain for
+        anything automated (an eval sweep, a measurement harness, a
+        long-running server, or a user leaning on /reset).
+
+        Widening to 8 hex digits makes a collision ~4 billion-to-one rather
+        than 65 536-to-one, but entropy alone cannot make this correct: two
+        callers can still draw the same id concurrently. The retry is the fix;
+        the extra digits are what keep it from ever being exercised.
+        """
         now = datetime.now().isoformat()
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO sessions(id, created_at, last_active, topic_hint, status) "
-                "VALUES (?, ?, ?, ?, 'active')",
-                (sid, now, now, topic_hint),
-            )
-        return sid
+        stamp = date.today().strftime("%Y%m%d")
+        for _ in range(_NEW_SESSION_ATTEMPTS):
+            sid = f"{stamp}-{uuid.uuid4().hex[:8]}"
+            try:
+                with self._lock:
+                    self._conn.execute(
+                        "INSERT INTO sessions(id, created_at, last_active, topic_hint, status) "
+                        "VALUES (?, ?, ?, ?, 'active')",
+                        (sid, now, now, topic_hint),
+                    )
+                return sid
+            except sqlite3.IntegrityError:
+                continue
+        raise RuntimeError(
+            f"could not allocate a unique session id after "
+            f"{_NEW_SESSION_ATTEMPTS} attempts"
+        )
 
     def latest_session(self) -> str | None:
         with self._lock:
