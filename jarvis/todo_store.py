@@ -15,9 +15,10 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from jarvis.clock import local_naive_now
 
 
 _TODO_TABLE = """
@@ -58,7 +59,9 @@ CATEGORY_LABELS = {
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    # Post-MVP Faz 2: the configured timezone, not the OS's -- see
+    # jarvis/clock.py's local_naive_now() for why those are different things.
+    return local_naive_now().isoformat(timespec="seconds")
 
 
 class TodoStore:
@@ -183,7 +186,7 @@ class TodoStore:
     def due_soon(self, within_min: int = 120) -> list[dict[str, Any]]:
         """Return open todos with due_date within the next N minutes."""
         from datetime import timedelta
-        cutoff = (datetime.now() + timedelta(minutes=within_min)).isoformat(timespec="seconds")
+        cutoff = (local_naive_now() + timedelta(minutes=within_min)).isoformat(timespec="seconds")
         now = _now_iso()
         with self._lock:
             rows = self._conn.execute(

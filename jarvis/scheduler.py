@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from jarvis.clock import local_naive_now
+
 
 _SCHEDULE_TABLE = """
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
@@ -48,7 +50,7 @@ MONTHLY = "monthly"
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return local_naive_now().isoformat(timespec="seconds")
 
 
 def _parse_time(run_at: str) -> tuple[int, int]:
@@ -75,8 +77,12 @@ def calc_next_run(
         days_of_week:  [0–6] Mon=0 … Sun=6 (used when schedule_type='weekly')
         day_of_month:  1–31 (used when schedule_type='monthly')
         after:         calculate next occurrence after this moment (default: now)
+
+    Post-MVP Faz 2: "now" comes from jarvis.clock, i.e. the CONFIGURED
+    timezone, not the operating system's. A reminder set for 14:30 should fire
+    at 14:30 in the zone the rest of JARVIS thinks it lives in.
     """
-    now = after or datetime.now()
+    now = after or local_naive_now()
 
     if schedule_type == ONCE:
         # run_at is a full ISO datetime string
@@ -246,7 +252,7 @@ class SchedulerStore:
                 task["run_at"],
                 days_of_week=dow,
                 day_of_month=task["day_of_month"],
-                after=datetime.now(),
+                after=local_naive_now(),
             )
             with self._lock:
                 self._conn.execute(
@@ -257,7 +263,7 @@ class SchedulerStore:
     def check_due(self, window_sec: int = 90) -> list[dict[str, Any]]:
         """Return active tasks whose next_run is within the next `window_sec` seconds
         (or already past). Does NOT mark them as ran — caller must call mark_ran()."""
-        now = datetime.now()
+        now = local_naive_now()
         cutoff = (now + timedelta(seconds=window_sec)).isoformat(timespec="seconds")
         with self._lock:
             rows = self._conn.execute(

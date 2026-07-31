@@ -57,6 +57,7 @@ from jarvis.graph.streaming import graph_stream_to_text
 from jarvis.usage import UsageTracker
 from jarvis.ws import event_bus
 from jarvis import audit_log               # Faz 4
+from jarvis import clock                    # Post-MVP Faz 2: one source of "now"
 from jarvis import tool_trace               # Faz 2.2: test-profile L1 tool trace
 from jarvis import paths                   # JARVIS_HOME isolation root
 from jarvis.llm_trace import LlmTraceRecorder  # runtime truth: actual provider per turn
@@ -320,7 +321,7 @@ _MONTHS_TR = [
 ]
 
 
-def _build_now_block() -> str:
+def _build_now_block(clock=None) -> str:
     """Tell the model what day it is.
 
     Nothing did, before 2026-07-30. The system prompt committed to a timezone
@@ -339,20 +340,27 @@ def _build_now_block() -> str:
     Recomputed per turn on purpose -- see JarvisAgent._env_block. Freezing it at
     construction would make an API server that stays up overnight confidently
     wrong about the date, which is worse than not knowing.
-    """
-    from datetime import datetime, timedelta, timezone
 
-    try:  # tzdata is not guaranteed on Windows
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("Europe/Istanbul"))
-    except Exception:  # noqa: BLE001
-        # UTC+3 is Istanbul year-round (no DST since 2016), so this fallback is
-        # exact rather than approximate.
-        now = datetime.now(timezone(timedelta(hours=3)))
+    Post-MVP Faz 2: this reads jarvis.clock rather than calling datetime.now()
+    itself. It is no longer the only place that answers "what day is it" -- the
+    calendar resolver answers the same question, and the whole point of the
+    Clock is that the two can no longer give different answers. They did: this
+    function said Europe/Istanbul while calendar.py said UTC, and for three
+    hours a day that disagreement wrote events to the wrong date. The tzdata
+    fallback that used to live here now lives in jarvis/clock.py, shared.
+    """
+    from datetime import timedelta
+
+    from jarvis.clock import get_clock
+
+    clk = clock or get_clock()
+    now = clk.now()
+    offset_h = (now.utcoffset() or timedelta()).total_seconds() / 3600
+    offset = f"UTC{offset_h:+.0f}" if offset_h == int(offset_h) else f"UTC{offset_h:+.1f}"
 
     tomorrow = now + timedelta(days=1)
     return (
-        f"\n\n## Current date and time (Europe/Istanbul, UTC+3)\n"
+        f"\n\n## Current date and time ({clk.tz_name}, {offset})\n"
         f"- Now: **{now:%Y-%m-%d %H:%M}**, "
         f"{_WEEKDAYS_TR[now.weekday()]} {now.day} {_MONTHS_TR[now.month - 1]} {now.year}\n"
         f"- Today = {now:%Y-%m-%d} · Tomorrow (yarın) = {tomorrow:%Y-%m-%d}\n"
@@ -661,6 +669,16 @@ class JarvisAgent:
         # construction-time `self.settings`, discarding the user's chosen model.
         # This is the settings switch_model()/the fallback rebuild actually act on.
         self._effective_settings = settings
+        # Post-MVP Faz 2: point the process clock at the configured timezone
+        # once, here, so the prompt's now-block and the calendar resolver read
+        # the same zone by construction rather than by each remembering to.
+        # Non-fatal: an unresolvable zone leaves the default in place and says
+        # so, because refusing to start over a timezone name would be a worse
+        # failure than running in the default one and logging it.
+        try:
+            clock.configure(settings.calendar_timezone)
+        except clock.UnknownTimezone as _tz_err:
+            logger.warning("clock: %s -- falling back to %s", _tz_err, clock.DEFAULT_TZ)
         self.memory = Memory(settings)
         # JARVIS_HOME isolation root (stabilization sprint): unset -> cwd,
         # identical to the old Path(".") behavior; set -> tool outputs
