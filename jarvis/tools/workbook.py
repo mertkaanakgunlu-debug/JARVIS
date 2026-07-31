@@ -31,6 +31,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from jarvis.execution.artifacts import declare as declare_artifact
 from jarvis.finance_store import DEFAULT_CURRENCY
 
 # openpyxl's own limit; a value beyond it makes the file unopenable.
@@ -297,6 +298,11 @@ def export_cashflow_workbook(
         return f"[ERROR] Workbook kaydedilemedi: {exc}"
     finally:
         wb.close()
+
+    # Post-MVP Faz 1 -- finance('export') returns a whole formatted Turkish
+    # summary block, so the .xlsx path is not recoverable from its result text.
+    # The chart declares itself inside generate_plot. See jarvis/execution/artifacts.py.
+    declare_artifact(target, kind="workbook", produced_by="finance.export")
 
     rel = _rel(target, workspace)
 

@@ -23,6 +23,13 @@ class PostconditionSpec(BaseModel):
         "file_exists", "path_within_workspace", "file_openable",
         "artifact_hash_matches", "row_count_matches", "series_matches",
         "exit_code_matches", "record_exists",
+        # Post-MVP Faz 1 (honesty kernel): every file the tool DECLARED it
+        # produced (jarvis/execution/artifacts.py) is on disk. Unlike the
+        # kinds above it resolves nothing from args -- which is the point:
+        # it covers exactly the artifact tools whose output path is not a
+        # call argument (plot_data's stem, report_write's title-derived
+        # path, finance('export')'s computed default).
+        "declared_artifacts_exist",
     ]
     params: dict[str, Any] = {}
     severity: Literal["required", "warning"] = "required"

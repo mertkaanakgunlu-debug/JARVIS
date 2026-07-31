@@ -24,14 +24,17 @@ schema layer for postcondition params):
     "path"      -- a literal path string
     "path_arg"  -- a key into the tool call's OWN args dict (args[path_arg])
   Neither present, or the resolved path can't be made absolute without a
-  workspace that wasn't given -> unverified. This is deliberately the ONLY
-  lookup strategy for this phase -- most tools compute/return their output
-  path rather than taking one as a direct argument (plot_data's `output` is
-  a filename STEM, not the real path; report_write derives a path from
-  `title`), and inventing a result-text-parsing convention to cover those is
-  a separate, not-yet-designed extension left for a future phase. Tools are
-  only given a real PostconditionSpec today when their output path IS a
-  direct, unambiguous call argument (see tool_registry.py -- file_write).
+  workspace that wasn't given -> unverified.
+
+Post-MVP Faz 1 (honesty kernel) adds the second, and deliberately still not
+text-parsing, strategy this module's Agent-Runtime-era docstring left open:
+"declared_artifacts_exist" reads the paths the TOOL ITSELF declared through
+jarvis/execution/artifacts.py, which covers exactly the case the args lookup
+structurally cannot -- plot_data's `output` being a filename STEM,
+report_write deriving its path from `title`, finance('export') computing a
+default. The alternative the earlier docstring called "a result-text-parsing
+convention" was considered and rejected on the same grounds it was deferred
+for; see the artifacts module docstring.
 """
 from __future__ import annotations
 
@@ -66,7 +69,7 @@ def _unverified(spec: PostconditionSpec, detail: str) -> PostconditionResult:
     return PostconditionResult(spec=spec, status="unverified", detail=detail)
 
 
-def _check_file_exists(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_file_exists(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     path = _target_path(spec, workspace, args)
     if path is None:
         return _unverified(spec, "no path available to check (missing params.path/path_arg or no workspace)")
@@ -74,7 +77,7 @@ def _check_file_exists(spec: PostconditionSpec, workspace: Path | None, args: di
     return PostconditionResult(spec=spec, status=status, detail=str(path))
 
 
-def _check_path_within_workspace(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_path_within_workspace(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     if workspace is None:
         return _unverified(spec, "no workspace given to check containment against")
     path = _target_path(spec, workspace, args)
@@ -87,7 +90,7 @@ def _check_path_within_workspace(spec: PostconditionSpec, workspace: Path | None
     return PostconditionResult(spec=spec, status="verified", detail=str(path))
 
 
-def _check_file_openable(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_file_openable(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     path = _target_path(spec, workspace, args)
     if path is None:
         return _unverified(spec, "no path available to check")
@@ -112,7 +115,7 @@ def _check_file_openable(spec: PostconditionSpec, workspace: Path | None, args: 
     return PostconditionResult(spec=spec, status="verified", detail=str(path))
 
 
-def _check_artifact_hash_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_artifact_hash_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     expected = spec.params.get("expected_hash")
     if not expected:
         return _unverified(spec, "no params.expected_hash to compare against")
@@ -142,7 +145,7 @@ def _read_rows(path: Path) -> list[list[str]] | None:
     return None
 
 
-def _check_row_count_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_row_count_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     expected = spec.params.get("expected_rows")
     if expected is None:
         return _unverified(spec, "no params.expected_rows to compare against")
@@ -164,7 +167,7 @@ def _check_row_count_matches(spec: PostconditionSpec, workspace: Path | None, ar
     return PostconditionResult(spec=spec, status=status, detail=f"actual_rows={actual}")
 
 
-def _check_series_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_series_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     """Compares a JSON manifest's declared y-series against params.expected_y.
 
     Deliberately reads a SIDECAR MANIFEST FILE, not the rendered image --
@@ -203,7 +206,7 @@ def _check_series_matches(spec: PostconditionSpec, workspace: Path | None, args:
 _EXIT_CODE_RE = re.compile(r"^\[(OK|EXIT (\d+))\]", re.MULTILINE)
 
 
-def _check_exit_code_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_exit_code_matches(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     expected = spec.params.get("expected_code")
     if expected is None:
         return _unverified(spec, "no params.expected_code to compare against")
@@ -215,7 +218,7 @@ def _check_exit_code_matches(spec: PostconditionSpec, workspace: Path | None, ar
     return PostconditionResult(spec=spec, status=status, detail=f"actual_exit_code={actual}")
 
 
-def _check_record_exists(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str) -> PostconditionResult:
+def _check_record_exists(spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple) -> PostconditionResult:
     db_path_raw = spec.params.get("db_path")
     table = spec.params.get("table")
     id_column = spec.params.get("id_column")
@@ -251,7 +254,58 @@ def _check_record_exists(spec: PostconditionSpec, workspace: Path | None, args: 
     return PostconditionResult(spec=spec, status=status, detail=f"{table}.{id_column}={id_value}")
 
 
-_RUNNERS: dict[str, Callable[[PostconditionSpec, Path | None, dict, str], PostconditionResult]] = {
+def _check_declared_artifacts_exist(
+    spec: PostconditionSpec, workspace: Path | None, args: dict, content: str, artifacts: tuple
+) -> PostconditionResult:
+    """Every file this call DECLARED it produced is on disk.
+
+    Post-MVP Faz 1 (honesty kernel). The three-way outcome is the whole
+    point, and each branch is deliberate:
+
+      no declarations  -> "unverified", never "verified". A tool that
+        declared nothing tells us nothing; silently passing here would hand
+        every non-artifact action of a multi-action tool (finance('summary'))
+        a free "independently verified" badge it did not earn -- the exact
+        dishonesty postcondition.py's docstring forbids.
+      all present      -> "verified".
+      any missing      -> "failed", naming the missing paths. This is the
+        one case that upgrades a tool's self-reported success into
+        "reported successful ... but independent verification FAILED" in
+        summary.py, which is what actually reaches the user.
+
+    A declared path is used as the tool wrote it (absolute for all five of
+    today's declarers); a relative one is resolved against the workspace,
+    and without a workspace to resolve it, unverified rather than guessed.
+    """
+    if not artifacts:
+        return _unverified(spec, "tool declared no artifacts for this call")
+    missing: list[str] = []
+    checked: list[str] = []
+    for ref in artifacts:
+        raw = getattr(ref, "path", "") or ""
+        if not raw:
+            continue
+        p = Path(raw)
+        if not p.is_absolute():
+            if workspace is None:
+                return _unverified(spec, f"relative artifact path {raw!r} needs a workspace to resolve")
+            p = workspace / p
+        checked.append(str(p))
+        if not p.is_file():
+            missing.append(str(p))
+    if not checked:
+        return _unverified(spec, "declared artifacts carried no usable path")
+    if missing:
+        return PostconditionResult(
+            spec=spec, status="failed",
+            detail=f"declared but not on disk: {', '.join(missing)}",
+        )
+    return PostconditionResult(
+        spec=spec, status="verified", detail=f"{len(checked)} artifact(s) verified: {', '.join(checked)}",
+    )
+
+
+_RUNNERS: dict[str, Callable[[PostconditionSpec, Path | None, dict, str, tuple], PostconditionResult]] = {
     "file_exists": _check_file_exists,
     "path_within_workspace": _check_path_within_workspace,
     "file_openable": _check_file_openable,
@@ -260,6 +314,7 @@ _RUNNERS: dict[str, Callable[[PostconditionSpec, Path | None, dict, str], Postco
     "series_matches": _check_series_matches,
     "exit_code_matches": _check_exit_code_matches,
     "record_exists": _check_record_exists,
+    "declared_artifacts_exist": _check_declared_artifacts_exist,
 }
 
 
@@ -269,6 +324,7 @@ def run_postconditions(
     workspace: Path | None,
     args: dict[str, Any],
     tool_result_content: str,
+    artifacts: tuple = (),
 ) -> list[PostconditionResult]:
     """Evaluate every declared PostconditionSpec for one completed tool call.
 
@@ -276,6 +332,12 @@ def run_postconditions(
     "auxiliary observation can't take down the main path" discipline as
     audit_log.record()/tool_trace.record()). A check that itself errors is
     reported "unverified" with the exception text, not silently dropped.
+
+    artifacts: the ArtifactRefs this call declared (Post-MVP Faz 1, see
+    jarvis/execution/artifacts.py). Defaults to () so the pre-Faz-1 keyword
+    call sites (workflow_engine, the existing tests) keep working unchanged;
+    only "declared_artifacts_exist" reads it, and with () it reports
+    unverified rather than inventing a verdict.
     """
     results: list[PostconditionResult] = []
     for spec in specs:
@@ -284,7 +346,7 @@ def run_postconditions(
             results.append(_unverified(spec, f"no runner implemented for kind={spec.kind!r}"))
             continue
         try:
-            results.append(fn(spec, workspace, args or {}, tool_result_content or ""))
+            results.append(fn(spec, workspace, args or {}, tool_result_content or "", tuple(artifacts or ())))
         except Exception as exc:  # noqa: BLE001 -- see docstring
             results.append(_unverified(spec, f"postcondition runner error: {exc}"))
     return results

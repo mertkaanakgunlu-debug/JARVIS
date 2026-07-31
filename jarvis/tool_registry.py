@@ -105,6 +105,17 @@ class ToolSpec:
         # re-decided then anyway.
 
 
+# Post-MVP Faz 1 (honesty kernel) -- shared by every tool that writes a file
+# whose path is NOT one of its arguments. Declared once so the five tools
+# below cannot drift apart, and kept "required" severity deliberately: a
+# declared-but-absent artifact is the precise shape of the hallucination
+# this phase exists to close, so it must be able to turn a tool's
+# self-reported success into a verification failure the user sees.
+_ARTIFACT_POSTCONDITION: tuple[PostconditionSpec, ...] = (
+    PostconditionSpec(kind="declared_artifacts_exist", source="tool_contract"),
+)
+
+
 TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
     # ── Filesystem ──────────────────────────────────────────────────────────────
     ToolSpec(
@@ -182,26 +193,36 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         timeout_seconds=60, supports_background=True,
         description="Full pandas statistical analysis of a tabular file",
     ),
+    # Post-MVP Faz 1 (honesty kernel): the four artifact tools below plus
+    # `finance` all now DECLARE the file they wrote (jarvis/execution/
+    # artifacts.py), so _ARTIFACT_POSTCONDITION can finally verify them.
+    # Until this phase every one of them was structurally unverifiable --
+    # none takes its real output path as an argument, which is the reason
+    # file_write was the only tool in the registry with a postcondition.
     ToolSpec(
         "plot_data", "compute", 2, False, "local_write",
         timeout_seconds=60, supports_background=True,
         description="Generate a matplotlib/seaborn PNG and save to workspace",
         args_schema=args_schemas.PlotDataArgs,
+        postconditions=_ARTIFACT_POSTCONDITION,
     ),
     ToolSpec(
         "report_write", "filesystem", 2, False, "local_write",
         timeout_seconds=30,
         description="Write a LaTeX .tex source file to vault/reports/",
+        postconditions=_ARTIFACT_POSTCONDITION,
     ),
     ToolSpec(
         "report_compile", "compute", 2, False, "local_execute",
         timeout_seconds=120, supports_background=True,
         description="Compile a .tex file to PDF via pdflatex",
+        postconditions=_ARTIFACT_POSTCONDITION,
     ),
     ToolSpec(
         "report_compose", "compute", 2, False, "local_write",
         timeout_seconds=120, supports_background=True,
         description="Write markdown + figures into a LaTeX report PDF",
+        postconditions=_ARTIFACT_POSTCONDITION,
     ),
 
     # ── Vault / notes ────────────────────────────────────────────────────────────
@@ -312,6 +333,12 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
             "and Excel (.xlsx) cash-flow workbook export"
         ),
         args_schema=args_schemas.FinanceArgs,
+        # Post-MVP Faz 1: only the artifact-producing actions ('export', and
+        # the chart it embeds) declare anything; every read-only action
+        # (summary, recent, budget_status, ...) declares nothing and so
+        # reports "unverified", which is both honest and display-identical
+        # to the "not_applicable" it reported before this phase.
+        postconditions=_ARTIFACT_POSTCONDITION,
     ),
     ToolSpec(
         "gcp_quota", "network", 1, False, "external_read",

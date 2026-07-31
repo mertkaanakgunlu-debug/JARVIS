@@ -245,7 +245,7 @@ def test_run_postconditions_reports_multiple_specs_independently(tmp_path):
 def test_run_postconditions_never_raises_even_on_internal_error(monkeypatch, tmp_path):
     import jarvis.execution.postcondition_runner as runner_mod
 
-    def _boom(spec, workspace, args, content):
+    def _boom(spec, workspace, args, content, artifacts):
         raise RuntimeError("simulated bug in a check")
     monkeypatch.setitem(runner_mod._RUNNERS, "file_exists", _boom)
 

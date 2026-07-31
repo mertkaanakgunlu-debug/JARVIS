@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from jarvis.execution.artifacts import declare as declare_artifact
+
 
 def latex_write(title: str, body: str, reports_dir: Path) -> str:
     """Write a LaTeX document to vault/reports/{title}.tex.
@@ -36,6 +38,9 @@ def latex_write(title: str, body: str, reports_dir: Path) -> str:
 \end{{document}}
 """
     tex_path.write_text(document, encoding="utf-8")
+    # Post-MVP Faz 1 -- the path is derived from `title`, never passed in, so
+    # it is undiscoverable from the call's arguments. See jarvis/execution/artifacts.py.
+    declare_artifact(tex_path, kind="report_source", produced_by="report_write")
     return str(tex_path)
 
 
@@ -97,6 +102,10 @@ def latex_compile(tex_path: str | Path, *, timeout: float = 120.0) -> str:
         if pdf_tmp.exists():
             dest = tex_path.with_suffix(".pdf")
             shutil.copy(pdf_tmp, dest)
+            # Post-MVP Faz 1 -- declared after the copy out of the temp dir, so
+            # what is verified is the PDF the user can actually open, not the
+            # one that briefly existed in a directory this function deletes.
+            declare_artifact(dest, kind="report_pdf", produced_by="report_compile")
             return f"Compiled successfully: {dest}"
 
         # Compilation failed — return last 60 log lines
@@ -194,6 +203,7 @@ def compose_report(
 \end{{document}}
 """
     tex_path.write_text(document, encoding="utf-8")
+    declare_artifact(tex_path, kind="report_source", produced_by="report_compose")
     return str(tex_path)
 
 

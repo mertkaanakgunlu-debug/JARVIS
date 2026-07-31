@@ -31,6 +31,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from jarvis.execution import idempotency
 from jarvis.execution.envelope import build_shadow_envelope
+from jarvis.execution.artifacts import parse_refs as parse_artifact_refs
 from jarvis.execution.postcondition_runner import run_postconditions
 from jarvis.execution.redaction import redact_preview
 from jarvis.graph.state import JarvisState
@@ -271,9 +272,15 @@ def make_tool_result_accounting_node(settings=None, workspace: Path | None = Non
             if envelopes is not None:
                 timed_out, may_still_run, worker_terminated = parse_timeout_flags(content)
                 spec = get_spec(name)
+                # Post-MVP Faz 1: whatever the tool declared it produced,
+                # carried out of band on ToolMessage.artifact by safe_tools'
+                # wrap hooks (jarvis/execution/artifacts.py). Read here rather
+                # than re-derived from `content` -- that is the entire point.
+                declared = parse_artifact_refs(getattr(tm, "artifact", None))
                 postcondition_results = (
                     run_postconditions(
-                        spec.postconditions, workspace=workspace, args=args, tool_result_content=content,
+                        spec.postconditions, workspace=workspace, args=args,
+                        tool_result_content=content, artifacts=declared,
                     )
                     if spec is not None and spec.postconditions
                     else []
@@ -286,6 +293,7 @@ def make_tool_result_accounting_node(settings=None, workspace: Path | None = Non
                     execution_may_still_be_running=may_still_run,
                     worker_terminated=worker_terminated,
                     postconditions=postcondition_results,
+                    artifacts=[a.path for a in declared],
                 ).model_dump())
 
         out = {

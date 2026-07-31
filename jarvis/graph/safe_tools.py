@@ -31,6 +31,13 @@ loop inside a plain `def` to bound anything with, and nothing in this
 codebase's real entry points ever drives the compiled graph through its sync
 .invoke() path (only ainvoke()/astream() -- see jarvis/agent.py) -- the only
 caller of that path today is test_safe_tools.py's own sync-dispatch test.
+
+Post-MVP Faz 1 (honesty kernel): both wrappers now also open a per-call
+artifact declaration sink (jarvis/execution/artifacts.py) and attach
+whatever the tool declared to the outgoing ToolMessage.artifact. These hooks
+are the right home for it for the same reason the docstring gives above --
+they are the one interception point that still knows WHICH call is running,
+and they already bracket every tool invocation exactly once.
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 from langgraph.prebuilt import ToolNode
 
+from jarvis.execution import artifacts
 from jarvis.tool_registry import get_spec
 
 _MAX_MESSAGE_CHARS = 200
@@ -155,13 +163,31 @@ def _error_tool_message(request: Any, exc: BaseException) -> ToolMessage:
     )
 
 
+def _attach_artifacts(result: Any, declared: list) -> Any:
+    """Ride this call's declared artifacts back on ToolMessage.artifact.
+
+    Post-MVP Faz 1 -- see jarvis/execution/artifacts.py for why the channel
+    is out of band rather than parsed out of the tool's return string. Only
+    ever fills an EMPTY artifact field: a tool using LangChain's own
+    response_format="content_and_artifact" owns that slot, and silently
+    overwriting it would break it. A non-ToolMessage result (ToolNode can
+    return a Command) is passed through untouched.
+    """
+    if not declared:
+        return result
+    if isinstance(result, ToolMessage) and result.artifact is None:
+        result.artifact = [a.model_dump() for a in declared]
+    return result
+
+
 def _wrap_tool_call(request: Any, execute: Any) -> Any:
-    try:
-        return execute(request)
-    except GraphInterrupt:
-        raise  # confirmation-gate interrupts must keep propagating untouched
-    except Exception as exc:  # noqa: BLE001 — this boundary is the point
-        return _error_tool_message(request, exc)
+    with artifacts.collecting() as declared:
+        try:
+            return _attach_artifacts(execute(request), declared)
+        except GraphInterrupt:
+            raise  # confirmation-gate interrupts must keep propagating untouched
+        except Exception as exc:  # noqa: BLE001 — this boundary is the point
+            return _attach_artifacts(_error_tool_message(request, exc), declared)
 
 
 def _timeout_bound_for(name: str) -> float:
@@ -180,12 +206,19 @@ def _timeout_bound_for(name: str) -> float:
 async def _awrap_tool_call(request: Any, execute: Any) -> Any:
     call = getattr(request, "tool_call", None) or {}
     name = call.get("name") or "unknown"
-    try:
-        return await asyncio.wait_for(execute(request), timeout=_timeout_bound_for(name))
-    except GraphInterrupt:
-        raise
-    except Exception as exc:  # noqa: BLE001 — this boundary is the point (includes asyncio.TimeoutError)
-        return _error_tool_message(request, exc)
+    with artifacts.collecting() as declared:
+        try:
+            return _attach_artifacts(
+                await asyncio.wait_for(execute(request), timeout=_timeout_bound_for(name)),
+                declared,
+            )
+        except GraphInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001 — this boundary is the point (includes asyncio.TimeoutError)
+            # A tool that wrote its file and THEN timed out really did produce
+            # it; keeping the declaration lets the envelope say so instead of
+            # losing the artifact along with the error.
+            return _attach_artifacts(_error_tool_message(request, exc), declared)
 
 
 def make_safe_tool_node(tools: list) -> ToolNode:

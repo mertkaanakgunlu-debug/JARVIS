@@ -16,6 +16,8 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from jarvis.execution.artifacts import declare as declare_artifact
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -382,4 +384,9 @@ def generate_plot(
         plt.close(fig)
 
     _write_plot_meta(out_path, kind, df, x, y)
+    # Post-MVP Faz 1: declare the real, final PNG path (post-savefig, and
+    # post-collision-suffix -- `output` is only a STEM, which is exactly why
+    # this call could never be verified from its arguments). See
+    # jarvis/execution/artifacts.py.
+    declare_artifact(out_path, kind="chart", produced_by="plot_data")
     return str(out_path)

@@ -62,6 +62,7 @@ def build_shadow_envelope(
     execution_may_still_be_running: bool = False,
     worker_terminated: bool = False,
     postconditions: list | None = None,
+    artifacts: list[str] | None = None,
 ) -> ExecutionEnvelope:
     """Build one envelope from the same per-call data
     tool_result_accounting already computes (name, args, ok, content,
@@ -70,8 +71,12 @@ def build_shadow_envelope(
     rev.2, Faz 2's prepare_execution node mints its own, separate,
     per-attempt id for approval binding (jarvis.execution.request) that is
     deliberately NOT this one -- the two ids serve different purposes and
-    are never meant to be interchangeable. artifacts/side_effects/evidence
-    stay empty -- nothing in this repo populates them yet.
+    are never meant to be interchangeable.
+
+    Post-MVP Faz 1: `artifacts` is now populated -- the paths the tool itself
+    declared through jarvis/execution/artifacts.py, passed through by
+    tool_result_accounting. side_effects/evidence still stay empty; nothing
+    in this repo populates those yet.
 
     Faz 3: status now becomes "timed_out" (never "success"/"failed") when
     timed_out=True -- timed_out takes precedence over ok, since a call that
@@ -103,5 +108,6 @@ def build_shadow_envelope(
         execution_may_still_be_running=execution_may_still_be_running,
         worker_terminated=worker_terminated,
         postconditions=postconditions or [],
+        artifacts=list(artifacts or []),
         created_at=datetime.now().isoformat(),
     )
