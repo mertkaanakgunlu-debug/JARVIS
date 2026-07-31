@@ -347,6 +347,8 @@ class StatusResponse(BaseModel):
     # completed foreground turn; `model`/`session_cost_usd` stay for older
     # clients (Electron HUD / Flutter).
     requested_role: str | None = None
+    # Faz 2.5 — which rule in role_router.py chose that role.
+    role_reason: str | None = None
     actual_provider: str | None = None
     actual_model: str | None = None
     # Response-scoped (patch 1.1): did a fallback tier author the visible
@@ -983,6 +985,7 @@ async def status(request: Request):
         session_cost_usd=agent.usage.session_cost,
         vertex_active=agent.settings.use_vertex,
         requested_role=trace.get("requested_role"),
+        role_reason=trace.get("role_reason"),
         actual_provider=trace.get("provider"),
         actual_model=trace.get("model"),
         fallback_used=trace.get("fallback_used"),

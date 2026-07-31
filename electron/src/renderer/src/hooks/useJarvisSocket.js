@@ -13,8 +13,13 @@
  *       plausible default. The server used to fabricate these with
  *       random.uniform() and this hook seeded them with invented numbers; both
  *       were removed 2026-07-31.
- *   {type:"model_status", provider, model, role, latency_ms, total_llm_ms,
- *                         input_tokens, output_tokens, fallback_used, cold_start}
+ *   {type:"model_status", provider, model, role, role_reason, latency_ms,
+ *                         total_llm_ms, input_tokens, output_tokens,
+ *                         fallback_used, cold_start}
+ *       role_reason (Faz 2.5) names the rule in role_router.py that chose the
+ *       role — "single_domain_tool", "multi_domain", "sequenced_steps", ...
+ *       The role alone says a turn ran slow; it cannot say whether the router
+ *       misread an easy request or the request was genuinely hard.
  *       Which provider/model ACTUALLY authored the last answer, from the
  *       server's own turn trace. All-null means no turn has run yet. Before
  *       this frame existed the HUD derived a model label from its animation
@@ -141,6 +146,7 @@ function useJarvisSocket(apiUrl, apiKey, options = {}) {
             provider: msg.provider ?? null,
             model: msg.model ?? null,
             role: msg.role ?? null,
+            role_reason: msg.role_reason ?? null,
             latency_ms: msg.latency_ms ?? null,
             input_tokens: msg.input_tokens ?? null,
             output_tokens: msg.output_tokens ?? null,

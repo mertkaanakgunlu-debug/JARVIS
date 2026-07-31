@@ -39,6 +39,10 @@ export function CurrentTask({ state, taskName, steps = [], modelStatus }) {
   // panel confidently named a cloud model on a local-only install.
   const routing = describeModel(modelStatus)
   const role = modelStatus?.role
+  // Faz 2.5: the rule that chose the role. Shown next to it because "reasoning"
+  // on its own leaves the owner guessing whether a slow turn was the router
+  // misreading an easy request or the request actually being hard.
+  const roleReason = modelStatus?.role_reason
   return (
     <Panel title="Current Task" id="ID/0x0A1" live>
       <div className="kv">
@@ -49,6 +53,9 @@ export function CurrentTask({ state, taskName, steps = [], modelStatus }) {
         <span className="k">Routing</span>
         <span className={routing === NO_VALUE ? 'v dim' : 'v'}>
           {routing}{routing !== NO_VALUE && role ? ` · ${role}` : ''}
+          {routing !== NO_VALUE && role && roleReason ? (
+            <span className="dim"> · {roleReason}</span>
+          ) : null}
         </span>
       </div>
       <div className="kv">

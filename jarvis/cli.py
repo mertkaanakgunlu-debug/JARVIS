@@ -493,8 +493,13 @@ async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
                     fb_marker = " [dim](fallback elsewhere in turn)[/dim]"
                 else:
                     fb_marker = ""
+                # Faz 2.5: the rule that chose the role, not just the role.
+                # "requested=reasoning" alone cannot distinguish a router
+                # misreading an easy request from a genuinely hard one.
+                why = trace.get("role_reason")
                 console.print(
-                    f"[dim]Last turn:[/dim]       requested=[bold]{trace['requested_role']}[/bold] "
+                    f"[dim]Last turn:[/dim]       requested=[bold]{trace['requested_role']}[/bold]"
+                    f"{f' [dim]({why})[/dim]' if why else ''} "
                     f"-> actual=[bold]{trace['provider']}:{trace['model']}[/bold]"
                     f"{fb_marker} "
                     f"[dim]({trace['calls']} LLM call(s), "
