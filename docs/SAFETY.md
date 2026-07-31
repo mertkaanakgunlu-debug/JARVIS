@@ -205,6 +205,62 @@ Two honesty notes about this section itself:
   something written last week). It will miss hallucinations. It is not supposed to block a claim it
   cannot contradict with evidence.
 
+## What Post-MVP Faz 2 changed (2026-07-31) — confidence-based calendar confirmation
+
+The first change in this codebase that **removes** a confirmation prompt, so it is written up in
+more detail than its size suggests.
+
+The owner's decision was *"takvim/todo serbest — tarih hatası kapandıktan sonra"*: stop
+interrupting for routine calendar entries once dates can be trusted. Faz 2 is where that date bug
+closes (`jarvis/clock.py` — relative dates were resolved against UTC and handed to Google as local
+wall-clock, so for three hours a day "yarın" landed a day early). The plan deliberately does not
+cash the decision in as a blanket relaxation: *"JARVIS may create calendar events without asking"*
+and *"JARVIS may create calendar events it is not sure about without asking"* are different
+promises.
+
+```
+create + high confidence          -> runs, no prompt
+create + ambiguous date/time/title -> asks
+batch_create | update | delete     -> asks, always, however confident
+```
+
+Only a single `create` is eligible. `batch_create` writes N events from one approval, `update`
+silently rewrites something that already exists, and `delete` is the one genuinely hard-to-reverse
+action in the tool. A single create is the only one a user can undo by looking at their calendar.
+
+**Confidence is derived, never supplied.** `policy_guard.calendar_confidence()` computes it from
+the arguments and from the user's own sentence. If it were a tool argument, the model could set it
+to 1.0 and approve its own actions. It is the minimum across date, time, title and utterance — an
+event at a confidently wrong hour is as wrong as one on a confidently wrong day.
+
+**Reading the user's sentence is load-bearing, and live measurement is why.** Scoring the
+arguments alone is not enough: asked *"Pazartesi saat 4'te spor salonu diye takvime bir şey
+ekle"*, real qwen3:8b ignored the instruction to pass the wording through, resolved the weekday
+itself — to a Saturday — and passed an ISO date. Scored on args alone that is a 1.00, and a
+wrong-day event would have been created silently. The gate now also reads `state["user_query"]`,
+which can only ever LOWER confidence, and blocks outright on a provable contradiction (the user
+named a weekday the given date is not).
+
+### What this did NOT relax
+
+Every one of these was written when `risk_level >= 3` implied `requires_confirmation=True`. Faz 2
+is the first thing that breaks that equivalence, so each was re-checked against a call that
+auto-approves, and each has a test in `tests/test_calendar_autonomy.py`:
+
+| Mechanism | Status |
+|---|---|
+| **Kill switch** | **This was a real bypass and had to be fixed.** The veto read `requires_confirmation and risk_level >= 3`; an auto-approved create would have walked straight past a tripped switch. Now keyed on `risk_level` alone — a no-op for every pre-existing tool, since the registry sweep already guarantees L3 ⇒ confirmation. |
+| **Risk classification** | Unchanged. Still L3, still `external_write`. Confidence buys not being asked, nothing else. |
+| **Audit log** | Unchanged — the filter is `risk_level >= 2`, so the row is still written, with `outcome="auto_approved"` and the confidence in `reason`. "Not asked about" never means "not recorded". |
+| **`--profile test`** | Unchanged. Keys on `side_effect_type`, which Faz 2 does not touch. |
+| **Background / proactive turns** | Never reach the downgrade: `interactive` is derived from the transport, and a `monitor-*` turn is not interactive. Such a turn still takes the pre-existing L3 interrupt→notification path. |
+| **Workflow engine, and any other caller** | Unchanged. `interactive` defaults to `False`, so a caller that has not thought about it keeps pre-Faz-2 behaviour. |
+| **Mail and Drive** | Unchanged and explicitly out of scope — *"Mail hep onaylı"*. |
+
+The confirmation prompt itself also improved: it now names the **resolved** instant
+(`when=2026-08-02 15:00`) rather than the expression (`date=yarın`). A user cannot tell from the
+word whether it resolved to the right day, which is how a one-day-early event gets approved.
+
 ## Known limits (honest, not aspirational)
 
 - **Electron confirmation UI exists but is not yet live-verified; mobile has none.** The HUD
@@ -244,3 +300,26 @@ Two honesty notes about this section itself:
 - **Kill switch scope is L3 only** — it does not block L2 (reversible local writes: `file_write`,
   `todo`, `spotify`, ...). This is deliberate (an emergency stop for JARVIS acting on the *outside
   world*, not a full halt of all functionality) but worth knowing if you expected it to block more.
+- **A calendar `create` can now happen without a prompt** (Faz 2, above). It is bounded — single
+  create only, high confidence only, human present only, kill switch and audit unchanged — but it
+  is a genuine reduction in how often the user is asked, and `calendar_autonomy_enabled=False`
+  restores the old behaviour exactly if that turns out to be the wrong trade.
+- **The weekday cross-check errs toward asking.** If the user names a weekday and the model's date
+  is a different weekday, the call is blocked from auto-approving. When the sentence carries its own
+  date expression the check is skipped (so "Cuma raporu için yarın toplantı" is fine), but a
+  weekday word used as a *name* with no other date in the sentence will still cost one confirmation
+  prompt. That is the safe direction, and it is a false-positive class, not a false-negative one.
+- **Nothing checks that the model relayed the user's wording faithfully.** The gate reads
+  `state["user_query"]`, so it catches an ambiguous request laundered into confident arguments. It
+  cannot catch a model that invents a detail the user never said in a sentence with no temporal
+  ambiguity at all — the title and description discipline is subtractive only, and "was this
+  description actually said?" is not knowable from the tool arguments.
+- **Person-name resolution is built and tested but not yet called from any live path.**
+  `jarvis/nlu/entities.py` resolves "Baranla" → "Baran" only when a source corroborates the stem,
+  with bands that decide between normalising, asking, and leaving the input alone. Nothing invokes
+  it yet, and that is deliberate rather than unfinished: the only source trusted enough to
+  auto-normalise an inflected form is Google Contacts, which is off by default
+  (`google_contacts_enabled`) because enabling it costs one OAuth re-consent — an owner decision.
+  Wiring it to the calendar path before that source exists would ship a code path whose every
+  outcome is "leave it alone", which is not a behaviour worth testing in production. **Do not read
+  this as "names are being corrected today": they are not.**

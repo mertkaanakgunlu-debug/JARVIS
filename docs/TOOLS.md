@@ -49,7 +49,7 @@ MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSp
 | `todo` | L2 | compute | — | — | 30s | To-do list with LLM priority analysis (SQLite) |
 | `finance` | L2 | external_api | — | ✓ | 60s | Bank mail sync (Gmail read-only), **`import_statement`** (PDF ekstre → ledger), cash-flow summary, budgets, **`export`** → multi-sheet .xlsx + chart |
 | `gcp_quota` | L1 | network | — | — | 30s | GCP Vertex AI quota status and usage tracking |
-| `google_calendar` | L3 | external_api | ✓ | — | 30s | Calendar: list/search (L1) · create/update/delete (L3) |
+| `google_calendar` | L3 | external_api | ✓* | — | 30s | Calendar: list/search (L1) · create/update/delete (L3). **\*** a SINGLE high-confidence `create` skips the prompt (Post-MVP Faz 2) — see below |
 | `gmail` | L3 | external_api | ✓ | — | 30s | Gmail: list/read/search (L1) · send/reply/trash (L3) |
 | `google_drive` | L3 | external_api | ✓ | ✓ | 60s | Drive: search/read/download (L1) · upload/share/delete (L3) |
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
@@ -75,6 +75,28 @@ reported success is downgraded and surfaced to the user**; nothing declared → 
 a silent pass. Every other tool in the table above stays honestly "not independently verified".
 Mechanism: `jarvis/execution/artifacts.py` (declaration) and
 `jarvis/execution/postcondition_runner.py` (checking); see [SAFETY.md](SAFETY.md).
+
+## Calendar: the one action that can skip its prompt (Post-MVP Faz 2, 2026-07-31)
+
+`google_calendar` is still L3 `external_write` for every action. What changed is **when the user is
+asked**, and only for a single `create`:
+
+| Situation | Behaviour |
+|---|---|
+| `create`, date + time + title + the user's own wording all ≥ 0.95 confidence | runs, no prompt |
+| `create`, anything ambiguous (bare weekday, bare small hour, instruction-shaped title) | asks |
+| `create`, the user named a weekday the given date is not | asks (provable contradiction) |
+| `batch_create` · `update` · `delete` | asks, always, however confident |
+| Kill switch tripped · `--profile test` · background/proactive turn · workflow step | unchanged — none of these can reach the auto path |
+
+Confidence is **derived** by `policy_guard.calendar_confidence()` from the arguments and
+`state["user_query"]`, never read from an argument — a `confidence` field in the schema would let
+the model approve its own actions. Turn it all off with `calendar_autonomy_enabled=False`.
+
+Dates and times are resolved by `jarvis/nlu/temporal.py`, in `settings.calendar_timezone`, not by
+the model: pass the user's wording through (`date="yarın"`, `time="öğlen 3"`) rather than computing
+a date. `öğlen 3` is 15:00. An expression naming a period rather than a day (`haftaya`) is refused
+with a reason instead of guessed.
 
 ## MCP tools (Faz 5, dynamic — `jarvis/mcp_integration.py`)
 

@@ -50,6 +50,16 @@ turns rather than an unknown fraction. See `docs/SAFETY.md`.
 
 **Key files:**
 - `jarvis/agent.py` — `JarvisAgent` wrapper, history management, multimodal pipeline
+- `jarvis/clock.py` — the single source of "now" (Post-MVP Faz 2). `SystemClock`/`FrozenClock`,
+  configured once from `settings.calendar_timezone`. Exists because "what day is it" used to have
+  two answers in one process — the prompt's now-block said Europe/Istanbul while the calendar tool
+  said UTC, and for three hours a day that disagreement wrote events to the wrong date.
+- `jarvis/nlu/` — deterministic resolution of the things the model should NOT compute
+  (Post-MVP Faz 2). `temporal.py` (date/time expressions → a timestamp, in the clock's zone, with
+  a clock-independent confidence score `policy_guard` reads), `entities.py` (person names,
+  adopted only when a source corroborates the stem), `event_text.py` (event titles are a record,
+  not a copy of the request). Depends on nothing graph- or DB-shaped, the same way `policy_guard`
+  does not, so the safety layer can import it.
 - `jarvis/providers/__init__.py` — `get_llm(role, settings)` role→provider router (Faz 1)
 - `jarvis/graph/graph.py` — `build_graph()` StateGraph builder
 - `jarvis/graph/nodes.py` — all node functions + routing predicates

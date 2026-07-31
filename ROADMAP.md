@@ -23,8 +23,8 @@
 | 0A | Baseline senkronu (`local == origin`) | ✅ 2026-07-31 |
 | 0B | Live-data integrity invariant (HUD/CLI uydurma yok) | ✅ 2026-07-31 |
 | **1** | **Honesty kernel** — artifact declaration + verification, zero-tool claim gate, shadow rollout metrikleri | ✅ **2026-07-31** |
-| 2 | Clock + temporal + entity resolver (takvim tarih hatası) | ⬜ next |
-| 2.5 | Otomatik rol seçimi (`fast` vs `reasoning`) | ⬜ |
+| **2** | **Clock + temporal + entity resolver** (takvim tarih hatası) | ✅ **2026-07-31** |
+| 2.5 | Otomatik rol seçimi (`fast` vs `reasoning`) | ⬜ next |
 | 3 | Daily Briefing MVP (1. kabul kilometre taşı) | ⬜ |
 | 4 | Working Set (5-10 tur revizyon) | ⬜ |
 | 5 | Proaktif mail → takvim | ⬜ |
@@ -48,6 +48,26 @@
 - **Bir araç yazmadığı yolu bildirebilir.** Bildirim aracın kendisinden geliyor, yani dönüş
   değerine duyulan güvenle aynı güvende. Postcondition dosyanın var olduğunu kanıtlıyor, o çağrının
   onu üretmiş olduğunu değil.
+
+**Faz 2'den taşınan, bilinçli olarak yapılmayanlar:**
+
+- **Google Contacts kapalı** (`google_contacts_enabled=False`). People API `contacts.readonly`
+  scope'u istiyor; mevcut credentials'a eklemek çalışan calendar/gmail token'ını geçersiz kılardı.
+  Kendi token dosyası var, yani açmak eklemeli bir işlem — ama **bir OAuth yeniden onayı** gerekiyor
+  ve bu owner kararı.
+- **Entity resolver hiçbir canlı yola bağlanmadı** (kuruldu + test edildi, Part 1). Yukarıdaki
+  kararın dürüst sonucu: Contacts kapalıyken çekimli bir formu otomatik düzeltebilecek kaynak yok,
+  yani takvim yolunun alacağı her cevap "dokunma" olurdu. **Bitirmek için:** Contacts açılır, sonra
+  "sor" bandı mevcut onay istemine bağlanır.
+- **`utterance` kontrolü modelin sadakatini denetlemiyor.** Gate `state["user_query"]`'i okuyor, yani
+  belirsiz bir isteğin kendinden emin argümanlara aklanmasını yakalıyor. Hiç zamansal belirsizlik
+  içermeyen bir cümlede modelin uydurduğu bir detayı yakalayamaz.
+- **Hafta günü çapraz kontrolü yanlış-pozitif yönünde hata yapar.** Cümlede başka tarih ifadesi
+  yoksa, isim olarak kullanılan bir gün adı ("Cuma raporu") bir onay istemine mal olur. Güvenli yön,
+  ama bedelsiz değil.
+- **`_all_day_end` Google'a karşı canlı doğrulanmadı** — API sözleşmesinden (end.date exclusive)
+  türetildi, credential olmadığı için gerçek istekle sınanmadı. Yalnız sonu ileri alabildiği için
+  her iki durumda da güvenli yazıldı.
 
 ## Direction (owner decisions, 2026-07-14)
 

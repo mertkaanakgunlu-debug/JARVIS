@@ -6,6 +6,167 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Post-MVP Faz 2: clock + temporal + entity] — 2026-07-31
+
+The phase's thesis, from the plan: **rather than make qwen3:8b smarter, shrink what it has to get
+right.** A model asked to turn *"yarın öğlen saat 3"* into a timestamp has to know today's date,
+the user's timezone, and that Turkish "öğlen 3" means 15:00 — three chances to be wrong, none of
+them reproducible. Code does that arithmetic identically every time.
+
+### The bug, measured before it was fixed
+
+`calendar.py:_parse_date()` resolved relative dates off `datetime.now(timezone.utc)`, then handed
+the resulting wall-clock numbers to Google as a naive string with `timeZone: Europe/Istanbul`.
+During the hours when UTC is still on the previous date, that is a whole day of error — a real
+event, on a real wrong day, with no error message.
+
+Sweeping the **pre-fix** `_parse_date` across all 24 local hours put the failure at exactly **3 of
+24**: Istanbul 00:00, 01:00 and 02:00. The same sweep through the fixed path is **0 of 24**
+(`tests/test_calendar_date_regression.py` runs the whole sweep, not just the three broken hours —
+a fix that moved the error to a different hour would pass a narrower test).
+
+**This corrects an instant recorded in HANDOFF.md**, which named `FrozenClock(2026-07-31 23:30
+Europe/Istanbul)` as the regression case. That instant does not reproduce the bug: 23:30 in
+Istanbul is 20:30 UTC on the same date. The window is 00:00–02:59 local.
+
+### `jarvis/clock.py` — one source of "now"
+
+`SystemClock` / `FrozenClock`, an injectable `Clock` protocol, and a process clock configured once
+from `settings.calendar_timezone` at `JarvisAgent.__init__`. Consumers migrated: the prompt's
+now-block (`agent.py:_build_now_block`, which owned the tzdata-missing fallback that now lives in
+`clock.py`), the calendar tool, and — per the plan — `scheduler.py` and `todo_store.py`, which were
+reading the **operating system's** timezone via bare `datetime.now()`. On this machine the two
+agree, so nothing was observably wrong; "correct because two independent settings happen to match"
+is the shape of the bug this module exists to remove. Those two keep naive timestamps
+(`local_naive_now()`) so comparisons against rows already on disk still work.
+
+An unresolvable timezone raises rather than silently becoming UTC — a calendar event written into
+the wrong zone is a wrong event, and the quiet version of that failure is the whole point here.
+
+### `jarvis/nlu/temporal.py` — the resolver
+
+Turkish and English date/time expressions, resolved in the clock's zone. Turkish-safe folding is
+not a nicety: `"YARIN".lower()` is `"yarin"` with a **dotted** i while the correct spelling has a
+dotless one, so a naive lowercase makes the two spellings of the most common expression in this
+user's requests compare unequal. Case endings are stripped two different ways — numeric tokens
+lose theirs (`"3'te"` parses as nothing otherwise), word rules carry an optional ending in their
+own pattern, which keeps the stripping anchored to words the resolver already knows.
+
+Dayparts carry real information a bare number does not, and getting them wrong is a 12-hour error:
+`öğlen 3` → 15:00 (the owner's exact live failure), `öğlen 4` → 16:00, `sabah 9` → 09:00, `gece 11`
+→ 23:00.
+
+Expressions that name a *period* rather than a day (`haftaya`, `gelecek ay`) return an honest
+failure with a reason, never a guess — the owner's stated requirement for the whole hallucination
+class.
+
+**Confidence is independent of the clock, by construction**, because `jarvis/policy_guard.py` is
+built on it and must stay a pure function of its arguments. `date_expression_confidence()` matches
+the rule table and stops — it never calls a resolver, so it cannot consult a clock. That the
+resolver's own confidence is *nearly* clock-independent was verified rather than assumed: sweeping
+every day of a year against `"ayın 28".."ayın 31"` finds exactly three divergences, all end-of-
+January rolling into February.
+
+### `jarvis/nlu/entities.py` — names, resolved only when corroborated
+
+The "Baranla → Baranda" class. **A stem is only ever adopted when a source confirms that person
+exists** — blind suffix-stripping would turn "Metin" into "Met" and "Erdem" into "Erd", which is a
+worse bug than the one being fixed. Source priority is the plan's (Google Contacts → durable
+entities → conversation), with trust ceilings so a conversation-only match can never
+auto-normalise, a fuzzy match never auto-corrects, and two plausible people produce a question
+rather than a choice.
+
+Google Contacts is **off by default** (`google_contacts_enabled`) and that is a cost decision, not
+caution: the People API needs the `contacts.readonly` scope, and adding it to the existing
+credentials would invalidate the token the working calendar/gmail integrations use today. It keeps
+its own token file so enabling it is additive.
+
+**This module is not yet called from any live path**, and that is the honest consequence of the
+line above rather than an unfinished edge: with Contacts off, the only source that can
+auto-normalise an inflected form does not exist, so every outcome the calendar path could get from
+it would be "leave it alone". Shipping that wiring would add a code path with no observable
+behaviour. What it takes to finish: the owner enables Contacts (one re-consent), then the ask band
+surfaces through the confirmation prompt that already exists. Same Part-1/Part-2 split as Faz 7's
+workflow runtime.
+
+### `jarvis/nlu/event_text.py` — a calendar holds a record, not a request
+
+Told *"yarın öğlen 3'te Baran'la toplantı ayarla"*, a model creates an event **titled** with that
+whole sentence. `clean_title()` removes spans it can identify exactly and never returns empty.
+
+The interesting part is what it does **not** remove. An early version ate the "Cuma" in "Cuma
+raporu" — a Friday *report*, where the weekday is the name. Parsing alone was not a safe test, so a
+span must now also *read* as a time adverbial (inherently adverbial, or carrying a Turkish
+locative/dative ending, or a bare clock time). A bare weekday or a bare "15 Ağustos" is left alone:
+a redundant title costs the user nothing, a title with a word eaten out of it is not recoverable.
+
+A word-boundary bug found by its own test is worth recording: the command verb `at` matched inside
+`kat`, so "Dr. Yılmaz, 2. kat" was classified as a bare instruction and a **real description was
+discarded**. The same pattern would have truncated titles ("Konser sanat" → "Konser san").
+
+### Confidence-based calendar confirmation
+
+See `docs/SAFETY.md`'s "What Post-MVP Faz 2 changed" for the full treatment — including the one
+mechanism this genuinely broke (the kill-switch veto was keyed on `requires_confirmation`, which
+an auto-approved L3 create would have walked straight past) and the six that were re-verified
+rather than assumed.
+
+The part that only live measurement could have found: **scoring the tool arguments is not enough.**
+Asked *"Pazartesi saat 4'te spor salonu diye takvime bir şey ekle"*, real qwen3:8b ignored the
+instruction to pass the wording through, resolved the weekday itself — to a Saturday — and passed
+an ISO date. Scored on args alone that is a 1.00 and the wrong-day event would have been created
+silently. The gate now also reads `state["user_query"]`, which can only ever lower confidence.
+
+### Verification
+
+`pytest -q` (2235 passed, 4 m 51 s) · `ruff check jarvis scripts tests` clean · `npm test --prefix
+electron` (27) · `npm run build --prefix electron` clean, plus a **40-mutation round** (each layer
+disabled by a surgical substitution; the targeted tests must go red) ending **40/40 caught**.
+
+Five mutations survived the FIRST round, and each was a real gap rather than a scoring detail:
+
+- The calendar regression test monkeypatched `_clock_for` so thoroughly that it would have passed
+  with the UTC bug back in place. The real function is now tested unpatched.
+- The clock-independence test never actually moved the process clock.
+- Nothing asserted end to end that `calendar_control` calls the title cleaner at all.
+- The never-return-empty guard was unreachable from the inputs the test used (only
+  punctuation-only titles get that far).
+- One was a genuine **equivalent** mutant — widening the tool-name check alone changes no
+  behaviour, because no other tool has a `create` action — and was replaced with a variant that
+  does change behaviour. Investigating it turned up something worth keeping: `shell_run`,
+  `python_run` and `workflow_start` have **no args schema at all**, so the tool-name check is the
+  only thing stopping a model from attaching calendar-shaped arguments to a shell command.
+
+### Live measurement (real qwen3:8b · Ollama · CLOUD_POLICY=off · fake Google service)
+
+A scratch `JARVIS_HOME` and a capture object in place of the Calendar service, so no request could
+reach Google — **0 real calls** in either run. n=10 per scenario. Clock frozen at 2026-08-01 01:30
+Istanbul, i.e. deliberately inside the window where UTC is still on the previous date.
+
+Before the utterance fix (this run also cleared the docstring-change risk):
+
+| Scenario | Result |
+|---|---|
+| "Yarın öğlen saat 3'e Baran'la toplantı ekle" | **10/10** on every axis — tool called, correct date, 15:00, clean title. p50 23.4 s |
+| "15 Ağustos 2026 saat 14:00'te … ekle" | **10/10** every axis. p50 21.7 s |
+| "Bugüne … tüm gün süren bir etkinlik ekle" | **10/10** every axis. p50 18.9 s |
+| "Pazartesi saat 4'te spor salonu … ekle" | **10/10 events created with no prompt, all on a Saturday** |
+
+After:
+
+| Scenario | Result |
+|---|---|
+| "Pazartesi saat 4'te spor salonu … ekle" | **0/10 unprompted** (was 10/10). p50 61.2 s |
+| "Cumaya Baran'la toplantı ekle" | **0/10 unprompted**. p50 34.8 s |
+| "Yarın öğlen saat 3'e Baran'la toplantı ekle" | **10/10 created, 10/10 correct date, 0 asked**. p50 27.6 s |
+| "15 Ağustos 2026 saat 14:00'te … ekle" | **10/10 correct, 0 asked**. p50 21.1 s |
+| "Gelecek pazartesi 18:00'de … ekle" | **10/10 correct Monday, 0 asked**. p50 17.9 s |
+
+The last three are the regression checks: a fix that simply made the gate ask about everything
+would have "passed" the first two rows and destroyed the feature.
+
+---
+
 ## [Post-MVP Faz 1: honesty kernel] — 2026-07-31
 
 *"Did JARVIS actually do what it just told you it did?"* — a different question from the one the

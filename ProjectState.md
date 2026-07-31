@@ -286,6 +286,10 @@ Mobile (mobile/ — Flutter/Android):
 |---|---|
 | `jarvis/__main__.py` | Entry point — `--voice`, `--wakeword`, `--api`, `--monitor`, `--port` |
 | `jarvis/agent.py` | `JarvisAgent` — wraps LangGraph, manages session state, model fallback |
+| `jarvis/clock.py` | **The** source of "now" (Post-MVP Faz 2) — `SystemClock`/`FrozenClock`, configured from `settings.calendar_timezone`. Consumers: the prompt's now-block, the calendar resolver, `scheduler.py`, `todo_store.py` |
+| `jarvis/nlu/temporal.py` | Turkish/English date+time expressions → a timestamp, in the clock's zone, plus a **clock-independent** confidence score that `policy_guard` gates on (Post-MVP Faz 2) |
+| `jarvis/nlu/entities.py` | Person-name resolution with confidence bands — a stem is adopted only when a source corroborates it, so "Metin" never becomes "Met" (Post-MVP Faz 2) |
+| `jarvis/nlu/event_text.py` | Event titles are a record of what is happening, not a copy of the request; strictly subtractive (Post-MVP Faz 2) |
 | `jarvis/config.py` | pydantic-settings from .env; Vertex + AI Studio model config |
 | `jarvis/context_builder.py` | `ContextBuilder` — extracted memory/todo/entity/session recall used by `agent.py` (Phase 4, 2026-05-24) |
 | `jarvis/tool_registry.py` | `ToolSpec` risk-metadata registry (risk level, confirmation requirement) for all tools (Phase 2, 2026-05-24) |
@@ -343,6 +347,20 @@ Mobile (mobile/ — Flutter/Android):
 8. **ChromaDB under OneDrive:** may cause sync churn. Move `CHROMA_DIR` outside OneDrive if noisy.
 9. **openwakeword false positives:** "Hey JARVIS" model may trigger on similar-sounding phrases. Threshold tuning may be needed.
 10. **ProjectState.md was frozen at Iteration 3** — this rewrite corrects that (2026-05-23).
+11. **Never call `datetime.now()` for anything the user will see as a date or time.** Use
+    `jarvis/clock.py` (`get_clock()`, or `local_naive_now()` for the stores that persist naive ISO
+    strings). Post-MVP Faz 2 exists because "what day is it" had two answers in one process — the
+    prompt's now-block read Europe/Istanbul, `calendar.py` read UTC, and for three hours a day that
+    disagreement wrote calendar events to the wrong date (measured: 3 of 24 local hours). A `Clock`
+    is also the only way to write a test for a bug that only appears between 00:00 and 03:00.
+12. **`google_calendar` `create` can run without a confirmation prompt** when date, time, title and
+    the user's own wording are all ≥ 0.95 confidence (Post-MVP Faz 2). Every other calendar action
+    still asks, the kill switch still vetoes, and `calendar_autonomy_enabled=False` restores the old
+    behaviour. See `docs/SAFETY.md` before changing anything in `policy_guard._resolve_risk`.
+13. **A local model will resolve dates itself even when told not to.** Measured 10/10 with real
+    qwen3:8b: asked for "Pazartesi" it passed an ISO date for a *Saturday* rather than passing the
+    word through. Anything that scores "how sure are we about this tool call" must read the user's
+    sentence, not only the arguments — arguments are the model's interpretation, not the request.
 
 ---
 
