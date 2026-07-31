@@ -61,7 +61,7 @@ def _base_chat_stream_agent(*, aget_state_return, workspace):
     agent.session_id = "s1"
     agent._history = []
     agent.workspace = workspace  # write_run_manifest() needs a real path on the no-interrupt path
-    agent._env_block = ""
+    agent._env_static = ""   # _env_block is a property (live clock)
     agent.usage = SimpleNamespace()
     agent.settings = Settings(_env_file=None)
     agent._last_turn_trace = None

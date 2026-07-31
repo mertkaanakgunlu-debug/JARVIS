@@ -236,6 +236,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         hue: str = "",
         output: str = "",
         data_json: str = "",
+        sheet: str = "",
     ) -> str:
         """Generate a chart and save as PNG — from a CSV/Excel FILE or INLINE data.
 
@@ -261,6 +262,10 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
                        column→values ('{"x": [1,2,3,4], "y": [1,4,9,16]}'; x
                        optional, defaults to 0..n-1) or a bare array
                        ('[1,4,9,16]', single series with x = index).
+            sheet:     Worksheet name for a multi-sheet Excel file. Without it
+                       only the FIRST sheet is read, so a workbook whose data
+                       lives on a later sheet (e.g. finance('export')'s
+                       'Günlük Akış') cannot be charted at all.
 
         Returns:
             Absolute path to the saved PNG file.
@@ -283,7 +288,9 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         # own docstring for why), so each call gets its own fresh,
         # collision-proof run directory instead.
         plots_dir = RunContext.for_execution(workspace).artifact_dir
-        result = generate_plot(full, kind, x, y, title, hue, output, plots_dir, df=df)
+        result = generate_plot(
+            full, kind, x, y, title, hue, output, plots_dir, df=df, sheet=sheet,
+        )
         event_bus.show_hud()
         return result
 
@@ -998,17 +1005,32 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         alert_threshold_pct: float = 0.8,
         months_back: int = 1,
         n: int = 5,
+        path: str = "",
+        chart_kind: str = "bar",
     ) -> str:
-        """Track bank transactions and manage budgets (Burgan Bank + Gmail extraction).
+        """Track bank transactions, analyse cash flow, and export it to Excel.
 
         Actions:
-            sync           — scan Gmail for Burgan Bank notification emails and extract
-                             transactions using LLM (Gemini Flash structured output)
+            sync             — scan Gmail for bank notification emails and save the
+                             transactions found in them
+            import_statement — read a PDF bank statement (ekstre) at `path` and save
+                             its transactions. Use this when the user gives a
+                             statement/ekstre file, or when sync finds no mail.
             summary        — monthly income, expenses, net balance + category breakdown
             recent         — list most recent transactions (default 20)
             top_categories — top N expense categories for a period
             set_budget     — define a monthly spending limit for a category
             budget_status  — show spent/limit/% for all budget categories with visual bars
+            export         — write a multi-sheet Excel (.xlsx) cash-flow workbook
+                             AND its chart (.png) for the period, then return both
+                             paths plus the income/expense/net totals. Use this for
+                             any "excel / tablo / grafik" request about money: it
+                             computes and charts everything itself, so you never
+                             pass transaction data in and you do NOT need a
+                             separate plot_data call afterwards. Report the totals
+                             it returns to the user.
+                             If the request mentions mail/e-posta, call sync first
+                             in the same turn, then export.
             chart          — generate a Plotly HTML bar chart for a period
 
         Args:
@@ -1019,16 +1041,27 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
                                 health | education | other)
             monthly_limit:      Monthly spending cap in TRY (for set_budget)
             alert_threshold_pct: Fraction of limit that triggers a warning (default 0.8 = 80%)
-            months_back:        How many months to scan Gmail (for sync, default 1)
+            months_back:        How many months of mail to scan (for sync, default 1)
             n:                  Number of results for recent/top_categories (default 5)
+            path:               PDF statement path (for import_statement)
+            chart_kind:         export's chart style: bar | line | scatter
+                                (default bar). If the user asks for a line or dot
+                                chart, re-run export with this — do NOT reach for
+                                plot_data.
+
+        Note: export chooses its own filename (exports/cashflow_<YYYY-MM>.xlsx).
+        There is deliberately no way to override it -- a live run named a July
+        export "cashflow_2026-05.xlsx", then failed to find its own file and
+        reported the export as broken when it had in fact succeeded.
 
         Examples:
-            finance("sync")                                      # pull latest Burgan mails
+            finance("sync")                                      # pull latest bank mails
             finance("summary")                                   # this month's summary
             finance("summary", year=2026, month=4)              # April 2026
             finance("top_categories", n=3)
             finance("set_budget", category="food", monthly_limit=1500)
             finance("budget_status")
+            finance("export")                                    # this month's Excel workbook
             finance("chart")
         """
         return finance_control(
@@ -1040,6 +1073,9 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             alert_threshold_pct=alert_threshold_pct,
             months_back=months_back,
             n=n,
+            path=path,
+            chart_kind=chart_kind,
+            workspace=workspace,
             settings=settings,
         )
 

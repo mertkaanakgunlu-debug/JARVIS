@@ -40,7 +40,7 @@ def _base_agent(jarvis_home, *, starting_turn: int = 0):
     agent.session_id = "s1"
     agent._history = []
     agent.workspace = jarvis_home
-    agent._env_block = ""
+    agent._env_static = ""   # _env_block is a property (live clock)
     agent.usage = SimpleNamespace()
     agent.settings = Settings(_env_file=None)
     agent._last_turn_trace = None

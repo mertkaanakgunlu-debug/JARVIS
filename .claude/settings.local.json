@@ -49,7 +49,10 @@
       "Read(//c//**)",
       "Bash(where python3 *)",
       "Bash(where py *)",
-      "Bash(find \"C:\\\\Users\\\\mertk\\\\Desktop\\\\Jarvis\" -iname \"tool.py\" -path \"*langchain_core*\" 2>/dev/null | head; find / -iname \"base.py\" -path \"*langchain_core*tools*\" 2>/dev/null | head -5 *)"
+      "Bash(find \"C:\\\\Users\\\\mertk\\\\Desktop\\\\Jarvis\" -iname \"tool.py\" -path \"*langchain_core*\" 2>/dev/null | head; find / -iname \"base.py\" -path \"*langchain_core*tools*\" 2>/dev/null | head -5 *)",
+      "PowerShell(git fetch origin --quiet 2>&1; Write-Output \"--- origin/langgraph-migration..HEAD \\(unpushed commits\\) ---\"; git log origin/langgraph-migration..HEAD --oneline; Write-Output \"--- count ---\"; \\(git log origin/langgraph-migration..HEAD --oneline | Measure-Object -Line\\).Lines; Write-Output \"--- main..langgraph-migration \\(how far main trails\\) ---\"; \\(git log main..langgraph-migration --oneline | Measure-Object -Line\\).Lines)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\Activate.ps1)",
+      "PowerShell(python -m pytest -q 2>&1)"
     ]
   }
 }

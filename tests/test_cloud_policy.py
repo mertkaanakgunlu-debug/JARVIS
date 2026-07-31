@@ -141,11 +141,48 @@ async def test_entity_extractor_gated(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_finance_extractor_gated():
+async def test_finance_extractor_works_under_cloud_policy_off():
+    """finance_extractor left the cloud-gated set on 2026-07-30 -- deliberately.
+
+    It used to be one of the 8 direct-Gemini helpers, so CLOUD_POLICY=off (the
+    default) made it return None for every mail. The consequence was not
+    "degraded": `finance('sync')` became a permanent no-op that reported
+    "0 islem kaydedildi" with no hint that extraction was switched off entirely,
+    and the transactions table sat at 0 rows.
+
+    It is now deterministic-parser-first with a get_llm("fast") fallback, so it
+    needs no cloud at all. The CLOUD_POLICY guarantee this file protects is
+    unaffected and is asserted directly below: under "off", get_llm builds a
+    purely local chain with zero cloud tiers, which is what actually prevents a
+    Google call.
+    """
     from jarvis.finance_extractor import extract_transaction
-    result = await extract_transaction("subj", "body", _settings(cloud_policy="off"))
-    assert result is None
-    assert "finance_extractor" in degraded_features()
+    from jarvis.finance_parser import ParsedTransaction
+
+    settings = _settings(cloud_policy="off")
+    result = await extract_transaction(
+        "Burgan Bank - Kartli Islem Bilgilendirmesi",
+        "07.07.2026 14:32 tarihinde kartiniz ile MIGROS isyerinde "
+        "250,75 TL tutarinda alisveris islemi gerceklestirilmistir.",
+        settings,
+    )
+
+    # Parsed offline, with no model of any kind involved.
+    assert isinstance(result, ParsedTransaction)
+    assert result.amount == pytest.approx(-250.75)
+    assert result.currency == "TRY"
+    assert "finance_extractor" not in degraded_features()
+
+
+def test_fast_role_has_no_cloud_tier_under_off():
+    """The structural guarantee finance_extractor now relies on instead of the
+    cloud_extractors_enabled() gate: its LLM fallback resolves through get_llm,
+    and under "off" that chain contains no cloud tier to reach."""
+    llm = get_llm("fast", _settings(cloud_policy="off"))
+
+    assert not isinstance(llm, RunnableWithFallbacks), (
+        "a fallback chain under CLOUD_POLICY=off implies a cloud tier was built"
+    )
 
 
 @pytest.mark.asyncio

@@ -47,3 +47,9 @@ electron/out/
 # OS
 Thumbs.db
 desktop.ini
+
+# Local dev server log
+server.log
+
+# Generated finance artifacts (contain REAL bank data)
+exports/

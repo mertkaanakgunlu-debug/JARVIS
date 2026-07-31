@@ -28,7 +28,7 @@ MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSp
 | `csv_read` | L1 | filesystem | — | — | 10s | Preview a CSV file (shape + first N rows) |
 | `python_run` | L3 | compute | ✓ | ✓ | 120s | Execute a Python script in a subprocess |
 | `data_analyze` | L1 | compute | — | ✓ | 60s | Full pandas statistical analysis of a tabular file |
-| `plot_data` | L2 | compute | — | ✓ | 60s | Generate a matplotlib/seaborn PNG and save to workspace |
+| `plot_data` | L2 | compute | — | ✓ | 60s | Generate a matplotlib/seaborn PNG from a file (`sheet=` selects a worksheet) or inline `data_json` |
 | `report_write` | L2 | filesystem | — | — | 30s | Write a LaTeX .tex source file to vault/reports/ |
 | `report_compile` | L2 | compute | — | ✓ | 120s | Compile a .tex file to PDF via pdflatex |
 | `report_compose` | L2 | compute | — | ✓ | 120s | Write markdown + figures into a LaTeX report PDF |
@@ -47,7 +47,7 @@ MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSp
 | `hud_panels` | L2 | ui | — | — | 5s | Show/hide/toggle panels in the Electron HUD |
 | `schedule` | L2 | compute | — | — | 10s | Scheduled tasks and reminders (SQLite) |
 | `todo` | L2 | compute | — | — | 30s | To-do list with LLM priority analysis (SQLite) |
-| `finance` | L2 | external_api | — | ✓ | 60s | Burgan Bank finance sync (Gmail read-only), summary, budgets |
+| `finance` | L2 | external_api | — | ✓ | 60s | Bank mail sync (Gmail read-only), **`import_statement`** (PDF ekstre → ledger), cash-flow summary, budgets, **`export`** → multi-sheet .xlsx + chart |
 | `gcp_quota` | L1 | network | — | — | 30s | GCP Vertex AI quota status and usage tracking |
 | `google_calendar` | L3 | external_api | ✓ | — | 30s | Calendar: list/search (L1) · create/update/delete (L3) |
 | `gmail` | L3 | external_api | ✓ | — | 30s | Gmail: list/read/search (L1) · send/reply/trash (L3) |

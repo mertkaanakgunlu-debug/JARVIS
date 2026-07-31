@@ -144,7 +144,16 @@ class Settings(BaseSettings):
     max_tool_calls_per_ai_message: int = 4   # batch size cap per AIMessage
     max_tool_calls_per_turn: int = 6         # attempted calls per turn (run/failed/blocked all count)
     max_identical_tool_call: int = 1         # same tool+args fingerprint per turn
-    max_tool_rounds_per_turn: int = 2        # tool batches per turn (loop stopper until Faz 2B's router)
+    # 2 -> 4 on 2026-07-30. The MVP chain is three SEQUENTIAL rounds --
+    # finance('sync') -> finance('export') -> plot_data(path from the export) --
+    # because each step needs the previous step's result, so they cannot be
+    # batched. At 2 the third round was hard-rejected with blocked_round_limit
+    # and the task was unfinishable no matter how well the model behaved.
+    # The 4th round is headroom for one bounded repair, not a 4-step plan.
+    # This budget exists to stop F16's tool-call loop, so the raise was checked
+    # against the Gate Core corpus rather than assumed safe; raise it further
+    # only if a real gate trace shows 4 is the binding constraint.
+    max_tool_rounds_per_turn: int = 4        # SEQUENTIAL tool batches per turn (loop stopper)
 
     # Patch 1.2 (Faz 1D): conversation-history window in completed TURNS, not
     # messages — with turn compaction (agent.py) one polluted turn can no
@@ -297,7 +306,14 @@ class Settings(BaseSettings):
     # Faz 16: Finance analytics
     finance_data_dir: Path = Path("data/finance")   # charts + reports output dir
     finance_bank: str = "burgan"                     # primary bank identifier
-    finance_sender_filter: str = "burgan"            # Gmail from: filter string
+    # Comma-separated sender fragments, OR-ed into one Gmail `from:(...)` clause.
+    # "burgan" alone was wrong for this account and would have stayed wrong
+    # silently: Burgan Bank's consumer digital brand is **ON**, and its mail comes
+    # from `m.on.com.tr`, which `from:burgan` never matches. Verified live
+    # 2026-07-30 — the only ON mails in the mailbox are from m.on.com.tr, so once
+    # transaction notifications start arriving the old filter would have found
+    # zero and reported an empty mailbox rather than a misconfiguration.
+    finance_sender_filter: str = "burgan,on.com.tr"
     finance_extractor_model: str = "gemini-2.5-flash"
     monitor_finance_interval_min: int = 30           # finance sync + budget check interval
 

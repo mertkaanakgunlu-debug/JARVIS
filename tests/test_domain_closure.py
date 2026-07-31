@@ -90,3 +90,104 @@ def test_ascii_drive_still_exposes_google_drive():
 def test_fold_maps_turkish_to_ascii_lowercase():
     assert _fold("ÇizGİ Şarkı Ürün") == "cizgi sarki urun"
     assert _fold("GRAFİK") == "grafik"
+
+
+# ── MULTI-domain closure (2026-07-30) ────────────────────────────────────────
+# The membership closure above is per-domain. B6 was a single-domain gap; the MVP
+# prompt exposed a MULTI-domain one, and it was structural rather than a missing
+# pattern: the "data" domain held exactly 8 tools while MAX_TOOLS_PER_TURN is
+# also 8, so once "data" was primary it consumed the whole budget and every
+# other routed domain was silently dropped.
+#
+# Measured before the fix: "Maillerimi kontrol et, hesabımdaki para akışını
+# analiz et, bir excel tablosuna dönüştür ve grafikle" routed to [data, mail] and
+# exposed 8 data tools with gmail AND finance both invisible. The live model then
+# reported "Hesabınızda ... e-posta bulunmuyor" -- a verdict on a mailbox it had
+# no tool to open.
+
+MVP_PROMPT = (
+    "Maillerimi kontrol et, hesabımdaki para akışını analiz et, "
+    "bir excel tablosuna dönüştür ve grafikle"
+)
+
+
+def test_mvp_prompt_exposes_every_tool_the_task_needs():
+    """The whole chain must be visible in ONE turn: read mail, analyse/export
+    money, chart the result."""
+    route = classify_query(MVP_PROMPT)
+    selected = set(select_tool_names(route, ALL_NAMES))
+
+    missing = {"gmail", "finance", "plot_data"} - selected
+    assert not missing, f"MVP closure gap: {missing} not visible (has {selected})"
+    assert len(selected) <= MAX_TOOLS_PER_TURN
+
+
+def test_no_single_domain_can_consume_the_whole_tool_budget():
+    """The invariant that makes the above robust to future growth: a domain must
+    leave room for the other domains a request routed to."""
+    from jarvis.graph.tool_router import _DOMAIN_PATTERNS
+
+    oversized = {}
+    for domain in _DOMAIN_PATTERNS:
+        members = [n for n in ALL_NAMES if (TOOL_SPECS[n].domain or "mcp") == domain]
+        if len(members) >= MAX_TOOLS_PER_TURN:
+            oversized[domain] = len(members)
+    assert not oversized, (
+        f"domain(s) at/over the per-turn cap: {oversized}. A domain this size "
+        "starves every other domain in a multi-domain request -- split it rather "
+        "than raising MAX_TOOLS_PER_TURN."
+    )
+
+
+def test_secondary_domains_keep_a_slot_even_when_the_primary_is_large():
+    """Direct test of the reservation rule, independent of today's domain sizes."""
+    route = classify_query(MVP_PROMPT)
+    assert len(route.domains) > 1, "premise: this is a multi-domain route"
+
+    selected = select_tool_names(route, ALL_NAMES)
+    domains_present = {TOOL_SPECS[n].domain for n in selected}
+    for domain in route.domains:
+        assert domain in domains_present, (
+            f"routed domain {domain!r} contributed no tool; "
+            f"got {sorted(domains_present)}"
+        )
+
+
+@pytest.mark.parametrize("query,expected", [
+    # The split moved \brapor and \bhesapla out of "data"; these prove the moves
+    # landed and that nothing that used to route still misroutes.
+    ("Bu konuda bir rapor yaz", "report"),
+    ("Şu integrali hesapla: x^2 dx", "math"),
+    ("Bu denklemi çöz", "math"),
+    ("csv dosyasını analiz et", "data"),
+    ("Şu sayılarla çizgi grafiği çiz: 1, 4, 9, 16", "data"),
+])
+def test_patterns_moved_out_of_data_still_route(query, expected):
+    assert classify_query(query).primary_domain == expected
+
+
+@pytest.mark.parametrize("query", [
+    "hesabımdaki para akışını göster",
+    "hesap hareketlerimi listele",
+    "ekstremi getir",
+    "nakit akışım nasıl",
+    "Burgan bildirimlerini tara",
+])
+def test_finance_wordings_the_owner_actually_uses(query):
+    """None of these matched any finance pattern before 2026-07-30."""
+    route = classify_query(query)
+    assert "finance" in select_tool_names(route, ALL_NAMES), (
+        f"{query!r} routed to {route.domains} without exposing finance"
+    )
+
+
+@pytest.mark.parametrize("calc,account", [
+    ("2 üzeri 10 hesapla", "hesabımdaki para"),
+    ("faizi hesapla", "hesabımın ekstresi"),
+])
+def test_hesapla_and_hesab_do_not_collide(calc, account):
+    """Turkish consonant alternation makes this a genuine trap: "hesapla"
+    (calculate) and "hesabım" (my account) share a stem prefix. `\\bhesab` must
+    not catch arithmetic, and `\\bhesapla` must not catch account requests."""
+    assert classify_query(calc).primary_domain == "math"
+    assert classify_query(account).primary_domain == "finance"

@@ -25,6 +25,18 @@ pydantic-settings>=2.6
 # Google Gemini SDK (cloud fallback)
 google-generativeai>=0.8
 
+# Google Workspace integrations — Gmail / Calendar / Drive tools.
+# These were UNDECLARED until 2026-07-30 even though jarvis/tools/{gmail,calendar,
+# drive}.py have always imported them: google-api-python-client happened to be
+# present transitively (via the langchain-google-* / google-generativeai stack)
+# while google-auth-oauthlib was NOT installed at all, so every calendar/gmail/
+# drive call failed at runtime with "Google API library import error". Declare
+# them explicitly -- a shipped feature must not depend on another package's
+# transitive tree.
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2      # InstalledAppFlow -- first-run OAuth consent only
+google-auth-httplib2>=0.2
+
 # OpenAI SDK (used for Ollama's OpenAI-compatible endpoint)
 openai>=1.70
 

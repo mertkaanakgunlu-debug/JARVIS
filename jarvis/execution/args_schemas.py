@@ -58,6 +58,12 @@ class PlotDataArgs(_StrictArgs):
     hue: str = ""
     output: str = ""
     data_json: str = ""
+    # Worksheet selection for multi-sheet Excel input. Added with the tool
+    # parameter itself, not after: _StrictArgs is extra="forbid", so a `sheet`
+    # argument that the schema does not know about is REJECTED by
+    # prepare_execution_node -- the call would never run, and the failure would
+    # look like a model error rather than a missing schema field.
+    sheet: str = ""
 
     @field_validator("kind", mode="before")
     @classmethod
@@ -317,9 +323,14 @@ class ItuMailArgs(_StrictArgs):
 
 class FinanceArgs(_StrictArgs):
     action: Literal[
-        "sync", "summary", "recent", "top_categories",
-        "set_budget", "budget_status", "chart",
+        "sync", "import_statement", "summary", "recent", "top_categories",
+        "set_budget", "budget_status", "export", "chart",
     ]
+    # PDF bank statement to import (action="import_statement" only).
+    path: str = ""
+    # export's chart style. Closed set: a typo would otherwise silently fall back
+    # to bar and the user would think their request was ignored.
+    chart_kind: Literal["bar", "line", "scatter"] = "bar"
     year: int = 0
     month: int = 0
     category: str = ""
@@ -327,6 +338,12 @@ class FinanceArgs(_StrictArgs):
     alert_threshold_pct: float = 0.8
     months_back: int = 1
     n: int = 5
+    # No `output` field, deliberately, and it must stay that way: the @tool
+    # wrapper does not accept one either. export picks its own deterministic
+    # filename. A live run named a July export "cashflow_2026-05.xlsx", then
+    # could not find its own file and told the user the export had failed when it
+    # had succeeded. _StrictArgs is extra="forbid", so a model that tries anyway
+    # is rejected with a clear message rather than silently mis-naming a file.
 
     @field_validator("action", mode="before")
     @classmethod
@@ -341,6 +358,8 @@ class FinanceArgs(_StrictArgs):
                 raise ValueError("action='set_budget' requires 'category'")
             if self.monthly_limit <= 0:
                 raise ValueError("action='set_budget' requires a positive 'monthly_limit'")
+        if self.action == "import_statement" and not self.path.strip():
+            raise ValueError("action='import_statement' requires 'path' to a PDF statement")
         return self
 
 

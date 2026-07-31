@@ -285,14 +285,83 @@ def _build_env_block(workspace: Path) -> str:
     else:
         desktop_candidates = [home / "OneDrive" / "Desktop", home / "Desktop"]
         desktop = next((p for p in desktop_candidates if p.exists()), desktop_candidates[0])
+    # Downloads/Documents added 2026-07-30. Only Home and Desktop were listed, so
+    # asked to read "indirilenlerdeki Hesap Hareketleri.pdf" the model invented
+    # `data/uploads/...` -- a path that does not exist AND sits inside
+    # files.PROTECTED_DIRS, so it was refused twice over. A bank statement or an
+    # invoice arrives in Downloads far more often than on the Desktop; naming the
+    # folder is the difference between the model resolving the request and
+    # guessing.
+    downloads = home / "Downloads"
+    documents_candidates = [home / "OneDrive" / "Documents", home / "Documents"]
+    documents = next(
+        (p for p in documents_candidates if p.exists()), documents_candidates[-1]
+    )
     return (
         f"\n\n## User environment (Windows)\n"
         f"- Home: `{home}`\n"
         f"- Desktop: `{desktop}`\n"
+        f"- Downloads (**indirilenler**): `{downloads}`\n"
+        f"- Documents (belgeler): `{documents}`\n"
         f"- Workspace (current working dir): `{workspace}`\n\n"
-        "When the user mentions **masaüstü / Desktop / my desktop**, use the Desktop "
-        "path above (absolute) with `file_list`, `file_read`, `pdf_read`, or `shell_run`. "
-        "Never assume files are inside the Workspace unless the user explicitly said so."
+        "When the user names a folder — **masaüstü/Desktop**, **indirilenler/"
+        "Downloads**, **belgeler/Documents** — use the ABSOLUTE path above with "
+        "`file_list`, `file_read`, `pdf_read`, `finance('import_statement')` or "
+        "`shell_run`. Never invent a path such as `data/uploads/...`: `data/` is a "
+        "protected directory and is always refused. If you are unsure which file "
+        "the user means, `file_list` the folder first rather than guessing a name."
+    )
+
+
+_WEEKDAYS_TR = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+_MONTHS_TR = [
+    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
+]
+
+
+def _build_now_block() -> str:
+    """Tell the model what day it is.
+
+    Nothing did, before 2026-07-30. The system prompt committed to a timezone
+    ("Europe/Istanbul") but never stated the current date, so any request phrased
+    relatively -- "bu ay", "yarın", "geçen hafta", "son 3 gün" -- was resolved
+    against whatever date the model guessed from its training distribution.
+
+    Measured consequence: asked to analyse "hesabımdaki para akışı" on
+    2026-07-30, qwen3:8b called finance('export', month=5) in 5 of 5 runs. The
+    ledger held July data, the export correctly reported "2026-05 için kayıtlı
+    işlem yok", and the model then told the user the export had failed. The tools
+    all defaulted to the right period; the model overrode them with an invented
+    one. The owner's live calendar failure ("Yarın öğlen saat 3'e ... ekle") is
+    the same family of bug.
+
+    Recomputed per turn on purpose -- see JarvisAgent._env_block. Freezing it at
+    construction would make an API server that stays up overnight confidently
+    wrong about the date, which is worse than not knowing.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    try:  # tzdata is not guaranteed on Windows
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Europe/Istanbul"))
+    except Exception:  # noqa: BLE001
+        # UTC+3 is Istanbul year-round (no DST since 2016), so this fallback is
+        # exact rather than approximate.
+        now = datetime.now(timezone(timedelta(hours=3)))
+
+    tomorrow = now + timedelta(days=1)
+    return (
+        f"\n\n## Current date and time (Europe/Istanbul, UTC+3)\n"
+        f"- Now: **{now:%Y-%m-%d %H:%M}**, "
+        f"{_WEEKDAYS_TR[now.weekday()]} {now.day} {_MONTHS_TR[now.month - 1]} {now.year}\n"
+        f"- Today = {now:%Y-%m-%d} · Tomorrow (yarın) = {tomorrow:%Y-%m-%d}\n"
+        f"- This month (bu ay) = **{now:%Y-%m}** (year={now.year}, month={now.month})\n\n"
+        "Resolve every relative date the user gives (bugün, yarın, bu ay, geçen "
+        "hafta, son N gün) against the values above — never against a date you "
+        "assume. When a tool takes year/month and the user named no period, OMIT "
+        "them and let the tool default to the current period; do not guess a "
+        "month."
     )
 
 
@@ -407,6 +476,28 @@ def _execution_summary_from_ledger(ledger: list[dict] | None) -> str:
         seen.add(key)
         parts.append(f"{key[0]} {'ok' if key[1] else 'failed/blocked'}")
     return "[Tool execution summary: " + "; ".join(parts) + "]"
+
+
+_INTERNAL_MARKER = re.compile(r"^\s*\[Tool execution summary:[^\]]*\]\s*", re.IGNORECASE)
+
+
+def strip_internal_markers(response: str) -> str:
+    """Remove internal bookkeeping markers the model has copied into its answer.
+
+    _execution_summary_from_ledger() writes "[Tool execution summary: finance ok]"
+    into conversation history so the next turn knows what actually ran. On
+    2026-07-30 a live follow-up turn made ZERO tool calls and opened its reply
+    with a hand-written "[Tool execution summary: plot_data ok]" — imitating the
+    format it had seen — then described a chart file that was never created.
+
+    Stripping the marker does not stop the fabrication (see HANDOFF.md's open
+    item on response-claim verification); it stops a fabrication from wearing a
+    system-generated badge, which is what makes it convincing. Cheap and exact:
+    only the literal marker at the start of the response is removed.
+    """
+    if not response:
+        return response
+    return _INTERNAL_MARKER.sub("", response, count=1)
 
 
 def _compact_completed_turn_for_history(
@@ -542,7 +633,9 @@ class JarvisAgent:
         # identical to the old Path(".") behavior; set -> tool outputs
         # (pdf_cache/plots/reports) and all stores land under it.
         self.workspace = paths.jarvis_home().resolve()
-        self._env_block = _build_env_block(self.workspace)
+        # Static half only: paths cannot change for the life of the process.
+        # The date half is appended per read -- see the _env_block property.
+        self._env_static = _build_env_block(self.workspace)
         self._active_model_id: str | None = None
         # Faz 1: which role (fast/local vs reasoning) served the most recent
         # turn — None before the first turn. Drives _cloud_model's per-turn
@@ -708,6 +801,18 @@ class JarvisAgent:
             return _label_for(self._active_model_id)
 
         return f"{s.local_model} (Ollama, local)"
+
+    @property
+    def _env_block(self) -> str:
+        """Environment facts for the system prompt: static paths + a LIVE clock.
+
+        A property rather than a stored string so the date is correct on every
+        turn. An API server or a wake-word session stays up for days; a date
+        captured at construction would drift and the model would state it with
+        full confidence. All three call sites (chat, chat_stream, proactive_turn)
+        read this attribute, so none of them needed changing.
+        """
+        return self._env_static + _build_now_block()
 
     @property
     def current_model_label(self) -> str:
@@ -1374,6 +1479,11 @@ class JarvisAgent:
                     "engellenen araç çağrıları olabilir). Lütfen isteği "
                     "yeniden veya daha net ifade ederek deneyin."
                 )
+
+            # The model has been observed copying the internal
+            # "[Tool execution summary: ...]" marker into its own answer while
+            # calling nothing -- see strip_internal_markers().
+            response = strip_internal_markers(response)
 
             # Runtime truth: label the turn with the provider that ACTUALLY
             # answered (per-tier callback metadata), not the requested role.

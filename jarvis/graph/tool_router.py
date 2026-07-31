@@ -39,7 +39,7 @@ MAX_DOMAINS_PER_TURN = 3
 # "listele" also smells like the filesystem).
 _DOMAIN_PRIORITY = [
     "procedure", "workflow", "mail", "calendar", "drive", "media", "finance",
-    "tasks", "web", "mcp", "files", "data", "system", "memory",
+    "tasks", "web", "mcp", "files", "data", "report", "math", "system", "memory",
 ]
 
 # Domains that are opt-in via explicit wording only, never picked up from
@@ -69,10 +69,22 @@ _DOMAIN_PATTERNS: dict[str, list[str]] = {
         r"\bcalendar\b", r"\bmeeting", r"\bappointment", r"\bevent",
     ],
     "drive": [r"\bdrive\b", r"\bbulut", r"\bupload\b", r"\byükle"],
+    # data / report / math were one "data" domain until 2026-07-30 (see
+    # _TOOL_DOMAINS in jarvis/tool_registry.py for why it was split). The
+    # patterns MOVED with their tools rather than being duplicated: leaving
+    # \brapor in both "data" and "report" would score the word twice and let one
+    # intent outrank a genuinely two-domain request.
     "data": [
         r"\banaliz", r"\bgrafik", r"\bçiz", r"\bplot\b", r"\bchart\b",
-        r"\brapor", r"\bhesapla", r"\bmatematik", r"\bdenklem", r"\bsimül",
-        r"\bcsv\b", r"\bexcel\b", r"\bveri",
+        r"\bcsv\b", r"\bexcel\b", r"\bveri", r"\btablo",
+    ],
+    "report": [
+        r"\brapor", r"\blatex\b", r"\bpdf rapor", r"\bmakale", r"\bmetin yaz",
+        r"\bözet çıkar", r"\bderleme",
+    ],
+    "math": [
+        r"\bhesapla", r"\bmatematik", r"\bdenklem", r"\bintegral", r"\btürev",
+        r"\bsimül", r"\bgeodezi", r"\bkoordinat",
     ],
     "system": [
         r"\bshell\b", r"\bkomut", r"\bçalıştır", r"\bterminal\b",
@@ -90,6 +102,20 @@ _DOMAIN_PATTERNS: dict[str, list[str]] = {
     "finance": [
         r"\bbütçe", r"\bharcama", r"\bgider", r"\bfatura", r"\bfinans",
         r"\bhisse", r"\bdolar", r"\beuro\b",
+        # Added 2026-07-30: the owner's own MVP wording ("hesabımdaki para
+        # akışını analiz et") matched NONE of the patterns above, so the finance
+        # domain scored zero on the one request it exists to serve.
+        #
+        # `\bhesab` is the possessive/oblique stem of "hesap" (account):
+        # hesabım, hesabımdaki, hesabında. Note it deliberately does NOT collide
+        # with math's `\bhesapla` ("calculate") -- folded, "hesabimdaki" matches
+        # \bhesab but not \bhesapla, and "hesapla" matches \bhesapla but not
+        # \bhesab (p != b). The nominative "hesap" is left out on purpose: it is
+        # the stem of hesapla* too, so `\bhesap` would drag every arithmetic
+        # request into the finance domain.
+        r"\bhesab", r"\bpara ak", r"\bnakit ak", r"\bgelir",
+        r"\bekstre", r"\bbanka", r"\bişlem geçmiş", r"\bhesap hareket",
+        r"\bcash ?flow", r"\btransaction", r"\bburgan",
     ],
     "memory": [r"\bnot\b", r"\bnotlar", r"\bvault\b", r"\barşiv", r"\bkaydettiğim"],
     "procedure": [r"\bprosedür", r"\bprocedure\b", r"\biş akışı"],
@@ -210,13 +236,31 @@ def select_tool_names(route: ToolRoute | None, available: list[str]) -> list[str
                 names.append(n)
         return names
 
+    # Groups first, so slot reservation can see what every routed domain wants.
+    groups = [(d, members(d)) for d in route.domains]
+    groups = [(d, g) for d, g in groups if g]
+
     selected: list[str] = []
-    for i, domain in enumerate(route.domains):
-        group = [n for n in members(domain) if n not in selected]
+    for i, (domain, group) in enumerate(groups):
+        group = [n for n in group if n not in selected]
         if not group:
             continue
-        if len(selected) + len(group) <= MAX_TOOLS_PER_TURN:
+        # Reserve at least one slot for each LATER routed domain before letting
+        # this one fill up. Without this, a domain whose size equals
+        # MAX_TOOLS_PER_TURN consumes the entire budget and every subsequent
+        # domain is dropped -- which is exactly what happened to the 8-tool
+        # "data" domain: the MVP prompt routed to [data, mail] and mail became
+        # invisible, so the model was asked to read mail with no mail tool.
+        # Splitting "data" fixed today's instance; this fixes the class, for the
+        # next domain that grows.
+        reserved = sum(1 for _, later in groups[i + 1:] if later)
+        room = MAX_TOOLS_PER_TURN - len(selected) - reserved
+        if i == 0:
+            # The primary domain is never skipped outright -- truncated at worst,
+            # and always given at least one tool.
+            room = max(room, 1)
+        if len(group) <= room:
             selected.extend(group)
-        elif i == 0:
-            selected.extend(group[:MAX_TOOLS_PER_TURN])
+        elif room > 0:
+            selected.extend(group[:room])
     return selected

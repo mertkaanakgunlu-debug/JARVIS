@@ -152,6 +152,57 @@ def frame_from_inline(data_json: str, x: str, y: str) -> tuple["pd.DataFrame | N
     return None, x, y, "[ERROR] data_json must be a JSON array or object."
 
 
+_ISO_DATE_TICK = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
+
+def _make_x_axis_readable(ax, plt) -> None:
+    """Stop the x-axis becoming an unreadable smear of overlapping labels.
+
+    Reported by the owner against a real chart (2026-07-30): "tarihler
+    okunmuyor" — 18 labels of the form ``2026-07-01`` crammed onto a 10-inch
+    figure. Three cheap fixes, applied to every chart rather than just the
+    finance one because the failure is generic:
+
+      * ISO dates are relabelled ``DD.MM`` — the year is already in the title and
+        repeating it 30 times buys nothing.
+      * Labels are rotated 45° and right-anchored so they cannot collide.
+      * With many categories only every Nth tick is drawn; a bar the reader can
+        see but not identify is still better than a label they cannot read.
+
+    Never raises: a chart with an ugly axis is worth far more than no chart.
+    """
+    try:
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        if not labels or not any(labels):
+            return
+
+        as_dates = [_ISO_DATE_TICK.match(lbl) for lbl in labels]
+        if all(m for m in as_dates):
+            labels = [f"{m.group(3)}.{m.group(2)}" for m in as_dates]
+            ax.set_xticks(ax.get_xticks())
+            ax.set_xticklabels(labels)
+
+        longest = max((len(lbl) for lbl in labels), default=0)
+        count = len(labels)
+        if count > 24:
+            step = (count // 15) + 1
+            for i, tick in enumerate(ax.get_xticklabels()):
+                if i % step:
+                    tick.set_visible(False)
+        if longest > 4 or count > 8:
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+                     rotation_mode="anchor")
+        # A signed series is unreadable without knowing where zero is.
+        try:
+            low, high = ax.get_ylim()
+            if low < 0 < high:
+                ax.axhline(0, color="#444444", linewidth=0.8, zorder=0)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001 -- cosmetics must never fail a chart
+        pass
+
+
 def generate_plot(
     path: Path | None,
     kind: str,
@@ -163,6 +214,7 @@ def generate_plot(
     plots_dir: Path,
     *,
     df: "pd.DataFrame | None" = None,
+    sheet: str = "",
 ) -> str:
     """Generate a chart from a CSV/Excel file (or an inline DataFrame) and save as PNG.
 
@@ -177,6 +229,10 @@ def generate_plot(
         plots_dir: Directory where the PNG will be saved.
         df:        Pre-built DataFrame (inline data path). When given, ``path``
                    is used only as a filename hint and no file is read.
+        sheet:     Worksheet name for a multi-sheet Excel file. Empty keeps the
+                   historical behavior (pandas' default: the FIRST sheet), which
+                   silently made any workbook whose data sits on a later sheet
+                   unchartable -- including finance('export')'s output.
 
     Returns:
         Absolute path to the saved PNG, or an error string starting with [ERROR].
@@ -194,6 +250,9 @@ def generate_plot(
     except ImportError:
         return "[ERROR] pandas is not installed. Run: pip install pandas openpyxl"
 
+    # Sheet names other than the one actually read, for the column-error hint.
+    other_sheets: list[str] = []
+
     if df is None:
         if path is None or not path.exists():
             return f"[ERROR] Data file not found: {path}"
@@ -202,19 +261,53 @@ def generate_plot(
             if suffix == ".csv":
                 df = pd.read_csv(path, sep=None, engine="python", encoding_errors="replace")
             elif suffix in (".xlsx", ".xls"):
-                df = pd.read_excel(path)
+                if sheet:
+                    try:
+                        df = pd.read_excel(path, sheet_name=sheet)
+                    except ValueError:
+                        # Name the sheets that DO exist: a model guessing a sheet
+                        # name gets a usable correction instead of "not found".
+                        try:
+                            available = pd.ExcelFile(path).sheet_names
+                        except Exception:  # noqa: BLE001
+                            available = []
+                        return (
+                            f"[ERROR] Sheet '{sheet}' not found in {path.name}."
+                            + (f" Available: {available}" if available else "")
+                        )
+                else:
+                    df = pd.read_excel(path)
+                    try:
+                        names = pd.ExcelFile(path).sheet_names
+                        other_sheets = list(names[1:])
+                    except Exception:  # noqa: BLE001 -- hint only, never fatal
+                        other_sheets = []
             else:
                 return f"[ERROR] Unsupported file type '{suffix}'."
         except Exception as exc:
             return f"[ERROR] Could not load data: {exc}"
 
-    # Validate columns
+    # Validate columns. The hint about OTHER sheets matters: a caller who omitted
+    # `sheet` silently got the first one, so "column not found" is frequently the
+    # wrong-sheet error wearing a wrong-column mask. A live qwen3:8b run answered
+    # this bare message by trying to rename columns -- the right repair was to
+    # name a sheet, which the old message gave it no way to discover.
+    def _cols_error(label: str, name: str) -> str:
+        msg = f"[ERROR] {label} '{name}' not found. Available: {list(df.columns)}"
+        if not sheet and other_sheets:
+            msg += (
+                f". NOTE: this file has other sheets ({other_sheets}) and no "
+                "sheet= was given, so only the first was read -- the data you "
+                "want may be on another sheet."
+            )
+        return msg
+
     if kind not in ("heatmap",) and x and x not in df.columns:
-        return f"[ERROR] Column '{x}' not found. Available: {list(df.columns)}"
+        return _cols_error("Column", x)
     if kind not in ("heatmap", "hist") and y and y not in df.columns:
-        return f"[ERROR] Column '{y}' not found. Available: {list(df.columns)}"
+        return _cols_error("Column", y)
     if hue and hue not in df.columns:
-        return f"[ERROR] Hue column '{hue}' not found. Available: {list(df.columns)}"
+        return _cols_error("Hue column", hue)
 
     # Import plotting libs
     try:
@@ -258,6 +351,8 @@ def generate_plot(
 
     if title:
         ax.set_title(title, fontsize=14, fontweight="bold")
+
+    _make_x_axis_readable(ax, plt)
     plt.tight_layout()
 
     # Save

@@ -39,9 +39,9 @@ def _get_service(settings: "Settings"):
             "See jarvis/tools/calendar.py docstring for setup instructions."
         )
     try:
+        from google.auth.exceptions import RefreshError
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
-        from google_auth_oauthlib.flow import InstalledAppFlow
         from googleapiclient.discovery import build
     except ImportError as _ie:
         raise RuntimeError(
@@ -58,8 +58,29 @@ def _get_service(settings: "Settings"):
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            # See gmail.py's identical block: RefreshError is not a
+            # RuntimeError and would otherwise escape calendar_control()'s
+            # handler as a raw traceback.
+            try:
+                creds.refresh(Request())
+            except RefreshError as _re:
+                raise RuntimeError(
+                    f"Google Calendar authorization is no longer valid ({_re}). "
+                    "The stored token cannot be refreshed -- re-authorize with: "
+                    "python scripts/auth_setup.py"
+                )
         else:
+            # Interactive-flow-only import -- see the identical comment in
+            # jarvis/tools/gmail.py's _get_service() for the incident this
+            # guards against (a valid token could not be used because the
+            # first-run consent package was missing).
+            try:
+                from google_auth_oauthlib.flow import InstalledAppFlow
+            except ImportError as _ie:
+                raise RuntimeError(
+                    f"Interactive Google OAuth flow unavailable: {_ie}. "
+                    "Run: pip install google-auth-oauthlib"
+                )
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
             creds = flow.run_local_server(port=0)
         token_file.write_text(creds.to_json())

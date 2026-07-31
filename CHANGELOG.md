@@ -6,6 +6,182 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [MVP: mail → cash flow → Excel → chart] — 2026-07-30
+
+The owner set one acceptance target — *"Maillerimi kontrol et, hesabımdaki para akışını analiz et,
+bir excel tablosuna dönüştür ve grafikle"* — to settle whether JARVIS can chain dependent tools on a
+real task. It could not: **seven structural blockers made it impossible for any model**, four of
+which were silent. Constraints: text-first, strictly local (`CLOUD_POLICY=off`), Burgan mail source.
+
+Measured outcome, `python scripts/mvp_gate.py --runs 10` on qwen3:8b: **ALL STEPS 10/10** (each of
+S1–S5 10/10). One run with `--contract-mode enforce_all`: **1/1**, and in that run a failed
+`finance(export)` could not be presented to the user as success. **Not** verified against real
+Gmail — see the closing note.
+
+Two corrections worth recording, because both were caught by questioning a number rather than by a
+test:
+
+- An intermediate report of "ALL STEPS 4/5" was **one sample of a high-variance system**. Two 5-run
+  batches with no production change between them scored 4/5 and then 0/5. qwen3:8b's tool output is
+  non-deterministic at temperature 0 — the same prompt returned `[sync, export]` and `[export]`
+  minutes apart. Measurements moved to n=10.
+- The owner questioned "✅ Gmail tarandı: 12 yeni mesaj var" in a reply the gate had **passed**. It was
+  fabricated: no `gmail` call in the trace at all, and `finance('sync')` had reported "toplam 10 mail
+  tarandı". S5 only checked whether a claimed *step* had a tool behind it, never whether a claimed
+  *number* matched tool output. New `FABRICATED COUNT` check; the 10/10 above is scored with it armed.
+
+### Blockers closed
+
+- **Router starvation.** `data` held exactly 8 tools and `MAX_TOOLS_PER_TURN` is 8, so once `data`
+  was primary no second domain could be added — the MVP prompt exposed 8 data tools with `gmail` and
+  `finance` both invisible, and the model reported on a mailbox it had no tool to open. `data` split
+  into `data`/`report`/`math`, plus `select_tool_names` now reserves a slot per additional routed
+  domain (fixes the class, not the instance). `tests/test_domain_closure.py` asserts no domain
+  reaches the cap.
+- **`max_tool_rounds_per_turn` 2 → 4.** The chain needs ≥3 sequential rounds. A/B against
+  F16/R20/R21/R23/B6 scored **5/5 in both arms** — no regression to the loop the budget exists to stop.
+- **No Excel write capability existed at all.** New `jarvis/tools/workbook.py` + `finance('export')`:
+  a four-sheet workbook (`Günlük Akış`, `İşlemler`, `Özet`, `Kategori`) computed entirely from the
+  ledger, so the model never carries transaction data.
+- **`google-auth-oauthlib` uninstalled and undeclared**, with `InstalledAppFlow` imported
+  unconditionally — so a valid token could not be used. Declared all three Google deps; moved the
+  import into the interactive branch. Also: `RefreshError` escaped `gmail_control`'s handler as a raw
+  traceback, and `scripts/auth_setup.py` had **no Gmail section** while its `if token.exists(): skip`
+  reported a revoked token as healthy.
+- **Cash-flow extraction was a permanent silent no-op.** `finance_extractor` was cloud-only behind
+  `cloud_extractors_enabled()`, true only for `cloud_policy=="auto"` (default `off`), so it returned
+  None for every mail and the transactions table sat at 0 rows. Replaced with
+  `jarvis/finance_parser.py` (deterministic, primary, ~0.00s/mail) and a local `get_llm("fast")`
+  fallback. The "use today's date if not found" / "make your best guess" instructions are gone:
+  insufficient evidence is a **reasoned rejection**, and every model-supplied value is validated
+  against text actually present in the mail.
+- **"para akışı" matched no finance router pattern.** Added `\bhesab`, `\bpara ak`, `\bekstre`, …
+  `\bhesab` deliberately does not collide with math's `\bhesapla`.
+
+### Bugs found while building it
+
+- **`summary()` netted per category before classifying**, so a category holding both a salary credit
+  and a debit lost the smaller side from the month entirely. And **nothing filtered by currency
+  anywhere** — TRY/USD/EUR were summed and labelled "TRY". `top_categories`/`budget_status` shared
+  the flaw (foreign spend counted against a lira budget). All now sign-split and currency-scoped;
+  aggregates are TRY-only and say when they excluded something.
+- **`months_back` was a dead parameter** and `gmail_control` clamped `maxResults` to 25, so a sync
+  asking for 50 silently got 25. `search` also fetched `format="full"` per message and discarded it,
+  after which finance re-read each one — 2N API calls. New structured `search_messages()` → N calls,
+  real `after:` bound.
+- **A 60s tool timeout left a committed side effect untraced.** `no_amount`/`no_date` rejections were
+  escalated to the LLM although they are provably unrecoverable (the evidence validation would refuse
+  any answer), costing ~7s of local inference that pushed `finance('sync')` past its timeout under
+  real contention. The worker thread committed 7 transactions while the awaiting side was cancelled,
+  leaving no `execution_end` and no trace row. Diagnosed from the audit log's 3-start/2-end asymmetry.
+- **The system prompt never told the model the current date.** It stated the timezone but not the
+  day, so every relative request resolved against a guessed date: asked on 2026-07-30, the model
+  called `finance('export', month=5)` in **5 of 5** runs and then reported the export as broken.
+  New `_build_now_block()`, and `_env_block` became a property so a long-lived server cannot serve a
+  frozen date. The owner's live calendar failure is the same family of bug.
+- **The API's async heuristic substring-matches short Turkish words.** `"grafik"` is in
+  `ASYNC_KEYWORDS`, so the MVP sentence was handed to the background `TaskExecutor` and `/chat`
+  returned `{"async": true, task_id}` in ~0s. `cli.py` never consults it, so the same sentence is
+  interactive in the terminal and asynchronous over HTTP. Added `ChatRequest.force_sync` with the
+  precedence in one `_should_offload()` helper. Narrowing the keyword list is left as an owner
+  decision about phone UX.
+- **Excel formula injection was unguarded.** Merchant/description text arrives from email anyone can
+  send and Excel executes a leading `=`/`+`/`-`/`@` on open — `workbook.sanitize_cell()`.
+
+### Design decisions worth keeping
+
+- **Carry the load in the tools, not the model.** qwen3:8b lands 2 dependent tool calls, not 3: the
+  third hop failed as invented English column names, the wrong sheet, the literal placeholder
+  `path='path_to_file'`, and once as a JSON block printed in the reply. So `finance('export')`
+  produces the chart itself; `plot_data` stays available for everything else.
+- **Never silently correct a model's argument.** A first attempt renamed a wrongly-dated filename
+  behind the model's back; the model then failed to find the path it had asked for and reported the
+  export as broken — 2 of 5 runs called a correct workbook a failure. Now refused, matching
+  `args_schemas`' existing reject-never-substitute rule. The model also lost the ability to name the
+  file at all.
+- **Errors must name the correct retry.** The empty-period error said only "run sync first", which is
+  misleading once sync has succeeded; the model looped on sync for 5/5 runs. It now names the periods
+  that *do* hold data. Same pattern as `plot_data` naming the other sheets in a column error.
+- **Never describe how a tool FAILS in its description.** The session's most expensive finding.
+  Adding *"REQUIRES data in the store … export on an empty store fails"* to `finance`'s docstring took
+  the gate from 4/5 to **0/10 with zero tool calls in every run** — the model narrated what it would
+  do instead of calling anything. The same fact phrased positively (*"If the request mentions
+  mail/e-posta, call sync first in the same turn, then export"*) restored **10/10**. Same model, same
+  router, same tools. Stating a precondition is fine; stating a failure mode makes a small model avoid
+  the tool. A description edit is a behavior change and needs re-measurement like any code change.
+- **Diagnostic ladder for dead tool-calling**, worth reusing: bind tools to the model with a one-line
+  system prompt (isolates capability) → full system prompt (isolates the prompt) → `fast` vs
+  `reasoning` role (isolates the provider path) → the graph. An empty `tool_trace.jsonl` *and* empty
+  `audit_log.jsonl` together mean the model emitted no tool call at all.
+- **Noted, not changed:** `_route_query()` sends every non-conversation query to the `reasoning` role,
+  which under `CLOUD_POLICY=off` means local Ollama with thinking ON and `max_output_tokens=2048`
+  (`fast` passes `reasoning_effort="none"` and 4096). Measured on the same call: `fast` ~0.9s / 19
+  output tokens, `reasoning` 12–33s / 524–1360. Both emit correct tool calls, so this was not the
+  failure — but every tool-shaped turn on a local-only config pays that cost.
+- `finance` is `side_effect_type="local_write"` now that `export` writes a file; its path is
+  deterministic and overwritten to honor its registered `idempotency="natural"`. XLSX idempotency is
+  asserted **semantically**, never byte-for-byte (zip timestamps).
+
+### Test lane
+
+New `scripts/mvp_gate.py` + `scripts/seed_finance_fixture.py`. Each repetition gets its own
+`JARVIS_TEST_HOME` (sharing one would let uid dedup make run 2 report "0 saved"); Gmail is served from
+a JSON fixture **only** under `JARVIS_TEST_MODE=1`, with no test-code import and no env-var-driven
+Python loading in production. The fixture is deliberately adversarial: a non-transaction mail, a
+duplicate uid, a mail with no date, a refund, an outgoing transfer, and a non-TRY amount.
+
+Three fixes were verified by mutation (reverted and measured red): the lazy OAuth import, the
+`summary()` netting bug, and currency cross-summing. A scorer bug in the gate itself was also
+found — S2 compared reply numbers against `abs(target)`, so a correctly-signed `-7100.75` never
+matched and S2 scored 0/5 in a run where 4 of 5 replies were right.
+
+### Live outcome: the mail path had no data, so PDF statement import became the real one
+
+OAuth was repaired (Gmail/Drive grants had been revoked — Gmail/Drive use Google *restricted*
+scopes, Calendar only *sensitive*, which is why Calendar alone survived). The live read-only gate run
+then proved the property that mattered most: **with nothing to find, JARVIS said so** —
+`finance('sync')` returned "📭 Banka bildirimi bulunamadı", S5 passed, and no workbook, chart or
+figure was invented.
+
+A full read-only sweep of the mailbox (spam and trash included) found **no bank transaction
+notifications at all**: 2 mails from `burgan.com.tr` (work correspondence), 20 from Garanti (all
+marketing), and zero hits for every Turkish transaction phrasing. The owner's manual check was right.
+
+That surfaced a real misconfiguration: Burgan Bank's consumer brand is **ON**, whose mail comes from
+`m.on.com.tr` — which the single-value `from:burgan` filter could never match. Once notifications did
+start arriving the sync would have reported an empty mailbox forever. `finance_sender_filter` is now
+a comma-separated list (`burgan,on.com.tr`) compiled into `from:(a OR b)`.
+
+**New: `finance('import_statement', path=...)`** (`jarvis/finance_statement.py`). ON exports PDF
+only, so this is how real money data reaches JARVIS today. On the owner's real 9-page statement:
+**90 transactions, 0 rejections**, and the bank's own running-balance column reconciles across
+**89/89** consecutive rows — plus the newest row's balance minus its amount equals the header's
+stated closing balance exactly. The model drove `import_statement → export` unaided **3/3**.
+
+Format facts, all verified against the real file rather than assumed:
+
+- Amounts carry **three** decimals: `-140,000` is −140.00 TL, not −140000. Misreading this scales
+  every figure by 1000.
+- pdfplumber reports page 1 as 4 columns and pages 2–8 as 6 (same data, empty edge cells). Requiring
+  exactly 4 found 10 rows out of 91.
+- **A row straddling a page break is emitted twice**, once with only the description prefix and once
+  with the merchant. Identity therefore keys on **(date, amount, balance)** and deliberately not the
+  description — the running balance is unique per movement, so it separates two identical same-day
+  purchases while collapsing the duplicate. Keying on description double-counted a transaction.
+- No LLM is involved: a statement row is a table cell with an explicitly signed amount, so direction
+  is never inferred. The opposite of the mail path, where ambiguity must be refused.
+
+`parse_rows()` is split out from `parse_statement()` so those rules are testable without generating
+PDFs (which would have meant adding `reportlab` for tests alone). `import_statement`'s path goes
+through `files._resolve()`, the same guard `file_read`/`file_write` use: an unconfined path would have
+made it a way around that boundary, and `expanduser()` bypassed `JARVIS_HOME` isolation
+(`tests/test_no_host_path_leak` caught exactly that).
+
+Category rules were also rewritten against the owner's real merchants — 71 of 90 transactions had
+been landing in "other", which makes the workbook's Kategori sheet worthless.
+
+---
+
 ## [Voice pipeline hardening — GPU, confirmation, Turkish, exit (live-tested)] — 2026-07-24
 
 Live `--voice` testing on the owner's machine drove this pass. Each external-review claim was

@@ -273,6 +273,22 @@ class ChatRequest(BaseModel):
     message: str
     language: str = ""
     force_async: bool = False
+    # The counterpart to force_async, added 2026-07-30. The async heuristic
+    # (jarvis/task_executor._should_async) matches bare substrings against short
+    # everyday Turkish words -- "grafik" is one -- so an ordinary interactive
+    # request like "...ve grafikle" is silently shunted to the background
+    # executor and the caller gets {"async": true, "task_id": ...} instead of an
+    # answer. cli.py never consults that heuristic, so the SAME sentence behaves
+    # one way in the CLI and another over HTTP.
+    #
+    # force_sync makes the interactive path explicitly reachable, which is what
+    # lets the MVP gate measure the same JarvisAgent.chat() entry point the CLI
+    # uses instead of background_turn() (a different path with different
+    # confirmation semantics -- see MEMORY.md on TaskExecutor and
+    # ConfirmationRequired). force_async wins if both are set: an explicit
+    # request for background execution is more specific than a request to skip
+    # the guess.
+    force_sync: bool = False
     # Agent Runtime rev.2, Faz 5 follow-up: real per-client conversation
     # support. Empty (every pre-existing client -- Electron HUD, mobile app,
     # anything predating this field) is a complete no-op, preserving today's
@@ -298,6 +314,23 @@ class AsyncChatResponse(BaseModel):
     async_: bool = True
     task_id: str
     status: str
+
+
+def _should_offload(executor, body: "ChatRequest") -> bool:
+    """Whether this request goes to the background TaskExecutor.
+
+    One function rather than the same condition inlined in /chat and
+    /chat/stream: they must not be able to disagree about whether a request is
+    interactive. Precedence: no executor -> never; force_async -> always;
+    force_sync -> never; otherwise the keyword heuristic decides.
+    """
+    if executor is None:
+        return False
+    if body.force_async:
+        return True
+    if body.force_sync:
+        return False
+    return bool(executor.should_async(body.message))
 
 
 class StatusResponse(BaseModel):
@@ -648,7 +681,7 @@ async def chat(body: ChatRequest, request: Request):
 
     # Async heuristic: offload long tasks to TaskExecutor
     executor = getattr(agent, "_task_executor", None)
-    if executor and executor.should_async(body.message, force=body.force_async):
+    if _should_offload(executor, body):
         task = executor.submit(body.message)
         return {"async": True, "task_id": task.task_id, "status": task.status}
 
@@ -688,9 +721,9 @@ async def chat_stream(body: ChatRequest, request: Request):
     _check_auth(request)
     agent = get_agent()
 
-    # Async heuristic check
+    # Async heuristic check (force_sync: see ChatRequest's field comment)
     executor = getattr(agent, "_task_executor", None)
-    if executor and executor.should_async(body.message, force=body.force_async):
+    if _should_offload(executor, body):
         task = executor.submit(body.message)
         import json
 

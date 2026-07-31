@@ -10,195 +10,374 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Son oturum: 2026-07-25 — DIŞ İNCELEME REMEDIATION: 2 CANLI RUNTIME BUG'I + TRANSPORT PARITY + GÖZLEMLENEBİLİRLİK + GATE BÜTÜNLÜĞÜ
+## Son oturum: 2026-07-30 — MVP: "mailleri kontrol et → para akışı → Excel → grafik"
 
-**Durum tek cümlede:** Owner bir önceki sprint'in (B0→B1→B2→D→F→E) dış incelemesini getirdi;
-inceleme kod üzerinde tek tek doğrulandı (**hepsi isabetliydi, biri hariç — aşağıya bakın**),
-önerilen düzeltme sırasının **kodla kapatılabilir 1-4. maddeleri tamamlandı**; 5-7. maddeler
-(W18/R24 redesign, corpus'u 40-60'a çıkarma, Faz C) canlı model koşusu veya owner kararı
-gerektirdiği için AÇIK bırakıldı.
+**Durum tek cümlede:** Owner tek bir MVP kabul hedefi koydu (*"Maillerimi kontrol et, hesabımdaki
+para akışını analiz et, bir excel tablosuna dönüştür ve grafikle"*); görev **7 yapısal engel
+yüzünden hiçbir modelle mümkün değildi**, engeller kapatıldı ve zincir **offline fixture lane'de
+10 koşuda 10'unda uçtan uca tamamlanıyor** (`ALL STEPS 10/10`, qwen3:8b, CLOUD_POLICY=off).
+**Ama MVP "hazır" DEĞİL: gerçek Gmail'e karşı hiç koşulmadı** — token iptal, aşağıya bakın. Owner
+kararları: metin-öncelikli, **kesinlikle yerel**, Burgan mailleri, çok sayfalı analiz workbook'u.
 
-### İncelemenin doğrulanması — bir madde yanlıştı
+### OAuth onarıldı, canlı koşu YAPILDI — ve MVP'nin veri kaynağı yokmuş
 
-İnceleme "GitHub tarafında bu branch için workflow run veya combined status göremedim; 'push
-yapıldı, CI yeşil' denemez" diyordu. **Bu yanlış:** `gh run list --branch langgraph-migration`
-önceki oturumun 6+1 commit'inin push edildiğini ve branch ucunun (`e5a46e3`) CI'ının
-`completed success` olduğunu gösteriyor. Diğer tüm P1/P2 bulguları kodda birebir doğrulandı.
+Gmail/Drive token'ları iptal olmuştu (`invalid_grant`; Gmail/Drive Google'ın *restricted*
+scope'larını, Calendar yalnızca *sensitive* kullanıyor — Calendar bu yüzden sağ kalmıştı). Owner
+`python scripts/auth_setup.py gmail drive` ile yeniden yetkilendirdi; **üç token da canlı**
+(salt-okunur `_token_is_usable()` ile doğrulandı).
 
-### 1. `--ptt` tek-tur sözleşmesi + ses state yaşam döngüsü (CANLI BUG)
+**Canlı koşu (`mvp_gate.py --live --runs 1`) en önemli özelliği kanıtladı: veri yokken uydurmuyor.**
+`finance('sync')` → "📭 Banka bildirimi bulunamadı", **S5 GEÇTİ**, ne Excel ne grafik ne rakam
+üretildi. Diğer adımlar doğru şekilde FAIL — üretecek veri yoktu.
 
-`drive_voice_session()` `stop_after_first_turn`'ü YALNIZCA izlenen bir coroutine tamamlandığında
-işletiyordu. `on_transcript` işi senkron bitirip `None` döndürdüğünde hiç turn_task oluşmadığı
-için koşul hiç değerlendirilmiyordu. **Canlı erişilebilir yol:** `cli.py`'nin
-`_detect_model_switch` dalı ("flash modeline geç") modeli değiştirir, kendi `speak_stream()`'ini
-bekler ve `None` döner — yani `--ptt` modunda cevap konuşulur ama mikrofon açık kalır, Enter
-kapısına HİÇ dönülmez. Artık senkron tur da turu bitiriyor.
+**Kök bulgu: owner'ın gelen kutusunda hiç banka işlem bildirimi yok.** Salt-okunur tarama
+(spam/çöp dahil, `in:anywhere`):
 
-İkinci yarısı: `finally` bloğu yalnız task'ları dispose ediyordu, capture ekseni girişte
-`listening` yapılıp hiç temizlenmiyordu — her çağıran hemen ardından `engine.stop()` çağırdığı
-için reducer fiziksel olarak kapalı bir mikrofonu "dinliyor" diye raporluyordu (en görünür yeri:
-Enter'ı bekleyen PTT kapısı). Artık iki eksen de baseline'a dönüyor, `awaiting_confirmation`
-korunarak (o, oturumu meşru olarak aşan tek durum).
+| sorgu | sonuç |
+|---|---|
+| `from:burgan` | 2 mail — "Logo", "FW: Kredi Kartı Görselleri" (iş yazışması, `burgan.com.tr`) |
+| `from:on.com.tr` | 2 mail — ikisi de "ON e-posta doğrulaması" (15 May, 30 Tem 09:48) |
+| `from:garanti` | 20 mail — hepsi bilgilendirme/pazarlama |
+| "tutarında alışveriş" / "işlem gerçekleştirilmiştir" / "nakit çekim" | **0** |
+| `in:spam` | 25 mail, hiçbiri banka |
 
-**Bu iki davranışı SABİTLEYEN 3 test vardı** (`state.capture == "listening"` / `response ==
-"thinking"` oturum bittikten sonra) — gerçek sözleşmeye çekildiler. Yeni
-`tests/test_ptt_single_turn.py`: planın Faz E'de isteyip yazılmamış olan deterministik
-press-to-arm → tek utterance → VAD-stop testi, `WavAudioIO` + gerçek engine + gerçek
-`drive_voice_session` ile. **Düzeltme öncesi kodda 3'ü kırmızı olduğu ölçülerek doğrulandı.**
+**Bunun ortaya çıkardığı gerçek config hatası — düzeltildi.** Owner bankasının Burgan olduğunu ve
+bildirimlerin açık olduğunu söyledi. Ama Burgan'ın bireysel dijital markası **ON** ve mailleri
+`m.on.com.tr`'den geliyor — `from:burgan` bunu **asla** yakalamaz. Yani bildirimler gelmeye
+başladığında bile sync sonsuza kadar "bulunamadı" derdi ve bu, yanlış yapılandırma değil boş
+gelen kutusu gibi görünürdü. `finance_sender_filter` artık virgülle ayrılmış çoklu değer alıyor
+(varsayılan `burgan,on.com.tr`) ve `from:(a OR b)` kuruyor; `_sender_clause()` + yeni
+`tests/test_finance_sender_filter.py`. Canlı doğrulandı: yeni sorgu ON maillerine ulaşıyor
+(4 mail, öncesinde 2). Doğrulama maili parser tarafından `no_amount` ile reddediliyor, deftere
+kirlilik girmiyor.
 
-Ayrıca bir sıralama kusuru: transcript geldiğinde capture-önce/response-sonra sırası bir anlık
-`(listening, idle)` çiftinden geçiyor ve bu wire'a "STT bitti → listening → thinking" diye tek
-karelik bir orb titremesi olarak yansıyordu. Response-önce yapıldı (test:
-`test_transcription_to_thinking_does_not_flicker_through_listening`, ters sırada kırmızı olduğu
-ölçüldü).
+**Yani MVP boru hattı hazır, veri kaynağı değil.** Hesap hareketlerine doğrudan bağlanma seçeneği
+YOK: Türkiye'de açık bankacılık (BDDK/ÖHVPS) lisanslı üçüncü taraf sağlayıcı gerektiriyor, bireysel
+bir script API kimlik bilgisi alamaz; Burgan/ON'un herkese açık müşteri API'si de yok. Teknik olarak
+mümkün tek "doğrudan" yol internet bankacılığına kimlik bilgisiyle otomatik giriş (projede Playwright
+MCP var) — **bu bilinçli olarak YAPILMADI ve yapılmamalı**: bankacılık şifresi/2FA taşımayı,
+bankanın kullanım şartlarını ihlal etmeyi ve oturum açılmış bir bankacılık ekranını bir LLM'e
+sürdürmeyi gerektirir.
 
-### 2. Transport parity — reducer üç taşıyıcıya da bağlandı
+### ✅ MVP GERÇEK VERİDE ÇALIŞIYOR — PDF ekstre importu
 
-Faz D'nin `VoiceState`'i yalnız `cli.py`'ye ulaşmıştı; `voice_api.py` (yerel wakeword/PTT loop) ve
-`api.py`'nin uzak `/ws` audio session'ı kendi `event_bus.state()` literal'lerini elle
-serpiştiriyordu — aynı state makinesi için iki ayrı sözleşme, reducer'ın öncelik kuralları
-(iki eksenin aynı anda canlı olması, `awaiting_confirmation`'ın rutin ilerlemeyi ezmesi) HUD'a hiç
-ulaşmıyordu.
+Owner ekstresini (9 sayfa, Burgan/ON PDF — ON yalnız PDF veriyor) sağladı. Yeni
+`jarvis/finance_statement.py` + `finance('import_statement', path=...)`:
 
-Üçü de artık oturum başına TEK bir `VoiceState` kuruyor ve onu `drive_voice_session` /
-`run_one_response` / `arm_and_speak_confirmation` / `resolve_confirmation`'a geçiriyor. HUD'un
-yayınlanmış wire sözlüğü (`listening|speaking|thinking|working|idle`, kaynak:
-`electron/src/renderer/src/hooks/useJarvisSocket.js`) dar olduğu için collapse TEK bir tabloda
-yapılıyor (`state.py`'nin `_HUD_STATE`'i) + `hud_state_emitter()` tekrarları bastırıyor.
-`awaiting_confirmation` bilinçli olarak `listening`'e eşleniyor (mikrofon gerçekten yes/no için
-açık; soruyu HUD zaten kendi confirmation overlay'inde gösteriyor) — wire sözlüğünü genişletmek
-canlı HUD E2E'si hiç yapılmamış bir Electron değişikliği gerektirirdi.
+**Doğrudan hesap bağlantısı seçenek DEĞİL** ve bilinçle yapılmadı: Türkiye'de açık bankacılık
+BDDK lisanslı üçüncü taraf sağlayıcı gerektiriyor, Burgan/ON'un müşteri API'si yok, ve tek teknik
+alternatif olan kimlik-bilgisiyle internet bankacılığı otomasyonu (Playwright MCP mevcut) bankacılık
+şifresi/2FA taşımayı ve oturum açılmış bir bankacılık ekranını LLM'e sürdürmeyi gerektirirdi.
 
-### 3. `/voice-status` — telemetri artık gerçekten gözlemlenebilir
+**Ölçüm (gerçek veri, 2026-07-30):**
+- Parser: **90 işlem, 0 red**, 91 satırdan (1'i sayfa geçişi tekrarı)
+- **Bankanın kendi bakiye kolonuyla 89/89 tutarlı**; ayrıca en yeni satırın bakiyesi eksi tutarı
+  = 1.978,90 = PDF başlığındaki kapanış bakiyesi. Bağımsız uçtan uca doğrulama.
+- Temmuz 2026: Gelir 24.659,00 · Gider -28.583,68 · Net -3.924,68 · 76 işlem
+- **Modelin kendisi zinciri sürdü: 3/3** (`finance(import_statement)` → `finance(export)`),
+  doğru rakamlarla, Excel + grafik üretildi.
 
-Faz D sayaçları ÖLÇÜLEBİLİR yapmıştı ama hiçbir şey onları birleştirmiyordu; tek okuyucu, hiçbir
-şey olmadan önce bir kez çalışan 4 statik alanlık bir startup print'iydi. Yeni
-`jarvis/voice/diagnostics.py`: tek `VoiceDiagnosticsSnapshot` (cihazlar, örnekleme hızı, gerçek STT
-cihazı, mic RMS, queue depth, input status/overflow, output underrun, son turun VAD max/mean +
-turn-end reason + captured audio + stt_s, capture/response/display/hud_state) + süreç-içi canlı
-oturum kayıt defteri. İki yüzey aynı snapshot'ı okuyor, drift edemezler:
+**Format bulguları (hepsi gerçek dosyada doğrulandı, tahmin değil):**
+- Tutarlar **3 ondalıklı**: `-140,000` = −140,00 TL (−140000 değil). Yanlış okumak her rakamı
+  1000 kat şişirirdi.
+- pdfplumber sayfa 1'i 4 kolon, sayfa 2-8'i 6 kolon veriyor (aynı veri, kenarlarda boş hücre).
+  `len(cells)==4` filtresi 91 satırın 10'unu buluyordu.
+- **Sayfa geçişine denk gelen satır İKİ kez basılıyor** — biri yalnız açıklama öneki, diğeri
+  satıcı adıyla. Kimlik anahtarı **(tarih, tutar, bakiye)** olmalı, açıklama OLMAMALI: yürüyen
+  bakiye her harekette değiştiği için aynı gün aynı tutarlı iki gerçek işlemi ayırır ama kopyayı
+  birleştirir. Açıklamayı anahtara katmak bir işlemi çift saydırıyordu (−151,44).
+- Ekstre yolunda **hiç LLM yok** — satır, işareti bankaca verilmiş bir tablo hücresi.
 
-- CLI: `--ptt` kapısında `/voice-status` yazın (sesli modun tek yazılı giriş noktası orası);
-  mikrofon açılmadan tablo basılır. Startup print'i de aynı snapshot'ın üstüne indi.
-- API: authenticated `GET /voice/status`. Oturum yoksa 200 + `session_active: false` (hata değil —
-  "ses çalışmıyor" başlı başına teşhis cevabıdır).
+**Ayrıca düzeltildi:** kategori kuralları fixture'ın hayali satıcılarından yazılmıştı, gerçek
+veride 90 işlemin 71'i "other"a düşüyordu. Owner'ın gerçek satıcılarıyla genişletildi
+(ESPRESSOLAB, MOKA/SWALLET, SOFRA BÖREK, MIGROS, Spotify, Disney, IYZICO/UBER, Google Claude,
+İTÜ Strateji Geliştirme, PAYCEL/TALIMATLIFATURA …).
 
-Bunun için `RealtimeVoiceEngine` son tur metriklerini artık SAKLIYOR (`last_turn_metrics`) —
-eskiden yalnızca `TurnEnded`/`FinalTranscript` ile yayınlanıp kayboluyorlardı.
+### Owner'ın KENDİ cümleleriyle, ÜRETİM modunda uçtan uca test
 
-**`input_overflow_count` semantiği düzeltildi** (incelemenin P1 sayaç bulgusu): PortAudio'nun
-`CallbackFlags`'i HERHANGİ bir durum bildirdiğinde truthy, dolayısıyla her truthy `status`'u
-overflow saymak ismin verdiği sözü abartıyordu. Artık iki sayaç: `input_status_count` (dürüst
-"PortAudio bir şey bildirdi") ve yalnız gerçek `status.input_overflow` sayan
-`input_overflow_count`.
+Owner haklı olarak "test geçti dedin ama çıktısını göstermedin" dedi. Önceki 3/3 ölçümü
+**yanıltıcıydı: prompt'ta tam dosya yolunu ben veriyordum**, yani işin en zor kısmı atlanmıştı.
+Owner'ın gerçek cümleleriyle, `--profile test` DEĞİL üretim modunda (gerçek ev dizini, gerçek
+Gmail, `EXTERNAL_WRITES_ENABLED=false` zorunlu) tekrar koşuldu. `data/sessions.db` önce yedeklendi,
+sonra geri yüklendi — gerçek defterde kalıcı iz yok (doğrulandı: transactions = 0).
 
-### 4. Alpha gate bütünlüğü — corpus artık pinlenmiş
+**İlk koşu ikisinde de BAŞARISIZ oldu ve üç kusur ortaya çıkardı:**
 
-- **`tool_ok` eksikse artık `VERİ YOK`.** Eskiden `iso.get("tool_ok", iso_runs)` ile "eski format,
-  temiz varsay" deniyordu; `{"runs": 20, "leaks": []}` dosyası `file_list`'in hiç çalışıp
-  çalışmadığını gösteremez ve aracı hiç çağırmayan bir ajan zaten sızdıramaz — yani bayat bir dosya
-  hiç içermediği kanıtla yeşile dönüyordu.
-- **Yeni `docs/eval/gate_core_manifest.json`** (14 senaryo): `schema_version`, `corpus_version`,
-  `required_runs`/`required_isolation_runs`, `driver_commit` + her Gate Core senaryosu için hem
-  driver prompt'unun (lambda'nın kendi kaynağı) hem oracle `Expected`'ının SHA-256'sı, artı iki
-  toplam digest. Senaryo kümesi `alpha_gate.py`'nin satır sabitlerinden TÜRETİLİYOR, yeniden
-  listelenmiyor — gate'e sınıf eklemek senaryoyu pinlemeyi unutamaz.
-  `manifest --write` üretir, `manifest` doğrular, **`evaluate` bunu birinci sınıf gate satırı
-  olarak kontrol eder**: drift = `KALDI`, manifest yok/eski şema = `VERİ YOK`.
-- Yeni isolation özetleri `schema_version` + `driver_commit` damgası taşıyor.
+1. **Sistem prompt'u "İndirilenler" klasörünü hiç söylemiyordu** (yalnız Home + Desktop vardı).
+   Model `data/uploads/Hesap Hareketleri.pdf` diye uydurdu — hem var olmayan hem de
+   `files.PROTECTED_DIRS` içinde bir yol, iki kez reddedildi. `_build_env_block`'a Downloads +
+   Documents eklendi, "asla `data/uploads` gibi bir yol uydurma, emin değilsen önce `file_list`"
+   talimatıyla.
+2. **Boş-veritabanı hatası sebebi varsayıyordu** — yalnız "finance('sync') çağır" diyordu, oysa
+   kullanıcı bir PDF göstermişti. Model mail yoluna itilip `import_statement`'ı hiç tekrar
+   denemedi. Hata artık **iki yolu birden** adlandırıyor.
+3. **Reddedilen import yolu çıplak bir "protected directory" hatası veriyordu** — düzeltilecek
+   hedef yoktu. Artık ekstrelerin nerede olduğunu (`~/Downloads`) ve `file_list` ile adı
+   doğrulamayı söylüyor.
 
-### 5. İki P2 daha kapatıldı
+**Düzeltmelerden sonra (üretim modu, tam çıktı görüldü):**
 
-- **`_latest_workflow_id()` determinizmi:** alt sınır saniye çözünürlüklü `time.strftime()`
-  karşılaştırmasıydı; aynı saniyede oluşan iki workflow ayırt edilemiyordu. Artık istekten ÖNCE
-  alınan audit log SATIR SAYISI (append-only dosyada saat çözünürlüğünden bağımsız olarak kesin).
-  Yeni `tests/test_driver_workflow_id.py`.
-- **Çıplak "Evet." xfail'i `strict=True` yapıldı:** yorumu "gelecekte düzelirse fark edilsin
-  (XPASS)" diyordu ama `strict=False` bunu ZORLAMIYORDU — non-strict bir XPASS koşuyu
-  düşürmez. **Bu, `voice_e2e` katmanında çalıştırılmamış bir sözleşme değişikliğidir** (gerçek
-  Whisper/Piper gerektirir, owner koşmalı).
+- **A — "indirilenlerdeki Hesap Hareketleri.pdf dosyasını oku, excel oluşturup grafikle":
+  ÇALIŞIYOR.** Model yolu kendi çözdü (`C:\Users\mertk\Downloads\Hesap Hareketleri.pdf`),
+  `import_statement` → 90 işlem, `export` → Excel + PNG üretildi, doğru rakamlar bildirildi
+  (Gelir 24.659,00 · Gider -28.583,68 · Net -3.924,68 · 76 işlem). 40 sn.
+- **B — "maillerimi oku, banka hesabımdaki hareketleri analiz et, excel oluşturup grafikle":
+  DOĞRU davranıyor ama veri yok.** Boş defterle koşuldu: `sync` çalıştı, tek ON mailini bulup
+  `no_amount` ile doğru reddetti, **uydurmadan** "işlem bulunmuyor" dedi ve iki kaynağı da önerdi.
+  Excel üretmemesi doğru. Gerçek bildirim maili düştüğü an aynı zincir çalışacak.
 
-Yan etki olarak: `manual_test_driver.py`'nin import anında `sys.stdout`'u sarmalaması, pytest'in
-capture buffer'ının sahipliğini alıp GC'de kapattığı için onu import eden HER testi teardown'da
-"I/O operation on closed file" ile öldürüyordu. Rewrap artık koşullu (zaten UTF-8 ise atlanır) +
-`alpha_gate._load_driver()` ayrıca throwaway bir stdout gösteriyor.
+**Bilinen boşluk (düzeltilmedi, bilinçli):** A ve B aynı oturumda arka arkaya koşulduğunda B,
+mail'den 0 işlem gelmesine rağmen A'nın PDF'inden gelen Temmuz rakamlarını sundu — `sync` sonucu
+"0 işlem kaydedildi" diyordu ama model bunu cevabına taşımadı. Yapısal çözüm veri kökeni
+(provenance) takibi olurdu: `export` sonucu, aynı turdaki `sync` 0 kaydettiyse "bu rakamlar
+mail'den değil, daha önce içe aktarılmış ekstreden geliyor" demeli. Gerçek iş, yapılmadı.
 
-### 6. Self-review'de bulunan 2 kusur (owner talebiyle diff baştan gözden geçirildi)
+### Kapatılan 7 engel (hepsi kod üzerinde ölçülerek doğrulandı)
 
-Yukarıdaki iş bittikten sonra owner review istedi; kendi diff'imde iki gerçek kusur çıktı, ikisi de
-düzeltildi ve regresyon testleri **düzeltme kaldırılarak kırmızı olduğu ölçülerek** doğrulandı:
+| # | Engel | Çözüm |
+|---|---|---|
+| B1 | `data` domain'i tam 8 araç, `MAX_TOOLS_PER_TURN` da 8 → `data` birincil olunca **hiçbir ikinci domain eklenemiyordu**; MVP prompt'unda `gmail` ve `finance` modele hiç görünmüyordu | `data`→`data`/`report`/`math` ayrıldı **+** `select_tool_names` artık her ek domain için slot rezerve ediyor (sınıfın çözümü, örneğin değil) |
+| B2 | `max_tool_rounds_per_turn = 2`; zincir ≥3 sıralı tur istiyor | 2→4. F16/R20/R21/R23/B6 ile A/B ölçüldü: **iki kolda da 5/5**, regresyon yok |
+| B3 | Excel/CSV **yazma** yeteneği hiç yoktu (`python_run` disabled, `file_write` metin) | `jarvis/tools/workbook.py` + `finance('export')` |
+| B4 | `google-auth-oauthlib` kurulu değil **ve** requirements'ta tanımsız; `InstalledAppFlow` koşulsuz import ediliyordu → geçerli token bile kullanılamıyordu | 3 dep tanımlandı + import interaktif dala taşındı |
+| B5 | `finance_extractor` yalnız-bulut + `cloud_policy` varsayılanı `off` → `sync` **kalıcı sessiz no-op** (transactions tablosu 0 satır) | `jarvis/finance_parser.py` (deterministik, birincil) + yerel LLM yalnız fallback |
+| B6 | "para akışı" hiçbir finance pattern'ine uymuyordu | `\bhesab`, `\bpara ak`, `\bekstre`, … eklendi |
+| B7 | `finance('chart')` plotly istiyor (kurulu değil) | Kapsam dışı bırakıldı; MVP `plot_data` motorunu kullanıyor |
 
-- **`None` dalı uçuşta olan önceki turu eziyordu (1. maddenin kendi regresyonu).** `result is None`
-  geldiğinde tur-sonu işlemi KOŞULSUZ uygulanıyordu; daha önceki bir `turn_task` hâlâ
-  çalışıyorsa response ekseni `idle` yapılıyordu (duyulabilir TTS'in üstüne "sessizlik") ve
-  `stop_after_first_turn` ile `turn_complete` dönülüp o tur `finally`'de İPTAL ediliyordu. Artık
-  `turn_task is None` guard'ı var; çalışan tur her ikisine de kendisi sahip.
-  Test: `test_a_synchronous_turn_does_not_cancel_an_in_flight_earlier_turn` (guard kaldırılınca
-  `finished == []` ile turun iptal edildiği ölçüldü).
-- **Kayıt yapmadan düşen remote `/ws` oturumu, yerel loop'un diagnostics kaydını siliyordu.**
-  `engine.load()` patlarsa `audio_io` set ama registration yapılmamış olur; `_stop_audio_session`
-  o durumda `restore_session(None)` çağırıp registry'yi temizliyordu — yerel loop kendini yalnız
-  bir kez kaydettiği için `/voice/status` süreç ömrü boyunca "oturum yok" derdi. Ayrı bir sentinel
-  ile "hiç kaydedilmedi" durumu `None`'dan ayrıldı.
+### Yol boyunca bulunan 5 ek canlı bug
 
-**Bu revizyonda kabul edilen, bilinçli sınırlar:** CLI `/voice-status` yalnız `--ptt` kapısında
-erişilebilir (sesli modda yazılı girişin tek noktası orası; `--wakeword` `ww_detector.listen`'de
-bloklu, düz `--voice`'ta hiç kapı yok) — sunucu tarafını `GET /voice/status` kapsıyor.
-`scenario_digests` `inspect.getsource(lambda)` kullandığı için çok satırlı bir lambda'da
-beklenenden fazla satır yakalayıp yanlış-pozitif drift üretebilir; anti-gaming kontrolü için
-güvenli yön bu.
+1. **API'nin async sezgisi Türkçe kısa kelimelerde substring eşliyor.** `"grafik"` `ASYNC_KEYWORDS`'te,
+   yani owner'ın MVP cümlesi `/chat`'te sessizce arka plan `TaskExecutor`'a gidiyor ve ~0 sn'de
+   `{"async": true, task_id}` dönüyordu. `cli.py` bu sezgiyi hiç kullanmıyor → **aynı cümle terminalde
+   interaktif, HTTP'de asenkron**; etkilenen yüzey telefon/HUD. `ChatRequest.force_sync` eklendi
+   (`_should_offload()` önceliği tutuyor). Keyword listesini daraltmak owner'a ait bir ürün kararı,
+   yapılmadı.
+2. **`summary()` kategori içinde netleyip sonra sınıflandırıyordu** → aynı kategoride maaş + kesinti
+   varsa küçük taraf aydan tamamen kayboluyordu. Ayrıca **hiçbir yerde currency filtresi yoktu**;
+   TRY/USD/EUR toplanıp "TRY" diye etiketleniyordu. `top_categories` ve `budget_status` da aynı
+   kusurdaydı (bir USD harcaması TRY bütçesinden düşüyordu). Hepsi işaret-bazlı + currency-scoped.
+3. **`months_back` ölü parametreydi** (tanımlı, geçiliyor, hiç kullanılmıyor) ve `gmail_control`
+   `maxResults`'ı 25'e kırpıyor — finance 50 isteyip sessizce 25 alıyordu. Ayrıca `search` her mesajı
+   `format="full"` çekip atıyor, finance sonra her birini **tekrar** okuyordu (2N çağrı). Yapısal
+   `search_messages()` eklendi → N çağrı, `after:` gerçek tarih sınırı.
+4. **60 sn tool timeout'u, yan etkisi işlenmiş bir çağrıyı izsiz bırakıyordu.** `no_amount`/`no_date`
+   red'leri LLM'e tırmandırılıyordu; bunlar **kanıtlanabilir şekilde kurtarılamaz** (extractor her
+   model değerini mailde geçen metne karşı doğruluyor), ama 5.2s+1.8s yerel çıkarım maliyeti gerçek
+   tur çekişmesi altında sync'i 60 sn'yi aştırıyordu. Worker thread 7 işlemi yazdı, bekleyen taraf
+   iptal edildi → `execution_end` yok, `tool_trace` satırı yok, model sync'in başardığını hiç
+   öğrenmedi. Audit log'daki **3 `execution_start` / 2 `execution_end`** asimetrisiyle teşhis edildi.
+   Gereksiz tırmanma kaldırıldı → sync 0.0 sn, sıfır çıkarım.
+5. **Sistem prompt'u modele günün tarihini HİÇ söylemiyordu.** Timezone yazıyor, tarih yazmıyor —
+   yani "bu ay", "yarın", "geçen hafta" modelin tahmin ettiği bir tarihe göre çözülüyordu. Ölçüm:
+   30 Temmuz'da `finance('export', month=5)` **5/5**. `_build_now_block()` eklendi ve `_env_block`
+   **property** yapıldı (sabit string olsa gece boyunca ayakta kalan sunucu tarihte kayardı).
+   Owner'ın canlı takvim hatası ("Yarın öğlen saat 3'e … ekle") aynı aileden.
 
-### Test/lint (2026-07-25, self-review düzeltmeleri dahil, bu oturumun sonunda)
+### Ölçüm: `scripts/mvp_gate.py` (yeni)
+
+Her repetisyon **kendi `JARVIS_TEST_HOME`'unda** koşar (SQLite, PNG'ler, sidecar'lar, audit,
+tool_trace hiçbir run arasında paylaşılmaz — paylaşılsa `upsert_transaction`'ın uid dedup'ı 2. run'ı
+"0 kaydedildi" gösterip çıkarımı ölçülemez yapardı). Gmail, **yalnız `JARVIS_TEST_MODE=1` altında**
+JSON fixture'dan servis edilir; production kodu test kodu import etmez ve env üzerinden Python
+yüklemez (reddedilen alternatif: adapter'ı runtime path'ten import etmek — production'a enjeksiyon
+yüzeyi).
+
+**2026-07-30, `python scripts/mvp_gate.py --runs 10` (nihai ölçüm):**
+
+| adım | sonuç |
+|---|---|
+| S1 mail okundu | **10/10** |
+| S2 rakamlar mutabık (TRY) | **10/10** |
+| S3 workbook (openpyxl ile içerik) | **10/10** |
+| S4 grafik (+ sidecar içerik) | **10/10** |
+| S5 uydurma başarı yok | **10/10** |
+| **ALL STEPS** | **10/10** |
+
+**Buraya gelmeden önceki yanlış rapor — kaydı önemli.** Bu oturumda bir ara "ALL STEPS 4/5" diye
+rapor edildi; owner çıktıdaki "12 yeni mesaj var" ifadesini sorgulayınca iki şey ortaya çıktı:
+(a) gate'in S5'i **iddia edilen SAYIYI** araç çıktısıyla karşılaştırmıyordu (yalnız adımın arkasında
+araç var mı diye bakıyordu), yani o cümle gerçekten uydurmaydı ve gate onu geçirmişti — trace'te hiç
+`gmail` çağrısı yoktu ve aracın kendisi "toplam 10 mail tarandı" demişti, model 12 dedi;
+(b) 4/5 rakamı yüksek varyanslı bir sistemin tek örneğiydi. `FABRICATED COUNT` kontrolü eklendi ve
+ölçüm 10 koşuya çıkarıldı.
+
+`--contract-mode enforce_all` ile 1 koşu: **1/1 hepsi geçti**; o koşuda ilk `finance(export)`
+BAŞARISIZ oldu ve S5 yine geçti — yani başarısız tool sonucu kullanıcıya başarı olarak
+sunulamadı (istenen doğrulama).
+
+Geçen bir koşunun cevabı: *"📊 Para akışı analizi tamamlandı (Temmuz 2026): Gelir 46.799,90 TRY ·
+Gider -7.100,75 TRY · Net 39.699,15 TRY · İşlem sayısı 6. Excel ve grafik dosyaları hazır."*
+
+### qwen3:8b'nin ölçülen sınırı — mimariyi bu belirledi
+
+**2 bağımlı tool çağrısı tutuyor, 3 tutmuyor.** `sync → export` güvenilir; üçüncü hop her şekilde
+başarısız oldu: uydurulmuş İngilizce kolon adları, grafik sayfası yerine defter sayfası, literal
+`path='path_to_file'`, ve bir kez çağrının tamamı cevaba JSON bloğu olarak basıldı (HANDOFF'un zaten
+kayıtlı "plot_data kod basıyor" örüntüsü). Tur başına bir argümanı düzeltebiliyor, seti bir arada
+tutamıyor. Bu yüzden **grafiği `finance('export')` kendi üretiyor**. `plot_data` her şey için açık;
+yalnızca para yolundaki zorunlu üçüncü hop kaldırıldı.
+
+Modeli ölçülebilir şekilde iyileştiren 3 şey, tekrar kullanılmaya değer: sıradaki talimatı (ve
+bildirmesi gereken rakamları) tool sonucunun **ilk iki satırına** koymak (5. satırdaki ipucu okunmadan
+geçildi); workbook'ta **grafiğe uygun sayfayı ilk sıraya** almak (`plot_data` `sheet=` yoksa ilkini
+okur); ve "kolon bulunamadı" hatasının **diğer sayfaları adlandırması** (çıkmaz sokağı kendini
+düzelten hale getiriyor).
+
+**Oturumun en pahalı bulgusu — tool DESCRIPTION'ında olumsuz/koşullu dil tool-calling'i tamamen
+bastırıyor.** `finance` docstring'ine *"REQUIRES data in the store … export on an empty store fails"*
+eklenmesi gate'i **0/10'a ve her koşuda SIFIR tool çağrısına** düşürdü — model hiçbir şey çağırmayıp
+ne yapacağını anlatan düzyazı üretti. Aynı bilgi olumlu kurulunca (*"If the request mentions
+mail/e-posta, call sync first in the same turn, then export"*) **10/10**'a döndü. Aynı model, aynı
+router, aynı araçlar; fark yalnız ifade. Küçük bir modele aracın neye ihtiyacı olduğunu söylemek
+sorun değil; aracın nasıl **başarısız olduğunu** söylemek onu araçtan kaçırıyor. Sonuç: bir
+description düzenlemesi kod değişikliği kadar davranış değişikliğidir, yeniden ölçüm gerektirir.
+
+**Tool-calling öldüğünde hızlı yer bulan teşhis merdiveni** (tekrar kullanın): araçları modele
+doğrudan tek satırlık system prompt ile bağla (model yeteneğini izole eder) → tam system prompt
+(prompt'u izole eder) → `fast` vs `reasoning` rolü (provider yolunu izole eder) → graph.
+`tool_trace.jsonl` **ve** `audit_log.jsonl` ikisi birlikte boşsa model hiç tool çağrısı üretmemiştir;
+graph'ın kapılayacağı bir şey olmamıştır.
+
+**Yan bulgu (düzeltilmedi, bilinmesi gerekir):** `_route_query()` konuşma dışı her sorguyu
+`reasoning` rolüne yönlendiriyor; bu rol `CLOUD_POLICY=off` altında **thinking AÇIK ve
+max_output_tokens=2048** ile yerel Ollama demek (`fast` rolü `reasoning_effort="none"` + 4096
+geçiyor). Ölçüm: aynı çağrı için `fast` ~0.9 sn / 19 çıktı token, `reasoning` 12–33 sn /
+524–1360 token. İkisi de doğru tool çağrısı üretiyor, yani tool-calling çöküşünün sebebi bu DEĞİLDİ —
+ama yalnız-yerel bir kurulumda her araç içeren tur bu bedeli ödüyor.
+
+**qwen3:8b'nin tool çıktısı sıcaklık 0'da bile deterministik değil:** aynı prompt+araçlar dakikalar
+arayla `[sync, export]` ve `[export]` döndü. Aradaki iki 5'li partide üretim tarafında hiçbir
+değişiklik yokken skor 4/5 → 0/5 saldı. **n=1'den asla sonuç çıkarma.**
+
+**Ayrıca öğrenilen bir anti-örüntü:** modelin argümanını **sessizce düzeltmek** işi bozar. Yanlış
+dönem adlı dosyayı sessizce yeniden adlandıran ilk deneme, modelin kendi istediği yolu araması →
+"dosya bulunamadı" → "export başarısız" raporuna yol açtı (5 koşudan 2'si doğru yazılmış bir workbook
+için başarısızlık bildirdi). Artık **reddediliyor**, `args_schemas` doğrulamasının zaten izlediği
+ilkeyle aynı: düzeltilmiş biçimi çağrıya geri koymak yok. Aynı sebeple modelin dosya adı seçme
+imkânı tamamen kaldırıldı (`output` ne `@tool` imzasında ne `FinanceArgs`'ta var).
+
+### Güvenlik / sözleşme dokunuşları
+
+- **Excel formül enjeksiyonu bu repoda hiç korunmuyordu.** Satıcı/açıklama metni herhangi birinin
+  gönderebildiği mailden geliyor ve Excel başta `=`/`+`/`-`/`@` görünce çalıştırıyor →
+  `workbook.sanitize_cell()`. Gelecekteki her spreadsheet yazıcısı bunu kullanmalı.
+- `finance` artık `side_effect_type="local_write"` (eskiden `external_read`) — `export` dosya
+  yazıyor; alan aracın **en kötü** etkisini tanımlamalı. L2 kaldı, `_READ_ACTIONS` girdisi
+  eklenmedi. `workflow_engine._had_side_effect()` bunu doğru yönde sıkılaştırıyor.
+- Export yolu **deterministik + üzerine yazılıyor** (`exports/cashflow_<YYYY-MM>.xlsx`), çünkü
+  `finance`'in kayıtlı `idempotency="natural"`ı bunu gerektiriyor. `RunContext.for_execution()`
+  kullanılmadı (çağrı başına yeni dizin üretir) ve `data/` altına yazılamaz (`files._resolve()`
+  `PROTECTED_DIRS` ile reddediyor).
+- **XLSX idempotency'si semantik olarak** iddia ediliyor, byte-byte değil (zip, gömülü timestamp).
+
+### Test/lint (2026-07-30, bu oturumun sonunda)
+
 ```powershell
-python -m pytest -q                      # 1454 passed, 5 deselected (voice_e2e), ~3.5 dk
+python -m pytest -q                      # 1703 passed, 5 deselected (voice_e2e), 3 dk 43 sn
 python -m ruff check jarvis scripts tests # All checks passed!
+python scripts/mvp_gate.py --runs 5      # ALL STEPS 4/5 (yukarıdaki tablo)
 ```
-Önceki oturuma göre +65 test (bu oturumda 4 yeni test dosyası + mevcutlara eklemeler).
-`voice_e2e` katmanı (5 test) koşulmadı — gerçek Whisper/Piper model cache'i gerektiriyor.
+
+Yeni test dosyaları: `test_google_auth_lazy_flow.py`, `test_fake_gmail_gate.py`,
+`test_chat_force_sync.py`, `test_mvp_gate_scorers.py`, `test_finance_parser.py`,
+`test_finance_store_aggregates.py`, `test_finance_extractor_local.py`, `test_workbook_export.py`,
+`test_now_block.py`; `test_domain_closure.py`, `test_finance_tool.py`, `test_cloud_policy.py`
+genişletildi. `voice_e2e` katmanı koşulmadı (gerçek Whisper/Piper cache'i gerekiyor).
+
+**Mutasyonla doğrulanan testler** (düzeltme geri alınıp kırmızı olduğu ölçüldü): lazy OAuth import
+(tam olarak 2 gmail vakası kırmızı, calendar/drive yeşil kaldı), `summary()` netleme bug'ı
+(42200 ≠ 42500), currency çapraz-toplama (-371.25 ≠ -250.75).
+
+**Kendi gate'imde bulunan bir scorer bug'ı:** S2, cevabın sayısını `abs(target)` ile karşılaştırıyordu,
+yani doğru işaretli `-7100.75` hiç eşleşmiyordu — bir kabul koşusunda 5 cevabın 4'ü doğruyken S2 0/5
+skorlandı. Artık iki tarafta da büyüklük karşılaştırılıyor.
 
 ### Commit durumu
 
-Bu oturumda **2 iş commit'i** (ses altsistemi remediation'ı; eval/gate bütünlüğü) ve bu kapanış
-HANDOFF commit'i. Kalıcı kural gereği bu kapanış commit'inin kendi SHA'sı/push/CI sonucu burada
-yazılmaz. Oturum sonunda **local == origin senkrondu**. Branch ucunun CI durumuna
-`gh run list --branch langgraph-migration` ile canlı bakın.
+Bu oturumun değişiklikleri **commit EDİLMEDİ** — owner commit istemedi. `git status` ile bakın;
+kapsam: `requirements.txt`, `jarvis/{agent,api,config,finance_extractor,finance_parser,finance_store,
+tool_registry}.py`, `jarvis/tools/{calendar,drive,gmail,finance,plotting,workbook}.py`,
+`jarvis/graph/{tools,tool_router}.py`, `jarvis/execution/args_schemas.py`,
+`scripts/{auth_setup,mvp_gate,seed_finance_fixture}.py`, `docs/TOOLS.md`, `MEMORY.md`, `tests/`.
 
-`.claude/settings.local.json` bilinçli olarak commit EDİLMEDİ — oturum-yerel izin listesi birikimi,
-bu işin parçası değil.
+## OWNER'IN AÇIK SORULARI (2026-07-30, sonraki oturumda ele alınacak)
 
-### Kapsam dışı bırakılanlar (bilinçli, gizlenmedi)
+Owner grafiği inceleyip dört soru sordu. Üçünün cevabı ölçülerek verildi; biri açık iş.
 
-- **W18/R24 redesign (incelemenin 5. maddesi):** approval-pause/bağımlılık gerektiren, doğrudan
-  tool çağrılarıyla eşdeğer biçimde yapılamayacak bir workflow tasarımı — canlı model koşusu
-  gerektirir, bu ajan tetikleyemez. Alpha gate bu yüzden HÂLÂ `EKSİK VERİ`; bu oturum gate'in
-  ölçüm bütünlüğünü düzeltti, gate'i GEÇTİ'ye taşımadı.
-- **Corpus'u gerçek 40-60'a çıkarma (6. madde):** 31 tasarım ID'si / 27 wired turn olduğu gibi.
-- **Faz C (7. madde):** owner'ın önceki kararıyla erteli.
+1. **"30 gün yok, 16 bar görüyorum"** — haklıydı, aslında **18 bar**tı (07-07 net tam 0,00 ve
+   07-28 −20 TL olduğu için görünmüyorlardı). Dönem 30 gün, **12 günde hareket yok** ve o günler
+   grafikten atılıyordu. Asıl kusur owner'ın fark ettiğinden ağırdı: **x ekseni zamansal değil
+   kategorikti**, yani 3 günlük boşlukla 1 günlük boşluk aynı genişlikte görünüyor, grafik paranın
+   ne zaman hareket ettiğini yanlış anlatıyordu. `daily_flow(fill_period=True)` eklendi, export
+   bunu kullanıyor → ayın 31 günü de eksende, hareketsiz gün gerçek bir sıfır.
+2. **"tarihler okunmuyor"** — düzeltildi. `_make_x_axis_readable()` (plotting.py, TÜM grafiklere
+   uygulanır): ISO tarihler `GG.AA`ya kısaltılıyor, etiketler 45° döndürülüp sağa yaslanıyor,
+   24'ten fazla kategori varsa her N'inci etiket gösteriliyor, işaretli seride sıfır çizgisi
+   çiziliyor.
+3. **"bar yerine çizgi/nokta yapabilir mi?"** — Yetenek **var** (`finance('export',
+   chart_kind='line'|'scatter'|'bar')`, testlerle sabit), ama **takip turunda model bunu
+   kullanmıyor**: iki ayrı koşuda "grafiği çizgi grafik yap" deyince `plot_data`'ya gidip
+   uydurma kolon adlarıyla patladı. **Kök neden mimari** (aşağıdaki 1. maddeye bakın), prompt
+   ayarı değil. Owner'a pratik tavsiye: **tek cümlede iste** ("... çizgi grafik olarak").
+4. **"kalitesi nasıl"** — cevap aşağıdaki "kalite değerlendirmesi" bölümünde.
+
+### Aynı incelemede bulunan CİDDİ bulgu — uydurma, takip turunda geri geldi
+
+3. turda ("grafikteki tarihler okunmuyor, düzelt") JARVIS **hiç araç çağırmadan**, cevabına elle
+`[Tool execution summary: plot_data ok]` yazıp — bu JARVIS'in KENDİ iç geçmiş işaretçisi —
+"✅ Çizgi grafiği tamamlandı: exports/cashflow_2026-07_line.png" dedi. **O dosya hiç yaratılmadı.**
+`strip_internal_markers()` eklendi (agent.py + `tests/test_internal_marker_leak.py`): baştaki
+işaretçi kullanıcıya giden cevaptan siliniyor. **Bu uydurmayı DURDURMUYOR**, yalnızca uydurmanın
+sistem rozeti takmasını engelliyor. Gerçek çözüm cevapta iddia edilen dosya yollarının diske karşı
+doğrulanması — yapılmadı, aşağıda 1. sıradaki iş.
+
+### Kalite değerlendirmesi (dürüst)
+
+**Güçlü:** ilk tur uçtan uca güvenilir (fixture 10/10, gerçek ekstre 3/3); rakamlar bankanın kendi
+bakiyesiyle 89/89 doğrulanıyor; veri yokken uydurmuyor (canlı kanıtlandı); Excel içeriği openpyxl
+ile, grafik içeriği sidecar ile bağımsız doğrulanabiliyor.
+
+**Zayıf:** (a) takip turları — tool sonucundaki yönlendirme bir sonraki tura taşınmıyor;
+(b) uydurma tamamen kapatılmadı, yalnızca MVP turunda gate'le yakalanıyor; (c) `plot_data`'nın
+workbook üzerindeki kullanımı hâlâ güvenilmez; (d) grafik tek renk — gelir/gider günleri renkle
+ayrılsa çok daha okunur olurdu; (e) kategorilerin %79'u "other"dan kurtarıldı ama POS
+açıklamalarındaki satıcı adları hâlâ ham (`ESPRESSOLAB ISTANBUL TR` gibi şehir/ülke ekli).
 
 ## SONRAKİ OTURUM — kalan iş (öncelik sırası)
 
-1. **Owner'ın canlı doğrulaması** (bu ajan tetikleyemez):
-   - `--ptt` gerçek Enter + gerçek mikrofonla: bir tur → Enter kapısına dönüş; ayrıca
-     "flash modeline geç" deyip kapının GERÇEKTEN geri geldiğini görmek (bu oturumun 1. bug'ı).
-   - `--ptt` kapısında `/voice-status` yazıp tablonun canlı sayaçları gösterdiği.
-   - Faz A: sesli onay dumanı (audit'te `user_approved` + `execution_end` + gerçek takvim etkinliği).
-2. **Alpha gate'i gerçekten GEÇTİ'ye taşımak** — `ab_run_config.ps1 -Runs 10` +
-   `alpha_gate.py isolation --runs 20` + `evaluate --runs 10`. **Ön koşul:** W18/R24'ün
-   `workflow_start` güvenilirlik boşluğu (`docs/eval/acceptance_matrix.md`'nin disposition notu).
-   Gate Core manifest'i corpus değişirse `manifest --write` ile yeniden mintlenmeli.
-3. **Faz C** — gerçek Takvim/Gmail entegrasyon runner'ı. 3 parametre netleşti (mevcut token'lar,
-   runner-oluşturur takvim, self-send adresi `mertkaanakgunlu@gmail.com`); plan dosyasının Faz C
-   bölümü hâlâ geçerli tasarım. **En riskli faz — gerçek yan etki üretir.**
-4. **İki gerçek model-yeteneği bulgusu (değişmedi):** `workflow_start` canlı modelle güvenilir
-   tetiklenmiyor (4/4 denemede hiç); `plot_data` bazen çağrılmak yerine Python kodu gösteriyor
-   (2/2, B6'da güvenilir çalışırken).
-5. **Owner Extended Corpus'u 40-60'a çıkarma.**
-6. Eski kalanlar (değişmedi): 4 worktree branch read-through (ayrı go-ahead bekliyor); Electron
-   `npm audit` 8 advisory; mobile flutter-analyze; canlı HUD E2E (onay approve/deny tıklaması);
-   Alt+Space'in `/voice/ptt/start`'a Electron'da kablolanması; wake-word modelinin neden
-   yüklenmediği (openwakeword, düşük öncelik).
+1. **Cevapta iddia edilen dosya yollarını diske karşı doğrula.** Oturumun en ciddi açık bulgusu:
+   model hiç araç çağırmadan "grafik hazır: exports/...png" diyebiliyor. Somut tasarım: compose
+   adımından sonra cevaptaki `exports/...`, `data/runs/...` gibi yol benzeri dizgileri çıkar,
+   diskte var mı bak, yoksa ya cevabı düzelt ya da açık bir uyarı ekle. `mvp_gate`'in S5'i bunu
+   tek turluk MVP için yapıyor; asıl çalışma zamanında yok.
+2. **Takip turu yönlendirmesini sistem prompt'una taşı.** Tool sonucundaki "sıradaki çağrı" ipucu
+   tur sınırını geçmiyor (`_compact_completed_turn_for_history` tam tool sonucunu geçmişten
+   düşürüyor). En az şu iki kural `jarvis/prompts/core/02_tool_policy.md`'ye girmeli: finans
+   grafiğinin türünü değiştirmek için `finance('export', chart_kind=...)` — `plot_data` DEĞİL; ve
+   çok sayfalı bir workbook'u çizerken `sheet=` zorunlu.
+3. **Owner kararı: gerçek finans verisi nereden gelecek?** Boru hattı hazır, veri yok.
+   Önerilen: **ekstre dosyası importu** — `finance('import_statement', path=...)` benzeri bir giriş
+   yolu; `iter_transactions`/`upsert_transaction` zaten var, tek eksik ekstre formatını okuyan
+   parser. Format sabit olduğu için mail parser'ından belirgin şekilde güvenilir olur ve GEÇMİŞ
+   veriyle hemen çalışır. Alternatif/ek: bildirim mailleri gelmeye başlayınca `sync`
+   (filtre artık doğru — ON dahil).
+2. **Bildirim maili geldiğinde parser'ı gerçek metne ayarlamak.** Fixture owner'ın anlattığı
+   formatlardan türetildi, gerçek ON/Burgan mail metni değil. `finance('sync')` red sebeplerini
+   sayıyor — `no_amount`/`not_a_transaction` yığılırsa `finance_parser.py` pattern'leri gerçek
+   gövdeye göre güncellenmeli. **Doğrudan hesap bağlantısı bir seçenek DEĞİL** (yukarıdaki
+   gerekçe); kimlik bilgisiyle internet bankacılığı otomasyonu bilinçle kapsam dışı.
+3. **İlk `export` çağrısının bazen month=5 ile gelmesi** — self-correcting hata 2. denemede
+   düzeltiyor ama bir tur boşa gidiyor. Tarih bloğu prompt'un en sonunda; bu bir model-yeteneği
+   sınırı, bilgi eksikliği değil.
+4. Async keyword listesini daraltmak (telefon/HUD UX kararı, owner'a ait).
+5. `_route_query()`'nin her araçlı turu `reasoning` rolüne (thinking AÇIK, 2048 token) göndermesi —
+   yalnız-yerel kurulumda gereksiz gecikme. Ölçüm yukarıda.
+6. Eski kalanlar (değişmedi): 4 worktree branch read-through; Electron `npm audit`;
+   mobile flutter-analyze; canlı HUD E2E; Alt+Space → `/voice/ptt/start`; wake-word modeli;
+   alpha gate'i GEÇTİ'ye taşımak (W18/R24 `workflow_start` güvenilirlik boşluğu).
 
 ## Değişmeyen taşınan işler
 
-- 8 direct-Gemini modülün shared gateway'e migrasyonu (Sprint 3) — kapsam dışı.
+- 7 direct-Gemini modülün shared gateway'e migrasyonu (`finance_extractor` bu oturumda taşındı;
+  kalanlar kapsam dışı).
 - 4 worktree branch read-through — ayrı go-ahead bekliyor (CLAUDE.md'de liste).

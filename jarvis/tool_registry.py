@@ -292,9 +292,25 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         args_schema=args_schemas.TodoArgs,
     ),
     ToolSpec(
-        "finance", "external_api", 2, False, "external_read",
+        # side_effect_type is "local_write", not "external_read", as of
+        # 2026-07-30: action="export" writes an .xlsx into the workspace, so
+        # "external_read" understated this tool's maximum real effect. The field
+        # must describe the WORST thing the tool can do, not its most common
+        # action. Two consumers change behavior accordingly, both in the safer
+        # direction: workflow_engine._had_side_effect() now treats a finance step
+        # as mutating (relevant to partial-commit/compensation), and the
+        # EXTERNAL_WRITES_ENABLED=false block is unaffected (it keys on
+        # "external_write", which this is not -- so a read-only live run can
+        # still sync and export). Risk level stays L2: a local, overwritable file
+        # in the workspace is a reversible write, and there is no
+        # policy_guard._READ_ACTIONS entry because finance has no per-action risk
+        # split of the kind gmail/calendar/drive have.
+        "finance", "external_api", 2, False, "local_write",
         timeout_seconds=60, supports_background=True,
-        description="Burgan Bank finance sync (Gmail read-only), summary, budget tracking",
+        description=(
+            "Bank mail sync (Gmail read-only), cash-flow summary, budget tracking, "
+            "and Excel (.xlsx) cash-flow workbook export"
+        ),
         args_schema=args_schemas.FinanceArgs,
     ),
     ToolSpec(
@@ -381,10 +397,24 @@ _TOOL_DOMAINS: dict[str, str] = {
     "gmail": "mail", "itu_mail": "mail",
     "google_calendar": "calendar",
     "google_drive": "drive",
-    # data — analysis, math, plotting, reports, content generation
-    "data_analyze": "data", "plot_data": "data", "report_write": "data",
-    "report_compile": "data", "report_compose": "data", "math_solve": "data",
-    "geo_math": "data", "write_content": "data",
+    # data / report / math — split out of one oversized "data" domain on
+    # 2026-07-30. That domain held exactly 8 tools while the router's
+    # MAX_TOOLS_PER_TURN is also 8, so whenever "data" was the primary domain it
+    # consumed the entire per-turn budget and NO second domain could ever be
+    # added. Measured consequence: the owner's MVP prompt ("Maillerimi kontrol
+    # et, hesabimdaki para akisini analiz et, bir excel tablosuna donustur ve
+    # grafikle") routed to [data, mail] and exposed 8 data tools with gmail and
+    # finance both invisible -- the task was impossible for any model, and the
+    # model duly reported on a mailbox it had no way to read.
+    #
+    # Raising the cap would have treated the symptom. "data" was a junk drawer
+    # holding analysis, charting, LaTeX reports, prose generation and symbolic
+    # maths -- five unrelated intents. Splitting it fixes the class: no single
+    # domain is near the cap any more.
+    "data_analyze": "data", "plot_data": "data",
+    "report_write": "report", "report_compile": "report",
+    "report_compose": "report", "write_content": "report",
+    "math_solve": "math", "geo_math": "math",
     # system — execution & machine control
     "shell_run": "system", "python_run": "system", "generate_code": "system",
     "gcp_quota": "system", "hud_panels": "system",

@@ -46,7 +46,7 @@ async def test_chat_raises_confirmation_from_value_style_interrupt(monkeypatch, 
     agent.session_id = "s1"
     agent._history = []
     agent.workspace = jarvis_home
-    agent._env_block = ""
+    agent._env_static = ""   # _env_block is a property (live clock)
     agent.usage = SimpleNamespace()
     from jarvis.config import Settings
     agent.settings = Settings(_env_file=None)
@@ -95,7 +95,7 @@ async def test_empty_response_does_not_echo_history(monkeypatch, jarvis_home):
     agent.session_id = "s1"
     agent._history = [prior_answer]
     agent.workspace = jarvis_home
-    agent._env_block = ""
+    agent._env_static = ""   # _env_block is a property (live clock)
     agent.usage = SimpleNamespace()
     from jarvis.config import Settings
     agent.settings = Settings(_env_file=None)

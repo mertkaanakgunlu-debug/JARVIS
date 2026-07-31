@@ -43,6 +43,9 @@ class _FakeAgent:
         self.session_id = "sess1"
         self._state_lock = threading.Lock()
         self.settings = Settings(_env_file=None)
+        # Plain attribute, NOT _env_static: this is a standalone duck-type, not a
+        # JarvisAgent instance, so it does not inherit the _env_block property
+        # (which composes static paths with a live clock -- see _build_now_block).
         self._env_block = ""
         self._context_builder = SimpleNamespace(
             build=lambda query, session_id=None: SimpleNamespace(
