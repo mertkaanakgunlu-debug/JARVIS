@@ -410,12 +410,46 @@ def test_more_than_200_transactions_are_not_truncated(store, workspace):
     wb.close()
 
 
-def test_explicit_output_is_confined_to_the_workspace(store, workspace):
+def test_explicit_output_outside_workspace_and_home_is_refused(store, workspace, jarvis_home):
+    """An explicit output path outside BOTH the workspace and the home dir is refused.
+
+    `jarvis_home` is required, not decoration. files._resolve() permits anything
+    under the effective home on purpose (that is how JARVIS reaches Desktop and
+    Downloads), so whether `../escape.xlsx` is refused depends entirely on
+    whether pytest's tmp_path happens to sit inside the home directory:
+
+        this machine   TEMP=C:\\Temp                          -> outside home -> refused
+        CI runner      TEMP=C:\\Users\\RUNNERADMIN\\AppData\\...  -> inside home  -> ALLOWED
+
+    So this test passed locally and failed on CI while the code was identical,
+    and on a default Windows install (TEMP under the user profile) it would have
+    failed for everyone. It was measuring where the OS puts temp files, not the
+    path policy. Pinning JARVIS_HOME to a sibling of the workspace makes the
+    escape target provably outside both, on any host.
+    """
     _seed(store)
     result = export_cashflow_workbook(
         store, workspace, year=2026, month=7, output="../escape.xlsx"
     )
     assert result.startswith("[ERROR]"), result
+
+
+def test_explicit_output_inside_home_is_allowed(store, workspace, jarvis_home):
+    """The companion half, so the policy is stated rather than implied.
+
+    Reaching outside the workspace into the user's home is DELIBERATE — it is
+    what lets JARVIS write to Desktop/Downloads. Without this test the pair
+    above reads as "everything outside the workspace is refused", which is not
+    the rule and would invite someone to "fix" _resolve() into breaking real use.
+    """
+    _seed(store)
+    target = jarvis_home / "rapor.xlsx"
+    result = export_cashflow_workbook(
+        store, workspace, year=2026, month=7, output=str(target)
+    )
+
+    assert not result.startswith("[ERROR]"), result
+    assert target.exists()
 
 
 def test_output_under_data_is_refused(store, workspace):
