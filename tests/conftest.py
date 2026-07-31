@@ -17,6 +17,28 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
+@pytest.fixture(autouse=True)
+def rollout_metrics_file(tmp_path, monkeypatch):
+    """Redirect the execution-verification metrics stream into tmp, always.
+
+    AUTOUSE on purpose. Post-MVP Faz 1 moved Settings.execution_contract_mode's
+    default from "off" to "shadow", which means compose_node now appends a
+    rollout row on ordinary turns -- so every test that drives a real turn
+    would otherwise write into the developer's real
+    data/execution_verification.jsonl and quietly corrupt the very numbers the
+    shadow->enforce promotion gate is supposed to be decided on. That is the
+    isolate-test-data-paths lesson again (MEMORY.md), one flipped default
+    later: a default change can hand an existing, correct test a brand-new
+    side effect, so the isolation has to be opt-OUT, not opt-in.
+
+    Returns the redirected path so a test can assert on what was written.
+    """
+    target = tmp_path / "rollout" / "execution_verification.jsonl"
+    import jarvis.execution.rollout as rollout
+    monkeypatch.setattr(rollout, "_path", lambda: target)
+    return target
+
+
 @pytest.fixture
 def isolated_cwd(tmp_path, monkeypatch):
     """Chdir into a fresh temp dir for the test's duration.

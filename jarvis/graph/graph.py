@@ -56,6 +56,7 @@ from jarvis.graph.state import JarvisState
 from jarvis.graph.nodes import (
     make_agent_node,
     make_compose_node,
+    make_verification_node,
     make_confirmation_node,
     make_planner_node,
     make_prepare_execution_node,
@@ -191,6 +192,12 @@ def build_graph(
     builder.add_node("tool_result_accounting", make_tool_result_accounting_node(settings, workspace))
     builder.add_node("compose", make_compose_node(settings))
     builder.add_node("critic", critic_node)
+    # Post-MVP Faz 1: terminal honesty gate. Deliberately a node of its own
+    # rather than logic inside compose -- compose is not on every path to
+    # END (a conversation turn goes agent -> critic -> END), and a gate that
+    # only sees tool turns cannot see the case it exists for. See
+    # make_verification_node's docstring.
+    builder.add_node("verify", make_verification_node(settings))
 
     # START → planner (if /think) or directly to agent
     builder.add_conditional_edges(
@@ -217,7 +224,12 @@ def build_graph(
     builder.add_conditional_edges(
         "confirmation",
         route_from_confirmation,
-        {"tools": "tools", "agent": "agent", END: END},
+        # END routes through "verify" for the same single-choke-point reason
+        # as the critic edge below: confirmation_node's honest answer is
+        # code-authored and will never trip the gate, but "every path to END
+        # passes verify" has to be literally true or the rollout metric is
+        # measured over an unknown fraction of turns.
+        {"tools": "tools", "agent": "agent", END: "verify"},
     )
     # Patch 1.2 (Faz 1B): completed-fingerprint/ledger bookkeeping happens
     # AFTER execution -- the only point that knows how a call actually ended.
@@ -234,11 +246,15 @@ def build_graph(
     )
     builder.add_edge("compose", "critic")
 
-    # critic → compose (revise, bare regeneration) or END (accept / exhausted)
+    # critic → compose (revise, bare regeneration) or verify → END
+    # (accept / exhausted). route_from_critic itself is unchanged and still
+    # returns END; only the destination that value maps to moves, so the
+    # single choke point is added without touching the routing decision.
     builder.add_conditional_edges(
         "critic",
         route_from_critic,
-        {"compose": "compose", END: END},
+        {"compose": "compose", END: "verify"},
     )
+    builder.add_edge("verify", END)
 
     return builder.compile(checkpointer=checkpointer)

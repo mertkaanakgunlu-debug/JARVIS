@@ -215,6 +215,66 @@ def make_agent_node(tools: list, settings=None):
     return agent_node
 
 
+# Post-MVP Faz 1 helpers for compose_node's unbacked-claim gate.
+
+# LangChain tag on the bounded repair round's LLM call. Defence in depth:
+# graph_stream_to_text already filters by node name and "verify" is not in
+# its allow-list, so today this tag is a second lock on the same door -- but
+# the gate lived inside compose_node for part of its life, where the node
+# filter did NOT separate them (same node, same langgraph_step, so BUG-12's
+# step-boundary rule could not tell the discarded draft from its
+# replacement). Keeping the tag means moving this logic again cannot
+# silently reintroduce spliced output.
+#
+# Honest limit neither lock fixes: the DRAFT has already streamed by the time
+# the gate runs, so on a streaming transport an enforce-mode block corrects
+# the final state and the saved history but cannot un-send what the user
+# already watched. Buffering the answer until verification finishes is the
+# real fix and belongs with the enforce promotion, not with shadow. Recorded
+# in docs/SAFETY.md as a blocker on that promotion.
+REPAIR_STREAM_TAG = "jarvis:verification_repair"
+
+# Turkish-specific letters, plus function words that are unambiguously
+# Turkish (no English homographs -- "bu"/"bir" are safe, "an"/"at"/"o" are
+# not and are deliberately absent). Used only to pick the LANGUAGE of the
+# honest-failure fallback, so a miss costs a reply in the wrong language,
+# never a wrong verdict.
+_TURKISH_HINT_RE = re.compile(
+    r"[şğıçöüŞĞİÇÖÜ]|\b(?:bir|bu|şu|için|ile|nedir|nasıl|lütfen|bana|beni|"
+    r"var|yok|oluştur|göster|yap|kaydet|hazırla|çiz|efendim)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_turkish(state: JarvisState) -> bool:
+    """Which language to answer the honest-failure fallback in.
+
+    Falls back to the last human message when state["user_query"] is absent:
+    it is populated on the normal entry path but not on every one (a
+    resumed checkpoint, a direct-node call), and defaulting a Turkish
+    owner's assistant to English because one state key was missing is a
+    silly way to lose a sentence.
+    """
+    query = str(state.get("user_query") or "")
+    if not query:
+        for message in reversed(state.get("messages") or []):
+            if isinstance(message, HumanMessage):
+                content = message.content
+                query = content if isinstance(content, str) else str(content)
+                break
+    return bool(_TURKISH_HINT_RE.search(query))
+
+
+def _declared_count(envelopes_raw: list, execution_id: str) -> int:
+    """How many artifacts the envelope for this operation declared. Read from
+    the raw envelope dicts because VerifiedOperation deliberately carries
+    only the verdict, not the payload."""
+    for raw in envelopes_raw or []:
+        if isinstance(raw, dict) and raw.get("execution_id") == execution_id:
+            return len(raw.get("artifacts") or [])
+    return 0
+
+
 def make_compose_node(settings=None):
     """Tool-free response composer (Faz 2B).
 
@@ -244,6 +304,13 @@ def make_compose_node(settings=None):
     computed and logged — this is the plan's "annotate, then enforce" step,
     and it is what keeps this phase's off/shadow behavior covered by
     test_shadow_replay_equivalence.py's bit-identical contract.
+
+    Post-MVP Faz 1 — honesty kernel. The unbacked-claim gate is NOT here.
+    It lives in make_verification_node (a terminal node) because compose is
+    not on every path to END — a plain conversational turn goes
+    agent → critic → END and never touches this node, which is exactly the
+    kind of turn the gate's headline case ("claimed a file, called no tool")
+    occurs on. See that node's docstring.
     """
     from jarvis.providers import get_llm
     from langchain_core.messages import ToolMessage
@@ -306,6 +373,13 @@ def make_compose_node(settings=None):
         # state dict built by hand (a direct-node unit test, an old
         # checkpoint) that happens to carry envelopes anyway.
         envelopes_raw = state.get("execution_envelopes") or []
+        # Post-MVP Faz 1 deliberately left this condition alone. The
+        # zero-tool case it excludes is real and is the whole point of the
+        # honesty kernel -- but it is handled in verification_node, where
+        # every path to END passes, rather than here, where only tool turns
+        # do. Nothing below would act on an empty summary anyway:
+        # audit_claims returns early unless any_failed, which an empty
+        # operation list can never be.
         summary = build_verified_summary(envelopes_raw) if (envelopes_raw and mode != "off") else None
         enforce = mode.startswith("enforce_")
         if summary is not None and enforce:
@@ -327,6 +401,7 @@ def make_compose_node(settings=None):
             violations = audit_claims(text, summary)
             if violations:
                 audit_log.record("claim_audit", mode=mode, enforced=enforce, reasons=violations)
+
             if enforce and summary.any_failed:
                 text = f"{text}\n\n{render_operation_status_for_user(summary)}"
                 response = AIMessage(content=text)
@@ -335,6 +410,151 @@ def make_compose_node(settings=None):
 
     compose_node.__name__ = "compose_node"
     return compose_node
+
+
+def make_verification_node(settings=None):
+    """TERMINAL node: the turn's final answer, checked against the evidence.
+
+    Post-MVP Faz 1 (honesty kernel). This started life inside compose_node and
+    was moved here after a live run showed the obvious home was the wrong one.
+    The graph has more than one way to finish a turn:
+
+        agent -> critic -> END                      (no tool calls)
+        agent -> ... -> tools -> ... -> compose -> critic -> END
+        agent -> ... -> tools -> ... -> agent -> critic -> END
+
+    Only the middle one passes through compose. So a gate living in compose
+    could not see a plain conversational turn at all -- and "the model claims
+    a file with no tool call behind it" IS most often a plain conversational
+    turn. The check was structurally blind to its own headline case. It is a
+    terminal node now so there is exactly ONE place where the answer meets
+    the evidence, whatever produced the answer, and exactly one gate
+    evaluation recorded per turn.
+
+    Per-operation verification rows are recorded here for the same reason:
+    a tool turn that loops back through the agent and ends at the critic
+    never reaches compose either, and its operations would have gone
+    uncounted -- silently deflating the very rollout metric the enforce
+    promotion is decided on.
+
+    Shadow does not touch the answer; only an enforce_* mode runs the single
+    bounded repair round and, failing that, replaces the text with an honest
+    report. "off" returns {} -- no new code path at all.
+    """
+    from langchain_core.messages import ToolMessage
+
+    from jarvis.providers import get_llm
+    from jarvis import audit_log
+    from jarvis.execution import rollout
+    from jarvis.execution.evidence import (
+        build_evidence_set,
+        detect_unbacked_claims,
+        honest_failure_report,
+        repair_instruction,
+    )
+    from jarvis.execution.summary import USER_STATUS_MARKER, build_verified_summary
+
+    timeout_sec = getattr(settings, "agent_llm_timeout_sec", 90.0) if settings is not None else 90.0
+    mode = getattr(settings, "execution_contract_mode", "off") if settings is not None else "off"
+    enforce = mode.startswith("enforce_")
+    _repair_llm: dict[str, object] = {}
+
+    async def verification_node(state: JarvisState) -> dict:
+        if mode == "off":
+            return {}
+
+        text = (state.get("response") or "").strip()
+        messages = state.get("messages") or []
+        if not text:
+            # A turn that ended at the critic never set state["response"] --
+            # the answer is the last AI message. Same fallback agent.py's
+            # chat() uses to read the final text.
+            for message in reversed(messages):
+                if isinstance(message, AIMessage) and isinstance(message.content, str):
+                    text = message.content.strip()
+                    break
+        if not text:
+            return {}
+
+        # Judge only what the MODEL said. In enforce mode compose_node appends
+        # its own code-authored status block, whose per-operation detail is
+        # the tool's normalized output -- which for an artifact tool IS a
+        # path, and for the verification-failed case is a path that is
+        # deliberately NOT on disk. Left in, the gate would read the system's
+        # own honest report of a missing file as a fabricated claim about it.
+        # (The negation guard happens to catch it today, because the block
+        # contains the word FAILED -- but relying on that is relying on a
+        # coincidence between two unrelated pieces of wording.)
+        model_text = text.split(USER_STATUS_MARKER, 1)[0].strip() or text
+
+        envelopes_raw = state.get("execution_envelopes") or []
+        summary = build_verified_summary(envelopes_raw)
+        for op in summary.operations:
+            rollout.record_verification(
+                mode=mode, capability=op.capability,
+                display_status=op.display_status,
+                postcondition_verdict=op.postcondition_verdict,
+                artifacts_declared=_declared_count(envelopes_raw, op.execution_id),
+            )
+
+        evidence = build_evidence_set(summary, envelopes_raw)
+        verdict = detect_unbacked_claims(model_text, evidence)
+        repaired: bool | None = None
+        blocked = False
+        out: dict = {}
+
+        if verdict.unbacked:
+            audit_log.record(
+                "unbacked_claim", mode=mode, enforced=enforce,
+                reasons=verdict.reasons, files=verdict.unbacked_files,
+            )
+            if enforce:
+                # Exactly one bounded repair round (plan item 5) -- never a
+                # loop. If the second draft is still contradicted the user
+                # gets an honest report rather than a third attempt: this is
+                # on the turn's critical path, and "keep asking the model
+                # until it stops lying" is not a bounded operation.
+                if "llm" not in _repair_llm:
+                    role = "reasoning" if state.get("use_pro_agent", False) else "fast"
+                    _repair_llm["llm"] = get_llm(role, settings)
+                repair_messages = [
+                    m for m in messages if not isinstance(m, ToolMessage)
+                ] + [SystemMessage(content=repair_instruction(verdict))]
+                try:
+                    reply = await asyncio.wait_for(
+                        _repair_llm["llm"].ainvoke(
+                            repair_messages, config={"tags": [REPAIR_STREAM_TAG]}
+                        ),
+                        timeout=timeout_sec,
+                    )
+                    repair_text = (
+                        reply.content if isinstance(reply.content, str) else str(reply.content)
+                    )
+                except Exception:  # noqa: BLE001 -- timeout, provider error, anything
+                    # A verification layer must never be the thing that kills
+                    # the turn (audit_log/postcondition_runner discipline). An
+                    # unavailable repair falls through to the honest report
+                    # below, which is the safe direction: the contradicted
+                    # draft does not survive just because the retry failed.
+                    repair_text = ""
+                second = detect_unbacked_claims(repair_text, evidence) if repair_text else verdict
+                repaired = bool(repair_text) and not second.unbacked
+                if repaired:
+                    text = repair_text
+                else:
+                    blocked = True
+                    text = honest_failure_report(second, _is_turkish(state))
+                out = {"messages": [AIMessage(content=text)], "response": text}
+
+        rollout.record_claim_gate(
+            mode=mode, enforced=enforce, fired=verdict.unbacked,
+            reasons=verdict.reasons, unbacked_files=verdict.unbacked_files,
+            repaired=repaired, blocked=blocked,
+        )
+        return out
+
+    verification_node.__name__ = "verification_node"
+    return verification_node
 
 
 def make_route_after_tool_accounting(settings=None):

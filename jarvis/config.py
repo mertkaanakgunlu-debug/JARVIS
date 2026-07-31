@@ -81,11 +81,22 @@ class Settings(BaseSettings):
     # this is anything but "off" -- no decision changes anywhere. The
     # enforce_* values are accepted here for forward compatibility with
     # Faz 2+ but behave identically to "shadow" until Faz 2 adds real
-    # gating on this field. Default "off": no new code path runs at all
-    # (Faz 1's own rollback contract).
+    # gating on this field.
+    #
+    # Post-MVP Faz 1 (honesty kernel, 2026-07-31) moves the DEFAULT one rung
+    # up the plan's own ladder, off -> shadow -> enforce_reversible. Shadow
+    # is the honest place to sit right now and the ladder is the reason:
+    # in shadow every operation is verified against the artifacts the tool
+    # declared, every unbacked claim is detected, and both are counted into
+    # jarvis/execution/rollout.py -- but the user-visible answer is not
+    # touched, so a detector bug costs a log line, not a wrong reply.
+    # Promotion to enforce_reversible is gated on the plan's measured
+    # threshold rather than a judgment call: 100 real artifact operations
+    # with zero reported false blocks (rollout.enforce_gate_status()).
+    # "off" remains a true no-op and is still the rollback switch.
     execution_contract_mode: Literal[
         "off", "shadow", "enforce_read_only", "enforce_reversible", "enforce_all"
-    ] = "off"
+    ] = "shadow"
 
     # Agent Runtime rev.2, Faz 2 (2026-07-21): how long a prepare_execution-
     # minted ExecutionRequest's HMAC approval stays valid. Unlike

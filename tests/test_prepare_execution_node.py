@@ -372,15 +372,36 @@ async def test_tool_result_accounting_does_not_commit_a_failed_call(isolated_cwd
 @pytest.mark.asyncio
 async def test_tool_result_accounting_unaffected_when_execution_requests_absent(isolated_cwd):
     """No prepare_execution run -> no crash, no attempted commit."""
-    settings = _settings()
+    # execution_contract_mode is pinned rather than inherited: this test's
+    # subject is the missing-ExecutionRequest path, and its envelope
+    # assertion used to read the global default, which Post-MVP Faz 1 moved
+    # from "off" to "shadow". A test that silently changes what it asserts
+    # when an unrelated default moves is measuring the default, not the
+    # behavior (same lesson as the workspace-confinement test that was
+    # measuring where the OS puts TEMP).
+    settings = _settings(execution_contract_mode="off")
     accounting = make_tool_result_accounting_node(settings)
     ai = _ai_tool_call("file_write", {"path": "a.txt", "content": "hi"})
     messages = [ai, ToolMessage(content="wrote 2 bytes", tool_call_id="call_1")]
 
     result = await accounting({"messages": messages})
 
-    assert "execution_envelopes" not in result  # off mode, unrelated to this change
+    assert "execution_envelopes" not in result  # explicit "off", the rollback contract
     assert result["completed_tool_fingerprints"]  # pre-existing behavior intact
+
+
+@pytest.mark.asyncio
+async def test_tool_result_accounting_builds_envelopes_under_the_new_default(isolated_cwd):
+    """The other half of the pin above: at the shipped default (shadow) the
+    same call DOES produce an envelope. Without this, flipping the default
+    back to "off" by accident would break nothing in the suite."""
+    accounting = make_tool_result_accounting_node(_settings())
+    ai = _ai_tool_call("file_write", {"path": "a.txt", "content": "hi"})
+    messages = [ai, ToolMessage(content="wrote 2 bytes", tool_call_id="call_1")]
+
+    result = await accounting({"messages": messages})
+
+    assert result["execution_envelopes"], "shadow is the shipped default (jarvis/config.py)"
 
 
 # ── Tier 3: a real compiled-graph interrupt -> resume round trip ──────────

@@ -11,6 +11,8 @@ from collections.abc import AsyncGenerator
 
 from langchain_core.messages import AIMessageChunk
 
+from jarvis.graph.nodes import REPAIR_STREAM_TAG
+
 
 async def graph_stream_to_text(
     graph,
@@ -45,6 +47,14 @@ async def graph_stream_to_text(
         stream_mode="messages",
     ):
         if metadata.get("langgraph_node") not in ("agent", "compose"):
+            continue
+        # Post-MVP Faz 1: compose_node's bounded repair round is a SECOND
+        # answer from the same node in the same langgraph_step, so the
+        # step-boundary rule above cannot separate it -- untagged, a stream
+        # consumer would get the discarded draft and its replacement spliced
+        # together. The repair's result reaches the user through the node's
+        # returned state, not through this stream.
+        if REPAIR_STREAM_TAG in (metadata.get("tags") or ()):
             continue
         if not isinstance(chunk, AIMessageChunk):
             continue

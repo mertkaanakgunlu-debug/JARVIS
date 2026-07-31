@@ -183,11 +183,20 @@ def render_operation_status_for_model(summary: VerifiedExecutionSummary) -> str:
     )
 
 
+# The exact prefix render_operation_status_for_user emits. Exported as a
+# constant because Post-MVP Faz 1's verification_node must be able to tell
+# the model's own words from this system-authored block and judge only the
+# former -- two hard-coded copies of this string would drift, and the
+# failure mode of that drift is the honesty gate accusing the system's own
+# honest report of fabricating a file.
+USER_STATUS_MARKER = "[System-verified status]"
+
+
 def render_operation_status_for_user(summary: VerifiedExecutionSummary) -> str:
     """The same facts, phrased for the end user. See this module's docstring
     for why this -- not claim-text detection -- is the actual safety net."""
     body = "\n".join(_operation_line(op) for op in summary.operations)
-    return f"[System-verified status]\n{body}"
+    return f"{USER_STATUS_MARKER}\n{body}"
 
 
 # ── Secondary, observation-only claim audit ─────────────────────────────────
