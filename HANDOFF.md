@@ -169,3 +169,13 @@ Sıra: injectable `Clock` → temporal resolver (model yalnız `date_expression`
   2026-07-23) ve **en az 2026-07-25'ten beri başarısız** — 71 bulgunun tamamı info/warning
   (65× `withOpacity`, + `assets/fonts/` ve `assets/wake/` boş dizin olduğu için git'te yok).
   Kod regresyonu değil, bloke etmiyor. **Owner kararı bekliyor.**
+
+- **CI teşhis notu — `chromadb: no such table: acquire_write` bir FLAKE'tir, regresyon değil.**
+  2026-07-31'de `python` job'ı bu hatayla kaldı ve **kaldığı commit sadece docs'tu** (`b0d4725`);
+  bir önceki koşu aynı kodla geçmişti, bir sonraki koşu da geçti. `requirements.txt`'te
+  `chromadb>=0.6` **pinsiz**, ve hata chromadb'nin Rust arka ucunda hızlı/eşzamanlı client
+  yaratmada görülen bir yarış. `test_procedure_store` / `test_shell_workspace` /
+  `test_todo_bg_analysis` gibi **alakasız** dosyalarda birden çıkması bunun imzası.
+  **Yeniden görülürse önce koşuyu tekrarlayın**, kod aramayın — bu repo'da daha önce olmayan bir
+  regresyonu aramak için zaman harcandı (HANDOFF'un bir önceki sürümündeki mobile vakası).
+  Kalıcı çözüm istenirse chromadb'yi pinlemek ayrı bir iş.
