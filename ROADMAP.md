@@ -10,6 +10,45 @@
 > The 59-finding review backlog is preserved in the **Bug backlog appendix** at the bottom and
 > mapped into the phases below by `[BUG-n]` tags.
 
+## CURRENT PLAN — Post-MVP mimari sağlamlaştırma (2026-07-31 →)
+
+> This supersedes the two older plans below as the *active* one. Owner reframed the scope on
+> 2026-07-31: the mail→cash-flow→Excel→chart chain was **a deliberately hard capability test, not a
+> product goal**. JARVIS's purpose is a **personal assistant / secretary**. Priority is
+> architectural correctness over feature breadth; every phase gets a fresh session.
+> Plan file: `C:\Users\mertk\.claude\plans\c-users-mertk-downloads-jarvis-post-mvp-federated-kettle.md`
+
+| Faz | Ad | Durum |
+|---|---|---|
+| 0A | Baseline senkronu (`local == origin`) | ✅ 2026-07-31 |
+| 0B | Live-data integrity invariant (HUD/CLI uydurma yok) | ✅ 2026-07-31 |
+| **1** | **Honesty kernel** — artifact declaration + verification, zero-tool claim gate, shadow rollout metrikleri | ✅ **2026-07-31** |
+| 2 | Clock + temporal + entity resolver (takvim tarih hatası) | ⬜ next |
+| 2.5 | Otomatik rol seçimi (`fast` vs `reasoning`) | ⬜ |
+| 3 | Daily Briefing MVP (1. kabul kilometre taşı) | ⬜ |
+| 4 | Working Set (5-10 tur revizyon) | ⬜ |
+| 5 | Proaktif mail → takvim | ⬜ |
+| 6 | Derin kalıcı hafıza | ⬜ |
+| 7 | MATLAB kalitesinde render + harita | ⬜ |
+| 8 | `web_download` (kendi fazı — SSRF/streaming/karantina) | ⬜ |
+| 9 | Kimi K3 hibrit router | ⬜ |
+
+**Faz 1'den taşınan, bilinçli olarak yapılmayanlar:**
+
+- **`enforce_reversible` açılmadı.** Varsayılan `shadow`. Terfi kararı bir ölçüme bağlı ve ölçüm
+  artık gerçek: `rollout.enforce_gate_status()` → 100 gerçek artifact işlemi, 0 bildirilmiş yanlış
+  blok. Bu sayı görülmeden mod yükseltilmez.
+- **Doğrulama 5 araçta, 36'da değil.** `plot_data`, `report_write`, `report_compose`,
+  `report_compile`, `finance` artifact bildiriyor; `file_write` kendi daha güçlü arg-tabanlı
+  kontrolünde kalıyor. Diğerleri dürüstçe "bağımsız doğrulanmadı" diyor — bu doğru, ama kapsam
+  değil.
+- **`EvidenceSet.facts` boş.** Plan `transaction_count`/`closing_balance` gibi yapılandırılmış
+  olguları anıyor; bugün hiçbir araç bunları yapılandırılmış olarak döndürmüyor ve boş dict bunun
+  dürüst temsili. Sayı taramasıyla doldurulmadı (dış review'ün reddettiği tam olarak buydu).
+- **Bir araç yazmadığı yolu bildirebilir.** Bildirim aracın kendisinden geliyor, yani dönüş
+  değerine duyulan güvenle aynı güvende. Postcondition dosyanın var olduğunu kanıtlıyor, o çağrının
+  onu üretmiş olduğunu değil.
+
 ## Direction (owner decisions, 2026-07-14)
 
 - **Local-first.** Vertex credits likely expired; RTX 4070 available. Ollama/Qwen becomes the

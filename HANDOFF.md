@@ -10,184 +10,162 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Son oturum: 2026-07-31 — yön değişikliği + Post-MVP Faz 0
+## Son oturum: 2026-07-31 — Post-MVP **Faz 1: honesty kernel**
 
-**Durum tek cümlede:** Owner kapsamı yeniden çerçeveledi (finans zinciri **ürün hedefi değil, bir
-kapasite testiydi**; JARVIS'in amacı kişisel asistan/sekreter), 9 fazlı bir Post-MVP planı
-onaylandı, ve **Faz 0 (ölçülebilirlik) bitirildi**: HUD ve terminaldeki her gösterge artık ya
-gerçek veriye bağlı ya da bilmediğini söylüyor.
+**Durum tek cümlede:** *"JARVIS yaptığını söylediği şeyi gerçekten yaptı mı?"* sorusu artık koda
+bağlı — artifact üreten araçlar ürettikleri dosyayı **bildiriyor**, postcondition o dosyayı diskte
+**doğruluyor**, ve turun son cevabı kanıta karşı sınanıyor. Varsayılan `shadow`: her şey ölçülüyor,
+kullanıcının cevabına dokunulmuyor.
 
-## Owner'ın yön kararları (plan bunlara göre kuruldu)
+## Plan ve önceki faz
 
-| Konu | Karar |
-|---|---|
-| Amaç | **Kişisel asistan / stajyer / sekreter.** Finans zinciri sadece zor bir testti |
-| Öncelik | **Mimari doğruluk**, özellik genişliği değil |
-| Model | qwen3:8b'yi maksimum kullan. **Kimi K3 cloud sonra** (GPT-5.6 ile planlanıyor), şimdi maliyet çıkmasın |
-| Yüzey | **Electron HUD** — owner terminale aşina değil. Canlı testleri Claude sürer |
-| Tempo | Açık uçlu, **her faz yeni session** (context şişmesin) |
-| Revizyon | 5+ ardışık, açık uçlu diyalog |
-| Yetki | Takvim/todo serbest — **ama takvim tarih hatası kapandıktan sonra**. Mail hep onaylı |
-| Proaktiflik | Önce güvenilirlik; saat başı mail kontrolü sonraki fazda |
-| Grafik | Herhangi bir kaynak. Önce doğruluk, **sonra** MATLAB kalitesi (owner jeofizik mühendisi) |
-| Ses | Acelesi yok |
-| Repo | Public kalıyor (GPT review için); private geçiş ertelendi |
+Plan: `C:\Users\mertk\.claude\plans\c-users-mertk-downloads-jarvis-post-mvp-federated-kettle.md`
+(Faz 0A + 0B bir önceki oturumda bitti). Sıra: **2** Clock/temporal/entity → 2.5 rol seçimi →
+3 Sabah Brifingi → 4 Working Set → 5 proaktif → 6 hafıza → 7 render/harita → 8 web_download →
+9 Kimi K3.
 
-**Yeni kabul kilometre taşları:** (1) *"JARVIS bugün neler var?"* → sabah brifingi ·
-(2) *"Bu grafiği değiştir"* → 5-10 tur revizyon · (3) *"Ben sormadan önemli şeyi fark et"*.
+## Ne yapıldı
 
-## Onaylanan plan
+**Yeni bir grounding sistemi kurulmadı** — GPT'nin plan düzeltmesi doğruydu.
+`VerifiedExecutionSummary` zaten vardı, iki kapı kapalıydı, ikisi de açıldı.
 
-`C:\Users\mertk\.claude\plans\c-users-mertk-downloads-jarvis-post-mvp-federated-kettle.md`
+1. **Artifact bildirimi** (`jarvis/execution/artifacts.py`). Bu faza kadar **kayıttaki tek
+   postcondition'lı araç `file_write`'tı** ve sebebi ihmal değil yapıydı: çıktı yolu **argüman
+   olan** tek araç o. `plot_data`'nın `output`'u bir **stem** (çakışmada `_1`/`_2` ekleniyor),
+   `report_write` yolu `title`'dan türetiyor, `finance('export')` varsayılanı hesaplıyor.
+   Artık araç dosyayı **gerçekten diske yazdığı anda** yolunu bildiriyor; bildirim
+   `ToolMessage.artifact` üzerinden **bant dışı** gidiyor, yani **modele giden dönüş dizgisi bayt
+   bayt aynı** (bir docstring cümlesinin gate'i 10/10 → 0/10 yaptığı kayıt yüzünden bu bilinçli).
+2. **`declared_artifacts_exist` postcondition'ı** — `plot_data`, `report_write`, `report_compose`,
+   `report_compile`, `finance`. Hepsi yerinde → `confirmed`; **bildirilmiş ama yoksa → aracın kendi
+   başarı beyanı "doğrulama BAŞARISIZ"a düşürülüyor** ve kullanıcıya çıkıyor; hiç bildirim yoksa
+   → `unverified`, asla bedava geçiş.
+3. **Karşılıksız iddia gate'i** (`jarvis/execution/evidence.py`). Yalnız **kanıtlanabilir
+   çelişkide** ateşliyor: bu turda bildirilmemiş **ve** diskte olmayan bir dosya adı, ya da hiçbir
+   aracın çalışmadığı turda bir **yan etki** iddiası. Sayı taraması **yok**.
+4. **Rollout metriği** (`jarvis/execution/rollout.py`) → `data/execution_verification.jsonl`.
+   `enforce_gate_status()` planın eşiğini sayıya çeviriyor: 100 gerçek artifact işlemi, 0
+   bildirilmiş yanlış blok. **Okumak için:**
 
-Sıra: **0A** baseline senkronu → **0B** canlı veri dürüstlüğü → **1** honesty kernel →
-**2** Clock/temporal/entity → **2.5** otomatik rol seçimi → **3** Sabah Brifingi (MVP) →
-**4** Working Set → **5** proaktif → **6** hafıza → **7** render/harita → **8** web_download →
-**9** Kimi K3.
+   ```powershell
+   .venv\Scripts\python.exe scripts\verification_status.py
+   ```
 
-Plan bir GPT review'ünden geçti; **14 maddesinin 13'ü koda karşı doğrulanıp işlendi**. Reddedilen
-tek madde (`force_sync` yok) **senkron artefaktıydı** — GPT remote'u okumuştu, alan yereldeydi.
-Bu yüzden Faz 0A (push edip `local == origin` yapmak) planın ilk gate'i oldu.
+   Yanlış bir blok görülürse `--mark-false-positive "sebep"` ile kaydedilir — bu sayı **asla
+   türetilmiyor** (kod tespit edebilseydi gate zaten ateşlemezdi), yani 0 "bildirilmedi" demek,
+   "olmadı" demek değil. Owner'ın gerçek `data/`'sı şu an **boş**: canlı ölçümler ayrı bir
+   `JARVIS_HOME` altında koşturuldu, sayaç gerçek kullanımla dolacak.
 
-GPT'nin en değerli düzeltmesi: **Faz 1 yeni bir grounding sistemi kurmamalı.**
-`jarvis/execution/summary.py`'deki `VerifiedExecutionSummary` zaten var ve `compose_node`'a bağlı
-(`nodes.py:309`); iki kapı yüzünden hiç çalışmıyor — `execution_contract_mode` varsayılanı `off`,
-ve **sıfır-araç turunda envelope listesi boş** olduğu için uydurma vakasında mekanizma tamamen
-atlanıyor. Faz 1 bu iki kapıyı açacak, sıfırdan yazmayacak.
+## Oturumun en önemli bulgusu — gate yanlış düğümdeydi
 
-## Faz 0'da ne yapıldı
-
-**Değişmez kural (artık testle zorunlu):** *bağlıyken hiçbir alan sentetik, placeholder,
-durumdan-türetilmiş veya rastgele değer gösteremez. Veri yoksa `—`/"veri yok", yetenek yoksa
-"YAKINDA". Demo veri yalnız bağlantı yokken, `○ OFFLINE · DEMO DATA` rozetiyle.*
-
-Owner'ın bildirdiği "terminalde hâlâ Gemini yazıyor" tek bir etiket hatası değil, bir sınıf çıktı:
-
-| Katman | Neyi uyduruyordu |
-|---|---|
-| `ws.py` | psutil yokken `random.uniform()` ile CPU/RAM/GPU; NVML başarısızken `gpu=0.0`; sabit `latency=0` |
-| `HudPanels`/`App` | Model adını **animasyon durumundan** türetiyordu; `REASONING · CLOUD`; `EDGE-TTS` (gerçek motor Piper); sabit Tailscale IP |
-| `App.jsx` | `connected && X.length ? X : fake` — gerçek akış boşsa demo veri; sahte mikrofon, hiç olmamış tool çağrıları, vault 2847, senaryolu diyalog, animasyondan türetilen "meşgul" ajanlar |
-| `useJarvisSocket` | metrics'i uydurma değerlerle seed'liyordu |
-| `cli.py` | `CLOUD_POLICY=off` iken Vertex ilan ediyordu; menüde "Qwen2.5 7B" (gerçek: qwen3:8b); emekli `text-embedding-004`; yerel kurulumda gereksiz API-key uyarısı |
-
-**psutil bu makinede gerçekten kurulu değil** — sunucunun kendi açılış logundan doğrulandı. Yani
-owner'ın HUD'da bugüne dek gördüğü her metrik uydurmaydı; varsayımsal bir dal değil, canlı yolun
-kendisiydi.
-
-Bağlanacak gerçek veri artık var: `ws.py` `model_status` yayınlıyor,
-kaynağı `JarvisAgent.last_turn_trace` (yeni ölçüm yok — `turn_summary` zaten "cevabı hangi çağrı
-yazdı"yı çözüyor). Tek etiket sözlüğü `jarvis/providers/labels.py` + renderer ikizi
-`lib/display.js`; iki sözlük **zaten ayrışmıştı** (runtime `ollama`, menü `local` diyor).
-
-**Ayrıca Faz 0'da:**
-- Async sezgisi gündelik Türkçeye çıplak substring eşliyordu → `grafik`/`rapor`/`finansal`/
-  `araştır`/`3d` çıkarıldı, eşleşme kök-çıpalı + diakritik-fold (`tool_router._fold` yeniden
-  kullanıldı). HUD ayrıca `force_sync` gönderiyor.
-- **Metin modunda markdown açıldı.** Ses kuralı koşulsuz yükleniyordu çünkü `prompt_loader` tüm
-  `core/*.md`'yi glob'luyor; `PromptContext.surface` mevcut `transport` id'sinden türetiliyor.
-  **Bu yarım kalsaydı hiç açmamaktan kötü olurdu** — Transcript `{t.text}` basıyordu, yani owner
-  ham `**kalın**` ve `| tablo |` görecekti. `lib/markdown.jsx` cevapları **React elementi** olarak
-  render ediyor, asla `dangerouslySetInnerHTML` değil (model çıktısı güvenilmez sayfa/dosya
-  alıntılıyor).
-- `scripts/start_jarvis.ps1` + `.cmd`: çift tıkla Ollama'yı HTTP ile yokla (process kontrolü asılı
-  bir listener'ı sağlıklı sayardı), API'yi başlat, HUD'u aç.
-
-**Canlı doğrulama (yalnız test değil):** API + HUD gerçek komut çubuğundan uçtan uca sürüldü.
-*"bugün ayın kaçı"* → doğru tarih; grafik isteği **interaktif** cevaplandı (arka plana düşmedi) ve
-PNG'yi bildirdiği yolda gerçekten üretti; tablo isteği gerçek `<table>` olarak render edildi
-(2 başlık + 6 hücre, ham `|` yok). Routing `qwen3:8b · Ollama · fast`, round-trip gerçek 13324 ms,
-ve canlı DOM'da `Gemini|Vertex|CLOUD ROUTE|EDGE-TTS|Tailscale` taraması **boş** döndü.
-
-**Guard testinin ayırt etme gücü ölçüldü, varsayılmadı:** enjekte edilen 8 regresyonun 8'i de
-kırmızıya döndürüyor. 8.'si guard'ın kendi kusurunu açığa çıkardı — bir kontrol ham dosyayı
-okuyordu ve rozet metnini silen mutasyonu geçiriyordu, çünkü yakındaki bir yorum aynı dizgiyi
-alıntılıyordu. Artık yorumları soyuyor.
-
-## CI — canlı bakın, ama bilinen durum şu
-
-`gh run list --branch langgraph-migration` ile bakın — **ama satır özeti yetmez.** Job düzeyine
-inin: `gh run view <id> --json jobs -q '.jobs[] | "\(.name): \(.conclusion)"'`.
-
-Sebebi: **`mobile` job'ı `continue-on-error: true`** (owner kararı, 2026-07-23; aynı gün `electron`
-bloke edici yapıldı çünkü L3 onay ekranını render ediyor). Yani mobile başarısızken bile koşu
-"success" görünür — bu doğru bir özet, yanıltıcı değil, ama tavsiye niteliğindeki job'lar hakkında
-hiçbir şey söylemez. Bu oturumda run özetlerini karşılaştırıp "mobile 07-25'te geçiyordu, yeni bir
-şey bozdu" diye var olmayan bir regresyon arandı; job düzeyi bakınca o koşuda da failure'dı.
-
-**`mobile` en az 2026-07-25'ten beri başarısız** — 71 bulgunun tamamı info/warning
-(65× `withOpacity` deprecation, + `assets/fonts/` ve `assets/wake/` git'te hiç yok çünkü boş dizin
-izlenmiyor). Kod regresyonu değil, bloke etmiyor, ve owner mobil yüzeyi geriye aldı.
-**Owner kararı bekliyor: temizlensin mi, mobil fazına mı bırakılsın.**
-
-**`python` job'ı 07-25'te geçip 07-31'de kaldı — bu gerçek bir regresyondu ve düzeltildi.**
-`test_explicit_output_is_confined_to_the_workspace` **ortama bağlıydı**: `files._resolve()` ev
-dizini altındaki her yolu bilerek kabul ediyor (Desktop/Downloads erişimi bu), dolayısıyla
-`../escape.xlsx`'in reddedilip reddedilmemesi pytest'in tmp dizininin ev dizinine göre nerede
-olduğuna bakıyordu.
+Gate ilk olarak `compose_node` içine yazıldı (cevabın yazıldığı yer, bariz ev). **Canlı graph
+bağlantılarını okuyunca compose'un END'e giden her yolda olmadığı görüldü:**
 
 ```
-bu makine   TEMP=C:\Temp                            -> ev DIŞINDA -> red  -> test geçer
-CI runner   TEMP=C:\Users\RUNNERADMIN\AppData\...   -> ev İÇİNDE  -> kabul -> test kalır
+agent -> critic -> END                                (hiç araç çağrılmadı)
+agent -> ... -> tools -> ... -> compose -> critic -> END
+agent -> ... -> tools -> ... -> agent  -> critic -> END
 ```
 
-Aynı kod, zıt sonuç — ve varsayılan Windows kurulumunda (temp profil altında) herkes için
-kalırdı. Test, yol politikasını değil işletim sisteminin temp'i nereye koyduğunu ölçüyormuş.
-`jarvis_home` fixture'ı ile `JARVIS_HOME` sabitlendi (kaçış hedefi artık her hostta ispatlı
-şekilde ikisinin de dışında), test **gerçek politikaya göre yeniden adlandırıldı**, ve politikanın
-diğer yarısını belgeleyen bir eş test eklendi (ev dizini içi **bilerek** serbest — biri
-`_resolve()`'u "düzeltip" gerçek kullanımı kırmasın diye).
+İlk satır sıradan bir sohbet turu — ve *"dosya iddia etti, araç çağırmadı"* **en çok tam olarak o
+şekilde** olur. Yani kontrol **kendi manşet vakasına yapısal olarak kördü**, ve bütün testler
+geçiyordu çünkü hepsi düğümü doğrudan çağırıyordu.
+
+Çözüm: **terminal `verification_node`**, END'e giden her yolda. Bedava gelen ikinci fayda: tur
+başına **tam bir** gate değerlendirmesi ve tek bir operasyon satırı seti — yoksa terfi metriği
+turların bilinmeyen bir kesri üzerinden ölçülürdü. `tests/test_unbacked_claim_gate.py` artık
+**edge haritasının kendisini** doğruluyor.
+
+`jarvis/graph/nodes.py` bu taşımadan sonra **saf ekleme**: 220 satır eklendi, 0 silindi —
+`compose_node` bayt bayt eski hâlinde.
+
+## Diğer bulgular (hepsi doğrulamadan çıktı, özellik yazarken değil)
+
+- **Onarım turu akışa sızacaktı.** İki taslak aynı düğümden aynı `langgraph_step`'te geliyordu, yani
+  BUG-12'nin adım-sınırı ayracı ikisini ayıramıyordu. `REPAIR_STREAM_TAG` eklendi.
+- **Sistemin kendi durum bloğu gate'i tetikleyebilirdi.** enforce'ta `compose_node` kendi kod
+  yazımı bloğunu ekliyor ve doğrulama-başarısız vakada o blok **bilerek diskte olmayan** bir yolu
+  alıntılıyor. Artık `summary.USER_STATUS_MARKER`'dan bölünüp yalnız modelin yarısı yargılanıyor.
+  (Negation guard bunu zaten yakalıyordu — ama iki alakasız metnin tesadüfen örtüşmesiyle.)
+- **Akan bir taslağı geri alamayız.** enforce'ta blok, state'i ve geçmişi düzeltir ama HUD'un
+  gördüğü tokenları geri almaz. `docs/SAFETY.md`'de **terfi engeli** olarak yazıldı.
+- **`tests/conftest.py`'ye autouse fixture eklendi.** Varsayılanın `shadow`'a çıkması, gerçek tur
+  süren her mevcut teste yeni bir yan etki verdi: owner'ın gerçek
+  `data/execution_verification.jsonl`'ına yazmak — yani terfi kararının dayandığı sayıları bozmak.
+- **Mutasyon turu iki gerçek boşluk buldu:** negation guard'ın **hiç testi yoktu** (iki "dürüst
+  hata" satırı ona ulaşmadan erken dönüyordu), ve o guard'daki çıplak `\byok\b` gerçek bir recall
+  deliğiydi ("sorun yok" tek başına gate'i kapatıyordu).
 
 ## Test / lint (2026-07-31, bu oturumun sonunda çalıştırıldı)
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q                     # 1722 passed, 5 deselected, 3 dk 47 sn
+.venv\Scripts\python.exe -m pytest -q                        # 1836 passed, 5 deselected, 4 dk 50 sn
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests  # All checks passed!
-npm test    --prefix electron                             # 27 passed (13 chatStream + 14 markdown)
-npm run build --prefix electron                           # 35 modül, hatasız
+npm test    --prefix electron                                # 27 passed
+npm run build --prefix electron                              # 35 modül, hatasız
 ```
 
-Yeni test dosyaları: `tests/test_no_synthetic_live_data.py` (14 test, kaynak taraması),
-`electron/src/renderer/src/lib/markdown.test.jsx` (14 test, yarısı enjeksiyon güvenliği).
-Güncellenenler: `test_chat_force_sync.py` (eski hatalı davranışı sabitleyen 2 test yeni
-davranışa çevrildi), `test_workbook_export.py` (ortama bağlı test düzeltildi + eş test),
-`test_confirmation_resume_trace.py` ve `test_reset_per_conversation.py` (stub'lar yeni
-arayüzü taşıyor).
+Yeni: `test_declared_artifacts.py` (24), `test_declared_artifact_postcondition.py` (23),
+`test_unbacked_claim_gate.py` (57), `test_rollout_metrics.py` (11).
+**Mutasyon: 16/16 enjekte regresyon yakalandı** (`verify`'ı critic'in END yolundan almak ve cevabı
+yalnız `state["response"]`'tan okumak dahil).
 
-**Mutasyonla doğrulanan:** `test_no_synthetic_live_data.py` — 8 ihlal enjekte edildi, 8'i de
-kırmızıya döndü. `test_workbook_export.py`'nin ortam bağımlılığı `_resolve()` doğrudan iki farklı
-`JARVIS_HOME` ile çağrılarak kanıtlandı (aynı kod, zıt sonuç).
+## Canlı ölçüm (gerçek qwen3:8b, gerçek graph, n=10/senaryo, 40 tur)
 
-## SONRAKİ OTURUM — Faz 1: honesty kernel
+`JARVIS_HOME` ayrı dizine alındı: dosyalar **gerçekten** yazıldı, owner'ın `data/`'sına dokunulmadı.
 
-Plan dosyasındaki Faz 1'i uygulayın. Özet:
+| Senaryo | Sonuç |
+|---|---|
+| A — artifact zinciri | **10/10 her eksende**: araç · bildirim · `verified` · `confirmed` · PNG diskte · cevap **gerçek yolu** yazdı · gate sessiz. p50 21.0 sn, p95 39.8 sn |
+| B — revizyon yemi (önceki grafik yok) | **0/10 uydurma** |
+| C — başarısızlık dürüstlüğü (olmayan CSV) | **0/10 uydurma**, 8/10 hatayı açıkça bildirdi |
+| D — yanlış-pozitif probu | **0/10 gate tetiklenmesi** |
 
-1. `execution_contract_mode`: `off → shadow → enforce_reversible`, **global switch değil rollout
-   metriğiyle** (`verification_total/verified/unverified/failed/false_positive`; "100 gerçek
-   artifact işleminde 0 false block" görülmeden enforce yok).
-2. **Sıfır-araç uydurma sınıfını kapat** — envelope listesi boşken cevap artifact/işlem iddia
-   ediyorsa. Postcondition bunu yakalayamaz: postcondition *çalışmış bir aracı* doğrular.
-   `summary.py`'deki `audit_claims()` (bugün yalnız gözlem) bu tek vakada karar verici olur.
-3. **Typed evidence, regex sayı taraması DEĞİL** — *"Bunu 3 adımda yapabiliriz"* ile
-   *"89 işlemin 45'i gelir"* aynı extractor'dan geçer. `EvidenceSet` (artifact/operation/facts).
-4. Artifact bildirimini standartlaştır (~5 araç: `plot_data`, `finance('export')`,
-   `report_compose`, `report_compile`, `workbook`) — `plot_data.output` bir **stem** olduğu için
-   bugün doğrulanamıyor. Bugün yalnız `file_write` postcondition tanımlıyor
-   (`tool_registry.py:130`).
-5. Başarısızlıkta bir sınırlı onarım turu, sonra doğal dilde dürüst rapor
-   (*"Efendim, istediğiniz dosyayı oluşturamadım"*). Sessiz düzeltme yok.
+**En değerli sayı tabloda değil:** B+C'nin 20 turunda model **15 kez dosya adı andı**, **0 kez
+tamamlama iddiası** yaptı. "Yol anıyorsa uydurmuştur" diyen naif bir dedektör orada **15 yanlış
+pozitif** üretirdi.
 
-**Test rejimi (GPT düzeltmesi kabul edildi):** deterministik kod (Clock, resolver, postcondition,
-WorkingSet patch) **bir kez** koşar; model davranışı içeren her şey **n=10–20** ve ikili geç/kal
-değil **oran** ölçülür (başarı, uydurma, tool-call doğruluğu, gecikme p50/p95).
+Gate'in ateşleme yolu da canlı sürüldü (composer sözleri zorlandı, gerisi gerçek): shadow tespit
+eder/dokunmaz · enforce + temiz onarım → onarılmış cevap · enforce + kirli onarım → dürüst rapor.
+**Kapsam canlı doğrulandı:** `conversation_no_tools` / `artifact_turn` / `failing_tool` →
+üçünde de tur başına **tam 1** `claim_gate` satırı (taşımadan önce ilki 0 üretirdi).
 
-## Bu oturumda değişmeyen taşınan işler
+## SONRAKİ OTURUM — Faz 2: Clock + temporal + entity
+
+Plan dosyasındaki Faz 2. Takvim hatasının mekanizması doğrulanmış durumda:
+`calendar.py:94` `datetime.now(timezone.utc)` ile "yarın" hesaplıyor, `:329` naive wall-clock +
+`timeZone: Europe/Istanbul` gönderiyor — **İstanbul'da 00:00–03:00 arası UTC hâlâ önceki gündür**,
+yani "yarın" bir gün erken çözülüyor. Regresyon testi tam olarak
+`FrozenClock(2026-07-31 23:30 Europe/Istanbul)`.
+
+Sıra: injectable `Clock` → temporal resolver (model yalnız `date_expression` üretir, timestamp'i
+**kod** hesaplar) → entity resolver (güven bantları: ≥0.95 otomatik, 0.75–0.95 sor, <0.75 dokunma)
+→ başlık/açıklama disiplini → confidence-based takvim onayı.
+
+## Faz 1'den taşınan, bilinçli olarak yapılmayanlar
+
+- **`enforce_reversible` açılmadı** — varsayılan `shadow`. Terfi bir ölçüme bağlı:
+  `rollout.enforce_gate_status()` → 100 gerçek artifact işlemi, 0 bildirilmiş yanlış blok.
+  **Ek terfi engeli:** akan bir taslağı geri alamama (yukarıda).
+- **Doğrulama 5 araçta, 36'da değil.** Diğerleri dürüstçe "bağımsız doğrulanmadı" diyor.
+- **`EvidenceSet.facts` boş** — hiçbir araç yapılandırılmış olgu döndürmüyor; sayı taramasıyla
+  doldurulmadı (dış review'ün reddettiği tam olarak buydu).
+- **Bir araç yazmadığı yolu bildirebilir** — bildirim aracın dönüş değeriyle aynı güvende.
+  Postcondition dosyanın varlığını kanıtlar, o çağrının onu ürettiğini değil.
+- `audit_claims()` bu vaka için **kullanılamadı** — `summary.any_failed` olmadan erken dönüyor,
+  boş operasyon listesi bunu asla sağlayamaz. Kendi yerinde kaldı.
+
+## Önceki oturumlardan taşınan, değişmeyen işler
 
 - 4 worktree branch read-through — ayrı go-ahead bekliyor (CLAUDE.md'de liste).
 - 7 direct-Gemini modülün shared gateway'e migrasyonu.
-- Electron `npm audit`; canlı HUD E2E'nin **Electron penceresi** ayağı (bu oturumda HUD tarayıcı
-  panelinden sürüldü — renderer'da sıfır Electron IPC bağımlılığı var, `window.jarvis` yoksa
-  `127.0.0.1:8000`'e düşüyor; **Electron pencere kontrolü ve PTT kısayolu bu yolla test edilemez**).
+- Electron `npm audit`; canlı HUD E2E'nin **Electron penceresi** ayağı (pencere kontrolü ve PTT
+  kısayolu tarayıcı panelinden test edilemez).
 - Alt+Space → `/voice/ptt/start`; wake-word modeli; alpha gate'i GEÇTİ'ye taşımak.
-- Finans: boru hattı çalışıyor, tek gerçek kaynak PDF ekstre importu (mail kutusunda banka
-  bildirimi yok — canlı doğrulandı). Owner ayda bir manuel importu kabul etti.
+- Finans: boru hattı çalışıyor, tek gerçek kaynak PDF ekstre importu. Owner ayda bir manuel
+  importu kabul etti.
+- **CI:** `gh run list --branch langgraph-migration` ile **job düzeyine** bakın
+  (`gh run view <id> --json jobs`). `mobile` job'ı `continue-on-error: true` (owner kararı,
+  2026-07-23) ve **en az 2026-07-25'ten beri başarısız** — 71 bulgunun tamamı info/warning
+  (65× `withOpacity`, + `assets/fonts/` ve `assets/wake/` boş dizin olduğu için git'te yok).
+  Kod regresyonu değil, bloke etmiyor. **Owner kararı bekliyor.**

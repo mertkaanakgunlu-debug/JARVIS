@@ -55,6 +55,27 @@ MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSp
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
 | `procedure_save` | L2 | memory | — | — | 15s | Save a reusable multi-step workflow to procedural memory (Faz 2) |
 
+## Independently verified tools (Post-MVP Faz 1, 2026-07-31)
+
+Most tools report their own success and are believed. These six are checked against the
+filesystem afterwards, so a tool that says "written" and a file that is not there produce
+different outcomes:
+
+| Tool | Postcondition | How the path is found |
+|---|---|---|
+| `file_write` | `file_exists` + `path_within_workspace` | Its `path` argument IS the destination |
+| `plot_data` | `declared_artifacts_exist` | Declared by `generate_plot` after `savefig` — `output` is only a filename STEM, and collisions append `_1`/`_2`, so the argument never identified the real file |
+| `report_write` | `declared_artifacts_exist` | Declared after write — the path is derived from `title` |
+| `report_compose` | `declared_artifacts_exist` | Declared after write |
+| `report_compile` | `declared_artifacts_exist` | Declared after the PDF is copied out of the temp dir, so what is verified is the file the user can open |
+| `finance` | `declared_artifacts_exist` | `export` declares the `.xlsx`; its embedded chart declares itself inside `generate_plot`. Read-only actions declare nothing and honestly report "unverified" |
+
+Verdicts: all declared files present → `confirmed`; **any declared file missing → the tool's
+reported success is downgraded and surfaced to the user**; nothing declared → `unverified`, never
+a silent pass. Every other tool in the table above stays honestly "not independently verified".
+Mechanism: `jarvis/execution/artifacts.py` (declaration) and
+`jarvis/execution/postcondition_runner.py` (checking); see [SAFETY.md](SAFETY.md).
+
 ## MCP tools (Faz 5, dynamic — `jarvis/mcp_integration.py`)
 
 Not in `make_tools()`/the table above — discovered at connect time from configured MCP servers

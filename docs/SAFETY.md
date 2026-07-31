@@ -171,6 +171,40 @@ exact action tables.
   for the mechanism. Doesn't change what the gate blocks, only whether you can trust what you're
   told happened.
 
+## What Post-MVP Faz 1 changed (2026-07-31) — the honesty kernel
+
+A different axis from everything above. Faz 4–7 answer *"is JARVIS allowed to do this?"*; this
+phase answers *"did JARVIS actually do what it just told you it did?"* A confirmation gate cannot
+help with a model that reports a chart it never drew — no tool call was made, so there was nothing
+to gate.
+
+Two gates were holding the existing verification machinery shut. `VerifiedExecutionSummary`
+(`jarvis/execution/summary.py`) had been wired into `compose_node` since Agent Runtime rev.2 Faz 4,
+but `execution_contract_mode` defaulted to `"off"`, **and** the summary was only built when the
+turn's envelope list was non-empty — so the one case that matters most, a turn where no tool ran at
+all, skipped every check. Both are now open.
+
+| Mechanism | Where | What it covers |
+|---|---|---|
+| **Artifact declaration** | `jarvis/execution/artifacts.py`, declared inside `generate_plot` / `export_cashflow_workbook` / `latex_write` / `compose_report` / `latex_compile` | A tool that writes a file states the real, final path at the moment it is on disk. Rides back on `ToolMessage.artifact` (out of band — the model-facing return string is untouched), so nothing has to parse prose. Before this, `file_write` was the only tool in the registry that could be verified at all, because it is the only one whose output path is a direct argument. |
+| **`declared_artifacts_exist` postcondition** | `jarvis/execution/postcondition_runner.py`, attached to `plot_data`, `report_write`, `report_compose`, `report_compile`, `finance` | Every declared file is checked on disk. Present → `confirmed`; **declared but absent → the tool's self-reported success is downgraded to "reported successful … but independent verification FAILED"**, which `render_operation_status_for_user` puts in front of the user. Nothing declared → `unverified`, never a free pass. |
+| **Unbacked-claim gate** | `jarvis/execution/evidence.py`, run by `verification_node` — a **terminal** graph node on every path to END | Catches the zero-tool class: the answer names a file that is neither a declared artifact of this turn nor present on disk, or asserts a side effect (*saved / sent / exported*) in a turn where nothing ran. Typed evidence only — no number scanning, which the external review showed manufactures false positives out of ordinary sentences. In enforce mode it runs **exactly one** bounded repair round, then falls back to an honest report. |
+| **Rollout metrics** | `jarvis/execution/rollout.py`, append-only at `data/execution_verification.jsonl` | Makes the shadow→enforce promotion a measurement instead of a judgment call: 100 real artifact operations with zero reported false blocks. Read it with `python scripts/verification_status.py`; record an operator-judged false block with `--mark-false-positive "reason"`. |
+
+**The default is now `shadow`, not `off`.** In shadow everything above is computed and counted, and
+the user-visible answer is not touched — a detector bug costs a log line, not a wrong reply.
+`off` remains the rollback switch.
+
+Two honesty notes about this section itself:
+
+- `false_positive_known` is **never inferred**. A false positive means verification contradicted a
+  claim that was actually true; if code could detect that, it would not have fired. Zero means
+  "none reported", not "none occurred", and `enforce_gate_status()` says so in its own output.
+- The gate is tuned for precision over recall, deliberately: it stays silent on anything it cannot
+  prove is false, including a named file that really is on disk (the user may be asking about
+  something written last week). It will miss hallucinations. It is not supposed to block a claim it
+  cannot contradict with evidence.
+
 ## Known limits (honest, not aspirational)
 
 - **Electron confirmation UI exists but is not yet live-verified; mobile has none.** The HUD
@@ -188,6 +222,25 @@ exact action tables.
   bug, but worth knowing: an async-submitted query that turns out to need one just fails with an
   actionable error telling the user to ask interactively instead.
 - **`python_run`'s reclassification is a gate, not a sandbox** (see above).
+- **The honesty kernel is in shadow, so today it observes rather than blocks.** Everything in
+  "What Post-MVP Faz 1 changed" is computed on every turn, but only an `enforce_*` mode rewrites a
+  contradicted answer. Until the promotion gate is met, a fabricated claim is *detected and logged*,
+  not withheld from the user.
+- **Verification covers five artifact tools, not all 36.** `plot_data`, `report_write`,
+  `report_compose`, `report_compile` and `finance` declare; `file_write` keeps its own stronger
+  args-resolved checks. Every other tool still reports honestly as "not independently verified" —
+  which is accurate, not a silent pass, but it is not coverage.
+- **A tool could declare a path it did not write.** The declaration is made by the tool itself, so
+  it is trusted the same way the tool's return value is; the postcondition proves the file exists,
+  not that this call is what produced it.
+- **On a streaming transport, an enforce-mode block cannot un-send the draft.** The gate runs after
+  `compose_node`'s answer is produced, but the HUD/voice stream has already emitted it token by
+  token. The repair round itself is tagged (`REPAIR_STREAM_TAG`) so it never splices onto the draft
+  — but the corrected answer only reaches the user through the node's returned state and the saved
+  history, not through the stream they already watched. Buffering compose output until verification
+  finishes is the real fix; **this is a blocker on the shadow→enforce promotion**, listed with the
+  metric threshold, not after it. In shadow (today's default) nothing is rewritten, so nothing
+  diverges.
 - **Kill switch scope is L3 only** — it does not block L2 (reversible local writes: `file_write`,
   `todo`, `spotify`, ...). This is deliberate (an emergency stop for JARVIS acting on the *outside
   world*, not a full halt of all functionality) but worth knowing if you expected it to block more.

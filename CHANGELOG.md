@@ -6,6 +6,193 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Post-MVP Faz 1: honesty kernel] — 2026-07-31
+
+*"Did JARVIS actually do what it just told you it did?"* — a different question from the one the
+Faz 4–7 safety kernel answers (*"is JARVIS allowed to do this?"*), and one a confirmation gate
+structurally cannot help with: when the model reports a chart it never drew, there was no tool call
+to gate.
+
+The plan's own scoping correction was the most useful part of this phase: **do not build a new
+grounding system.** `VerifiedExecutionSummary` (`jarvis/execution/summary.py`) has been wired into
+`compose_node` since Agent Runtime rev.2 Faz 4. Two gates were holding it shut:
+
+```python
+summary = build_verified_summary(envelopes_raw) if (envelopes_raw and mode != "off") else None
+#                                                    ^^^^^^^^^^^^^     ^^^^^^^^^^^^^
+#                                       EMPTY on a zero-tool turn   default was "off"
+```
+
+Both are now open, and the second one mattered more than it looks: the empty-envelope condition
+gated out precisely the case the phase exists for.
+
+### Artifact declaration — the reason only one tool could ever be verified
+
+Before this, `file_write` was the *only* tool in the registry with a postcondition, and the reason
+was structural rather than an oversight: it is the only artifact tool whose output path is a direct
+argument. `plot_data`'s `output` is a filename STEM (and collisions append `_1`/`_2`),
+`report_write` derives its path from `title`, `finance('export')` computes a default. For all of
+them the question "is the file you claimed actually there?" had no way to be asked.
+
+The obvious fix — regex the path back out of the tool's return string — is rejected in the plan,
+and the strings themselves are the argument against it: `"Compiled successfully: C:\..."`, a
+six-line Turkish cash-flow summary, `"Grafik oluşturuldu: ..."`. A parser over prose is an
+undeclared second contract that breaks the first time someone rewords a message.
+
+So the tool declares instead (`jarvis/execution/artifacts.py`): the real, final path, at the moment
+the file is genuinely on disk (after `savefig`, after `wb.save`), carried out of band on
+`ToolMessage.artifact` — LangChain's existing channel for structured tool data the model is not
+meant to read. **The model-facing return string is untouched, byte for byte**, which is deliberate
+and load-bearing: this repo has a measured record of a single added docstring sentence moving a
+gate from 10/10 to 0/10 with zero tool calls. A verification layer must not pay for itself in
+behavior drift.
+
+Transport rests on two concurrency properties, both tested rather than assumed: `asyncio.gather`
+gives each tool call its own context copy, and a sync tool dispatched into a worker thread runs
+under `copy_context()` and so appends into the *same list object* the awaiting parent holds.
+
+New postcondition kind `declared_artifacts_exist`, attached to `plot_data`, `report_write`,
+`report_compose`, `report_compile` and `finance`. All declared files present → `confirmed`; **any
+declared file missing → the tool's self-reported success becomes "reported successful … but
+independent verification FAILED"**, which the existing renderer puts in front of the user;
+nothing declared → `unverified`, never a free pass (a multi-action tool's read-only actions must
+not inherit a badge they did not earn).
+
+### Unbacked-claim gate — the zero-tool class
+
+`jarvis/execution/evidence.py`. Typed `EvidenceSet` (artifacts / operations / facts) built from
+envelopes, and a check that fires only on a provable contradiction: a named file that is neither a
+declared artifact of this turn nor present on disk, or a side-effect assertion in a turn where
+nothing ran at all.
+
+**It runs in a new terminal `verification_node`, and the reason is the most useful thing this
+phase found.** It was built inside `compose_node` — the obvious home, where the answer is written.
+Reading the live graph wiring while setting up the end-to-end run showed compose is not on every
+path to END:
+
+```
+agent → critic → END                                  (no tool calls)
+agent → … → tools → … → compose → critic → END
+agent → … → tools → … → agent  → critic → END        (multi-step, second round has no calls)
+```
+
+The first line is a plain conversational turn — and *"claimed a file, called no tool"* is most
+often exactly a plain conversational turn. **The check was structurally blind to its own headline
+case**, and every test passed, because they all invoked the node directly. Moving it to a terminal
+node on every path to END fixes that and gives one more thing for free: exactly one gate evaluation
+and one set of per-operation rows per turn, so the promotion metric is measured over all turns
+rather than an unknown fraction. `tests/test_unbacked_claim_gate.py` now asserts the edge map
+itself, so moving it back is a red test rather than a silent regression.
+
+A second interaction fell out of the same move: in enforce mode `compose_node` appends its own
+code-authored status block, and for a verification-FAILED operation that block quotes a path which
+is deliberately *not* on disk. Judged as model output it reads as a fabricated file claim — the
+gate would accuse the system's own honest report. `verification_node` now splits on
+`summary.USER_STATUS_MARKER` and judges only the model's half. (The negation guard happened to
+catch this already, because the block contains the word FAILED — but that is a coincidence between
+two unrelated pieces of wording, not a design.)
+
+Three design points, each of which came from something breaking rather than from taste:
+
+- **Numbers are never the trigger.** The external review's counter-examples — *"Bunu 3 adımda
+  yapabiliriz"* and *"89 işlemin 45'i gelir"* — feed the same extractor, so a numeric claim-checker
+  manufactures false positives out of ordinary sentences. Nothing here looks at a number.
+- **Generic completion verbs do not convict on their own.** The first probe of this detector
+  flagged *"Sizin için bir liste oluşturdum: 1) süt 2) ekmek"* — a model composing a list inline,
+  which is exactly right and involves no side effect. Verbs are split: side-effect verbs
+  (*kaydettim / gönderdim / saved / sent*) are self-anchoring; generic ones only convict alongside
+  a named file that turns out not to exist.
+- **A file that really is on disk is never called a lie.** The user may be asking about something
+  written last week.
+
+`audit_claims()` could not be re-pointed at this case as the plan suggested: it returns early
+unless `summary.any_failed`, which an empty operation list can never be. It stays as-is for its own
+case; the new check was written alongside it.
+
+In enforce mode: **exactly one** bounded repair round, then an honest natural-language report
+(*"Efendim, istediğiniz dosyayı oluşturamadım"*) in the user's language. Never a loop — this node
+is on the turn's critical path, and "keep asking until it stops lying" is not a bounded operation.
+
+### The ladder is now a measurement, not a judgment call
+
+Default moves `off` → **`shadow`**. In shadow everything above is computed and counted and the
+user-visible answer is not touched, so a detector bug costs a log line rather than a wrong reply.
+`jarvis/execution/rollout.py` records per-operation verifications and every gate evaluation to
+`data/execution_verification.jsonl`; `enforce_gate_status()` implements the plan's threshold
+literally — 100 real *artifact* operations, zero reported false blocks.
+
+`false_positive_known` is never inferred, and this is stated in the API rather than assumed by the
+reader: a false positive means verification contradicted a claim that was actually true, and if
+code could detect that it would not have fired. Zero means "none reported", not "none occurred".
+
+### Verification
+
+`pytest -q` → **1836 passed**, 5 deselected (4 min 50 s, 2026-07-31); `ruff check jarvis scripts
+tests` clean; `npm test --prefix electron` 27 passed; `npm run build --prefix electron` clean.
+New: `tests/test_declared_artifacts.py` (24), `tests/test_declared_artifact_postcondition.py` (23),
+`tests/test_unbacked_claim_gate.py` (57), `tests/test_rollout_metrics.py` (11).
+
+**Mutation-verified, 16/16 injected regressions caught** — including taking `verify` off the
+critic's path to END, reading the answer only from `state["response"]` (which would make the node
+blind to `agent → critic → END` again), turning the single repair round into a loop, letting shadow
+edit the answer, and making "nothing declared" count as verified.
+
+**Live, n=10 per scenario against real qwen3:8b** (real graph, real tools, `JARVIS_HOME` redirected
+so files were genuinely written without touching the owner's `data/`):
+
+| Scenario | Result |
+|---|---|
+| Artifact chain (*"draw a line chart of these numbers"*) | **10/10 on every axis** — tool called, artifact declared, postcondition `verified`, operation `confirmed`, PNG genuinely on disk, and the reply named the **real** path. p50 21.0 s, p95 39.8 s |
+| Revision bait (revise a chart that was never drawn) | **0/10 fabrications** — asked for the path or said it could not |
+| Failure honesty (nonexistent CSV) | **0/10 fabrications**, 0 artifacts declared, 8/10 reported the error explicitly |
+| False-positive probe (inline list, no tools) | **0/10 gate fires** |
+
+The most useful number is not in that table. Across the 20 bait/failure turns the model **named a
+file 15 times and made a completion claim 0 times** — a naive "mentions a path ⇒ hallucination"
+detector would have produced 15 false positives there. Requiring both conditions eliminated all of
+them, which is the precision argument holding up against real output rather than against test
+fixtures.
+
+The gate's firing path was driven live too, with the composer's wording forced (everything else
+real): shadow detects without editing; enforce with a clean repair passes the rewrite through;
+enforce whose repair is *also* contradicted falls back to the honest Turkish report. And coverage
+was confirmed on the live graph — `conversation_no_tools`, `artifact_turn` and `failing_tool` each
+produce **exactly one** `claim_gate` row. Before the terminal-node move the first of those produced
+zero.
+
+Three findings came from verification rather than from writing the feature, and none would have
+surfaced from the unit tests alone:
+
+- **The gate was on the wrong node** (above) — found by reading the live graph wiring while setting
+  up the end-to-end run, not by any test.
+- **The repair round would have spliced into the stream.** Both drafts came from the same node in
+  the same `langgraph_step`, so `graph_stream_to_text`'s step-boundary separator (BUG-12's fix)
+  could not tell the discarded draft from its replacement. Now tagged `REPAIR_STREAM_TAG` and
+  filtered; the terminal move made the node-name filter cover it too, and both locks are kept so a
+  future move cannot silently reintroduce it.
+- **An enforce-mode block cannot un-send a streamed draft.** Not fixable at this layer — recorded
+  in `docs/SAFETY.md` as a blocker on the shadow→enforce promotion, alongside the metric threshold
+  rather than after it.
+
+Two more came from the mutation pass itself:
+
+- The negation guard (*an admitted failure suppresses the gate*) had **no test that reached it**.
+  Both "honest failure" rows in the table returned earlier, at the completion-claim check. Fixed by
+  adding mixed answers (*"Grafiği kaydettim, ancak Excel dosyası oluşturulamadı"*) — the only shape
+  that exercises it.
+- A bare `\byok\b` in that guard was a real recall hole: "yok" is ordinary conversational Turkish
+  ("sorun yok"), so one throwaway reassurance could switch the whole gate off. Now anchored to the
+  nouns that make it an admission.
+
+Also fixed: `tests/conftest.py` gained an **autouse** fixture redirecting the metrics stream to
+tmp. The flipped default handed every existing test that drives a real turn a brand-new side
+effect — writing into the developer's real `data/execution_verification.jsonl`, i.e. corrupting the
+exact numbers the promotion gate is decided on. Same lesson as the workspace-confinement test one
+session earlier: a test that silently changes what it asserts when an unrelated default moves is
+measuring the default, not the behavior.
+
+---
+
 ## [MVP: mail → cash flow → Excel → chart] — 2026-07-30
 
 The owner set one acceptance target — *"Maillerimi kontrol et, hesabımdaki para akışını analiz et,

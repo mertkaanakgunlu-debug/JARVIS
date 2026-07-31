@@ -19,13 +19,30 @@
 START
   └─ route_from_start
        ├─ planner_node   (/think — reasoning role, step-by-step plan)
-       └─ agent_node     (fast role by default, reasoning role for complex queries)
+       └─ agent_node     (tool-bound; turn-scoped tool subset from tool_route)
             └─ route_from_agent
-                 ├─ tools_node   (LangGraph ToolNode — 35 tools)
-                 │    └─ route_from_tools → agent_node (loop until done)
-                 └─ critic_node  (reasoning role, accept or revise, up to 2×)
-                      └─ route_from_critic → {agent_node | END}
+                 ├─ prepare_execution_node   (mint + sign one ExecutionRequest per call)
+                 │    └─ confirmation_node   (policy_guard + kill switch; interrupt for L3)
+                 │         └─ route_from_confirmation
+                 │              ├─ tools_node               (safe ToolNode — see safe_tools.py)
+                 │              │    └─ tool_result_accounting  (ledger, envelopes, postconditions)
+                 │              │         └─ route_after_tool_accounting
+                 │              │              ├─ compose_node  (BARE composer — no tool schemas)
+                 │              │              └─ agent_node    (multi-step, within round budget)
+                 │              ├─ agent_node                (denied — model acknowledges)
+                 │              └─ verification_node         (repair budget spent, honest answer)
+                 └─ critic_node   (accept / revise, up to 2×)
+                      └─ route_from_critic
+                           ├─ compose_node       (revise — bare regeneration)
+                           └─ verification_node  (accept / exhausted)
+                                └─ END
 ```
+
+`verification_node` is **terminal and on every path to END** (Post-MVP Faz 1). That is the point
+of it: `compose_node` is not — a turn with no tool calls goes `agent → critic → END` and never
+touches compose — so an honesty check living inside compose could not see the very turn shape it
+exists for. It also means the rollout metric (`jarvis/execution/rollout.py`) is measured over all
+turns rather than an unknown fraction. See `docs/SAFETY.md`.
 
 **State:** `JarvisState` TypedDict — `messages`, `language`, `plan`, `critique`,
 `tool_calls_count`, `critic_iterations`, `session_id`, `user_id`, `workspace`,
