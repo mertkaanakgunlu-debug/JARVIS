@@ -35,6 +35,27 @@ class Settings(BaseSettings):
     google_calendar_creds_file: str = "data/calendar_credentials.json"
     calendar_timezone: str = "Europe/Istanbul"  # IANA timezone for event create/update
 
+    # Post-MVP Faz 2: skip the confirmation prompt for a SINGLE calendar
+    # `create` whose date, time and title all resolve at >= 0.95 confidence
+    # (jarvis/policy_guard.py's calendar_confidence). The owner's decision was
+    # "takvim/todo serbest -- tarih hatasi kapandiktan sonra", and Faz 2 is
+    # where that date bug closes, so this defaults on.
+    #
+    # What it does NOT do, so this default is readable at a glance: it never
+    # touches batch_create/update/delete, never lowers the call's L3 risk
+    # level, never removes it from the audit log, never bypasses the kill
+    # switch, never applies to a background/proactive turn, and never applies
+    # under --profile test. Set False to restore pre-Faz-2 behaviour exactly.
+    calendar_autonomy_enabled: bool = True
+
+    # Post-MVP Faz 2: Google Contacts as the first-priority source for person-
+    # name resolution (jarvis/nlu/entities.py). OFF by default and that is a
+    # deliberate cost decision, not caution: the People API needs the
+    # contacts.readonly scope, and turning this on means one fresh OAuth
+    # consent (its own token file, so the working calendar/gmail tokens are
+    # untouched). Owner's call.
+    google_contacts_enabled: bool = False
+
     # Faz 9: REST API server (python -m jarvis --api)
     jarvis_api_key: str = ""    # set in .env; empty = auth disabled (local-only)
     jarvis_api_port: int = 8000

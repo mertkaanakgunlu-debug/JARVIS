@@ -265,6 +265,34 @@ def _is_turkish(state: JarvisState) -> bool:
     return bool(_TURKISH_HINT_RE.search(query))
 
 
+def _gate_inputs(state: JarvisState) -> tuple[bool, str]:
+    """(interactive, utterance) for policy_guard.evaluate().
+
+    Post-MVP Faz 2. Extracted rather than written twice because
+    prepare_execution_node and confirmation_node each call evaluate()
+    independently, and evaluate() being a pure function only guarantees they
+    agree if they actually pass the same inputs.
+
+    `user_query` is populated on the normal entry path but not on every one --
+    a resumed checkpoint or a direct-node call can lack it, which the
+    _is_turkish() helper above already had to work around. An absent utterance
+    would silently give up the protection against a model that pre-resolved an
+    ambiguous request, so the same last-human-message fallback applies here.
+    Picking up one of this node's own synthetic ack messages instead is
+    harmless: they contain no date, time or weekday, so every check on them
+    returns "no objection".
+    """
+    interactive = not (state.get("transport") or "unknown").startswith("monitor-")
+    utterance = str(state.get("user_query") or "")
+    if not utterance:
+        for message in reversed(state.get("messages") or []):
+            if isinstance(message, HumanMessage):
+                content = message.content
+                utterance = content if isinstance(content, str) else str(content)
+                break
+    return interactive, utterance
+
+
 def _declared_count(envelopes_raw: list, execution_id: str) -> int:
     """How many artifacts the envelope for this operation declared. Read from
     the raw envelope dicts because VerifiedOperation deliberately carries
@@ -826,6 +854,7 @@ def make_prepare_execution_node(settings=None):
             return {}
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        interactive, utterance = _gate_inputs(state)  # Post-MVP Faz 2 -- see the helper
         requests: list[dict] = []
         invalid_calls: list[dict] = []
         for tc in last_ai.tool_calls:
@@ -843,7 +872,9 @@ def make_prepare_execution_node(settings=None):
                     })
                     continue
 
-            decision = policy_guard.evaluate(name, args, settings)
+            decision = policy_guard.evaluate(
+                name, args, settings, interactive=interactive, utterance=utterance,
+            )
 
             req = ExecutionRequest(
                 execution_id=f"{tc.get('id', 'call')}-{secrets.token_hex(6)}",
@@ -923,8 +954,16 @@ def make_confirmation_node(settings):
 
         transport = state.get("transport") or "unknown"
         is_proactive = transport.startswith("monitor-")
+        # Post-MVP Faz 2: `interactive` means a human is present in this turn
+        # to see what happens; `utterance` is what they actually said. Both
+        # come from the shared _gate_inputs() helper so this node and
+        # prepare_execution_node cannot derive them differently.
+        interactive, utterance = _gate_inputs(state)
         decisions = {
-            tc.get("id"): policy_guard.evaluate(tc.get("name", ""), tc.get("args", {}) or {}, settings)
+            tc.get("id"): policy_guard.evaluate(
+                tc.get("name", ""), tc.get("args", {}) or {}, settings,
+                interactive=interactive, utterance=utterance,
+            )
             for tc in last_ai.tool_calls
         }
         # Agent Runtime rev.2, Faz 2: prepare_execution's signed
