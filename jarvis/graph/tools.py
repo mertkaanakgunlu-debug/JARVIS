@@ -452,11 +452,19 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
 
         Args:
             action:           list | create | batch_create | delete | search | update
-            title:            Event title (create/update)
-            date:             Date — YYYY-MM-DD, DD/MM/YYYY, 'today', 'tomorrow' (create/update)
-            time:             Start time HH:MM in 24h (create/update; omit for all-day event)
+            title:            Event title — what is HAPPENING ("Baran ile toplantı"), not
+                              the user's request ("yarın Baran'la toplantı ayarla"). Leave
+                              the date and time out of the title; they have their own fields.
+            date:             Date — YYYY-MM-DD, DD/MM/YYYY, 'today', 'tomorrow', or the
+                              user's own wording ('yarın', 'gelecek pazartesi', '15 Ağustos').
+                              Relative wording is resolved for you, in the user's timezone —
+                              pass it through rather than computing a date yourself.
+            time:             Start time HH:MM in 24h, or the user's own wording
+                              ('öğlen 3' = 15:00, 'akşam 8' = 20:00). Also resolved for you.
+                              (create/update; omit for an all-day event)
             duration_minutes: Duration in minutes (default 60)
-            description:      Optional event description
+            description:      Optional event description — only when the user actually gave
+                              one. Never invent one, and never restate the title.
             location:         Optional event location
             days_ahead:       How many days ahead to look (list action, default 7)
             query:            Keyword for search/delete actions
