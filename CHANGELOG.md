@@ -6,6 +6,98 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Post-MVP Faz 3: Daily Briefing MVP] — 2026-08-01
+
+The plan's first acceptance milestone: *"JARVIS bugün neler var"* → an hour-aware briefing over
+the calendar, the to-do list, the weather and the day's headlines, **with nothing invented**.
+
+### The load-bearing decision: a briefing is not an LLM workflow
+
+```
+DailyBriefingService
+   ├─ calendar (now → local midnight)   ├─ todo (top-N by priority)
+   ├─ weather  (Open-Meteo, keyless)    └─ news (RSS/Atom, keyless)
+                       ↓  concurrent, per-section deadline
+                 BriefingFacts          ← deterministic
+                       ↓
+                      LLM               ← narration only
+```
+
+The model does not gather the data, resolve "today", or decide which event exists. It receives a
+closed list of already-final strings. Everything in `jarvis/briefing.py` exists to make that
+division real rather than a sentence in a system prompt.
+
+Both new sources are **keyless on purpose** — Open-Meteo needs no account and RSS needs no
+account. A briefing that runs every morning must not be able to start failing because a quota ran
+out, and "the key expired" is indistinguishable, from the model's side, from "the weather is
+unknown".
+
+### The measurement that changed a Faz 2.5 rule
+
+`weather` was added to `_FAST_DOMAINS` on the stated principle of that set: one deterministic call
+against a structured source. It was **measured out the same afternoon.** Same query, n=5 per arm,
+nothing else changed:
+
+| arm | called the tool | what the other runs did |
+|---|---|---|
+| `fast` | **1/5** | answered *"sıcak ve güneşli, 32°C"* out of nothing — it was 27.4°C and çok bulutlu |
+| `reasoning` | **5/5** | p50 16.2 s |
+
+`news` is equally one call against a structured source and scores **5/5 on `fast`**. So call shape
+was never the real axis. What decides it is **whether the model believes it already knows the
+answer**: nothing in qwen3:8b's weights holds this user's calendar or today's headlines, but a
+plausible weather report exists for every day of the year. Before adding a domain to
+`_FAST_DOMAINS`, ask "could the model fake this convincingly?" — not "is this one tool call?"
+
+That finding arrived through a tool **docstring**, too. The first version said `city:` *"Leave
+EMPTY for the user's own location"*, and the model turned it into *"hangi şehirde hava durumunu
+öğrenmek istiyorsun?"* — it read a default as a question to ask. The plan's own risk table
+predicts exactly this; the rewrite ("Never ask which city") is what got the tool called at all.
+
+### 0 fabricated items is a number, not a hope
+
+`briefing.audit_narration()` compares what the model said against the exact fact set, on four
+checks that are decidable by comparison:
+
+| Check | Catches |
+|---|---|
+| invented clock times | a 14:00 meeting narrated as 15:00 — the failure that actually hurts |
+| invented numbers | a temperature, percentage or date the facts do not contain |
+| unstated failures | a source that did not answer, silently skipped |
+| **false-empty claims** | a *failed* section presented as an empty day |
+
+The last one exists because a live run produced it: *"Bugün takvimde bir etkinlik bulunmuyor, bu
+nedenle takvim bölümüne giriş yapılamadı"* — it admits the failure **and** asserts emptiness in
+the same breath, so a stems-only honesty check passes it. "I could not read your calendar" makes
+the user go and look; "you have nothing today" makes them stop thinking about it.
+
+Every check is conservative in the same direction. One of them produced its own false positive
+live (*"o günün etkinlikleri hakkında bilgi bulunmuyor"* — no *information*, which is true and
+honest) and was tightened, because a fabrication metric with false positives is worse than none.
+
+### Also in this phase
+
+- **`calendar.fetch_events()`** — structured Google events, so the briefing does not parse
+  `calendar_control("list")`'s display text back into data. `calendar_control` is now one of its
+  two callers rather than the only place the query lives.
+- **The Turkish weekday/month tables moved to `jarvis/clock.py`** and `agent.py` reads them from
+  there. A second private copy is how the timezone split that created that module began.
+- **`\bhaber` moved from the `web` domain to a new `news` domain** — moved, not copied, per that
+  table's own rule. `web_search` was answering "haberler ne durumda" with a search tool for a
+  question that has a source.
+- **A Turkish casing bug, caught by its own test**: headline dedup used `str.casefold()`, which is
+  locale-independent — `"AYNI".casefold()` is `ayni` while `"Aynı".casefold()` is `aynı`, so the
+  same wire story in caps and in title case did not match. Now uses the project's `fold()`.
+
+### Deliberately not done
+
+- **Scheduling the briefing.** The three tools are L1, which is what lets a briefing run on the
+  proactive path at all (Faz 2.75's clamp blocks `risk_level >= 2` unattended). Actually wiring a
+  07:00 job is a separate change with its own delivery question (push? toast? both?).
+- **`web_download`.** Out of scope by the plan; the briefing needs no file downloads.
+
+---
+
 ## [Post-MVP Faz 2.75: runtime & session hardening] — 2026-08-01
 
 An external review read the branch on GitHub and named six blockers for Faz 3. Every one was

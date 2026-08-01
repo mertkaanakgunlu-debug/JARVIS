@@ -1,6 +1,9 @@
 # J.A.R.V.I.S. — Tool Registry
 
-36 native tools registered by `make_tools()` in `jarvis/graph/tools.py`, plus (Faz 5) a dynamic
+41 native tools in the registry; `make_tools()` (`jarvis/graph/tools.py`) exposes **40** of them —
+`python_run` is alpha-disabled and structurally absent from the model's surface. (This line read
+"36" until Post-MVP Faz 3; it had not been updated for `workflow_start`/`workflow_status` either.
+Re-derive it with `len(TOOL_SPECS)` rather than trusting it.) Plus (Faz 5) a dynamic
 MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSpec` dataclass +
 `TOOL_SPECS` dict); MCP tools are inserted into that same dict at connect time via
 `register_dynamic_spec()`, not listed in the dict's literal source.
@@ -54,6 +57,26 @@ MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSp
 | `google_drive` | L3 | external_api | ✓ | ✓ | 60s | Drive: search/read/download (L1) · upload/share/delete (L3) |
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
 | `procedure_save` | L2 | memory | — | — | 15s | Save a reusable multi-step workflow to procedural memory (Faz 2) |
+| `weather` | L1 | network | — | — | 15s | Current conditions + today's high/low via Open-Meteo (**no API key**) |
+| `news` | L1 | network | — | — | 20s | Top headlines from the configured RSS/Atom feeds (**no API key**) |
+| `daily_briefing` | L1 | network | — | — | 30s | Deterministic daily briefing facts — calendar, to-dos, weather, headlines (Post-MVP Faz 3) |
+
+### `daily_briefing` is not a normal tool
+
+The other 39 tools answer a question the model asked. This one hands the model a **finished
+record** and asks it only to narrate — `DailyBriefingService` (`jarvis/briefing.py`) gathers all
+four sections in code, concurrently, with a per-section deadline, before the model sees a token.
+Three consequences worth knowing before touching it:
+
+* **Every section states its own outcome.** `DURUM: N kayıt` / `DURUM: BOŞ` / `DURUM: ALINAMADI —
+  <reason>`. An empty calendar and an unreachable calendar are different strings, because they
+  are different facts and only one of them is good news.
+* **The output ends in a narration contract**, and every clause of it maps to a way
+  `briefing.audit_narration()` can fail the result — invented clock times, invented numbers, or a
+  failed section the narration quietly skipped. That audit is what makes "0 fabricated items" a
+  number this repo can produce rather than a hope about the prompt.
+* **It routes to its own domain** (`briefing`) and to the `fast` tier. There is no plan to make
+  and no chain to complete, which is exactly the property the tier split was built to exploit.
 
 ## Independently verified tools (Post-MVP Faz 1, 2026-07-31)
 

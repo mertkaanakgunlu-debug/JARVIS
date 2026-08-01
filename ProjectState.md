@@ -235,7 +235,7 @@ Mobile (mobile/ — Flutter/Android):
 
 ---
 
-## Tool Registry (36 tools in graph/tools.py)
+## Tool Registry (41 registered; `make_tools()` exposes 40)
 
 | # | Tool | Category | What it does |
 |---|---|---|---|
@@ -275,8 +275,18 @@ Mobile (mobile/ — Flutter/Android):
 | 34 | `geo_math` | Science | Geo-math, FDM simulation, seismic |
 | 35 | `hud_panels` | UI | Show/hide mobile HUD panels |
 | 36 | `procedure_save` | Memory | Save a reusable multi-step workflow to procedural memory (Faz 2) |
+| 37 | `workflow_start` | Workflow | Start a dependency-ordered multi-step workflow (Agent Runtime rev.2, Faz 7) |
+| 38 | `workflow_status` | Workflow | Report a workflow's step-by-step status (read-only) |
+| 39 | `weather` | Briefing | Open-Meteo current + today's high/low, **no API key** (Post-MVP Faz 3) |
+| 40 | `news` | Briefing | RSS/Atom headlines from the configured feeds, **no API key** (Post-MVP Faz 3) |
+| 41 | `daily_briefing` | Briefing | Calendar + to-dos + weather + headlines in one deterministic call (Post-MVP Faz 3) |
 
 *Note (corrected 2026-07-14): `email_triage` was removed entirely from `graph/tools.py` in commit `576aa75` (2026-05-24) — this is no longer a loose end.*
+
+*Note (corrected 2026-08-01): this table stopped at 36 and had not been updated for
+`workflow_start`/`workflow_status` (Agent Runtime rev.2, Faz 7 Part 2). Rows 37–41 close that gap.
+`python_run` is in the registry but alpha-**disabled**, so `make_tools()` exposes 40 of the 41 —
+re-derive with `len(TOOL_SPECS)` rather than trusting a written count.*
 
 ---
 
@@ -286,7 +296,10 @@ Mobile (mobile/ — Flutter/Android):
 |---|---|
 | `jarvis/__main__.py` | Entry point — `--voice`, `--wakeword`, `--api`, `--monitor`, `--port` |
 | `jarvis/agent.py` | `JarvisAgent` — wraps LangGraph, manages session state, model fallback |
-| `jarvis/clock.py` | **The** source of "now" (Post-MVP Faz 2) — `SystemClock`/`FrozenClock`, configured from `settings.calendar_timezone`. Consumers: the prompt's now-block, the calendar resolver, `scheduler.py`, `todo_store.py` |
+| `jarvis/clock.py` | **The** source of "now" (Post-MVP Faz 2) — `SystemClock`/`FrozenClock`, configured from `settings.calendar_timezone`, plus the Turkish weekday/month tables and `format_long_date()` (Post-MVP Faz 3, moved out of `agent.py`). Consumers: the prompt's now-block, the calendar resolver, `scheduler.py`, `todo_store.py`, the briefing |
+| `jarvis/briefing.py` | `DailyBriefingService` → `BriefingFacts` (Post-MVP Faz 3) — four sources gathered **in code**, concurrently, behind a per-section deadline, so the model only narrates. Also `audit_narration()`, the deterministic no-fabrication check |
+| `jarvis/tools/weather.py` | Open-Meteo current + today's high/low, **keyless**; typed `WeatherReport` for the briefing, `[ERROR]`-prefixed string for the tool (Post-MVP Faz 3) |
+| `jarvis/tools/news.py` | RSS 2.0 + Atom headlines over stdlib ElementTree, **keyless**, per-feed failure isolation, round-robin interleave (Post-MVP Faz 3) |
 | `jarvis/nlu/temporal.py` | Turkish/English date+time expressions → a timestamp, in the clock's zone, plus a **clock-independent** confidence score that `policy_guard` gates on (Post-MVP Faz 2) |
 | `jarvis/nlu/entities.py` | Person-name resolution with confidence bands — a stem is adopted only when a source corroborates it, so "Metin" never becomes "Met" (Post-MVP Faz 2) |
 | `jarvis/nlu/event_text.py` | Event titles are a record of what is happening, not a copy of the request; strictly subtractive (Post-MVP Faz 2) |

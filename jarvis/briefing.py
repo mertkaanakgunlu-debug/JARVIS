@@ -754,10 +754,12 @@ def audit_narration(narration: str, facts: BriefingFacts) -> BriefingAudit:
     that failed this one while PASSING that one — it admitted the failure and
     asserted emptiness in the same breath.
 
-    Scoped per sentence rather than per narration on purpose: a paragraph that
-    reports invented weather and, separately, a genuinely failed news feed
-    contains the words "hava" and "ulaşılamadı", and a whole-text check would
-    read that as weather having been reported honestly.
+    The last two are scoped per sentence rather than per narration on purpose:
+    a paragraph that reports invented weather and, separately, a genuinely
+    failed news feed contains the words "hava" and "ulaşılamadı", and a
+    whole-text check would read that as weather having been reported honestly.
+    A markdown heading carries down onto the lines under it — see
+    `_scoped_sentences` for the live round that cost.
 
     Every check is conservative in the same direction — anything ambiguous is
     NOT reported. A non-zero count is evidence; a zero is the absence of proof,

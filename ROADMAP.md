@@ -26,8 +26,8 @@
 | **2** | **Clock + temporal + entity resolver** (takvim tarih hatası) | ✅ **2026-07-31** |
 | **2.5** | **Otomatik rol seçimi** (`fast` vs `reasoning`) — `jarvis/graph/role_router.py` | ✅ **2026-08-01** |
 | **2.75** | **Runtime & Session Hardening** (GPT review, Paket A–F) | ✅ **2026-08-01** |
-| 3 | Daily Briefing MVP (1. kabul kilometre taşı) | ⬜ next |
-| 4 | Working Set (5-10 tur revizyon) | ⬜ |
+| **3** | **Daily Briefing MVP** (1. kabul kilometre taşı) — `jarvis/briefing.py` + `weather`/`news` (ikisi de anahtarsız) | ✅ **2026-08-01** |
+| 4 | Working Set (5-10 tur revizyon) | ⬜ next |
 | 5 | Proaktif mail → takvim | ⬜ |
 | 6 | Derin kalıcı hafıza | ⬜ |
 | 7 | MATLAB kalitesinde render + harita | ⬜ |
@@ -89,7 +89,31 @@
   kalması mantıkla türetildi; hangi katmanın daha iyi mail yazdığı ölçülmedi.
 - **Zincir tamamlama sorunu rolle çözülmüyor** — ölçüm bunu açıkça gösterdi (aşağıdaki CHANGELOG).
   İki bağımlı çağrılık istek her iki katmanda da tamamlanmıyor; çözüm Faz 4'ün Working Set'i,
-  model katmanı değil.
+  model katmanı değil. *(Faz 2.75 bu sonucun yarısını çürüttü — CHANGELOG'a bakın.)*
+- **`_FAST_DOMAINS`'in gerekçesi Faz 3'te ölçümle düzeltildi.** "Tek deterministik çağrı" ölçüt
+  değilmiş: `weather` tam olarak oydu ve `fast`'te **1/5** araç çağırdı, kalan dördü uydurdu.
+  Gerçek eksen **modelin cevabı zaten bildiğini sanıp sanmadığı.** Ölçülmemiş yedi üye
+  (`tasks`, `media`, `memory`, `mail`, `drive`, `finance`, `math`) hâlâ ölçülmedi ve artık
+  gerekçeleri de şüpheli — hepsi bu soruyla yeniden bakılmalı.
+
+**Faz 3'ten taşınan, bilinçli olarak yapılmayanlar:**
+
+- **Uçtan uca gecikme kapısı KARŞILANMADI, veri kapısı fazlasıyla karşılandı.** Ölçüm (n=10,
+  qwen3:8b, `cloud_policy=off`): **veri toplama p50 0.31 sn / p95 0.44 sn** — kapı 5/10 sn.
+  Uçtan uca **p50 ~22 sn**, çünkü kalan her şey modelin Türkçe yazmasıdır. Bu bir brifing hatası
+  değil, katman maliyeti; brifing kendi payını 15 kat aşımla geçiyor. Uçtan uca rakamı ancak daha
+  hızlı bir katman (Kimi K3 — Faz 9) veya daha kısa bir anlatım sözleşmesi düşürür, ikisi de
+  kendi ölçümünü ister.
+- **Brifing zamanlanmadı.** Üç araç da L1, yani Faz 2.75'in proaktif kıskacını geçiyorlar —
+  *engel kalktı*. Ama 07:00 işini gerçekten kurmak ayrı bir değişiklik ve kendi teslimat sorusu
+  var (push mu, toast mu, ikisi mi).
+- **`audit_narration` çalışma zamanında bir kapı değil.** Testlerin ve `scripts/briefing_gate.py`'nin
+  kullandığı bir ölçüm aracı. Doğrulama düğümünün `enforce_*` onarım turuna bağlamak doğru devam,
+  ama `EvidenceSet` bugün brifing olgularını taşımıyor.
+- **Denetimin yakalayamadığı bir uydurma sınıfı var: göreli gün sözcükleri.** Canlı bir koşuda model
+  bugünkü 11:00 etkinliğine *"Dün"* dedi. Sayı da saat de doğruydu, yanlış olan tek şey sözcüktü.
+  Sayıya indirgenemeyen iddiaları karşılaştırmayla kararlaştırmak mümkün değil, o yüzden denetim
+  bu konuda **sessiz** — yanlış pozitif üretmektense kaçırmayı seçiyor.
 
 ## Direction (owner decisions, 2026-07-14)
 

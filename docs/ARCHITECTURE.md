@@ -95,7 +95,7 @@ exactly the treatment it had before this module existed:
 | `/think` prefix | `explicit_think` | `reasoning` |
 | no route at all (background paths, old checkpoints) | `no_route` | `reasoning` |
 | more than one capability domain in the sentence | `multi_domain` | `reasoning` |
-| domain that plans, researches or composes (`web`, `data`, `report`, `system`, `workflow`, `procedure`, `mcp`) | `deliberative_domain` | `reasoning` |
+| domain that plans, researches or composes (`web`, `data`, `report`, `system`, `workflow`, `procedure`, `mcp`) — **and `weather`**, see below | `deliberative_domain` | `reasoning` |
 | mail, but sending rather than reading | `composes_prose` | `reasoning` |
 | "sonra" / "ardından" / "then" | `sequenced_steps` | `reasoning` |
 | two different imperative verbs | `multiple_imperatives` | `reasoning` |
@@ -104,6 +104,16 @@ exactly the treatment it had before this module existed:
 
 The reason rides in `LlmTraceRecorder` → `JarvisAgent.last_turn_trace["role_reason"]`, which is
 what makes a slow turn attributable to a named rule instead of guessed at.
+
+**What actually makes a domain safe for `fast`** (measured in Post-MVP Faz 3, and not the axis
+`_FAST_DOMAINS` was originally reasoned along). `weather` is a single deterministic call against a
+structured source — the stated property of every member of that set — and it failed badly: same
+query, n=5 per arm, `fast` called the tool **1/5** and the other four answered *"sıcak ve güneşli,
+32°C"* out of nothing, while `reasoning` called it 5/5. `news` is equally one call and scores 5/5
+on `fast`. The difference is not call shape, it is **whether the model believes it already knows
+the answer**: no weights contain this user's calendar or today's headlines, but a plausible
+weather report exists for every day of the year. Before adding a domain here, ask "could the model
+fake this convincingly?" — not "is this one tool call?"
 
 **On this machine both roles are the same qwen3:8b** (`cloud_policy="off"`), so today the choice
 is really "does the model think first". With a cloud tier configured the same decision picks a
@@ -139,10 +149,40 @@ refuses a mismatched one; `AsyncTask` carries it from `submit()` to `background_
 `JarvisAgent` serves every client, so none of these can be re-derived later: by then another
 request may have moved the active session.
 
-## Tools (36 native + dynamic MCP)
+## Tools (41 native + dynamic MCP)
 
 See [TOOLS.md](TOOLS.md) for the full native-tool list with risk levels. Faz 5 adds a second,
 dynamically-discovered tool source — see the MCP layer section below.
+
+## Daily briefing (Post-MVP Faz 3 — `jarvis/briefing.py`)
+
+The one place in this system where the model is deliberately **not** in the data path.
+
+```
+DailyBriefingService
+   ├─ calendar (Google, now → local midnight)   ├─ todo (SQLite, top-N by priority)
+   ├─ weather  (Open-Meteo, keyless)            └─ news (RSS/Atom, keyless)
+                            ↓  concurrent, per-section deadline
+                      BriefingFacts             ← deterministic
+                            ↓  one tool result
+                           LLM                  ← narration only
+```
+
+Everything else in this document describes a model choosing tools and reading their output. Here
+the four sources run in code, concurrently, behind a per-section deadline, and the model receives
+one finished record. It does not gather the data, resolve "today", or decide which event exists.
+
+Three properties fall out of that, and each is checked rather than asserted:
+
+| Property | How it is real |
+|---|---|
+| A failed source is a **stated** failure | Every section carries `ok`/`error` and renders `DURUM: ALINAMADI — <reason>`. An empty day and an unreadable calendar are different strings because they are different facts. |
+| Fabrication is **measurable** | `audit_narration()` compares the narration to the exact fact set: invented clock times, invented numbers, silently-skipped failed sections, and a failed section described as empty. |
+| Latency is **attributable** | `scripts/briefing_gate.py` reports data-collection p50/p95 separately from end-to-end. They are fixed by completely different work, and one number would hide which regressed. |
+
+`daily_briefing`/`news` route to `fast`; `weather` does **not** — see the measurement pinned in
+`role_router._FAST_DOMAINS`. All three are L1, which is what lets a briefing run on the proactive
+path at all (Faz 2.75's clamp blocks `risk_level >= 2` on an unattended turn).
 
 ## MCP layer (Faz 5 — `jarvis/mcp_integration.py`)
 
