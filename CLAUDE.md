@@ -45,11 +45,15 @@ python -m jarvis --monitor           # Background watcher only
 
 - Active development branch: **`langgraph-migration`** — keep working on it unless told otherwise.
   Both it and `main` are pushed to `github.com/mertkaanakgunlu-debug/JARVIS`.
-  **They have NOT pointed at the same commit since 2026-07-15** — as of 2026-07-21 `main` is
-  **47 commits behind** `langgraph-migration` (everything from the two-metric oracle through
-  Agent Runtime rev.2 Faz 1 and the A/B harness hardening lives only on `langgraph-migration`).
-  `main` has no commits of its own, so catching it up is still a pure fast-forward whenever the
-  owner wants one; nothing is lost meanwhile, but don't read `main` as current.
+  **They have NOT pointed at the same commit since 2026-07-15** — as of 2026-08-01 `main` is
+  **136 commits behind** `langgraph-migration` (everything from the two-metric oracle through
+  Post-MVP Faz 2.5 lives only on `langgraph-migration`). `main` has **0** commits of its own and
+  is still a strict ancestor, so catching it up remains a pure fast-forward whenever the owner
+  wants one; nothing is lost meanwhile, but don't read `main` as current.
+  **Re-derive this number, never quote it** — it is stale the moment anything lands:
+  `git rev-list --left-right --count origin/main...origin/langgraph-migration`. An external
+  reviewer pointed at `main` has already reported a defect that did not exist on the real tip
+  (recorded in the plan file's risk table); the gap is now ~3× what this line said before today.
 - `.claude/worktrees/*` are scratch branches from past Claude Code sessions — **never**
   treat them as canonical source. 17 of the original 21 were confirmed fully-merged into
   `langgraph-migration` (zero unique content) and deleted 2026-07-15. **4 remain**
