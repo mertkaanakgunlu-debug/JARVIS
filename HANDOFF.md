@@ -112,8 +112,17 @@ npm test    --prefix electron                                # 27 passed
 npm run build --prefix electron                              # 35 modül, hatasız
 ```
 
-Taban 2235 + `test_role_router.py` 43 + `test_session_store.py` 3 = **2281**; aritmetikle
-doğrulandı, hiçbir eski test sessizce düşmedi.
+GPT review düzeltmelerinden sonra tekrar: **2287 passed** (3 dk 58 sn). Taban 2235 +
+`test_role_router.py` 43 + `test_session_store.py` 3 + review düzeltmelerinin testleri 6 = 2287;
+aritmetikle doğrulandı, hiçbir eski test sessizce düşmedi.
+
+**Çözülmemiş tek nokta — tekrarlanamayan bir flake.** Dört tam koşudan **biri** 5 hata verdi;
+sonraki **üç koşu temiz** (2287). Yakalanan tek isim
+`test_todo_bg_analysis.py::test_bg_task_is_tracked_then_pruned_after_completion` — izole halde
+3/3 geçiyor. `pytest-randomly` **kurulu değil**, yani sıra rastgele değil; muhtemel neden
+zamanlama (o koşu, CPU'yu doyuran bir mutasyon turunun hemen ardından başladı). Kod
+regresyonuna bağlanamadı ama **kapatılmış da sayılmamalı** — tekrar görülürse önce arka plan
+görev testlerinin zamanlama varsayımlarına bakın.
 
 **Mutasyon turu: 22/22 yakalandı.** Faz 1 ve Faz 2'nin aksine ilk turda hayatta kalan olmadı —
 ama bunun dürüst nedeni şu: üç regex çakışması mutasyon turundan **önce**, kuralları gerçek
@@ -195,6 +204,41 @@ yerine capture nesnesi, fixture'ı kendi kuruyor.
 
 Faz 3'ün gate'i (medyan < 5 sn **ve** p95 < 10 sn **ve** 0 uydurma kalem) tam olarak bu iki ekseni
 istiyor — yalnız gecikme raporlayan bir harness o soruyu cevaplayamaz.
+
+## GPT review (2026-08-01) — koda karşı doğrulandı
+
+Review yazarı repoyu klonlayamadığını belirtti (raporun 39. satırı), yani bulgular **GitHub
+okumasına** dayanıyor. Her birini gerçek koda karşı çalıştırdım. **Uydurma bulgu çıkmadı** —
+aşağıdakilerin hepsi doğrulandı.
+
+| # | Bulgu | Durum | Kanıt |
+|---|---|---|---|
+| P0-4 | `task-async` "insan mevcut" sayılıyor | ✅ **BU OTURUMDA DÜZELTİLDİ** | `evaluate(google_calendar, create, interactive=True)` → `requires_confirmation=False, risk=3` |
+| P1-6 | Onaylı turda kullanıcı metni hafızaya yazılmıyor | ✅ **BU OTURUMDA DÜZELTİLDİ** | `_schedule_memory_extraction("", ...)`, `resumed_user_query` zaten okunmuşken |
+| P0-1 | Stream, terminal cevabı değil biriken chunk'ları geçmişe yazıyor | ✅ doğrulandı, açık | `agent.py`: `full_response = "".join(chunks)` → `_compact_completed_turn_for_history` |
+| P0-2 | Onay sonucu global aktif session'a yazılıyor | ✅ doğrulandı, açık | pending kaydı `{config, recorder, created_at}`; `ConfirmRequest` yalnız `decision` taşıyor |
+| P0-3 | Arka plan görevi conversation ID'yi kaybediyor | ✅ doğrulandı, açık | `submit(query)` → `AsyncTask(task_id, user_query)`; `body.conversation_id` hiç geçmiyor |
+| P0-6 | Salt-okuma `todo`/`schedule`/`finance` proaktif yolda bloklanıyor | ✅ doğrulandı, açık | üçü de `risk=2, confirm=False, local_write`; `_READ_ACTIONS` yalnız 4 Google/mail aracını kapsıyor |
+| P1-1 | Tanımsız araç fail-closed değil | ✅ doğrulandı, açık | `policy_guard.py`: ToolSpec yoksa `allowed=True` |
+| P1-4 | `local` rolü gerçekte local-only değil | ✅ doğrulandı, açık | `cloud_policy=auto` altında `get_llm("local")` bulut fallback katmanı istiyor |
+
+**P0-6'nın somut kanıtı** (Faz 3'ü doğrudan bloklayan bulgu):
+
+```
+todo    {'action':'list'}     risk=2 confirm=False -> proaktif yolda BLOKLANIR
+schedule{'action':'list'}     risk=2 confirm=False -> proaktif yolda BLOKLANIR
+finance {'action':'summary'}  risk=2 confirm=False -> proaktif yolda BLOKLANIR
+google_calendar {'action':'list'}   risk=1 -> geçer
+gmail   {'action':'list_unread'}    risk=1 -> geçer
+```
+
+Yani bugünkü haliyle proaktif yolda koşan bir Daily Briefing takvimi ve maili okuyabilir,
+**yapılacakları ve finansı okuyamaz**.
+
+**Owner kararı bekleyen soru:** review "Faz 2.75 — Runtime & Session Hardening" öneriyor
+(Paket A–F). Doğrulama bunu destekliyor: P0-1/2/3 tek bir kök nedenin üç yüzü — **conversation
+runtime'ın global olması**. Faz 3 gözetimsiz çalışan ilk özellik olacağı için bu üçü orada
+sistematik hâle gelir. Ama bu bir faz büyüklüğünde iş; sıraya alınması owner'ın kararı.
 
 ## SONRAKİ OTURUM — Faz 3: Daily Briefing MVP
 
