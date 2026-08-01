@@ -307,6 +307,7 @@ Mobile (mobile/ — Flutter/Android):
 | `jarvis/voice_api.py` | Voice loop for API mode (wakeword/PTT-gated, now built on `jarvis/voice/`) |
 | `jarvis/graph/graph.py` | LangGraph StateGraph builder |
 | `jarvis/graph/nodes.py` | agent_node, planner_node, critic_node, routing functions |
+| `jarvis/graph/role_router.py` | Which model tier a turn asks for (Post-MVP Faz 2.5) — `reasoning` is the default and `fast` must be earned by a positive signal; carries the deciding rule as `role_reason` into the turn trace, the CLI, `/status` and the HUD |
 | `jarvis/graph/state.py` | `JarvisState` TypedDict |
 | `jarvis/graph/streaming.py` | astream → async text generator |
 | `jarvis/graph/tools.py` | 35 LangChain `@tool` wrappers (make_tools factory) |

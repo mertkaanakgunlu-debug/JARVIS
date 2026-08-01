@@ -6,6 +6,164 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Post-MVP Faz 2.5: automatic role selection] — 2026-08-01
+
+One rule decided the model tier for every turn: conversation ⇒ `fast`, anything tool-shaped ⇒
+`reasoning`. So *"bugünkü takvimimi göster"* — one deterministic call against one API — was
+routed like *"şu üç kaynağı araştır ve karşılaştır"*.
+
+### What the two roles actually are here
+
+With `cloud_policy="off"` (the owner's config) both roles resolve to the same local qwen3:8b.
+The only difference is the thinking channel, which `get_llm` disables for `fast`. So on this
+machine the decision is **"does the model think first"**, not "which model". With a cloud tier
+configured the same decision picks a different model instead, which is why `role_router.py` is
+written in terms of roles rather than effort.
+
+### The recorded baseline was not measuring the role
+
+The numbers this phase was planned against — `fast` ≈ 0.9 s / 19 tokens, `reasoning` ≈ 12–33 s /
+524–1360 tokens — compare a **chat reply** against **tool work**. Both were produced by whatever
+role the old rule picked, so they measure request difficulty, not the tier. Re-measured properly
+(same query, both arms, n=10, real qwen3:8b over Ollama, real graph and tools, Google Calendar
+replaced by a capture object, a scratch `JARVIS_HOME` — **0 real Google calls**):
+
+| Scenario | `fast` p50 | `reasoning` p50 | Ratio | Tool correctness |
+|---|---|---|---|---|
+| *"Merhaba, bugün nasılsın?"* | **5.4 s** | 8.4 s | 1.6× | 10/10 · 10/10 (zero tools, correctly) |
+| *"Bugünkü takvimimi göster"* | **9.6 s** | 14.8 s | 1.5× | 10/10 · 10/10 |
+| *"Masaüstündeki dosyaları listele"* | **9.1 s** | 19.1 s | 2.1× | 10/10 · 15/15 |
+| *"Yarın 15:00'te Baran'la toplantı ekle"* | **16.8 s** | 23.0 s | 1.4× | 10/10 · 10/10 |
+| *"…csv'yi oku ve grafiğini çiz"* (2 dependent calls) | 31.9 s | 101.3 s | 3.2× | **0/10 · 0/10** |
+
+So the win is **1.4–2.1×, not the ~20× the old numbers implied** — both roles are the same
+qwen3:8b here, and only the thinking channel differs. Worth saying plainly: this phase buys
+seconds, not an order of magnitude.
+
+**The accuracy column is the one that mattered**, and it is the reason the measurement was run at
+all. The only prior evidence that tool-calling survives with thinking off was n=1 — one
+`file_write` call, recorded in `test_local_thinking.py`'s docstring. Across four single-tool
+scenarios the fast tier called the right tool in **45/45** runs, with `calendar_create` writing
+the correct date (2026-08-02T15:00+03:00) every time, i.e. Faz 2's clock/temporal/event-text
+machinery holds without the thinking channel.
+
+The `file_list` reasoning cell is n=15, not 10: the first run died partway (see the session-id
+bug below) and the resumed run re-measured all ten, so five extra samples exist for that cell.
+They are reported rather than discarded.
+
+### The finding that matters most: the chain problem is not a tier problem
+
+The `multi_step` row above was confounded — asked about *"Masaüstündeki satis.csv"*, the model
+went to **Downloads** in 10/10 runs and the read failed before any chain could start. (A real
+error, worth recording on its own: the environment block names both folders and the request named
+one.) Re-measured with the file present in **both** folders, so no folder guess can fail:
+
+| | tool sequence | chart drawn |
+|---|---|---|
+| `fast` | `csv_read` (9/10), `csv_read → data_analyze` (1/10) | **0/10** |
+| `reasoning` | `csv_read → data_analyze` (9/10), `csv_read` (1/10) | **0/10** |
+
+`reasoning` goes one step deeper — 9/10 second calls against 1/10 — and still never reaches the
+chart. `data_analyze`
+returns statistics only; `plot_data` is the only tool that draws. On the `fast` arm one run
+printed **raw tool-call JSON as its answer** and another *offered* to draw the chart instead of
+drawing it.
+
+So the `multi_domain → reasoning` rule is **not vindicated by measurement**. It stands because it
+is the conservative direction, not because it was shown to buy anything. Completing a dependent
+chain is Faz 4's Working Set, not a model tier — and this phase's honest contribution there is
+having measured that, rather than assuming the bigger tier would cope.
+
+### `jarvis/graph/role_router.py` — `fast` has to be earned
+
+`reasoning` is the default. A turn this module cannot read keeps exactly the treatment it had
+before, so the change can only remove reasoning where there is a positive signal it is not
+needed — the failure modes are not symmetrical (a hard turn on `fast` risks a wrong tool call;
+an easy turn on `reasoning` costs seconds).
+
+| `reason` | Role | Chosen when |
+|---|---|---|
+| `explicit_think` | `reasoning` | the user's own `/think` — never overridden by a heuristic |
+| `no_route` | `reasoning` | no classification at all (old checkpoints) |
+| `multi_domain` | `reasoning` | more than one capability domain in one sentence |
+| `deliberative_domain` | `reasoning` | `web`, `data`, `report`, `system`, `workflow`, `procedure`, `mcp` |
+| `composes_prose` | `reasoning` | mail, but sending rather than reading |
+| `sequenced_steps` | `reasoning` | "sonra" / "ardından" / "then" |
+| `multiple_imperatives` | `reasoning` | two *different* imperative verbs |
+| `unattended` | `reasoning` | proactive checks and background tasks (below) |
+| `conversation` | `fast` | zero tools bound |
+| `single_domain_tool` | `fast` | one lookup-shaped domain, one verb |
+
+Every decision carries its `reason` through `LlmTraceRecorder` →
+`last_turn_trace["role_reason"]` → the CLI's `Last turn:` line, `GET /status`, and the HUD's
+Routing row. Faz 2's most expensive finding was a gate that passed 2235 tests while scoring the
+wrong input; a role regression fails the same silent way — the turn still answers, it is just
+slower or sloppier — so the attribution has to survive into the trace.
+
+### Two places the turn's own role is deliberately overridden
+
+**Unattended turns never take `fast`** (`for_unattended_turn`, applied in `proactive_turn` and
+`background_turn`). Latency is not the complaint there: a monitor poll on a 600-second rate limit
+and a job the user deliberately backgrounded have nobody waiting. And a proactive turn is the one
+path where the only thing between a misjudging model and an unwatched L2 write is a sentence in
+the system prompt (`docs/SAFETY.md` is explicit that this is mitigated, not closed) — "follows a
+negative instruction more reliably without thinking" is not a claim anyone has measured. Net
+behaviour change: none. Those turns already took `reasoning`; this keeps them there and confines
+the phase to attended turns.
+
+**The unbacked-claim repair always escalates to `reasoning`** (`nodes.py`). It runs only after
+that turn's answer was provably contradicted, and exactly one round is allowed — retrying on the
+tier that just produced the answer spends it on nothing.
+
+### Regexes narrowed against words this project says constantly
+
+Three collisions, each found by reading the rules back against real phrasings rather than by a
+test failing:
+
+- `\bindir` matched **"indirilenler"** (the Downloads folder, named in every system prompt's
+  environment block) — *"indirilenlerdeki dosyayı listele"* read as two steps.
+- `\bciz` matched **"çizgi"** (the noun "line", as in "çizgi grafiği" — the plan's own wording).
+- `\ben son` as a sequencer matched the superlative **"en son"** ("the latest"), so *"en son
+  mailimi göster"* — one lookup — read as a sequence. Removed outright: a sequencing word has to
+  be one that cannot also be a modifier.
+
+Bare **"ve"** was never a step boundary: *"Baran ve Mehmet'le toplantı ekle"* is one event, and
+treating every conjunction as a sequence would have sent most ordinary requests back to
+`reasoning` and undone the phase.
+
+### Found and fixed on the way: session id collisions
+
+`SessionStore.new_session()` drew `YYYYMMDD-<4 hex>` and inserted it once with nothing to catch a
+repeat. The space resets daily, so the draws are a birthday problem: ~150 sessions in one day is
+roughly a 1-in-6 chance of collision, and one killed the A/B harness 75 turns into a 100-turn run
+with `sqlite3.IntegrityError` raised straight out of the turn. Rare by hand, near-certain for
+anything automated. Now retries (bounded at 5) and draws 8 hex digits — the retry is the fix, the
+extra digits are what keep it from being exercised. `tests/test_session_store.py` forces a
+collision on the first draw, because with 8 digits a natural one will never be observed again.
+
+### Known cost, pinned rather than hidden
+
+A generic verb owned by a specific domain in `tool_router.py` splits a one-call request into two
+domains: `\blistele` is a *files* pattern, so *"Son 3 mailimi listele"* scores mail=1, files=1 and
+reads as a chain. A survey of 16 realistic single-call requests hit this 4 times (`listele` and
+`ara`; phantom `files`/`web`/`drive`). Not fixed here — the available refinement (let a
+multi-domain route stay `fast` when every domain is a fast one) also lets *"PDF'teki toplantıları
+takvime ekle"* through, and that one genuinely is two dependent calls. One imperative verb cannot
+tell those apart, so the honest fix is in `tool_router.py`, not a second heuristic on top of it.
+Nothing regresses meanwhile: those turns take `reasoning` today too.
+
+**A second `tool_router` gap surfaced from the same reading, and this one is not about roles.**
+`\bpdf\b` requires a word boundary after "pdf", so *"PDF'teki toplantıları takvime ekle"* matches
+(the apostrophe is a boundary) but *"PDFteki toplantıları takvime ekle"* — a Turkish suffix
+attached directly to an acronym, which people write constantly — matches nothing in `files`. The
+turn then routes to `calendar` alone and **the model is never given a tool that can read the
+PDF**. That is a tool-exposure bug, present before this phase and unchanged by it; the only thing
+Faz 2.5 adds is that such a turn now also takes the fast tier. Recorded, not fixed here: pattern
+edits change which tools the model sees, which this plan's own risk table says requires its own
+measurement. It belongs with the `listele` fix above, in one `tool_router` pass.
+
+---
+
 ## [Post-MVP Faz 2: clock + temporal + entity] — 2026-07-31
 
 The phase's thesis, from the plan: **rather than make qwen3:8b smarter, shrink what it has to get

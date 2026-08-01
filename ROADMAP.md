@@ -24,8 +24,8 @@
 | 0B | Live-data integrity invariant (HUD/CLI uydurma yok) | ✅ 2026-07-31 |
 | **1** | **Honesty kernel** — artifact declaration + verification, zero-tool claim gate, shadow rollout metrikleri | ✅ **2026-07-31** |
 | **2** | **Clock + temporal + entity resolver** (takvim tarih hatası) | ✅ **2026-07-31** |
-| 2.5 | Otomatik rol seçimi (`fast` vs `reasoning`) | ⬜ next |
-| 3 | Daily Briefing MVP (1. kabul kilometre taşı) | ⬜ |
+| **2.5** | **Otomatik rol seçimi** (`fast` vs `reasoning`) — `jarvis/graph/role_router.py` | ✅ **2026-08-01** |
+| 3 | Daily Briefing MVP (1. kabul kilometre taşı) | ⬜ next |
 | 4 | Working Set (5-10 tur revizyon) | ⬜ |
 | 5 | Proaktif mail → takvim | ⬜ |
 | 6 | Derin kalıcı hafıza | ⬜ |
@@ -68,6 +68,27 @@
 - **`_all_day_end` Google'a karşı canlı doğrulanmadı** — API sözleşmesinden (end.date exclusive)
   türetildi, credential olmadığı için gerçek istekle sınanmadı. Yalnız sonu ileri alabildiği için
   her iki durumda da güvenli yazıldı.
+
+**Faz 2.5'ten taşınan, bilinçli olarak yapılmayanlar:**
+
+- **`tool_router.py`'de iki örüntü boşluğu bulundu, düzeltilmedi.** (1) Jenerik bir fiil belirli
+  bir alana ait olduğunda hayalî ikinci bir alan doğuruyor: `\blistele` bir *files* örüntüsü, yani
+  *"Son 3 mailimi listele"* → `['mail','files']` ve tek çağrılık bir istek `multi_domain`
+  kuralıyla reasoning'e gidiyor (16 gerçekçi istekte 4 kez). (2) `\bpdf\b` Türkçe ekle yazılmış
+  *"PDFteki"*'yi kaçırıyor, bu yüzden model **PDF okuyabilen hiçbir araç görmüyor** — bu ikincisi
+  rol seçiminden bağımsız, daha ciddi bir araç-görünürlüğü hatası. İkisi tek bir ölçümlü
+  `tool_router` turunda birlikte düzeltilmeli; planın kendi risk tablosu model-görünürlüğü
+  değişikliklerinin yeniden ölçüm istediğini söylüyor.
+  `tests/test_role_router.py::test_a_generic_verb_can_split_one_request_into_two_domains`
+  bugünkü davranışı sabitliyor ve düzeltildiğinde **kırmızıya dönecek** — kasıtlı.
+- **`_FAST_DOMAINS` listesinin yalnız iki üyesi canlı ölçüldü** (`calendar`, `files`). `tasks`,
+  `media`, `memory`, `mail`, `drive`, `finance`, `math` gerekçeyle eklendi, ölçümle değil. Hepsi
+  bugünkü davranışı koruyan yönde yazıldı, yani yanlış olmaları gecikmeye mal olur.
+- **`composes_prose` kuralı ölçülmedi.** Mail *gönderme*nin düzyazı ürettiği için reasoning'de
+  kalması mantıkla türetildi; hangi katmanın daha iyi mail yazdığı ölçülmedi.
+- **Zincir tamamlama sorunu rolle çözülmüyor** — ölçüm bunu açıkça gösterdi (aşağıdaki CHANGELOG).
+  İki bağımlı çağrılık istek her iki katmanda da tamamlanmıyor; çözüm Faz 4'ün Working Set'i,
+  model katmanı değil.
 
 ## Direction (owner decisions, 2026-07-14)
 

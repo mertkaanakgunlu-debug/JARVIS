@@ -71,7 +71,7 @@ turns rather than an unknown fraction. See `docs/SAFETY.md`.
 
 | Role | Primary | Fallback chain |
 |---|---|---|
-| `fast` / `local` / `realtime` (agent execution) | `qwen2.5:7b-instruct` via Ollama | configured cloud tiers: Vertex Flash, then AI Studio `gemini-2.5-flash` |
+| `fast` / `local` / `realtime` (agent execution) | `qwen3:8b` via Ollama, thinking channel **off** (`local_reasoning_effort="none"`) | configured cloud tiers: Vertex Flash, then AI Studio `gemini-2.5-flash` |
 | `reasoning` (planner / critic / complex queries) | configured cloud tiers: Vertex Pro, then AI Studio `gemini-2.5-flash` | local Ollama (final fallback — nothing is cloud-mandatory) |
 | Sub-agents (5×, pydantic-ai) | `gemini-2.5-pro` / `flash` | Vertex AI (unchanged — not yet migrated to the router) |
 | Embeddings (docs / summaries) | `nomic-embed-text` via Ollama | Gemini `text-embedding-004`, then ChromaDB default ONNX |
@@ -80,6 +80,36 @@ turns rather than an unknown fraction. See `docs/SAFETY.md`.
 A manual `/model` switch (`switch_model()`) pins the `fast` role to a specific cloud model
 (`Settings.pin_cloud_model`), bypassing the local-first default; `reasoning` is never affected by
 the pin. See [MEMORY.md](../MEMORY.md) for the local-first pivot rationale.
+
+### Who picks the role (Post-MVP Faz 2.5 — `jarvis/graph/role_router.py`)
+
+`get_llm` resolves a role to a model; `select_role()` decides which role a turn asks for. Both
+`classify_query()` (which tools the model sees) and `select_role()` (which model sees them) run
+per turn from `agent._route_query`, deterministically and with no LLM call of their own.
+
+`reasoning` is the default and `fast` has to be earned, so a turn the router cannot read keeps
+exactly the treatment it had before this module existed:
+
+| Chosen when | `reason` | Role |
+|---|---|---|
+| `/think` prefix | `explicit_think` | `reasoning` |
+| no route at all (background paths, old checkpoints) | `no_route` | `reasoning` |
+| more than one capability domain in the sentence | `multi_domain` | `reasoning` |
+| domain that plans, researches or composes (`web`, `data`, `report`, `system`, `workflow`, `procedure`, `mcp`) | `deliberative_domain` | `reasoning` |
+| mail, but sending rather than reading | `composes_prose` | `reasoning` |
+| "sonra" / "ardından" / "then" | `sequenced_steps` | `reasoning` |
+| two different imperative verbs | `multiple_imperatives` | `reasoning` |
+| zero tools bound | `conversation` | `fast` |
+| one lookup-shaped domain, one verb | `single_domain_tool` | `fast` |
+
+The reason rides in `LlmTraceRecorder` → `JarvisAgent.last_turn_trace["role_reason"]`, which is
+what makes a slow turn attributable to a named rule instead of guessed at.
+
+**On this machine both roles are the same qwen3:8b** (`cloud_policy="off"`), so today the choice
+is really "does the model think first". With a cloud tier configured the same decision picks a
+different model. One deliberate exception to the turn's role: the unbacked-claim repair
+(`nodes.py`) always escalates to `reasoning`, because it only runs after that turn's answer was
+provably contradicted.
 
 ## Tools (36 native + dynamic MCP)
 
