@@ -291,6 +291,28 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         description="Multi-step Tavily search + fetch + Gemini Pro synthesis with citations",
     ),
 
+    # ── Post-MVP Faz 3: daily briefing ───────────────────────────────────────
+    # All three are L1 reads with no confirmation, which is what lets the
+    # briefing run on the PROACTIVE path -- the clamp there fires on
+    # `risk_level >= 2 and not requires_confirmation` (see Faz 2.75's Paket E),
+    # so a scheduled morning briefing would have been blocked at L2 even
+    # though it writes nothing.
+    ToolSpec(
+        "weather", "network", 1, False, "external_read",
+        timeout_seconds=15,
+        description="Current conditions + today's high/low via Open-Meteo (no API key)",
+    ),
+    ToolSpec(
+        "news", "network", 1, False, "external_read",
+        timeout_seconds=20,
+        description="Top headlines from the configured RSS/Atom feeds (no API key)",
+    ),
+    ToolSpec(
+        "daily_briefing", "network", 1, False, "external_read",
+        timeout_seconds=30,
+        description="Deterministic daily briefing facts — calendar, to-dos, weather, headlines",
+    ),
+
     # ── Sub-agents ───────────────────────────────────────────────────────────────
     ToolSpec(
         "math_solve", "sub_agent", 2, False, "none",
@@ -456,6 +478,14 @@ _TOOL_DOMAINS: dict[str, str] = {
     # web — outbound reads
     "web_search": "web", "url_read": "web", "deep_web_research": "web",
     "research": "web",
+    # briefing / weather / news — Post-MVP Faz 3. Three domains, not one, and
+    # `news` is NOT filed under "web": "haberler ne durumda" is answered by a
+    # feed read, and routing it to web_search would hand the model a search
+    # tool for a question that has a source. The router's pattern for \bhaber
+    # moved here with the tool, per that table's own move-don't-copy rule.
+    "daily_briefing": "briefing",
+    "weather": "weather",
+    "news": "news",
     # mail / calendar / drive — split on purpose; see ToolSpec.domain comment
     "gmail": "mail", "itu_mail": "mail",
     "google_calendar": "calendar",
@@ -744,6 +774,15 @@ _TIMEOUT_CLASSES: dict[str, str] = {
     "itu_mail": "external_request_timeout",
     "finance": "external_request_timeout",
     "gcp_quota": "external_request_timeout",
+    "weather": "external_request_timeout",
+    "news": "external_request_timeout",
+    # daily_briefing is the one entry in this class that ALREADY enforces a
+    # real per-source deadline of its own (DailyBriefingService.
+    # section_timeout_sec) rather than only inheriting the generic outer
+    # asyncio.wait_for. Classified here anyway because what it blocks on is
+    # still remote round-trips, and the class describes the wait, not who
+    # bounds it.
+    "daily_briefing": "external_request_timeout",
     # soft_thread_timeout -- local compute/filesystem/SQLite/ChromaDB
     "file_read": "soft_thread_timeout",
     "file_write": "soft_thread_timeout",
@@ -821,6 +860,7 @@ _IDEMPOTENCY: dict[str, str] = {
     "data_analyze": "natural", "vault_search": "natural",
     "web_search": "natural", "url_read": "natural", "deep_web_research": "natural",
     "research": "natural", "gcp_quota": "natural", "workflow_status": "natural",
+    "weather": "natural", "news": "natural", "daily_briefing": "natural",
     # natural -- pure compute, no side effects
     "math_solve": "natural", "write_content": "natural", "generate_code": "natural",
     # natural -- converging writes (overwrite / verified dedup)

@@ -20,6 +20,8 @@ from jarvis.tools.notes import append_note
 from jarvis.tools.pdf import read_pdf
 from jarvis.tools.pdf_vision import read_pdf_vision
 from jarvis.tools.web import tavily_search
+from jarvis.tools.weather import weather_report        # Post-MVP Faz 3
+from jarvis.tools.news import news_headlines           # Post-MVP Faz 3
 from jarvis.tools.latex import latex_write, latex_compile, compose_report
 from jarvis.tools.excel import read_excel
 from jarvis.tools import python_exec
@@ -149,6 +151,61 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
     def web_search(query: str) -> str:
         """Quick web search via Tavily. For deep multi-step research use the research tool."""
         return tavily_search(query, api_key=settings.tavily_api_key)
+
+    # ── Post-MVP Faz 3: weather, news, and the daily briefing ────────────────
+
+    @tool
+    def weather(city: str = "") -> str:
+        """Current weather and today's high/low. Real measurements, no API key.
+
+        Call this whenever the user asks about the weather — you have no way
+        to know today's temperature, and a plausible guess is
+        indistinguishable from a reading until the user walks outside.
+
+        Never ask which city. The user's own location is already configured
+        and is what this returns by default.
+
+        Args:
+            city: Optional override. Pass a name ONLY when the user named a
+                  different place ("Ankara'da hava nasıl"). Otherwise omit it.
+        """
+        return weather_report(city, settings)
+
+    @tool
+    def news(limit: int = 0) -> str:
+        """Today's headlines, read verbatim from the configured news feeds.
+
+        Returns real published titles with their URLs — use it for "haberler
+        ne durumda" / "gündemde ne var". Report the headlines as they come
+        back; do not summarize a story you have not read or add one you
+        remember. For researching a specific topic use web_search instead.
+
+        Args:
+            limit: How many headlines (0 = the configured default).
+        """
+        return news_headlines(limit, settings)
+
+    @tool
+    def daily_briefing(sections: str = "") -> str:
+        """The user's day: calendar, to-dos, weather and headlines in ONE call.
+
+        Use for "bugün neler var", "günlük özet", "brifing", "günüme bak".
+
+        Everything is gathered and verified before you see it — this is a
+        finished record, not a starting point. Narrate it and stop: do not
+        call google_calendar, todo, weather or news afterwards to check or
+        extend it, and do not add an item that is not listed. A section marked
+        ALINAMADI must be reported as unavailable, not guessed at.
+
+        Args:
+            sections: Comma-separated subset from calendar, todo, weather,
+                      news. Leave EMPTY for the full briefing; narrow it only
+                      when the user asked for one part.
+        """
+        from jarvis.briefing import build_briefing
+
+        wanted = [s.strip().lower() for s in (sections or "").split(",") if s.strip()]
+        return build_briefing(settings, include=wanted or None)
 
     @tool
     def note_append(topic: str, body: str) -> str:
@@ -1232,6 +1289,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         geo_math,                # Faz 18
         hud_panels,              # HUD panel control
         procedure_save,          # Faz 2 — procedural memory
+        weather, news, daily_briefing,  # Post-MVP Faz 3 — daily briefing
     ]
     # Agent Runtime rev.2, Faz 0: a "disabled" alpha status means structurally
     # absent from the model-visible surface, not just documented as off-limits

@@ -71,6 +71,37 @@ REASONING = "reasoning"
 _FAST_DOMAINS = frozenset({
     "calendar", "tasks", "media", "memory", "files", "mail", "drive",
     "finance", "math",
+    # Post-MVP Faz 3. The plan's own role table puts "brifing workflow'u" on
+    # the fast side, and the briefing is the strongest case in this set: its
+    # facts are gathered by DailyBriefingService before the model sees
+    # anything, so there is no plan to make, no date to resolve and no tool
+    # sequence to get right. What is left for the model is narration, which is
+    # the one job a non-thinking tier is unambiguously suited to.
+    #
+    # It also matters more here than elsewhere. A briefing is the turn the
+    # owner runs every morning, so its latency is the latency of the product.
+    #
+    # "weather" was in this set for exactly one afternoon and was MEASURED
+    # OUT. Same query ("Hava durumu nasıl?"), n=5 per arm, nothing else
+    # changed:
+    #
+    #     fast       1/5 called the tool -- the other 4 answered
+    #                "sıcak ve güneşli, 32°C" out of thin air (it was 27.4°C
+    #                and çok bulutlu)
+    #     reasoning  5/5 called the tool, p50 16.2 s
+    #
+    # The lesson generalizes past this one domain, and it is not the axis
+    # this set was originally reasoned along. What makes a domain safe for
+    # the fast tier is not "one call against a structured source" -- news is
+    # that too, and news scores 5/5 fast. It is whether the model believes it
+    # ALREADY KNOWS the answer. Nothing in qwen3:8b's weights can produce
+    # this user's calendar or today's headlines, and the model behaves
+    # accordingly; a generic plausible weather report exists for every day of
+    # the year, so without a thinking step it simply writes one.
+    #
+    # Read that before adding a domain here. The question to ask is not "is
+    # this one tool call?" but "could the model fake this convincingly?"
+    "briefing", "news",
 })
 
 # Explicit sequencing, not mere conjunction. Bare "ve" is excluded on purpose:

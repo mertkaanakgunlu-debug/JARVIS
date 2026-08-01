@@ -41,9 +41,17 @@ MAX_DOMAINS_PER_TURN = 3
 # on equal keyword-hit scores ("Son 3 mailimi listele" is mail, even though
 # "listele" also smells like the filesystem).
 _DOMAIN_PRIORITY = [
-    "procedure", "workflow", "mail", "calendar", "drive", "media", "finance",
-    "tasks", "web", "mcp", "files", "data", "report", "math", "system", "memory",
+    "procedure", "workflow", "mail", "calendar", "briefing", "drive", "media",
+    "finance", "tasks", "weather", "news", "web", "mcp", "files", "data",
+    "report", "math", "system", "memory",
 ]
+
+# "briefing" sits BELOW "calendar" deliberately. Both fire on "takvimimde
+# bugün neler var" (calendar on \btakvim, briefing on "bugün neler var"), and
+# on that tie the user named the calendar explicitly -- so the calendar owns
+# the turn and the briefing rides along as the second domain. The pure request
+# ("bugün neler var", nothing else) scores briefing alone, which is what makes
+# it a single-domain turn and therefore a `fast` one.
 
 # Domains that are opt-in via explicit wording only, never picked up from
 # general vibes — same reasoning as procedure_save originally: a capability
@@ -84,10 +92,42 @@ _DOMAIN_PATTERNS: dict[str, list[str]] = {
         r"\bpdf", r"\bcsv", r"\bexcel",
     ],
     "web": [
-        r"\binternet", r"\bweb\b", r"\bsite", r"\bsayfa", r"\bhaber",
+        # \bhaber MOVED to the "news" domain in Post-MVP Faz 3 -- not copied.
+        # It named a capability this project now actually has a tool for
+        # (news_headlines over real feeds), and leaving it in both would score
+        # the word twice, the exact mistake this table's header warns about.
+        r"\binternet", r"\bweb\b", r"\bsite", r"\bsayfa",
         r"\bsearch\b", r"\baraştır", r"https?://", r"\bwww\.",
         r"\b[\w-]+\.(com|net|org|io|dev|edu|gov)\b",
     ],
+    # ── Post-MVP Faz 3 ───────────────────────────────────────────────────────
+    # Briefing patterns are all MULTI-WORD or briefing-specific on purpose.
+    # The tempting short one -- \bbugün -- would fire on "bugünkü takvimimi
+    # göster", "bugün kaç mail geldi", "bugünün harcamaları": a phantom second
+    # domain on nearly every request that mentions today, which is the failure
+    # Faz 2.75 (Paket F) removed three generic verbs to fix. A briefing is a
+    # specific thing the user asks for by name, not a mood.
+    #
+    # A bare "günaydın" is deliberately NOT here. It is a greeting, and firing
+    # four network calls on it would make saying good morning cost five
+    # seconds. The plan's acceptance is the explicit request.
+    "briefing": [
+        r"\bbrifing", r"\bbriefing\b", r"\bbrief me\b",
+        r"\bgünlük özet", r"\bgünün özeti", r"\bgün[üu]n [öo]zeti",
+        r"\bbugün neler var", r"\bbugün ne var", r"\bbugün nelerim var",
+        r"\bgünüme bak", r"\bgünüm nasıl", r"\bgüne başla",
+        r"\bwhat'?s on today", r"\bwhat's my day",
+    ],
+    # \bhava alone is banned: "havalimanı" (airport) and "havale" (bank
+    # transfer -- a finance word) both start with it, and a weather tool
+    # offered for a money transfer is the substring class this module's header
+    # was written about.
+    "weather": [
+        r"\bhava durum", r"\bhava nasıl", r"\bhavalar", r"\bsıcaklık",
+        r"\byağmur", r"\bkar yağ", r"\bmeteoroloji", r"\bderece mi\b",
+        r"\bweather\b", r"\bforecast\b",
+    ],
+    "news": [r"\bhaber", r"\bgündem", r"\bmanşet", r"\bson dakika"],
     "mail": [
         r"\bmail", r"\be-?posta", r"\bgmail\b", r"\binbox\b",
         r"\bgelen kutusu", r"\bmesaj",
