@@ -6,6 +6,116 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Post-MVP Faz 2.75: runtime & session hardening] — 2026-08-01
+
+An external review read the branch on GitHub and named six blockers for Faz 3. Every one was
+re-checked against the running code before anything changed; **none turned out to be an artifact
+of reading rather than running.** Packages A–F, in dependency order.
+
+### The finding that overturned a previous conclusion (Paket F)
+
+`tool_router` had three defects, and the third invalidated a measurement from Faz 2.5.
+
+Slots were filled per domain in route order. *"…satis.csv…oku ve grafiğini çiz"* routes to
+`[files, data]`; `files` has 7 tools and took 7 of the 8 slots, so `data` got exactly one —
+`data_analyze` — and **`plot_data` was never offered at all.** Faz 2.5 measured that scenario as
+the model "failing to complete a two-step chain", 0/10 on both tiers, and concluded chain
+completion needed Faz 4's Working Set. Half of that was wrong. Same harness, same fixture, n=10:
+
+| | before | after |
+|---|---|---|
+| `fast` | 0/10 completed · p50 31.9 s | **8/10** · p50 **19.5 s** |
+| `reasoning` | 0/10 completed · p50 101.3 s | **8/10** · p50 **47.0 s** |
+
+The model was not failing to draw the chart; it was never given the tool that draws charts.
+Dropped tools are logged with the route that dropped them now — "did the model even have it" was
+unanswerable from the logs, which is precisely how this went unnoticed for a whole round.
+
+The other two: generic **verbs** were domain patterns (`\blistele` in files, `\bara\b` in web), so
+*"Son 3 mailimi listele"* scored mail=1, files=1 and read as a two-domain chain — 4 of 16 realistic
+requests. And `\bpdf\b` required a word boundary, so *"PDFteki toplantıları takvime ekle"* matched
+nothing and the model got **no PDF-capable tool**; `\bcsv`/`\bexcel` had the same hole *and* sat in
+the wrong domain, so they moved to `files` with their tools rather than being copied.
+
+### `interactive` was a denylist (Paket C)
+
+`not transport.startswith("monitor-")` meant every transport nobody had thought about counted as
+"a human is present" — including `task-async`, the background TaskExecutor. A background job's
+calendar create therefore took Faz 2's confidence downgrade: `risk_level=3`,
+`requires_confirmation=False`, **nobody watching**. Faz 2's own notes claimed background turns never
+reach the downgrade; that was verified for `monitor-*` and assumed for the rest.
+
+`ExecutionContext(transport, origin, human_present, can_confirm, unattended, background)` is now
+computed once at the entry point and carried in state. Anything unrecognized lands in the safe
+corner, so the class is closed rather than the instance. `origin` is not a synonym for
+`unattended`: a monitor poll nobody asked for is clamped read-only, while a background job the user
+*did* ask for must still write the report it was asked for — both directions tested, because
+keying the clamp on `unattended` passed everything until they existed.
+
+### Reads were classified as writes (Paket E)
+
+`policy_guard` owned a private table covering four external tools. `todo`, `schedule` and `finance`
+are L2/`local_write` at the tool level, so their pure reads inherited that — and the proactive
+clamp fires on `risk_level >= 2 and not requires_confirmation`. Measured: `todo("list")`,
+`schedule("list")` and `finance("summary")` were **blocked** on a self-initiated turn while
+`google_calendar("list")` and `gmail("list_unread")` passed. A briefing there could read the
+calendar and the mailbox and not the to-do list.
+
+`ToolSpec.actions` now carries per-action metadata from one registry table. Only **reads** are
+declared: an unlisted action keeps its tool's stricter risk, so one somebody forgot — or one added
+next year — fails safe. `todo("done")` marks a task complete; `schedule("done")` lists completed
+tasks. Same word, opposite operation, and there is a test that says so.
+
+### "Timed out" is not "did not happen" (Paket D)
+
+`asyncio.wait_for` stops waiting; it does not stop the socket. `execution_may_still_be_running=true`
+has been in the error block since Faz 3 — sitting directly under `retryable=true`. Saying "this may
+have worked" and "go ahead and retry" in one message is how the same mail gets sent twice. A timeout
+that leaves an external side effect in doubt now sets `retryable=false`, adds `outcome=unknown`, and
+tells the model **what to say**: *the result could not be verified* — not *failed*, which is the one
+thing definitely not established.
+
+Remote reconciliation (querying Gmail's sent folder, Calendar for a maybe-created event) is
+deliberately **not** built: it cannot be verified without live credentials, and a hook that has
+never run against the real API is a claim, not a capability.
+
+### The persisted answer was the rejected draft (Paket A)
+
+`chat_stream` wrote `"".join(chunks)` into history, memory and the run manifest. That string is not
+the answer: `graph_stream_to_text` yields every draft, so a critic revision persisted **the rejected
+draft followed by its replacement**, and a verification repair — deliberately kept out of the stream
+— reached history not at all. Persistence now takes the graph's terminal `response`. Tokens cannot
+be unsent, so a `__jarvis_final__` marker corrects the screen; voice is the honest exception, since
+a sentence already spoken is already spoken.
+
+### A turn belongs to a conversation (Paket B)
+
+One agent serves every client. The pending confirmation pinned the graph config and the trace
+recorder but not the conversation, so: A parks on a confirmation → B sends a message → A approves →
+**A's answer lands in B's history.** `/chat/confirm` also took no conversation at all, making
+"approve whatever is pending" a sentence any client could say about someone else's L3 write. And
+`TaskExecutor` read the origin session when a *worker* started, not when the request submitted —
+so a queued task's origin was whoever spoke last.
+
+All three now carry the conversation from where it is known to where it is used. The
+`ConversationRuntime` refactor the review sketches (per-conversation history, turn counter and lock)
+is **not** done: it is the structural end state and would also buy real parallelism, but these three
+holes are closed without it.
+
+### Verification
+
+`pytest -q` **2549 passed** (4 min 01 s) · `ruff` clean · electron 27 tests + build clean.
+Mutation rounds per package: **C 10/10 · E 11/11 · F 10/10 · D 10/10 · B 9/9.**
+
+Two mutation rounds were themselves wrong before they were right. Paket F's first run reported
+everything SURVIVED because a heredoc ate a backslash level and every mutation wrote a literal
+backspace instead of `\b` — a harness that does not mutate reports perfect coverage. Several other
+survivors were real gaps, not equivalent mutants: nothing asserted a local read says `local_read`
+rather than `external_read`, nothing exercised `get_action_spec` directly, and nothing covered the
+ledger row at all.
+
+---
+
 ## [Post-MVP Faz 2.5: automatic role selection] — 2026-08-01
 
 One rule decided the model tier for every turn: conversation ⇒ `fast`, anything tool-shaped ⇒

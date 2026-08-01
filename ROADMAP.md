@@ -25,6 +25,7 @@
 | **1** | **Honesty kernel** — artifact declaration + verification, zero-tool claim gate, shadow rollout metrikleri | ✅ **2026-07-31** |
 | **2** | **Clock + temporal + entity resolver** (takvim tarih hatası) | ✅ **2026-07-31** |
 | **2.5** | **Otomatik rol seçimi** (`fast` vs `reasoning`) — `jarvis/graph/role_router.py` | ✅ **2026-08-01** |
+| **2.75** | **Runtime & Session Hardening** (GPT review, Paket A–F) | ✅ **2026-08-01** |
 | 3 | Daily Briefing MVP (1. kabul kilometre taşı) | ⬜ next |
 | 4 | Working Set (5-10 tur revizyon) | ⬜ |
 | 5 | Proaktif mail → takvim | ⬜ |

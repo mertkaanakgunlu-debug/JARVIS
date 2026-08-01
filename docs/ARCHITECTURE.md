@@ -117,6 +117,28 @@ Three nodes do **not** take the turn's role:
 | proactive / background turns | always `reasoning` | Deliberate — `for_unattended_turn`. Nobody is waiting, and a proactive turn's only protection against an unwatched L2 write is a prompt instruction. |
 | **critic** (`make_critic_node`) | always `reasoning` | **Not deliberate — structural.** `llm_pro` is built once in `graph.py`, so the node cannot read the turn's role. Measured 2026-08-01: on 10/10 live `fast` runs of *"Yarın saat 15:00'te Baran'la toplantı ekle"* the answer cleared `_is_simple_exchange`'s 40-word bar and the critic spent a reasoning-tier call anyway. Left as-is pending its own measurement — changing which model judges an answer is a change to a quality gate. |
 
+## Who a turn belongs to (Post-MVP Faz 2.75)
+
+Two questions the transport string used to answer at once, now separated.
+
+`jarvis/execution/context.py` — **ExecutionContext**, computed once per turn at the entry point
+and carried in graph state. `origin` is provenance; `human_present`/`can_confirm`/`unattended` are
+policy. An unrecognized transport lands in the safe corner (unattended, cannot confirm), so a
+surface added later is closed until someone opens it deliberately.
+
+| Transport | origin | may act without asking | read-only clamp |
+|---|---|---|---|
+| `cli`, `cli-text`, `api`, `api-stream`, `api-upload`, `voice-*` | `user` | yes | no |
+| `task-async` | `task` | no | **no** — the user asked for this job, it may write its report |
+| `monitor-*` | `monitor` | no | **yes** — JARVIS started this itself |
+| anything else | `unknown` | no | no |
+
+`conversation_id` — pinned where it is known, used where it is needed. A pending confirmation
+records the conversation its turn belongs to and resume switches back to it; `/chat/confirm`
+refuses a mismatched one; `AsyncTask` carries it from `submit()` to `background_turn()`. A shared
+`JarvisAgent` serves every client, so none of these can be re-derived later: by then another
+request may have moved the active session.
+
 ## Tools (36 native + dynamic MCP)
 
 See [TOOLS.md](TOOLS.md) for the full native-tool list with risk levels. Faz 5 adds a second,

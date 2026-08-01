@@ -10,245 +10,167 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Son oturum: 2026-08-01 — Post-MVP **Faz 2.5: otomatik rol seçimi**
+## Son oturum: 2026-08-01 — **Faz 2.5** + **Faz 2.75 (Paket A–F)**
 
-**Durum tek cümlede:** hangi modelin turu göreceği artık kodun kararı, ve o kararı **kimin
-verdiği** ekranda yazıyor — ama ölçüm, fazın planlandığı sayıların yanlış şeyi ölçtüğünü de
-gösterdi.
+**Durum tek cümlede:** dış review'ün altı Faz-3 blokerinin **hepsi koda karşı doğrulandı ve
+kapatıldı**, ve bu sırada Faz 2.5'in kendi sonuçlarından biri **yanlış çıktı**.
 
-## Plan ve sıra
+## Sıra ve plan
 
 Plan: `C:\Users\mertk\.claude\plans\c-users-mertk-downloads-jarvis-post-mvp-federated-kettle.md`
-(Faz 0A + 0B + 1 + 2 önceki oturumlarda bitti). Sıra: **3 Sabah Brifingi** → 4 Working Set →
-5 proaktif → 6 hafıza → 7 render/harita → 8 web_download → 9 Kimi K3.
+(Faz 0A + 0B + 1 + 2 + 2.5 bitti). **Sıra: Faz 3 — Daily Briefing MVP.**
 
-## Kayıttaki taban sayı rolü ölçmüyordu
+## Review doğrulaması — uydurma bulgu çıkmadı
 
-Fazın dayandığı sayılar — `fast` ≈ 0.9 sn / 19 token, `reasoning` ≈ 12–33 sn / 524–1360 token —
-bir **sohbet cevabını** bir **araç işiyle** kıyaslıyordu. İkisi de eski kuralın seçtiği rolde
-koştuğu için o sayılar rolü değil **isteğin zorluğunu** ölçüyor.
+Review yazarı repoyu klonlayamadığını belirtmişti (raporun 39. satırı), yani bulgular GitHub
+okumasına dayanıyordu. Sekizinin tamamı gerçek çıktı. Paketler bağımlılık sırasında yapıldı:
+**C → E → F → D → A → B.**
 
-Doğru ölçüm: aynı sorgu, iki kol, n=10, gerçek qwen3:8b · Ollama · `CLOUD_POLICY=off`, gerçek
-graph ve araçlar, Google Calendar yerine capture nesnesi, ayrı `JARVIS_HOME` — **0 gerçek Google
-çağrısı**.
+## Bu oturumun en önemli bulgusu — Faz 2.5'in bir sonucu yanlıştı
 
-| Senaryo | `fast` p50 | `reasoning` p50 | Oran | Araç doğruluğu |
-|---|---|---|---|---|
-| *"Merhaba, bugün nasılsın?"* | **5.4 sn** | 8.4 sn | 1.6× | 10/10 · 10/10 (doğru şekilde sıfır araç) |
-| *"Bugünkü takvimimi göster"* | **9.6 sn** | 14.8 sn | 1.5× | 10/10 · 10/10 |
-| *"Masaüstündeki dosyaları listele"* | **9.1 sn** | 19.1 sn | 2.1× | 10/10 · 15/15 |
-| *"Yarın 15:00'te Baran'la toplantı ekle"* | **16.8 sn** | 23.0 sn | 1.4× | 10/10 · 10/10 |
+`tool_router` slotları **rota sırasıyla** dolduruyordu. *"…satis.csv…oku ve grafiğini çiz"*
+`[files, data]`'ya gidiyor; `files`'ın 7 aracı 8 slotun 7'sini alıyor, `data`'ya **tek** slot
+kalıyor (`data_analyze`) ve **`plot_data` hiç sunulmuyor**.
 
-**Kazanç 1.4–2.1×, ~20× değil.** Burada iki rol de aynı qwen3:8b; fark yalnız düşünme kanalı.
-Bu faz saniye kazandırıyor, mertebe değil — açıkça söylenmeli.
+Faz 2.5 bu senaryoyu *"model iki bağımlı çağrılık zinciri tamamlayamıyor, 0/10, her iki katmanda
+da"* diye ölçmüş ve *"çözüm Faz 4'ün Working Set'i"* demişti. **Yarısı yanlıştı.** Aynı harness,
+aynı fixture, n=10:
 
-**Asıl önemli sütun doğruluk.** Düşünme kapalıyken araç çağırmanın bozulmadığına dair tek kanıt
-n=1'di (`test_local_thinking.py` docstring'i, tek bir `file_write`). Dört tek-araçlık senaryoda
-`fast` **45/45** turda doğru aracı çağırdı ve takvim tarihini her seferinde doğru yazdı
-(2026-08-02T15:00+03:00) — yani Faz 2'nin clock/temporal/event-text makinesi düşünme kanalı
-olmadan da tutuyor.
-
-`file_list` reasoning hücresi n=15: ilk koşu ortada öldü (aşağıdaki session id hatası), devam
-koşusu onu baştan ölçtü. Fazladan 5 örnek atılmadı, bildirildi.
-
-## Fazın en önemli bulgusu — zincir sorunu **rolle çözülmüyor**
-
-İki bağımlı çağrılık istek (*"csv'yi oku ve grafiğini çiz"*) hiçbir kolda tamamlanmıyor.
-
-| | araç dizisi | grafik |
+| | önce | sonra |
 |---|---|---|
-| `fast` | `csv_read` (9/10), `csv_read → data_analyze` (1/10) | **0/10** |
-| `reasoning` | `csv_read → data_analyze` (9/10), `csv_read` (1/10) | **0/10** |
+| `fast` | 0/10 · p50 31.9 sn | **8/10** · p50 **19.5 sn** |
+| `reasoning` | 0/10 · p50 101.3 sn | **8/10** · p50 **47.0 sn** |
 
-`reasoning` bir adım daha derine iniyor — ikinci çağrı 9/10'a karşı 1/10 — ama grafiğe hiç
-ulaşmıyor; `data_analyze` yalnız istatistik
-üretiyor, grafik aracı sadece `plot_data`. `fast` kolunda bir turda model **ham tool-call JSON'unu
-cevap metni olarak** bastı, bir turda da çizmek yerine *"dilerseniz oluşturabilirim"* dedi.
+Model grafiği çizemiyor değildi — **çizen aracı hiç görmüyordu.** Artık düşen araçlar, onları
+düşüren rotayla birlikte loglanıyor: *"model bu aracı gördü mü"* sorusu loglardan
+cevaplanamıyordu, ve bu tam olarak bu hatanın bir tur boyunca fark edilmemesinin sebebiydi.
 
-**Sonuç:** `multi_domain → reasoning` kuralı ölçümle *doğrulanmadı* — temkinli olduğu için duruyor,
-kazandırdığı için değil. Zincir tamamlamanın çözümü **Faz 4'ün Working Set'i**, model katmanı değil.
+## Paket paket ne yapıldı
 
-İlk koşuda ayrı bir bulgu daha çıktı: *"Masaüstündeki satis.csv"* denmesine rağmen model
-**10/10 Downloads'a** gitti. Temiz ölçüm için dosya iki klasöre birden konuldu.
+**C — ExecutionContext.** `interactive` bir denylist'ti (`not transport.startswith("monitor-")`),
+yani kimsenin düşünmediği her transport "insan var" sayılıyordu — `task-async` dahil. Arka plan
+işinin takvim create'i Faz 2'nin güven indirimini alıyordu: `risk=3`, `confirm=False`, **kimse
+izlemiyor**. Artık giriş noktasında bir kez hesaplanıp state'te taşınıyor; tanınmayan her şey
+güvenli köşeye düşüyor. `origin` ≠ `unattended`: proaktif tur salt-okunur kısıtlanıyor, ama
+kullanıcının istediği arka plan işi raporunu **yazabiliyor** — ikisi de test edildi.
 
-## Ne yapıldı
+**E — action seviyesinde risk.** `todo`/`schedule`/`finance` araç düzeyinde L2/`local_write`
+olduğu için okumaları da yazma sayılıyordu, ve proaktif kısıt `risk>=2 and not confirm` ile
+ateşliyor. Ölçüldü: `todo("list")`, `schedule("list")`, `finance("summary")` proaktif turda
+**bloklu**, `google_calendar("list")` ve `gmail("list_unread")` geçiyordu. Artık `ToolSpec.actions`
+tek kaynak; **yalnız okumalar** bildiriliyor, listelenmemiş action aracın daha katı riskini
+koruyor. `todo("done")` = tamamlandı işaretle (yazma), `schedule("done")` = tamamlananları listele
+(okuma) — aynı kelime, zıt işlem, testi var.
 
-1. **`jarvis/graph/role_router.py`** — `reasoning` varsayılan, `fast` **hak edilmeli**. Okunamayan
-   bir tur bugünkü davranışını aynen koruyor, yani değişiklik yalnız *azaltabiliyor*.
-   Gerekçeler: `explicit_think`, `no_route`, `multi_domain`, `deliberative_domain`,
-   `composes_prose`, `sequenced_steps`, `multiple_imperatives`, `unattended` → `reasoning`;
-   `conversation`, `single_domain_tool` → `fast`.
-2. **Turun kendi rolünün bilinçle ezildiği iki yer.** `for_unattended_turn`: proaktif kontroller ve
-   arka plan işleri asla `fast` almıyor — orada bekleyen kimse yok, ve proaktif tur, yanlış karar
-   veren bir modelle izlenmeyen bir L2 yazma arasındaki tek şeyin bir prompt cümlesi olduğu yol
-   (`docs/SAFETY.md` bunun kapatılmadığını açıkça yazıyor). Davranış değişimi **sıfır** — o turlar
-   zaten `reasoning` alıyordu. `nodes.py`'deki unbacked-claim onarımı **her zaman** yükseliyor:
-   kanıtlanmış yanlış bir cevabı üreten katmanda tekrar denemek tek onarım hakkını boşa harcamak.
-3. **Gerekçe ize ve ekrana akıyor** — `LlmTraceRecorder` → `last_turn_trace["role_reason"]` →
-   CLI'nin `Last turn:` satırı, `GET /status`, HUD'ın Routing satırı.
-4. **Üç regex daraltması**, her biri bu projenin sürekli söylediği bir kelimeye çarpıyordu:
-   `\bindir` → **"indirilenler"** (her system prompt'ta geçen klasör), `\bciz` → **"çizgi"**,
-   ve sıralayıcı olarak `"en son"` → üstünlük anlamındaki **"en son"**. Üçü de tek adımlık isteği
-   iki adımlık yapıyordu. Yalın **"ve"** hiç adım sınırı sayılmadı.
+**F — router.** Yukarıdaki slot bulgusu + jenerik fiiller (`\blistele`, `\bara\b`) alan
+üretiyordu (16 istekte 4) + `\bpdf\b` kelime sınırı istediği için *"PDFteki"* hiç eşleşmiyordu ve
+model **PDF okuyabilen hiçbir araç görmüyordu**. `\bcsv`/`\bexcel` aynı boşluğa sahipti **ve**
+yanlış alandaydı; araçlarıyla birlikte `files`'a **taşındı** (kopyalanmadı — iki yerde olmak
+kelimeyi iki kez sayardı).
 
-## Yol üstünde bulunup düzeltilen gerçek hata — session id çakışması
+**D — `unknown_outcome`.** `execution_may_still_be_running=true` Faz 3'ten beri vardı — tam
+`retryable=true`'nun altında. *"Bu olmuş olabilir"* ile *"tekrar dene"*yi aynı mesajda söylemek
+aynı mailin iki kez gitmesidir. Artık dış yazmada zamanaşımı `retryable=false` + `outcome=unknown`
+veriyor ve modele **ne söyleyeceğini** de söylüyor: *sonuç doğrulanamadı* — *başarısız* değil.
 
-`SessionStore.new_session()` `YYYYMMDD-<4 hex>` çekip **tek** INSERT yapıyordu, tekrar için hiçbir
-yakalama yoktu. Tarih öneki uzayı her gün sıfırladığı için bu bir doğum-günü problemi: bir günde
-~150 oturum ≈ **6'da 1** çakışma olasılığı, ve biri 100 turluk ölçümü **75. turda**
-`sqlite3.IntegrityError` ile öldürdü. Elle nadir, otomatik her şey için neredeyse kesin.
+**A — terminal cevap.** `chat_stream` `"".join(chunks)`'ı geçmişe yazıyordu; bu, kritik revizyon
+olduğunda **reddedilen taslak + yerine geçen** demek, doğrulama onarımı ise akışa hiç girmediği
+için geçmişe **hiç** ulaşmıyordu. Artık graph'ın terminal `response`'u kalıcı oluyor;
+`__jarvis_final__` işaretçisi ekranı düzeltiyor.
 
-Artık 5 denemeye kadar retry + 8 hex hane. **Retry düzeltme, haneler ise retry'ın hiç
-çalışmamasını sağlayan şey** — entropi tek başına doğru yapmıyor, iki çağıran yine aynı id'yi
-çekebilir. Çakışma testi ilk çekimi zorla tekrarlatıyor: 8 haneyle doğal bir çakışma bir daha
-gözlenmeyeceği için ancak zorlanmış olan retry'ı kanıtlar.
+**B — conversation sabitleme.** Bekleyen onay, turun graph config'ini ve trace recorder'ını
+sabitliyordu ama conversation'ını değil: A onay beklerken B mesaj gönderirse, A'nın onayladığı
+cevap **B'nin geçmişine** yazılıyordu. `/chat/confirm` hiç conversation almıyordu, yani *"bekleyen
+neyse onayla"* herhangi bir istemcinin başkasının L3 yazması hakkında söyleyebileceği bir cümleydi.
+`TaskExecutor` da kaynak session'ı **worker başladığında** okuyordu, istek gönderildiğinde değil.
 
 ## Doğrulama (2026-08-01, bu oturumda çalıştırıldı)
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q                        # 2281 passed, 5 deselected, 5 dk 08 sn
-.venv\Scripts\python.exe -m ruff check <değişen 10 dosya>     # All checks passed!
+.venv\Scripts\python.exe -m pytest -q                        # 2549 passed, 5 deselected, 4 dk 01 sn
+.venv\Scripts\python.exe -m ruff check jarvis scripts tests  # All checks passed!
 npm test    --prefix electron                                # 27 passed
 npm run build --prefix electron                              # 35 modül, hatasız
 ```
 
-GPT review düzeltmelerinden sonra tekrar: **2287 passed** (3 dk 58 sn). Taban 2235 +
-`test_role_router.py` 43 + `test_session_store.py` 3 + review düzeltmelerinin testleri 6 = 2287;
-aritmetikle doğrulandı, hiçbir eski test sessizce düşmedi.
+**Mutasyon turları:** C **10/10** · E **11/11** · F **10/10** · D **10/10** · B **9/9**
+(+ Faz 2.5 rol router'ı 22/22, session id düzeltmesi 3/3).
 
-**Çözülmemiş tek nokta — tekrarlanamayan bir flake.** Dört tam koşudan **biri** 5 hata verdi;
-sonraki **üç koşu temiz** (2287). Yakalanan tek isim
-`test_todo_bg_analysis.py::test_bg_task_is_tracked_then_pruned_after_completion` — izole halde
-3/3 geçiyor. `pytest-randomly` **kurulu değil**, yani sıra rastgele değil; muhtemel neden
-zamanlama (o koşu, CPU'yu doyuran bir mutasyon turunun hemen ardından başladı). Kod
-regresyonuna bağlanamadı ama **kapatılmış da sayılmamalı** — tekrar görülürse önce arka plan
-görev testlerinin zamanlama varsayımlarına bakın.
+**İki mutasyon turu önce kendisi hataliydi.** Paket F'nin ilk koşusu "hepsi SURVIVED" dedi çünkü
+bir heredoc bir ters bölü seviyesi yemiş ve her mutasyon `\b` yerine **backspace karakteri**
+yazmıştı — hiç mutasyon uygulanmamıştı. **Mutasyon uygulamayan bir harness mükemmel kapsam
+raporlar.** O günden sonra bütün mutasyon betikleri dosyaya yazılıyor, heredoc'a değil.
 
-**Mutasyon turu: 22/22 yakalandı.** Faz 1 ve Faz 2'nin aksine ilk turda hayatta kalan olmadı —
-ama bunun dürüst nedeni şu: üç regex çakışması mutasyon turundan **önce**, kuralları gerçek
-cümlelere karşı okurken bulundu ve her biri düzeltmesiyle **birlikte** testlendi. Yani mutasyon
-turu bu kez boşluk keşfetmedi, kapsamı doğruladı.
-
-Session id düzeltmesine ayrıca 3 mutasyon koşuldu: 2 yakalandı, 1'i davranışsal olarak **eşdeğer**
-mutanttı (8→4 hane hiçbir davranışı bozmuyor, retry emiyor) — onun için entropi bütçesini açıkça
-sabitleyen ayrı bir test yazıldı.
-
-## Faz 3 öncesi kod gözden geçirmesinde çıkan iki nokta
-
-**1. Kritik (critic) turun rolünü izlemiyor — yapısal, bilinçli değil.** `llm_pro`, `graph.py`'de
-**bir kez** `get_llm("reasoning", ...)` ile kuruluyor, yani `make_critic_node` agent/compose gibi
-`state["use_pro_agent"]`'ı okuyamıyor. Her tur `reasoning` iken bu görünmezdi; artık değil.
-`_is_simple_exchange` 40 kelimeyi aşan **her cevabı** (veya 15 kelimeyi aşan soruyu, ya da veri
-dosyası adı geçen soruyu) tam yola sokuyor — ve *"Yarın saat 15:00'te Baran'la toplantı ekle"*
-gibi bir `fast` turda **10/10** reasoning katmanında bir çağrı harcanıyor. Ölçüldü, varsayılmadı.
-
-**Bilerek düzeltilmedi:** hangi modelin cevabı yargıladığını değiştirmek bir **kalite kapısını**
-değiştirmektir, kendi öncesi/sonrası ölçümünü ister (`scripts/role_ab.py` tam bu iki ekseni
-raporluyor), ve "daha zayıf katmanla yargıla" hızlı olduğu için doğru olmuyor. `nodes.py` ve
-`docs/ARCHITECTURE.md`'ye maliyeti görünür olsun diye yazıldı.
-
-**2. `/model` pin'i artık daha çok tura ulaşıyor.** `pin_cloud_model` yalnız **fast** rolüne
-uygulanıyor, `reasoning` onu yok sayıyor. Yani bu fazın `fast`'e taşıdığı her tur, bir pin varken
-ücretli bulut modeline gidebilecek bir tur — önceden `reasoning`'e gidip yerel kalıyordu.
-Owner'ın konfigürasyonunda **yapısal olarak imkânsız** (`cloud_policy="off"` pinli olsa bile her
-bulut katmanını reddediyor — doğrulandı), ama `explicit`/`auto` altında gerçek. `_FAST_DOMAINS`'i
-genişletmeye gelen biri görsün diye `role_router.py`'ye yazıldı.
-
-Aynı geçişte düzeltilen bayat iddialar (hepsi yorum, davranış değişimi yok): kritik'in docstring'i
-"Gemini Pro" diyordu (aslında `reasoning` neye çözülüyorsa o — yerelde qwen3:8b),
-`JarvisState.use_pro_agent` "route agent node to Gemini Pro" diyordu, ve `ARCHITECTURE.md` fast
-rolünün birincil modelini `qwen2.5:7b-instruct` gösteriyordu.
+Hayatta kalan mutasyonların çoğu **gerçek boşluktu**, eşdeğer mutant değil: yerel bir okumanın
+`external_read` değil `local_read` dediğini hiçbir test iddia etmiyordu, `get_action_spec` doğrudan
+hiç çağrılmıyordu, defter satırının hiç testi yoktu, ve `may_act_without_asking`'in üç koşulundan
+hiçbiri tek tek sınanmıyordu.
 
 ## Bilinçli olarak yapılmayanlar
 
-- **`tool_router.py`'de iki örüntü boşluğu bulundu, düzeltilmedi.**
-  (1) Jenerik bir fiil belirli bir alana aitse hayalî ikinci alan doğuruyor: `\blistele` bir
-  *files* örüntüsü, yani *"Son 3 mailimi listele"* → `['mail','files']` ve tek çağrılık istek
-  `multi_domain` ile reasoning'e gidiyor — 16 gerçekçi istekte **4 kez** (`listele`, `ara`).
-  (2) `\bpdf\b` Türkçe ekli *"PDFteki"*'yi kaçırıyor, bu yüzden model **PDF okuyabilen hiçbir araç
-  görmüyor** — bu ikincisi rol seçiminden bağımsız, daha ciddi bir **araç görünürlüğü** hatası.
-  İkisi tek bir ölçümlü `tool_router` turunda düzeltilmeli; planın risk tablosu model-görünürlüğü
-  değişikliklerinin yeniden ölçüm istediğini söylüyor.
-  `tests/test_role_router.py::test_a_generic_verb_can_split_one_request_into_two_domains`
-  bugünkü davranışı sabitliyor ve düzeltildiğinde **kırmızıya dönecek** — kasıtlı, doğru dosyayı
-  gösteriyor.
-- **`_FAST_DOMAINS`'in yalnız iki üyesi canlı ölçüldü** (`calendar`, `files`). `tasks`, `media`,
-  `memory`, `mail`, `drive`, `finance`, `math` gerekçeyle eklendi. Hepsi bugünkü davranışı koruyan
-  yönde, yani yanlışlarsa bedeli gecikme.
-- **`composes_prose` ölçülmedi.** Mail *göndermenin* düzyazı ürettiği için reasoning'de kalması
-  mantıkla türetildi; hangi katmanın daha iyi mail yazdığı ölçülmedi. Onay kapısı her iki durumda
-  da dokunulmamış: gönderim yine duruyor ve soruyor.
-- **HUD satırı yalnız compile+build doğrulaması.** Electron'da component test altyapısı yok
-  (jsdom/testing-library yok) ve eklemek bu fazın işi değildi. Sözleşmenin **backend yarısı**
-  testli (`role_reason` frame'de var; tur koşmamışken uydurma yerine null).
-- **Sınıflandırıcının kendisi canlı A/B'de sürülmedi.** Ölçüm rolü *zorlayarak* yapıldı, yani
-  "hangi rolün ne kazandırdığı" ölçüldü; "sınıflandırıcı gerçek trafikte doğru rolü seçiyor mu"
-  deterministik testlerle ve 37 istekli bir dağılım taramasıyla gösterildi (**%73 fast**), canlı
-  turlarla değil.
+- **`ConversationRuntime` refactor'ü (review'ün Paket B önerisinin tam hali).** Per-conversation
+  history/turn/lock, yalnız graph ve model havuzu paylaşımlı. Yapısal son durum bu ve istemciler
+  arasında **gerçek paralellik** de kazandırırdı; bu oturum üç doğruluk deliğini onsuz kapattı,
+  global kilit turları sıraya sokmaya devam ediyor.
+- **Uzak mutabakat (reconciliation).** Gmail'in gönderilenlerini veya Calendar'ı sorgulayıp
+  "gerçekten oldu mu" demek Paket D'nin doğru devamı, ama **canlı credential olmadan
+  doğrulanamaz**; hiç gerçek API'ye karşı koşmamış bir hook yetenek değil iddiadır.
+- **P1-1 tanımsız araç fail-closed değil.** `policy_guard.evaluate()` ToolSpec bulamazsa
+  `allowed=True` + `requires_confirmation=True` dönüyor — "fail safe" değil "confirm by default".
+  Doğrulandı, bu oturumda düzeltilmedi.
+- **P1-4 `local` rolü gerçekte local-only değil.** `cloud_policy=auto` altında `get_llm("local")`
+  bulut fallback katmanı istiyor. Doğrulandı; owner'ın konfigürasyonunda (`off`) etkisiz, ama
+  isimlendirme tuzağı gerçek.
+- **P1-2 critic hata durumunda sessizce kabul ediyor** (fail-open) ve **critic turun rolünü
+  izlemiyor** — `llm_pro` `graph.py`'de bir kez kuruluyor. Ölçüldü: `fast` bir takvim-oluşturma
+  turunda **10/10** reasoning katmanında bir çağrı harcanıyor. Hangi modelin cevabı yargıladığını
+  değiştirmek bir kalite kapısını değiştirmektir, kendi ölçümünü ister.
+- **`/model` pin'i artık daha çok tura ulaşıyor** (Faz 2.5'in yan etkisi). `pin_cloud_model` yalnız
+  `fast` rolüne uygulanıyor. `cloud_policy="off"` altında yapısal olarak imkânsız (doğrulandı).
+
+## Çözülmemiş — tekrarlanamayan test flake'i
+
+Bir noktada dört tam koşudan biri 5-6 hata verdi, diğerleri temiz. Yakalanan tek isim
+`test_todo_bg_analysis.py::test_bg_task_is_tracked_then_pruned_after_completion`, izole halde 3/3
+geçiyor. Teşhis: `graph_tools._todo_bg_tasks` **modül düzeyinde global** ve o test başlangıçta boş
+olmasını şart koşuyor; aynı dosyadaki ilk test arka plan görevi bitmeden dönüyor, yani done-callback
+henüz budamamış olabilir. `pytest-randomly` **kurulu değil**, sıra rastgele değil — değişken
+zamanlama. **Kapatılmadı.** Tekrar görülürse o dosyaya `_todo_bg_tasks`'i her testten önce boşaltan
+bir autouse fixture eklemek doğru düzeltme.
 
 ## Oturum sonu
 
-**5 iş commit'i ve bu kapanış HANDOFF commit'i.** Yapı bilinçli olarak bağımsız ve tek tek geri
-alınabilir, bağımlılıklar ileri akıyor (hiçbir ara commit kırık ağaç bırakmıyor):
-session id düzeltmesi → rol router + kablolama + testler → sunum katmanı (CLI/`/status`/HUD) →
-ölçüm harness'ı → docs. Oturum sonunda **local == origin senkrondu**.
+**16 iş commit'i ve bu kapanış HANDOFF commit'i** (Faz 2.5 ve Faz 2.75 birlikte; ara HANDOFF/docs
+commit'leri de bu sayıya dahil). Her paket kendi commit'i, bağımlılıklar ileri akıyor, hiçbir ara
+commit kırık ağaç bırakmıyor. Oturum sonunda **local == origin senkrondu**.
 
-**Yeni araç: `scripts/role_ab.py`.** Aynı sorguyu iki rolde koşup **gecikme ve doğruluğu birlikte**
-raporluyor. `JARVIS_HOME` repo **dışında** bir temp dizin (`ROLE_AB_HOME` ile ezilebilir), Calendar
-yerine capture nesnesi, fixture'ı kendi kuruyor.
+**Yeni araç: `scripts/role_ab.py`** — aynı sorguyu iki rolde koşup **gecikme ve doğruluğu birlikte**
+raporluyor. `JARVIS_HOME` repo dışında bir temp dizin (`ROLE_AB_HOME` ile ezilir), Calendar yerine
+capture nesnesi, fixture'ı kendi kuruyor.
 
 ```powershell
 .venv\Scripts\python.exe scripts\role_ab.py --runs 10
-.venv\Scripts\python.exe scripts\role_ab.py --runs 10 --arm fast --only calendar_list
+.venv\Scripts\python.exe scripts\role_ab.py --runs 10 --arm fast --only multi_step
 ```
-
-Faz 3'ün gate'i (medyan < 5 sn **ve** p95 < 10 sn **ve** 0 uydurma kalem) tam olarak bu iki ekseni
-istiyor — yalnız gecikme raporlayan bir harness o soruyu cevaplayamaz.
-
-## GPT review (2026-08-01) — koda karşı doğrulandı
-
-Review yazarı repoyu klonlayamadığını belirtti (raporun 39. satırı), yani bulgular **GitHub
-okumasına** dayanıyor. Her birini gerçek koda karşı çalıştırdım. **Uydurma bulgu çıkmadı** —
-aşağıdakilerin hepsi doğrulandı.
-
-| # | Bulgu | Durum | Kanıt |
-|---|---|---|---|
-| P0-4 | `task-async` "insan mevcut" sayılıyor | ✅ **BU OTURUMDA DÜZELTİLDİ** | `evaluate(google_calendar, create, interactive=True)` → `requires_confirmation=False, risk=3` |
-| P1-6 | Onaylı turda kullanıcı metni hafızaya yazılmıyor | ✅ **BU OTURUMDA DÜZELTİLDİ** | `_schedule_memory_extraction("", ...)`, `resumed_user_query` zaten okunmuşken |
-| P0-1 | Stream, terminal cevabı değil biriken chunk'ları geçmişe yazıyor | ✅ doğrulandı, açık | `agent.py`: `full_response = "".join(chunks)` → `_compact_completed_turn_for_history` |
-| P0-2 | Onay sonucu global aktif session'a yazılıyor | ✅ doğrulandı, açık | pending kaydı `{config, recorder, created_at}`; `ConfirmRequest` yalnız `decision` taşıyor |
-| P0-3 | Arka plan görevi conversation ID'yi kaybediyor | ✅ doğrulandı, açık | `submit(query)` → `AsyncTask(task_id, user_query)`; `body.conversation_id` hiç geçmiyor |
-| P0-6 | Salt-okuma `todo`/`schedule`/`finance` proaktif yolda bloklanıyor | ✅ doğrulandı, açık | üçü de `risk=2, confirm=False, local_write`; `_READ_ACTIONS` yalnız 4 Google/mail aracını kapsıyor |
-| P1-1 | Tanımsız araç fail-closed değil | ✅ doğrulandı, açık | `policy_guard.py`: ToolSpec yoksa `allowed=True` |
-| P1-4 | `local` rolü gerçekte local-only değil | ✅ doğrulandı, açık | `cloud_policy=auto` altında `get_llm("local")` bulut fallback katmanı istiyor |
-
-**P0-6'nın somut kanıtı** (Faz 3'ü doğrudan bloklayan bulgu):
-
-```
-todo    {'action':'list'}     risk=2 confirm=False -> proaktif yolda BLOKLANIR
-schedule{'action':'list'}     risk=2 confirm=False -> proaktif yolda BLOKLANIR
-finance {'action':'summary'}  risk=2 confirm=False -> proaktif yolda BLOKLANIR
-google_calendar {'action':'list'}   risk=1 -> geçer
-gmail   {'action':'list_unread'}    risk=1 -> geçer
-```
-
-Yani bugünkü haliyle proaktif yolda koşan bir Daily Briefing takvimi ve maili okuyabilir,
-**yapılacakları ve finansı okuyamaz**.
-
-**Owner kararı bekleyen soru:** review "Faz 2.75 — Runtime & Session Hardening" öneriyor
-(Paket A–F). Doğrulama bunu destekliyor: P0-1/2/3 tek bir kök nedenin üç yüzü — **conversation
-runtime'ın global olması**. Faz 3 gözetimsiz çalışan ilk özellik olacağı için bu üçü orada
-sistematik hâle gelir. Ama bu bir faz büyüklüğünde iş; sıraya alınması owner'ın kararı.
 
 ## SONRAKİ OTURUM — Faz 3: Daily Briefing MVP
 
-Plan dosyasındaki Faz 3, ve 1. kabul kilometre taşı: *"JARVIS bugün neler var"* → saate duyarlı,
-**uydurmasız** brifing (takvim · yapılacaklar · hava · haber). Brifing bir LLM workflow'u
-**değil**: `DailyBriefingService` deterministik `BriefingFacts` üretir, LLM yalnız anlatır.
+Plan dosyasındaki Faz 3, 1. kabul kilometre taşı: *"JARVIS bugün neler var"* → saate duyarlı,
+**uydurmasız** brifing. Brifing bir LLM workflow'u **değil**: `DailyBriefingService` deterministik
+`BriefingFacts` üretir, LLM yalnız anlatır.
 
-Faz 2.5'in oraya bıraktığı iki şey: (1) brifing tek deterministik iş olduğu için `fast` katmanına
-uygun — ama `tool_router`'da kendi alanı yok, eklenmesi gerekecek; (2) `jarvis/clock.py` Faz 2'de
-kuruldu ve brifing onun henüz bağlanmamış tüketicisi.
+Faz 2.75'in oraya bıraktıkları:
+
+- **Proaktif yol artık takvim, mail, todo, schedule ve finansı okuyabiliyor** (Paket E). Faz 3'ün
+  doğrudan engeli buydu.
+- **Gözetimsiz tur semantiği tipli** (Paket C) — zamanlanmış brifing `origin`'ini alır, transport
+  string'i tahmin etmez. Push bildirimiyle teslim edilen bir brifing `can_confirm=True` ama
+  `human_present=False` olabilir; `ExecutionContext` bunu ifade edebiliyor ve testi var.
+- **Gate metrikleri için harness hazır** — Faz 3'ün eşiği (medyan < 5 sn **ve** p95 < 10 sn **ve**
+  0 uydurma kalem) tam olarak `scripts/role_ab.py`'nin raporladığı iki eksen.
+- **Brifingin `tool_router`'da kendi alanı yok**, eklenmesi gerekecek (hava + haber araçları da bu
+  fazda geliyor).
+- `jarvis/clock.py` Faz 2'de kuruldu ve brifing hâlâ onun **bağlanmamış** tüketicisi.
 
 ## Önceki oturumlardan taşınan, değişmeyen işler
 
@@ -270,3 +192,5 @@ kuruldu ve brifing onun henüz bağlanmamış tüketicisi.
   2026-07-31'de `python` job'ı bu hatayla kaldı ve **kaldığı commit sadece docs'tu** (`b0d4725`);
   bir önceki ve bir sonraki koşu aynı kodla geçti. `requirements.txt`'te `chromadb>=0.6` **pinsiz**.
   **Yeniden görülürse önce koşuyu tekrarlayın**, kod aramayın.
+- **`main` kaç commit geride sayısını okumayın, türetin** — her commit'te bayatlıyor:
+  `git rev-list --left-right --count origin/main...origin/langgraph-migration`.
