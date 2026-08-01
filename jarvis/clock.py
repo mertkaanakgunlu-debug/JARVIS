@@ -79,6 +79,34 @@ def resolve_timezone(name: str) -> tzinfo:
         return timezone(timedelta(hours=offset), name)
 
 
+# ── Saying the date in the user's language ───────────────────────────────────
+#
+# Post-MVP Faz 3. These lived as private lists in jarvis/agent.py, used by
+# _build_now_block() alone. The daily briefing needs the same two tables, and a
+# second copy is how the timezone split that created this module started: two
+# call sites, each with its own private answer, agreeing until one changed.
+# They belong here for the same reason `now` does -- "what day is it, stated
+# the way the user says it" is one question, and DEFAULT_LOCALE already lives
+# in this module.
+#
+# Turkish-only, deliberately. This project has exactly one user and every
+# user-facing string in it is Turkish; a locale dispatch table with one entry
+# would be an abstraction over a decision nobody has had to make yet.
+WEEKDAYS_TR = ("Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar")
+MONTHS_TR = (
+    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
+)
+
+
+def format_long_date(moment: date | datetime) -> str:
+    """`1 Ağustos 2026 Cumartesi` — how a person states a date out loud."""
+    return (
+        f"{moment.day} {MONTHS_TR[moment.month - 1]} {moment.year} "
+        f"{WEEKDAYS_TR[moment.weekday()]}"
+    )
+
+
 @runtime_checkable
 class Clock(Protocol):
     """What a consumer is allowed to depend on. Kept deliberately small: a

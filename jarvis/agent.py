@@ -325,11 +325,10 @@ def _build_env_block(workspace: Path) -> str:
     )
 
 
-_WEEKDAYS_TR = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
-_MONTHS_TR = [
-    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
-]
+# Post-MVP Faz 3: the weekday/month tables these two lines used to define
+# moved to jarvis/clock.py, which the daily briefing also reads. See the
+# comment above WEEKDAYS_TR there for why a second private copy was the wrong
+# shape.
 
 
 def _build_now_block(clock=None) -> str:
@@ -362,7 +361,7 @@ def _build_now_block(clock=None) -> str:
     """
     from datetime import timedelta
 
-    from jarvis.clock import get_clock
+    from jarvis.clock import MONTHS_TR, WEEKDAYS_TR, get_clock
 
     clk = clock or get_clock()
     now = clk.now()
@@ -373,7 +372,7 @@ def _build_now_block(clock=None) -> str:
     return (
         f"\n\n## Current date and time ({clk.tz_name}, {offset})\n"
         f"- Now: **{now:%Y-%m-%d %H:%M}**, "
-        f"{_WEEKDAYS_TR[now.weekday()]} {now.day} {_MONTHS_TR[now.month - 1]} {now.year}\n"
+        f"{WEEKDAYS_TR[now.weekday()]} {now.day} {MONTHS_TR[now.month - 1]} {now.year}\n"
         f"- Today = {now:%Y-%m-%d} · Tomorrow (yarın) = {tomorrow:%Y-%m-%d}\n"
         f"- This month (bu ay) = **{now:%Y-%m}** (year={now.year}, month={now.month})\n\n"
         "Resolve every relative date the user gives (bugün, yarın, bu ay, geçen "
