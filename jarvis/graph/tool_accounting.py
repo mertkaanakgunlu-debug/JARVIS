@@ -138,6 +138,20 @@ def parse_invalid_args_field(content: Any) -> str | None:
     return m.group(1) if m else None
 
 
+def parse_unknown_outcome(content: Any) -> bool:
+    """Post-MVP Faz 2.75 (Paket D): did this call leave an external side effect
+    in doubt?
+
+    Written by safe_tools.format_tool_error as `outcome=unknown` when a timed-out
+    external write may still have landed on the remote service. Parsed the same
+    plain-substring way as the flags below, and kept separate from them because
+    it is a different KIND of fact: those describe the local process, this
+    describes what the remote may or may not now contain.
+    """
+    s = content if isinstance(content, str) else str(content)
+    return "outcome=unknown" in s
+
+
 def parse_timeout_flags(content: Any) -> tuple[bool, bool, bool]:
     """Agent Runtime rev.2, Faz 3: (timed_out, execution_may_still_be_running,
     worker_terminated) parsed out of a [TOOL_ERROR] block -- same plain
@@ -268,6 +282,9 @@ def make_tool_result_accounting_node(settings=None, workspace: Path | None = Non
                 # state through the SqliteSaver checkpointer.
                 "content_head": redact_preview(content, max_chars=_CONTENT_HEAD_CHARS),
                 **({"reason_code": code} if code else {}),
+                # Paket D: "not ok" and "may have happened anyway" are
+                # different facts, and only the second one forbids a retry.
+                **({"outcome": "unknown"} if parse_unknown_outcome(content) else {}),
             })
             if envelopes is not None:
                 timed_out, may_still_run, worker_terminated = parse_timeout_flags(content)

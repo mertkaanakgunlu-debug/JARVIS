@@ -107,7 +107,41 @@ def _categorize(exc: BaseException) -> str:
     return "unexpected"
 
 
-def format_tool_error(tool_name: str, exc: BaseException) -> str:
+def is_unknown_outcome(tool_name: str, action: str, still_running: bool) -> bool:
+    """Whether a timeout leaves an EXTERNAL side effect in an unknown state.
+
+    Post-MVP Faz 2.75, Paket D. "Timed out" and "did not happen" are different
+    claims, and for an external write the difference is a duplicate:
+
+        gmail send -> JARVIS reports a timeout -> the HTTP request completes
+        anyway -> the user says "tekrar dene" -> the mail is sent twice.
+
+    Three conditions, all necessary:
+      still_running  -- giving up on the await did not stop the socket. False
+                        for cooperative_async tools, where cancellation really
+                        does stop the coroutine.
+      external write -- a local write that half-happened is on this machine and
+                        recoverable; a sent mail is not.
+      idempotency "none" -- a converging write (file_write, report_*, finance)
+                        can be safely re-run, so its outcome being unknown does
+                        not matter. Read straight off ToolSpec rather than
+                        re-guessed here.
+
+    `action` matters: gmail's ToolSpec is external_write because `send` is, but
+    a timed-out `list_unread` wrote nothing and must stay ordinarily retryable.
+    Per-action classification (Paket E) already knows the difference.
+    """
+    spec = get_spec(tool_name)
+    if spec is None or not still_running:
+        return False
+    from jarvis.tool_registry import get_action_spec
+
+    action_spec = get_action_spec(tool_name, action)
+    effect = action_spec.side_effect_type if action_spec else spec.side_effect_type
+    return effect == "external_write" and spec.idempotency == "none"
+
+
+def format_tool_error(tool_name: str, exc: BaseException, action: str = "") -> str:
     """Render an exception as the structured [TOOL_ERROR] block the model sees.
 
     Faz 3: for category=="timeout" (from ANY source -- this outer module's
@@ -132,31 +166,49 @@ def format_tool_error(tool_name: str, exc: BaseException) -> str:
         first_line = type(exc).__name__
     if len(first_line) > _MAX_MESSAGE_CHARS:
         first_line = first_line[:_MAX_MESSAGE_CHARS] + "..."
-    retryable = "true" if category in _RETRYABLE_CATEGORIES else "false"
-    block = (
-        "[TOOL_ERROR]\n"
-        f"tool={tool_name}\n"
-        f"category={category}\n"
-        f"message={first_line}\n"
-        f"retryable={retryable}"
-    )
+    retryable = category in _RETRYABLE_CATEGORIES
+    extra = ""
     if category == "timeout":
         spec = get_spec(tool_name)
         timeout_class = spec.timeout_class if spec is not None else "soft_thread_timeout"
         still_running = timeout_class != "cooperative_async"
         worker_terminated = isinstance(exc, subprocess.TimeoutExpired)
-        block += (
+        extra = (
             f"\nexecution_may_still_be_running={'true' if still_running else 'false'}"
             f"\nworker_terminated={'true' if worker_terminated else 'false'}"
         )
-    return block
+        if is_unknown_outcome(tool_name, action, still_running):
+            # The block already said execution_may_still_be_running=true, and
+            # that field has been there since Faz 3 -- but it sat next to
+            # `retryable=true`, and the model reads the field it was trained to
+            # act on. Saying "this may have worked" and "go ahead and retry" in
+            # the same message is how the same mail gets sent twice.
+            retryable = False
+            extra += (
+                "\noutcome=unknown"
+                "\nDO NOT retry this call. The request may have completed on the"
+                " remote service. Tell the user the result could NOT be verified"
+                " -- do not report it as failed -- and offer to check before"
+                " doing anything again."
+            )
+    return (
+        "[TOOL_ERROR]\n"
+        f"tool={tool_name}\n"
+        f"category={category}\n"
+        f"message={first_line}\n"
+        f"retryable={'true' if retryable else 'false'}"
+        + extra
+    )
 
 
 def _error_tool_message(request: Any, exc: BaseException) -> ToolMessage:
     call = getattr(request, "tool_call", None) or {}
     name = call.get("name") or "unknown"
+    # Paket D: the action decides whether a timeout leaves an external side
+    # effect in doubt -- gmail("send") does, gmail("list_unread") does not.
+    action = str((call.get("args") or {}).get("action", "")).strip().lower()
     return ToolMessage(
-        content=format_tool_error(name, exc),
+        content=format_tool_error(name, exc, action),
         name=name,
         tool_call_id=call.get("id") or "",
         status="error",
