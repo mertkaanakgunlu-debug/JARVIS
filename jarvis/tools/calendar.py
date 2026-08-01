@@ -129,6 +129,54 @@ def _all_day_end(start_dt: datetime, duration_minutes: int) -> str:
     return (start_dt + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
+def fetch_events(
+    settings: "Settings",
+    *,
+    time_min: datetime | None = None,
+    time_max: datetime | None = None,
+    days_ahead: int = 7,
+    query: str = "",
+    max_results: int = 20,
+    service=None,
+) -> list[dict]:
+    """Upcoming events as RAW Google event dicts, ordered by start time.
+
+    Post-MVP Faz 3. `calendar_control("list")` returns display text, and the
+    daily briefing needs the events themselves: it decides what is "today",
+    formats times in the user's zone, and hands the model a closed fact list.
+    Parsing that display text back into events would mean the briefing's
+    correctness depended on a bullet-point format nobody thinks of as an
+    interface -- and one whose `_fmt_event` output is deliberately lossy
+    (descriptions truncated at 120 chars).
+
+    So this is the single API call, and `calendar_control("list")` is now one
+    of its two callers rather than the only place the query lives. Raises
+    RuntimeError (missing credentials, expired token) and whatever the Google
+    client raises; both callers catch, because the briefing reports a failed
+    source and the tool renders `[ERROR]`.
+
+    `service` is an already-authenticated client to reuse -- `calendar_control`
+    builds one for the whole call and passes it here rather than paying for a
+    second `_get_service` on the same request.
+    """
+    service = service or _get_service(settings)
+    clock = _clock_for(settings)
+    start = time_min or clock.now()
+    end = time_max or (start + timedelta(days=days_ahead))
+
+    params: dict = {
+        "calendarId": "primary",
+        "timeMin": start.isoformat(),
+        "timeMax": end.isoformat(),
+        "singleEvents": True,
+        "orderBy": "startTime",
+        "maxResults": max_results,
+    }
+    if query:
+        params["q"] = query
+    return (service.events().list(**params).execute()).get("items", [])
+
+
 def _fmt_event(event: dict) -> str:
     """Format a single Calendar event for display."""
     summary = event.get("summary", "(no title)")
@@ -201,22 +249,12 @@ def calendar_control(
 
     try:
         if action == "list":
-            now = clock.now()
-            time_min = now.isoformat()
-            time_max = (now + timedelta(days=days_ahead)).isoformat()
-            result = (
-                service.events()
-                .list(
-                    calendarId="primary",
-                    timeMin=time_min,
-                    timeMax=time_max,
-                    singleEvents=True,
-                    orderBy="startTime",
-                    maxResults=20,
-                )
-                .execute()
+            # Same query the briefing runs (fetch_events above) -- one place,
+            # so a window or ordering change cannot land in one and not the
+            # other. The already-built `service` is handed straight through.
+            events = fetch_events(
+                settings, days_ahead=days_ahead, max_results=20, service=service
             )
-            events = result.get("items", [])
             if not events:
                 return f"[Calendar] No events in the next {days_ahead} days."
             lines = [f"[Calendar] Upcoming events (next {days_ahead} days):"]
