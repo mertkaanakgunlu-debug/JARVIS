@@ -1946,7 +1946,7 @@ class JarvisAgent:
                 event_bus.state("idle")
                 return
 
-            full_response = "".join(chunks)
+            streamed_response = "".join(chunks)
 
             # Runtime truth: streaming fires the same on_chat_model_start/
             # on_llm_end callbacks, so the trace is just as real here.
@@ -1956,22 +1956,58 @@ class JarvisAgent:
             # Patch 1.2 (Faz 1D): same canonical-exchange compaction as chat().
             # (Pre-1.2 this rebuilt history from the checkpoint to PRESERVE raw
             # tool messages — Faz 12-B; deliberately inverted now, the ledger
-            # summary is what history keeps.) The checkpoint is read only for
-            # the execution ledger.
+            # summary is what history keeps.)
             ledger: list[dict] = []
             # Faz 5: pre-initialized (not just assigned inside the try) so a
             # get_tuple() failure leaves this None, not undefined -- the
             # run_manifest write below also reads this same variable, after
             # the try/except has already exited.
             checkpoint_tuple = None
+            terminal_response = ""
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
                 if checkpoint_tuple:
-                    ledger = list(
-                        checkpoint_tuple.checkpoint["channel_values"].get("tool_execution_ledger") or []
-                    )
+                    values = checkpoint_tuple.checkpoint["channel_values"]
+                    ledger = list(values.get("tool_execution_ledger") or [])
+                    terminal_response = str(values.get("response") or "")
             except Exception:
                 pass
+
+            # Post-MVP Faz 2.75 (Paket A): what gets PERSISTED is the graph's
+            # terminal response, not the accumulated stream.
+            #
+            # They are not the same text, and the gap is not cosmetic. The
+            # stream carries every draft the answering node produces: when the
+            # critic asks for a revision, compose runs again and
+            # graph_stream_to_text yields the second pass too, separated by a
+            # blank line. `"".join(chunks)` is therefore the REJECTED draft
+            # followed by its replacement -- and that concatenation was what
+            # went into history, into episodic memory, into the run manifest,
+            # and into the next turn's context. A verification repair (Faz 1)
+            # never reached any of them at all, because its tokens are
+            # deliberately kept out of the stream.
+            #
+            # Falls back to the streamed text when the checkpoint has no
+            # response: an interrupted or checkpoint-less run should persist
+            # something the user actually saw rather than nothing.
+            full_response = terminal_response or streamed_response
+
+            # ...and what the user is LOOKING at gets corrected. Tokens cannot
+            # be unsent, so the only honest options were to buffer the whole
+            # answer until `verify` (killing streaming, including sentence-wise
+            # TTS) or to stream and then say "actually, this". This is the
+            # second: a single marker carrying the authoritative text, which
+            # every stream consumer already has a place to handle because
+            # __jarvis_confirm__ established the shape.
+            #
+            # Voice is the honest exception and cannot be fixed here: a
+            # sentence already spoken is already spoken. jarvis/voice/session.py
+            # swallows the marker rather than reading JSON aloud.
+            if terminal_response and terminal_response != streamed_response:
+                yield json.dumps(
+                    {"__jarvis_final__": True, "text": terminal_response},
+                    ensure_ascii=False,
+                )
             exchange = _compact_completed_turn_for_history(
                 human_msg, full_response, _execution_summary_from_ledger(ledger),
             )

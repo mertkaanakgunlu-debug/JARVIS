@@ -78,12 +78,23 @@ async def _sse_frames(token_stream: AsyncGenerator[str, None]) -> AsyncGenerator
     -- a second same-turn confirmation leaked as raw JSON there. One shared
     wrapper used by every SSE endpoint in this file makes that omission
     structurally impossible for the next one too."""
-    from jarvis.voice.session import parse_confirm_marker
+    from jarvis.voice.session import parse_confirm_marker, parse_final_marker
 
     async for token in token_stream:
         marker = parse_confirm_marker(token)
         if marker is not None:
             yield _confirmation_sse_frame(marker)
+            continue
+        # Paket A: the graph's terminal answer, when it differs from what was
+        # already streamed. Structured like the confirmation frame for the same
+        # reason -- a client must be able to tell it from ordinary tokens, or
+        # it would append the correction to the text it is correcting.
+        final = parse_final_marker(token)
+        if final is not None:
+            payload = json.dumps(
+                {"type": "final_answer", "text": final}, ensure_ascii=False,
+            )
+            yield f"data: {payload}\n\n"
             continue
         safe = token.replace("\n", "\\n")
         yield f"data: {safe}\n\n"

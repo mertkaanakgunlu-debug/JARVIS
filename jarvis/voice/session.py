@@ -70,6 +70,31 @@ def parse_confirm_marker(delta: str) -> dict | None:
     return None
 
 
+def parse_final_marker(delta: str) -> str | None:
+    """The authoritative answer text, if `delta` is the __jarvis_final__ marker.
+
+    Post-MVP Faz 2.75 (Paket A). chat_stream yields this at the end of a turn
+    when the graph's terminal response differs from the tokens it already
+    streamed -- a critic revision or a verification repair. Tokens cannot be
+    unsent, so consumers that CAN redraw (CLI, SSE clients) replace what they
+    showed. Voice cannot: a sentence already spoken is already spoken, so the
+    voice loop simply swallows this rather than reading JSON aloud.
+
+    Same single-complete-delta guarantee as parse_confirm_marker -- one
+    `yield json.dumps(...)` call, so no cross-chunk buffering.
+    """
+    s = delta.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(obj, dict) and obj.get("__jarvis_final__"):
+        return str(obj.get("text") or "")
+    return None
+
+
 def describe_confirmation(marker: dict, lang: str = "en") -> str:
     """Natural-language, TTS-safe question for a pending confirmation marker
     (as returned by parse_confirm_marker) -- no markdown, spoken aloud."""

@@ -1090,7 +1090,9 @@ async def _run_voice_response(
     scheduled) -- this function's own job is only to flip to "speaking"
     around its own speak_stream() call.
     """
-    from jarvis.voice.session import parse_confirm_marker, arm_and_speak_confirmation
+    from jarvis.voice.session import (
+        arm_and_speak_confirmation, parse_confirm_marker, parse_final_marker,
+    )
 
     response_chunks: list[str] = []
     llm_error: list[BaseException] = []
@@ -1103,6 +1105,14 @@ async def _run_voice_response(
                 marker = parse_confirm_marker(delta)
                 if marker is not None:
                     confirm_marker = marker
+                    return
+                # Paket A: the terminal-answer correction. Swallowed here
+                # rather than spoken: TTS has already said the superseded
+                # sentences and there is no un-saying them, so reading the
+                # replacement aloud would give the user the answer twice.
+                # The correction still reaches history and memory, which is
+                # where it changes what the NEXT turn believes.
+                if parse_final_marker(delta) is not None:
                     return
                 response_chunks.append(delta)
                 yield delta
