@@ -2188,9 +2188,21 @@ class JarvisAgent:
             if interrupted:
                 event_bus.state("idle")
 
+        # The user's own words, not just the answer. resumed_user_query is read
+        # from the checkpoint above and already used to build the history
+        # exchange; passing "" on to memory dropped it on exactly the turns
+        # that matter most -- the ones that ran a risky, confirmed action.
+        # Episodic memory kept "I sent it" without "send Baran the report", and
+        # fact/entity extraction saw only JARVIS talking to itself. chat(),
+        # chat_stream() and background_turn() all store both sides; this was
+        # the one path that did not. Empty stays empty: a checkpoint with no
+        # user_query (an old one, a direct-node test) must not store a blank
+        # "user" row.
+        if resumed_user_query:
+            self.memory.store("user", resumed_user_query, self.session_id)
         self.memory.store("assistant", full_response, self.session_id)
         self.memory.log_turn("assistant", full_response)
-        self._schedule_memory_extraction("", full_response)
+        self._schedule_memory_extraction(resumed_user_query, full_response)
 
         event_bus.state("idle")
 

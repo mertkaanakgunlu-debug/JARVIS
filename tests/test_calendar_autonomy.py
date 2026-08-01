@@ -37,6 +37,12 @@ from jarvis.nlu.temporal import AUTO_THRESHOLD
 
 CONFIDENT = {"action": "create", "title": "Baran ile toplantı", "date": "yarın", "time": "15:00"}
 
+# The request CONFIDENT is a faithful reading of. Used by the transport tests
+# below so the only thing that can force a confirmation there is the transport:
+# an utterance that contradicted the args would make the gate fire for the
+# wrong reason and the test would pass while proving nothing.
+UTTERANCE = "Yarın saat 15:00'te Baran'la toplantı ekle"
+
 
 def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, confirmation_gate_enabled=True, **overrides)
@@ -474,12 +480,99 @@ class TestNoSafetyMechanismIsBypassed:
     def test_the_two_graph_nodes_evaluate_the_same_call_identically(self, isolated_cwd):
         """prepare_execution_node and confirmation_node each call evaluate()
         independently. They can only agree because it is a pure function AND
-        both derive `interactive` the same way from the transport."""
-        for transport in ("cli", "api", "voice", "monitor-email", "unknown", None):
-            interactive = not (transport or "unknown").startswith("monitor-")
+        both derive `interactive` the same way from the transport.
+
+        Calls the REAL _gate_inputs. It used to re-implement the derivation
+        inline, which made it agree with itself no matter what the shipped rule
+        was -- it stayed green through the task-async bug below and would have
+        stayed green through the fix too.
+        """
+        from jarvis.graph.nodes import _gate_inputs
+
+        for transport in ("cli", "api", "voice-local", "monitor-email", "unknown", None):
+            interactive, _ = _gate_inputs({"transport": transport, "user_query": UTTERANCE})
             a = policy_guard.evaluate("google_calendar", CONFIDENT, _settings(), interactive=interactive)
             b = policy_guard.evaluate("google_calendar", CONFIDENT, _settings(), interactive=interactive)
             assert a == b, transport
+
+
+# ── the unattended-transport hole (found by external review, 2026-08-01) ──────
+
+class TestOnlyAnAttendedTransportCountsAsInteractive:
+    """`interactive` means "a human is present, in this turn, to see what
+    happens" -- so it must be an allowlist of transports that actually have
+    one, not "everything except monitor-*".
+
+    The old rule was a denylist. `task-async` -- the background TaskExecutor --
+    does not start with "monitor-", so it was treated as attended and a
+    background job's calendar create took the Faz 2 confidence downgrade: an
+    L3 external write, executed with nobody watching. Faz 2's own notes claimed
+    background turns never reach the downgrade; that was verified for monitor-*
+    and assumed for the rest.
+    """
+
+    def test_task_async_is_not_a_human(self, isolated_cwd):
+        from jarvis.graph.nodes import _gate_inputs
+
+        interactive, _ = _gate_inputs({"transport": "task-async", "user_query": UTTERANCE})
+        assert interactive is False
+
+    def test_an_unrecognized_transport_fails_safe(self, isolated_cwd):
+        """The property the denylist could not have: a transport added later,
+        by someone with no reason to look at this file, is unattended until
+        it is listed."""
+        from jarvis.graph.nodes import _gate_inputs
+
+        for transport in ("some-future-surface", "unknown", "", None):
+            interactive, _ = _gate_inputs({"transport": transport, "user_query": UTTERANCE})
+            assert interactive is False, transport
+
+    def test_the_real_attended_surfaces_still_auto_approve(self, isolated_cwd):
+        """The regression guard in the other direction: a fix that made
+        everything unattended would pass every test above and silently delete
+        the feature Faz 2 shipped."""
+        from jarvis.graph.nodes import _gate_inputs
+
+        for transport in ("cli", "cli-text", "api", "api-stream", "api-upload",
+                          "voice-cli", "voice-local", "voice-remote"):
+            interactive, _ = _gate_inputs({"transport": transport, "user_query": UTTERANCE})
+            assert interactive is True, transport
+
+    @pytest.mark.asyncio
+    async def test_a_background_calendar_create_reaches_the_gate(
+        self, isolated_cwd, monkeypatch,
+    ):
+        """The behavioural half, through the real confirmation node.
+
+        Before the fix this returned confirmation_result="approved" and the
+        event was written unattended.
+        """
+        from langgraph.errors import GraphInterrupt
+
+        reached = []
+
+        def _fake_interrupt(payload):
+            reached.append(payload)
+            raise GraphInterrupt()
+
+        monkeypatch.setattr("langgraph.types.interrupt", _fake_interrupt)
+
+        node = make_confirmation_node(_settings())
+        state = {
+            "messages": [AIMessage(content="", tool_calls=[
+                {"name": "google_calendar", "args": CONFIDENT, "id": "c1", "type": "tool_call"}])],
+            "transport": "task-async",
+            "user_query": UTTERANCE,
+        }
+        with pytest.raises(GraphInterrupt):
+            await node(state)
+        assert reached, "a background calendar create must not slip past the gate"
+
+        # Same node, same args, same utterance -- only the transport differs.
+        # Without this the test above would also pass if the utterance check
+        # were what fired, or if the downgrade had simply been deleted.
+        approved = await node({**state, "transport": "cli-text"})
+        assert approved["confirmation_result"] == "approved"
 
     @pytest.mark.asyncio
     async def test_an_auto_approved_create_is_still_written_to_the_audit_log(self, isolated_cwd):

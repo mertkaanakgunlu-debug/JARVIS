@@ -271,6 +271,35 @@ def _is_turkish(state: JarvisState) -> bool:
     return bool(_TURKISH_HINT_RE.search(query))
 
 
+# Transports on which a human is present RIGHT NOW and can answer a
+# confirmation prompt. Everything not listed is unattended.
+#
+# An allowlist, not a denylist, and the difference was a live bug. This read
+# `not transport.startswith("monitor-")` from Post-MVP Faz 2 until 2026-08-01,
+# which made "a human is present" the default for every transport nobody had
+# thought about -- including `task-async`, the background TaskExecutor. A
+# background job that proposed a calendar create therefore got the Faz 2
+# confidence downgrade and wrote an L3 external event with NOBODY WATCHING:
+#
+#   evaluate("google_calendar", {"action": "create", ...}, interactive=True)
+#     -> requires_confirmation=False, risk_level=3
+#
+# Faz 2's own notes claimed background turns "never reach the downgrade". That
+# was verified for monitor-* and assumed for the rest; `task-async` does not
+# start with "monitor-". The lesson is MEMORY.md's verify-each-branch one: a
+# denylist has to be re-audited every time a transport is added, and the person
+# adding one has no reason to look here.
+#
+# So: unrecognized transport, empty transport, an old checkpoint with no
+# transport at all -> unattended. Costs a confirmation prompt; the alternative
+# costs an unwatched write.
+_ATTENDED_TRANSPORTS = frozenset({
+    "cli", "cli-text",                        # the Rich REPL
+    "api", "api-stream", "api-upload",        # a client is holding the request
+    "voice-cli", "voice-local", "voice-remote",  # the gate speaks the prompt
+})
+
+
 def _gate_inputs(state: JarvisState) -> tuple[bool, str]:
     """(interactive, utterance) for policy_guard.evaluate().
 
@@ -288,7 +317,7 @@ def _gate_inputs(state: JarvisState) -> tuple[bool, str]:
     harmless: they contain no date, time or weekday, so every check on them
     returns "no objection".
     """
-    interactive = not (state.get("transport") or "unknown").startswith("monitor-")
+    interactive = (state.get("transport") or "") in _ATTENDED_TRANSPORTS
     utterance = str(state.get("user_query") or "")
     if not utterance:
         for message in reversed(state.get("messages") or []):

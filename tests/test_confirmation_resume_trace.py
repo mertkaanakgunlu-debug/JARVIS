@@ -154,3 +154,63 @@ async def test_resume_with_unknown_or_reset_cleared_id_yields_error():
 
     assert any("expired" in c for c in chunks)
     assert agent.saved_turns == []
+
+
+# ── the user's own words survive a confirmed turn (external review, 2026-08-01) ──
+
+@pytest.mark.asyncio
+async def test_resume_stores_the_user_query_not_just_the_answer(monkeypatch):
+    """A confirmed turn used to persist only JARVIS's reply to memory.
+
+    resume_and_stream reads user_query out of the checkpoint (it needs it to
+    build the history exchange) and then passed "" on to memory.store and
+    _schedule_memory_extraction. So on exactly the turns that ran a risky,
+    confirmed action, episodic memory kept "I sent it" without "send Baran the
+    report", and fact/entity extraction saw only the assistant side.
+    chat(), chat_stream() and background_turn() all store both.
+    """
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _fake_stream)
+    agent = _FakeResumeAgent({
+        "c1": {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None},
+    })
+    # A checkpoint that HAS the original request -- the fallback get_tuple=None
+    # in _FakeResumeAgent would hide the whole point of this test.
+    agent._checkpointer = SimpleNamespace(get_tuple=lambda cfg: SimpleNamespace(
+        checkpoint={"channel_values": {
+            "user_query": "Baran'a raporu gönder", "tool_execution_ledger": [],
+        }},
+    ))
+    stored: list[tuple] = []
+    extracted: list[tuple] = []
+    agent.memory = SimpleNamespace(
+        store=lambda role, text, sid: stored.append((role, text)),
+        log_turn=lambda *a, **k: None,
+    )
+    agent._schedule_memory_extraction = lambda user_text, response: extracted.append(
+        (user_text, response)
+    )
+
+    [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert ("user", "Baran'a raporu gönder") in stored
+    assert ("assistant", "resumed answer") in stored
+    assert extracted == [("Baran'a raporu gönder", "resumed answer")]
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_store_a_blank_user_row(monkeypatch):
+    """An old checkpoint with no user_query must store nothing for the user
+    side rather than an empty row -- the guard the fix above needs."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _fake_stream)
+    agent = _FakeResumeAgent({
+        "c1": {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None},
+    })
+    stored: list[tuple] = []
+    agent.memory = SimpleNamespace(
+        store=lambda role, text, sid: stored.append((role, text)),
+        log_turn=lambda *a, **k: None,
+    )
+
+    [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert not any(role == "user" for role, _ in stored)
