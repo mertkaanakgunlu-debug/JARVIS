@@ -1684,10 +1684,24 @@ class JarvisAgent:
             del self._pending_confirmations[stale_id]
         self._pending_confirmations[conf_id] = {
             "config": config, "recorder": recorder, "created_at": now,
+            # Post-MVP Faz 2.75 (Paket B): WHOSE turn this is.
+            #
+            # A single JarvisAgent serves every API client, and self.session_id
+            # is whatever the most recent request switched it to. Without this,
+            # resume wrote the approved turn's result into whatever conversation
+            # happened to be active when the approval arrived:
+            #
+            #   A asks for something risky -> parked on a confirmation
+            #   B sends an ordinary message -> the agent's active session is B
+            #   A approves                  -> A's answer lands in B's history
+            #
+            # The turn's own graph config was already pinned here; its
+            # conversation was not.
+            "conversation_id": self.session_id,
         }
         logger.info(
-            "[confirm] registered conf_id=%s ttl_sec=%s",
-            conf_id, getattr(self.settings, "approval_ttl_sec", 300),
+            "[confirm] registered conf_id=%s conversation=%s ttl_sec=%s",
+            conf_id, self.session_id, getattr(self.settings, "approval_ttl_sec", 300),
         )
 
     def has_pending_confirmation(self, conf_id: str) -> bool:
@@ -2066,6 +2080,7 @@ class JarvisAgent:
         decision: str,
         *,
         pre_claimed: dict | None = None,
+        conversation_id: str = "",
     ) -> AsyncGenerator[str, None]:
         """Resume a graph interrupted for confirmation and stream the agent's response.
 
@@ -2102,6 +2117,20 @@ class JarvisAgent:
         # before the interrupt -- the resumed half of the turn keeps feeding
         # it, so its rollup below is the WHOLE turn's, not just the tail's.
         recorder = pending.get("recorder")
+        pinned_conversation = str(pending.get("conversation_id") or "")
+
+        # Post-MVP Faz 2.75 (Paket B): a caller that names a conversation must
+        # name the RIGHT one. Approving by confirmation id alone is enough for
+        # the single-user CLI, but the API takes both from a client that could
+        # be holding a stale id -- and "approve whatever is pending" is not a
+        # sentence anyone should be able to say about an L3 external write.
+        if conversation_id and pinned_conversation and conversation_id != pinned_conversation:
+            logger.warning(
+                "[confirm] conf_id=%s belongs to %s, not %s -- refused",
+                conf_id, pinned_conversation, conversation_id,
+            )
+            yield "[ERROR: this confirmation belongs to a different conversation]"
+            return
 
         # BUG-8: same turn-serialization as chat()/chat_stream() — this
         # resumes and finishes the SAME turn that chat_stream() started
@@ -2109,6 +2138,15 @@ class JarvisAgent:
         # the lock for the same reason: self._history/_turn get written here.
         await self._acquire_state_lock()
         try:
+            # ...and it has to write them into the conversation the turn
+            # BELONGS to, not whichever one is active when the approval lands.
+            # Between the interrupt and the approval, any other client's
+            # request can have switched the shared agent's active session --
+            # so without this, A's approved answer was appended to B's history
+            # and saved under B's id. Switching inside the lock is the same
+            # atomicity chat() already relies on for its own conversation_id.
+            if pinned_conversation and pinned_conversation != self.session_id:
+                self._switch_session_locked(pinned_conversation)
             event_bus.state("thinking")
             chunks: list[str] = []
             _first_chunk = True
@@ -2374,7 +2412,13 @@ class JarvisAgent:
             return ProactiveOutcome(kind="none")
         return ProactiveOutcome(kind="response", text=text)
 
-    async def background_turn(self, user_query: str, *, transport: str = "task-async") -> str:
+    async def background_turn(
+        self,
+        user_query: str,
+        *,
+        transport: str = "task-async",
+        conversation_id: str = "",
+    ) -> str:
         """Entry point for TaskExecutor's user-initiated (not proactive)
         background jobs -- deep research, geo-math sims, finance reports,
         anything long enough to run off-thread while the user keeps chatting.
@@ -2416,7 +2460,15 @@ class JarvisAgent:
         # /reset or /session-switch while the (long) task runs -- the result
         # must land in the session that ASKED for it, never whichever one
         # happens to be live at completion time (session contamination).
-        origin_session_id = self.session_id
+        # Post-MVP Faz 2.75 (Paket B): the conversation the task was SUBMITTED
+        # from, not the one that happens to be active now.
+        #
+        # A task can sit queued while other clients talk, and this line ran
+        # when a worker picked it up -- so "origin" was whoever spoke last, and
+        # a background result could land in a conversation that never asked for
+        # it. TaskExecutor captures the id at submit() and passes it here.
+        # Empty (every pre-existing caller) keeps the old behaviour exactly.
+        origin_session_id = conversation_id or self.session_id
 
         ctx = self._context_builder.build(user_query, session_id=origin_session_id)
         system_prompt = _load_system_prompt(

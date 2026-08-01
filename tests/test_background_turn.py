@@ -230,9 +230,14 @@ class _StubBackgroundAgent:
         self._result = result
         self._raises = raises
         self.calls: list[str] = []
+        self.conversations: list[str] = []
 
-    async def background_turn(self, query, transport="task-async"):
+    async def background_turn(self, query, transport="task-async", conversation_id=""):
+        # conversation_id: Post-MVP Faz 2.75 (Paket B). Recorded, not just
+        # accepted -- a stub that swallowed it would let the executor stop
+        # passing it without any test noticing.
         self.calls.append(query)
+        self.conversations.append(conversation_id)
         if self._raises is not None:
             raise self._raises
         return self._result
@@ -268,3 +273,21 @@ def test_task_executor_reports_confirmation_required_without_crashing():
     assert task.status == "failed"
     assert "shell_run" in task.error
     assert "background" in task.error.lower()
+
+
+def test_the_executor_hands_the_submitting_conversation_to_the_agent():
+    """Paket B: a task can sit queued while other clients talk, so the origin
+    conversation has to travel with the task rather than be read off the shared
+    agent when a worker finally picks it up."""
+    import time
+
+    agent = _StubBackgroundAgent(result="ok")
+    executor = TaskExecutor(agent)
+    task = executor.submit("uzun bir iş", "conv-A")
+    for _ in range(50):
+        if task.status in ("done", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert task.status == "done"
+    assert agent.conversations == ["conv-A"]

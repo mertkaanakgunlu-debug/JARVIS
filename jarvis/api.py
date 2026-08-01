@@ -313,6 +313,12 @@ class ChatRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     decision: str  # "approve" | "deny" | "deny:<optional guidance>"
+    # Post-MVP Faz 2.75 (Paket B). Optional so every existing client keeps
+    # working; when supplied it must match the conversation the confirmation
+    # was raised in, or the resume is refused. A shared JarvisAgent serves
+    # every client, so "approve whatever is pending" was previously a sentence
+    # a client could say about someone else's L3 external write.
+    conversation_id: str = ""
 
 
 class ChatResponse(BaseModel):
@@ -695,7 +701,10 @@ async def chat(body: ChatRequest, request: Request):
     # Async heuristic: offload long tasks to TaskExecutor
     executor = getattr(agent, "_task_executor", None)
     if _should_offload(executor, body):
-        task = executor.submit(body.message)
+        # Paket B: the request's own conversation, captured now. Reading it
+        # off the shared agent when a worker later starts would attribute the
+        # result to whoever spoke while the task sat queued.
+        task = executor.submit(body.message, getattr(body, "conversation_id", "") or "")
         return {"async": True, "task_id": task.task_id, "status": task.status}
 
     event_bus.state("thinking")
@@ -737,7 +746,10 @@ async def chat_stream(body: ChatRequest, request: Request):
     # Async heuristic check (force_sync: see ChatRequest's field comment)
     executor = getattr(agent, "_task_executor", None)
     if _should_offload(executor, body):
-        task = executor.submit(body.message)
+        # Paket B: the request's own conversation, captured now. Reading it
+        # off the shared agent when a worker later starts would attribute the
+        # result to whoever spoke while the task sat queued.
+        task = executor.submit(body.message, getattr(body, "conversation_id", "") or "")
         import json
 
         async def _async_sse():
@@ -787,7 +799,9 @@ async def chat_confirm(conf_id: str, body: ConfirmRequest, request: Request):
 
     async def _sse() -> AsyncGenerator[str, None]:
         try:
-            async for frame in _sse_frames(agent.resume_and_stream(conf_id, body.decision)):
+            async for frame in _sse_frames(agent.resume_and_stream(
+                conf_id, body.decision, conversation_id=body.conversation_id,
+            )):
                 yield frame
         except Exception as e:
             yield f"data: [ERROR] {e}\n\n"

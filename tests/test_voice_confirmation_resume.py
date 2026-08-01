@@ -176,6 +176,8 @@ def test_a_real_jarvis_agent_reports_pending_state_honestly(isolated_cwd):
     agent = JarvisAgent.__new__(JarvisAgent)  # bypass heavy __init__; only this dict is needed
     agent._pending_confirmations = {}
     agent.settings = Settings(_env_file=None)
+    # Paket B: registration pins the paused turn to its conversation.
+    agent.session_id = "sess-1"
 
     assert agent.has_pending_confirmation("c1") is False
     agent._register_pending_confirmation("c1", {"configurable": {}}, recorder=None)

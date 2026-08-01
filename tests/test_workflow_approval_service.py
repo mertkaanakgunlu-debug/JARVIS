@@ -358,7 +358,8 @@ def test_chat_confirm_emits_structured_confirmation_frame_for_a_second_interrupt
     class _ConfirmingAgent:
         session_id = "s"
 
-        async def resume_and_stream(self, conf_id, decision):
+        async def resume_and_stream(self, conf_id, decision, *,
+                                    pre_claimed=None, conversation_id=""):
             yield "Okay, one more thing. "
             yield marker
 

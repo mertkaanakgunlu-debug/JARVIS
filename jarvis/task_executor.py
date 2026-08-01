@@ -107,6 +107,14 @@ def _should_async(query: str, force: bool = False) -> bool:
 class AsyncTask:
     task_id: str
     user_query: str
+    # Post-MVP Faz 2.75 (Paket B): the conversation that SUBMITTED this task,
+    # captured at submit() rather than read off the shared agent when the
+    # worker eventually starts. A task can sit queued while other clients send
+    # messages, and the agent's active session is whatever the last of those
+    # switched it to -- so the origin used to be "whoever was talking when a
+    # thread pool slot freed up". Empty means "the caller did not say", which
+    # keeps every pre-existing caller working.
+    conversation_id: str = ""
     status: str = "queued"          # queued | running | done | failed | cancelled
     created_at: datetime = field(default_factory=datetime.utcnow)
     started_at: datetime | None = None
@@ -120,6 +128,7 @@ class AsyncTask:
         return {
             "task_id": self.task_id,
             "user_query": self.user_query,
+            "conversation_id": self.conversation_id,
             "status": self.status,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -148,9 +157,10 @@ class TaskExecutor:
     def should_async(self, query: str, force: bool = False) -> bool:
         return _should_async(query, force)
 
-    def submit(self, query: str) -> AsyncTask:
+    def submit(self, query: str, conversation_id: str = "") -> AsyncTask:
         task_id = uuid.uuid4().hex[:12]
-        task = AsyncTask(task_id=task_id, user_query=query)
+        task = AsyncTask(task_id=task_id, user_query=query,
+                         conversation_id=conversation_id)
         with self._lock:
             self._tasks[task_id] = task
         self._pool.submit(self._run, task)
@@ -197,7 +207,10 @@ class TaskExecutor:
             # looking at) and holds _state_lock for the whole ainvoke() call
             # (blocking foreground chat for as long as this task runs). See
             # JarvisAgent.background_turn()'s docstring for the isolation.
-            response = asyncio.run(self._agent.background_turn(task.user_query, transport="task-async"))
+            response = asyncio.run(self._agent.background_turn(
+                task.user_query, transport="task-async",
+                conversation_id=task.conversation_id,
+            ))
             task.result_text = response
             task.result_artifacts = self._collect_artifacts(response)
             task.status = "done"

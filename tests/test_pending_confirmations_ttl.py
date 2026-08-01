@@ -17,10 +17,16 @@ from jarvis.agent import JarvisAgent
 from jarvis.config import Settings
 
 
-def _bare_agent():
+def _bare_agent(session_id: str = "sess-1"):
     agent = JarvisAgent.__new__(JarvisAgent)
     agent.settings = Settings(_env_file=None, approval_ttl_sec=300)
     agent._pending_confirmations = {}
+    # Post-MVP Faz 2.75 (Paket B): registration now records WHICH conversation
+    # the paused turn belongs to, so resume can write the approved answer back
+    # into it rather than into whatever session is active when the approval
+    # arrives. A bare stub needs the attribute for the same reason production
+    # has it.
+    agent.session_id = session_id
     return agent
 
 
@@ -160,3 +166,13 @@ def test_claim_returns_the_entry_when_still_within_ttl(monkeypatch):
 
     assert claimed is not None
     assert claimed["config"] == {"thread_id": "t1"}
+
+
+def test_registration_pins_the_conversation(monkeypatch):
+    """Paket B: a shared agent serves every client, so "which conversation"
+    cannot be re-derived at resume time -- by then another request may have
+    switched it."""
+    agent = _bare_agent("conv-A")
+    monkeypatch.setattr("jarvis.agent.time.monotonic", lambda: 1000.0)
+    agent._register_pending_confirmation("c1", {"thread_id": "t1"}, None)
+    assert agent._pending_confirmations["c1"]["conversation_id"] == "conv-A"
