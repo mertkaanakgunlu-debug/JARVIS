@@ -314,6 +314,23 @@ class Settings(BaseSettings):
     todo_reminder_lookahead_min: int = 120  # alert for todos due within N minutes
     todo_analyzer_model: str = "gemini-2.5-flash"  # model for priority analysis
 
+    # Post-MVP Faz 3: daily briefing (weather + news + calendar + to-dos).
+    #
+    # Both sources are deliberately KEYLESS -- Open-Meteo needs no account and
+    # RSS needs no account -- so the briefing cannot start failing because a
+    # quota ran out or a key expired. That is the whole reason these are
+    # coordinates and feed URLs rather than an api_key field.
+    weather_latitude: float = 41.0138          # İstanbul
+    weather_longitude: float = 28.9497
+    weather_place: str = "İstanbul"            # name used in the briefing text
+    news_feeds: list[str] = []                 # empty ⇒ jarvis.tools.news.DEFAULT_FEEDS
+    news_headline_count: int = 5
+    # Per-SECTION wall-clock budget, not per-briefing: the four sources run
+    # concurrently, so this is also roughly the briefing's own ceiling. Sized
+    # against the plan's gate (p50 < 5 s, p95 < 10 s) with room for one slow
+    # source to fail without dragging the other three past it.
+    briefing_section_timeout_sec: float = 8.0
+
     # Faz 14: Google Drive
     drive_cache_dir: Path = Path("data/drive_cache")   # downloaded Drive files
     drive_default_folder_id: str = ""                  # optional default folder ID
