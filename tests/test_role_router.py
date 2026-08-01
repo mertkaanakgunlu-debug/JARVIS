@@ -153,28 +153,37 @@ def test_reading_mail_is_still_fast():
     assert d.reason == "single_domain_tool"
 
 
-def test_a_generic_verb_can_split_one_request_into_two_domains():
-    """A known cost of the multi_domain rule, pinned rather than hidden.
+@pytest.mark.parametrize("query,domain", [
+    ("Son 3 mailimi listele", "mail"),
+    ("Bu haftaki toplantılarımı listele", "calendar"),
+    ("Notlarımı ara", "memory"),
+])
+def test_a_generic_verb_no_longer_splits_one_request_into_two_domains(query, domain):
+    """This test was written red on purpose and is now green.
 
-    "listele" is a *files* pattern in tool_router, so "Son 3 mailimi listele"
-    scores mail=1, files=1 and reads as a two-domain chain -- one call's worth
-    of work paying the reasoning tier. A survey of 16 realistic single-call
-    requests (2026-08-01) hit this 4 times: "listele" and "ara" are the verbs,
-    files/web/drive the phantom domains.
+    "listele" was a *files* pattern and "ara" a *web* one, so "Son 3 mailimi
+    listele" scored mail=1, files=1 and read as a two-domain chain -- one
+    call's worth of work paying the reasoning tier. A survey of 16 realistic
+    single-call requests (2026-08-01) hit that 4 times.
 
-    Not fixed here, and the reason matters. The available refinement -- let a
-    multi-domain route stay fast when every domain is a fast one -- also lets
-    "PDF'teki toplantıları takvime ekle" through, and that one genuinely is two
-    dependent calls. One imperative verb cannot tell those apart, so the honest
-    fix is in tool_router (a generic verb owned by a specific domain), not in a
-    second heuristic layered on top of it.
-
-    Nothing regresses meanwhile: these turns take the reasoning tier today too.
-    When tool_router is fixed, this test goes red and points at the right file.
+    Faz 2.75 (Paket F) removed the generic verbs from tool_router's domain
+    table, which is where the fix belonged: the refinement available *here* --
+    let a multi-domain route stay fast when every domain is a fast one -- would
+    also have let "PDF'teki toplantıları takvime ekle" through, and that one
+    genuinely is two dependent calls.
     """
-    route = classify_query("Son 3 mailimi listele")
-    assert route.domains == ["mail", "files"]
-    assert select_role("Son 3 mailimi listele", route, False).reason == "multi_domain"
+    route = classify_query(query)
+    assert route.domains == [domain]
+    assert select_role(query, route, False).reason == "single_domain_tool"
+
+
+def test_a_genuine_two_step_request_still_reads_as_one():
+    """The guard the fix above needs: removing generic verbs must not also
+    remove real multi-domain detection."""
+    query = "PDF'teki toplantıları takvime ekle"
+    route = classify_query(query)
+    assert len(route.domains) > 1
+    assert select_role(query, route, False).reason == "multi_domain"
 
 
 @pytest.mark.parametrize("query", [

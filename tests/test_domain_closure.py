@@ -159,11 +159,27 @@ def test_secondary_domains_keep_a_slot_even_when_the_primary_is_large():
     ("Bu konuda bir rapor yaz", "report"),
     ("Şu integrali hesapla: x^2 dx", "math"),
     ("Bu denklemi çöz", "math"),
-    ("csv dosyasını analiz et", "data"),
     ("Şu sayılarla çizgi grafiği çiz: 1, 4, 9, 16", "data"),
+    # Faz 2.75 (Paket F) moved csv and excel from "data" to "files", for
+    # the same reason rapor moved to "report": a pattern belongs with the
+    # tools that serve it, and csv_read/excel_read are files tools. Before the
+    # move "csvyi oku" offered data_analyze and plot_data but not csv_read.
+    ("csv dosyasını analiz et", "files"),
+    ("csvyi oku", "files"),
+    ("excelde ne var", "files"),
 ])
 def test_patterns_moved_out_of_data_still_route(query, expected):
     assert classify_query(query).primary_domain == expected
+
+
+def test_a_format_name_reaches_the_tool_that_opens_it():
+    """The point of the move, stated as behaviour rather than as a domain
+    label: naming a format must expose the reader for that format."""
+    for query, tool in (("csvyi oku", "csv_read"),
+                        ("excelde ne var", "excel_read"),
+                        ("PDFteki tabloyu oku", "pdf_read")):
+        selected = select_tool_names(classify_query(query), ALL_NAMES, query)
+        assert tool in selected, f"{query!r} -> {selected}"
 
 
 @pytest.mark.parametrize("query", [

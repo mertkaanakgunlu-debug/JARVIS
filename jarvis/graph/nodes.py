@@ -187,7 +187,9 @@ def make_agent_node(tools: list, settings=None):
     async def agent_node(state: JarvisState) -> dict:
         role = "reasoning" if state.get("use_pro_agent", False) else "fast"
         route = ToolRoute.from_dict(state.get("tool_route"))
-        subset_names = select_tool_names(route, all_names)
+        # Faz 2.75 (Paket F): the query orders each domain's tools by relevance,
+        # so a request naming a .csv does not spend its slots on pdf_vision.
+        subset_names = select_tool_names(route, all_names, state.get("user_query") or "")
         llm = _llm_for(role, subset_names)
         try:
             response = await asyncio.wait_for(llm.ainvoke(state["messages"]), timeout=timeout_sec)

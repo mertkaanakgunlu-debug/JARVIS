@@ -28,8 +28,11 @@ Routing rules (external review, GPT-5.6 2026-07-17):
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 MAX_TOOLS_PER_TURN = 8
 MAX_DOMAINS_PER_TURN = 3
@@ -50,14 +53,39 @@ _DOMAIN_PRIORITY = [
 _EXPLICIT_ONLY_DOMAINS = frozenset({"procedure", "workflow"})
 
 _DOMAIN_PATTERNS: dict[str, list[str]] = {
+    # Post-MVP Faz 2.75 (Paket F) removed three GENERIC VERBS from this table:
+    # \boku\b and \blistele from here, \bara\b from "web". They named an
+    # operation, not a capability, so any request that used one picked up a
+    # phantom second domain -- "Son 3 mailimi listele" scored mail=1, files=1
+    # and read as a two-domain chain. A survey of 16 realistic single-call
+    # requests hit that 4 times, and the cost is not only the wasted slots:
+    # role_router sends a multi-domain route to the slower reasoning tier.
+    # Nothing is lost, because the NOUN is still there in every real request
+    # ("dosyaları listele" matches \bdosya, "notlarımı ara" matches \bnot).
+    #
+    # \bpdf\b became \bpdf for a bug the word boundary caused: Turkish attaches
+    # suffixes straight onto the acronym, so "PDFteki toplantıları takvime
+    # ekle" matched nothing here and the model was handed NO tool that can read
+    # a PDF. ("PDF'teki" matched only because the apostrophe is a boundary.)
     "files": [
         r"\bdosya", r"\bklas[öo]r", r"\bdizin", r"\bfolder\b", r"\bfile",
-        r"\bdirectory\b", r"\bmasaüstü", r"\bdesktop\b", r"\boku\b",
-        r"\.(txt|md|pdf|csv|xlsx?|docx?|json|py|log)\b", r"\bpdf\b", r"\blistele",
+        r"\bdirectory\b", r"\bmasaüstü", r"\bdesktop\b",
+        r"\.(txt|md|pdf|csv|xlsx?|docx?|json|py|log)\b",
+        # File-FORMAT names live with the tools that open them (pdf_read,
+        # csv_read, excel_read are all "files"), per this table's own rule that
+        # a pattern moves with its tool. \bcsv and \bexcel were left in "data"
+        # when that domain was split out on 2026-07-30, so "csvyi oku" offered
+        # data_analyze and plot_data but not csv_read.
+        #
+        # Stems, not \b-terminated: Turkish attaches the suffix straight onto
+        # the acronym. "PDFteki", "csvyi", "excelde" match none of \bpdf\b,
+        # \bcsv\b, \bexcel\b -- and "PDFteki toplantıları takvime ekle" was
+        # therefore handed no PDF-capable tool at all.
+        r"\bpdf", r"\bcsv", r"\bexcel",
     ],
     "web": [
         r"\binternet", r"\bweb\b", r"\bsite", r"\bsayfa", r"\bhaber",
-        r"\bsearch\b", r"\bara\b", r"\baraştır", r"https?://", r"\bwww\.",
+        r"\bsearch\b", r"\baraştır", r"https?://", r"\bwww\.",
         r"\b[\w-]+\.(com|net|org|io|dev|edu|gov)\b",
     ],
     "mail": [
@@ -74,9 +102,13 @@ _DOMAIN_PATTERNS: dict[str, list[str]] = {
     # patterns MOVED with their tools rather than being duplicated: leaving
     # \brapor in both "data" and "report" would score the word twice and let one
     # intent outrank a genuinely two-domain request.
+    # \bcsv and \bexcel MOVED to "files" in Faz 2.75 (Paket F) rather than
+    # being copied there. Leaving them in both would score the word twice --
+    # the exact mistake this table's own header warns about for \brapor -- and
+    # would let a one-format request outrank a genuinely two-domain one.
     "data": [
         r"\banaliz", r"\bgrafik", r"\bçiz", r"\bplot\b", r"\bchart\b",
-        r"\bcsv\b", r"\bexcel\b", r"\bveri", r"\btablo",
+        r"\bveri", r"\btablo",
     ],
     "report": [
         r"\brapor", r"\blatex\b", r"\bpdf rapor", r"\bmakale", r"\bmetin yaz",
@@ -208,14 +240,67 @@ def classify_query(query: str) -> ToolRoute:
     return ToolRoute(ranked[0], ranked, confidence, explicit)
 
 
-def select_tool_names(route: ToolRoute | None, available: list[str]) -> list[str]:
+def _by_relevance(names: list[str], folded_query: str) -> list[str]:
+    """Tools the query actually names, first; everything else in registry order.
+
+    Deterministic and deliberately shallow: a tool's own name tokens
+    (``csv_read`` → csv, read) checked against the folded query. No model, no
+    embedding, no scoring table to drift.
+
+    ``_GENERIC_NAME_TOKENS`` are skipped because every tool in a domain shares
+    them -- "read" would make csv_read, pdf_read, excel_read and file_read all
+    equally "relevant" to the word "oku" and rank nothing.
+    """
+    def score(name: str) -> int:
+        tokens = {t for t in name.split("_") if t not in _GENERIC_NAME_TOKENS}
+        return -sum(1 for t in tokens if t and t in folded_query)
+
+    return sorted(names, key=score)  # stable: ties keep registry order
+
+
+# Tokens that carry no information about WHICH tool inside a domain to prefer.
+# Two kinds:
+#   verbs shared by most members  — read, write, list, ...
+#   the domain's own word         — "mail" is why itu_mail outranked gmail on
+#                                   "Son 3 mailimi listele": itu_mail's name
+#                                   happens to embed the domain word and
+#                                   gmail's does not, which says nothing about
+#                                   which mailbox the user meant.
+_GENERIC_NAME_TOKENS = frozenset({
+    "read", "write", "list", "get", "set", "data", "search", "run", "tool",
+    "content", "compose", "compile", "analyze", "solve", "doc", "append",
+    "mail", "file", "google", "web",
+})
+
+
+def select_tool_names(
+    route: ToolRoute | None,
+    available: list[str],
+    query: str = "",
+) -> list[str]:
     """Resolve a route to concrete tool names from what's actually available.
 
     None (no route in state — background/proactive paths, old checkpoints)
     ⇒ the full pre-router toolset, so nothing regresses behind this feature.
-    Whole domains are added in route order while the total stays within
-    MAX_TOOLS_PER_TURN; a domain that would overflow is skipped, the primary
-    domain is never skipped (truncated instead if it alone exceeds the cap).
+
+    Post-MVP Faz 2.75 (Paket F) replaced "fill each domain in route order until
+    the cap" with an equal share per routed domain, filled relevance-first.
+    The old rule quietly starved the second domain of a two-domain request:
+
+        "Masaüstündeki satis.csv dosyasını oku ve grafiğini çiz"
+          -> [files, data]; files has 7 tools and took 7 of the 8 slots,
+             so `data` got exactly one -- data_analyze -- and **plot_data was
+             never offered at all**.
+
+    The model was then measured "failing to complete the chain" in the Faz 2.5
+    A/B (0/10 on both tiers). It was not offered the tool that draws charts.
+    Six of those seven file tools were irrelevant to a request that named a
+    .csv; relevance ordering puts csv_read first and the fair share leaves room
+    for the domain the user's second verb asked for.
+
+    `query` is optional so every existing caller and old checkpoint keeps
+    working -- without it the ordering is simply registry order, i.e. the
+    previous behaviour within each share.
     """
     if route is None:
         return list(available)
@@ -236,31 +321,37 @@ def select_tool_names(route: ToolRoute | None, available: list[str]) -> list[str
                 names.append(n)
         return names
 
-    # Groups first, so slot reservation can see what every routed domain wants.
-    groups = [(d, members(d)) for d in route.domains]
+    folded = _fold(query or "")
+    groups = [(d, _by_relevance(members(d), folded)) for d in route.domains]
     groups = [(d, g) for d, g in groups if g]
+    if not groups:
+        return []
 
+    # Round 1 — an equal share each, so no domain can starve another. This is
+    # the reservation idea the previous version had, generalized: reserving one
+    # slot per later domain stopped a domain being dropped ENTIRELY, but still
+    # let a large one leave the next with a single tool.
+    share = max(1, MAX_TOOLS_PER_TURN // len(groups))
     selected: list[str] = []
-    for i, (domain, group) in enumerate(groups):
-        group = [n for n in group if n not in selected]
-        if not group:
-            continue
-        # Reserve at least one slot for each LATER routed domain before letting
-        # this one fill up. Without this, a domain whose size equals
-        # MAX_TOOLS_PER_TURN consumes the entire budget and every subsequent
-        # domain is dropped -- which is exactly what happened to the 8-tool
-        # "data" domain: the MVP prompt routed to [data, mail] and mail became
-        # invisible, so the model was asked to read mail with no mail tool.
-        # Splitting "data" fixed today's instance; this fixes the class, for the
-        # next domain that grows.
-        reserved = sum(1 for _, later in groups[i + 1:] if later)
-        room = MAX_TOOLS_PER_TURN - len(selected) - reserved
-        if i == 0:
-            # The primary domain is never skipped outright -- truncated at worst,
-            # and always given at least one tool.
-            room = max(room, 1)
-        if len(group) <= room:
-            selected.extend(group)
-        elif room > 0:
-            selected.extend(group[:room])
-    return selected
+    for _domain, group in groups:
+        selected.extend(n for n in group[:share] if n not in selected)
+
+    # Round 2 — leftovers, in route order, so the primary domain gets the
+    # slack when the others are small.
+    for _domain, group in groups:
+        room = MAX_TOOLS_PER_TURN - len(selected)
+        if room <= 0:
+            break
+        selected.extend([n for n in group if n not in selected][:room])
+
+    dropped = [n for _d, g in groups for n in g if n not in selected]
+    if dropped:
+        # No silent truncation. When a turn goes wrong the first question is
+        # "did the model even have the tool", and that used to be unanswerable
+        # from the logs -- which is how plot_data went missing for a whole
+        # measurement round without anyone noticing.
+        logger.info(
+            "tool_router: %d/%d tools dropped for %s -> %s",
+            len(dropped), len(dropped) + len(selected), route.domains, dropped,
+        )
+    return selected[:MAX_TOOLS_PER_TURN]
