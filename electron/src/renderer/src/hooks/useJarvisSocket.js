@@ -58,7 +58,7 @@ function useJarvisSocket(apiUrl, apiKey, options = {}) {
   // server had sent a single metrics frame.
   const [metrics, setMetrics]       = useState({ cpu: null, gpu: null, ram: null, vram: null, latency: null })
   const [modelStatus, setModelStatus] = useState({
-    provider: null, model: null, role: null, latency_ms: null,
+    provider: null, model: null, role: null, role_reason: null, latency_ms: null,
     input_tokens: null, output_tokens: null, fallback_used: null, cold_start: null,
   })
   const [calEvents, setCalEvents]   = useState([])

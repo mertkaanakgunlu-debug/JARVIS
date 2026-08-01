@@ -124,6 +124,32 @@ Session id düzeltmesine ayrıca 3 mutasyon koşuldu: 2 yakalandı, 1'i davranı
 mutanttı (8→4 hane hiçbir davranışı bozmuyor, retry emiyor) — onun için entropi bütçesini açıkça
 sabitleyen ayrı bir test yazıldı.
 
+## Faz 3 öncesi kod gözden geçirmesinde çıkan iki nokta
+
+**1. Kritik (critic) turun rolünü izlemiyor — yapısal, bilinçli değil.** `llm_pro`, `graph.py`'de
+**bir kez** `get_llm("reasoning", ...)` ile kuruluyor, yani `make_critic_node` agent/compose gibi
+`state["use_pro_agent"]`'ı okuyamıyor. Her tur `reasoning` iken bu görünmezdi; artık değil.
+`_is_simple_exchange` 40 kelimeyi aşan **her cevabı** (veya 15 kelimeyi aşan soruyu, ya da veri
+dosyası adı geçen soruyu) tam yola sokuyor — ve *"Yarın saat 15:00'te Baran'la toplantı ekle"*
+gibi bir `fast` turda **10/10** reasoning katmanında bir çağrı harcanıyor. Ölçüldü, varsayılmadı.
+
+**Bilerek düzeltilmedi:** hangi modelin cevabı yargıladığını değiştirmek bir **kalite kapısını**
+değiştirmektir, kendi öncesi/sonrası ölçümünü ister (`scripts/role_ab.py` tam bu iki ekseni
+raporluyor), ve "daha zayıf katmanla yargıla" hızlı olduğu için doğru olmuyor. `nodes.py` ve
+`docs/ARCHITECTURE.md`'ye maliyeti görünür olsun diye yazıldı.
+
+**2. `/model` pin'i artık daha çok tura ulaşıyor.** `pin_cloud_model` yalnız **fast** rolüne
+uygulanıyor, `reasoning` onu yok sayıyor. Yani bu fazın `fast`'e taşıdığı her tur, bir pin varken
+ücretli bulut modeline gidebilecek bir tur — önceden `reasoning`'e gidip yerel kalıyordu.
+Owner'ın konfigürasyonunda **yapısal olarak imkânsız** (`cloud_policy="off"` pinli olsa bile her
+bulut katmanını reddediyor — doğrulandı), ama `explicit`/`auto` altında gerçek. `_FAST_DOMAINS`'i
+genişletmeye gelen biri görsün diye `role_router.py`'ye yazıldı.
+
+Aynı geçişte düzeltilen bayat iddialar (hepsi yorum, davranış değişimi yok): kritik'in docstring'i
+"Gemini Pro" diyordu (aslında `reasoning` neye çözülüyorsa o — yerelde qwen3:8b),
+`JarvisState.use_pro_agent` "route agent node to Gemini Pro" diyordu, ve `ARCHITECTURE.md` fast
+rolünün birincil modelini `qwen2.5:7b-instruct` gösteriyordu.
+
 ## Bilinçli olarak yapılmayanlar
 
 - **`tool_router.py`'de iki örüntü boşluğu bulundu, düzeltilmedi.**

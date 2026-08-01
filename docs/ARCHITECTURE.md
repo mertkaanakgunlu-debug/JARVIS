@@ -107,9 +107,15 @@ what makes a slow turn attributable to a named rule instead of guessed at.
 
 **On this machine both roles are the same qwen3:8b** (`cloud_policy="off"`), so today the choice
 is really "does the model think first". With a cloud tier configured the same decision picks a
-different model. One deliberate exception to the turn's role: the unbacked-claim repair
-(`nodes.py`) always escalates to `reasoning`, because it only runs after that turn's answer was
-provably contradicted.
+different model.
+
+Three nodes do **not** take the turn's role:
+
+| Node | Tier | Why |
+|---|---|---|
+| unbacked-claim repair (`nodes.py`) | always `reasoning` | Deliberate. It only runs after the answer was provably contradicted; one round is allowed, and retrying on the tier that produced it spends it on nothing. |
+| proactive / background turns | always `reasoning` | Deliberate — `for_unattended_turn`. Nobody is waiting, and a proactive turn's only protection against an unwatched L2 write is a prompt instruction. |
+| **critic** (`make_critic_node`) | always `reasoning` | **Not deliberate — structural.** `llm_pro` is built once in `graph.py`, so the node cannot read the turn's role. Measured 2026-08-01: on 10/10 live `fast` runs of *"Yarın saat 15:00'te Baran'la toplantı ekle"* the answer cleared `_is_simple_exchange`'s 40-word bar and the critic spent a reasoning-tier call anyway. Left as-is pending its own measurement — changing which model judges an answer is a change to a quality gate. |
 
 ## Tools (36 native + dynamic MCP)
 

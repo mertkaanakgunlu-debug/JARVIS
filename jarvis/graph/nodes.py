@@ -122,7 +122,13 @@ def _extract_ai_text(state: JarvisState) -> str:
 def _is_simple_exchange(user_query: str, response_text: str) -> bool:
     """Return True if this looks like a short conversational exchange.
 
-    Simple exchanges skip the Pro critic call to save cost and latency.
+    Simple exchanges skip the critic's model call to save cost and latency.
+
+    Worth knowing what "not simple" costs, because it is easy to miss: a
+    response of 40+ words, a query over 15 words, or one naming a data file or
+    a keyword like "analiz"/"hesapla"/"yaz" all take the full path -- and the
+    full path always runs on the REASONING tier, whatever tier the turn itself
+    is on (see make_critic_node).
     """
     _COMPLEX_EXTS = {".pdf", ".xlsx", ".xls", ".py", ".tex", ".csv", ".docx", ".json"}
     _COMPLEX_KEYWORDS = {
@@ -672,11 +678,29 @@ def make_planner_node(llm_pro):
 
 
 def make_critic_node(llm_pro):
-    """Return a critic node that scores the agent's output with Gemini Pro.
+    """Return a critic node that scores the agent's output on the reasoning tier.
 
-    Fast-path: simple conversational exchanges are auto-accepted without a Pro call.
-    Full path: structured JSON verdict {score, verdict, critique} from Gemini Pro.
+    Fast-path: simple conversational exchanges are auto-accepted with no model
+    call at all (see _is_simple_exchange).
+    Full path: structured JSON verdict {score, verdict, critique}.
     Max revisions: 2. After that the critic always accepts.
+
+    The docstring used to say "Gemini Pro". It is whatever `reasoning` resolves
+    to -- on a local-only install (cloud_policy="off", this owner's config) that
+    is qwen3:8b with its thinking channel on, not a cloud model.
+
+    **Known inconsistency, measured not assumed (2026-08-01).** `llm_pro` is
+    built ONCE in graph.py as get_llm("reasoning", ...), so the critic cannot
+    follow the turn's role the way the agent and compose nodes do. Post-MVP Faz
+    2.5 made most single-tool turns run `fast`, and on 10/10 live runs of
+    "Yarın saat 15:00'te Baran'la toplantı ekle" -- a fast turn -- the answer
+    cleared 40 words and this node spent a reasoning-tier call anyway.
+
+    Left alone on purpose. Changing which model judges an answer is a change to
+    a quality gate and needs its own before/after measurement (scripts/role_ab.py
+    reports the two axes it would need); and "judge with the weaker tier" is not
+    obviously right just because it is faster. Recorded so the cost is visible
+    rather than surprising.
     """
 
     async def critic_node(state: JarvisState) -> dict:
@@ -718,7 +742,7 @@ def make_critic_node(llm_pro):
 
         user_query = state.get("user_query", "")
 
-        # Fast-path: simple conversational exchange — skip Pro call
+        # Fast-path: simple conversational exchange — no model call at all
         if _is_simple_exchange(user_query, response_text):
             return {
                 "critic_verdict": "accept",
@@ -727,7 +751,8 @@ def make_critic_node(llm_pro):
                 "revise_count": revise_count,
             }
 
-        # Full path: call Gemini Pro for quality scoring
+        # Full path: score on the reasoning tier (see this factory's docstring
+        # for why that is not the turn's own tier)
         try:
             critic_resp = await llm_pro.ainvoke([
                 SystemMessage(content=_CRITIC_SYSTEM),

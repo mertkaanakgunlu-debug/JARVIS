@@ -141,6 +141,30 @@ anything automated. Now retries (bounded at 5) and draws 8 hex digits — the re
 extra digits are what keep it from being exercised. `tests/test_session_store.py` forces a
 collision on the first draw, because with 8 digits a natural one will never be observed again.
 
+### Two things the tier decision does not reach
+
+**The critic runs on `reasoning` whatever the turn is on.** `llm_pro` is built once in `graph.py`
+as `get_llm("reasoning", ...)`, so `make_critic_node` cannot read the turn's role the way the
+agent and compose nodes do. That was invisible while every non-conversation turn was `reasoning`
+anyway. Now it is not: `_is_simple_exchange` sends any answer over 40 words (or a query over 15
+words, or one naming a data file) down the full path, and on **10/10** live `fast` runs of *"Yarın
+saat 15:00'te Baran'la toplantı ekle"* it spent a reasoning-tier call. Left alone deliberately —
+changing which model judges an answer is a change to a quality gate and needs its own before/after
+measurement, and "judge with the weaker tier" is not obviously right just because it is faster.
+Recorded in `nodes.py` and `docs/ARCHITECTURE.md` so the cost is visible instead of surprising.
+
+**A `/model` pin now reaches more turns.** `pin_cloud_model` applies to the *fast* role only;
+`reasoning` ignores it. Every turn this phase moves to `fast` is therefore a turn a pin can send
+to a paid cloud model, where before it went to `reasoning` and stayed local. Structurally
+impossible on this owner's config — `cloud_policy="off"` refuses every cloud tier, pinned or not
+(verified) — but real under `explicit`/`auto`, and noted in `role_router.py` where someone would
+go to widen `_FAST_DOMAINS`.
+
+Stale claims corrected along the way, all comments, no behaviour: the critic's docstring said
+"Gemini Pro" (it is whatever `reasoning` resolves to — qwen3:8b locally), `JarvisState`'s
+`use_pro_agent` still said "route agent node to Gemini Pro", and `ARCHITECTURE.md` listed the fast
+role's primary as `qwen2.5:7b-instruct`.
+
 ### Known cost, pinned rather than hidden
 
 A generic verb owned by a specific domain in `tool_router.py` splits a one-call request into two

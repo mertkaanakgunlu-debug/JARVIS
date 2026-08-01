@@ -24,6 +24,15 @@ Deterministic, no LLM call — same discipline as ``tool_router.classify_query``
 and for the same reason: a classifier that itself needs a model round-trip
 cannot pay for a latency phase.
 
+**One conditional cost to know before widening ``_FAST_DOMAINS``.** A ``/model``
+pin (``switch_model`` → ``settings.pin_cloud_model``) applies to the *fast* role
+only; ``reasoning`` ignores it. So every turn this module moves to ``fast`` is a
+turn a pin can now send to a paid cloud model, where before it went to
+``reasoning`` and stayed local. Structurally impossible on this owner's config —
+``cloud_policy="off"`` refuses every cloud tier, pinned or not — but real under
+``explicit`` or ``auto``, and worth weighing against the owner's "no cost for
+now" before adding a domain here.
+
 The decision carries a ``reason``. That is not decoration: Faz 2's most
 expensive finding was a gate that passed 2235 unit tests and 40/40 mutations
 while scoring the wrong input, and what made it visible was being able to ask a
