@@ -42,6 +42,33 @@ from jarvis.clock import FrozenClock
 MORNING = "2026-08-01 08:15"
 
 
+@pytest.fixture(autouse=True)
+def stub_default_sources(monkeypatch):
+    """Make the REAL sources unreachable from this file, always.
+
+    AUTOUSE, because the alternative was measurably not enough. `collect()`
+    merges a test's `sources` over the defaults, so a test that injects two of
+    four silently runs the other two for real — the real Open-Meteo call, the
+    real RSS fetch, and a real SQLite file resolved relative to cwd. This
+    file's own docstring claimed no test here touches a network, and for
+    several of them that claim was false.
+
+    It passed locally and failed on CI, which is the tell: the machine that
+    wrote the test had a network, so a real forecast returned inside a 0.5 s
+    deadline and a test asserting `failed_keys == (NEWS,)` got exactly that.
+    CI has no such luck, weather failed too, and the assertion changed meaning.
+
+    Stubs return an OK-but-empty section rather than raising, so a test that
+    does not care about a section gets a neutral one instead of a failure it
+    then has to reason about. Anything a test DOES care about, it injects —
+    which is the property the file was supposed to have from the start.
+    """
+    def stubbed(self):
+        return {key: _section(key) for key in SECTION_ORDER}
+
+    monkeypatch.setattr(DailyBriefingService, "_default_sources", stubbed)
+
+
 def _section(key: str, *items: str, ok: bool = True, error: str = "", note: str = ""):
     return lambda: BriefingSection(
         key=key, title=SECTION_TITLES[key], ok=ok,
