@@ -36,6 +36,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.errors import GraphInterrupt, GraphRecursionError
 
 from jarvis.execution.redaction import redact_preview  # Agent Runtime rev.2, Faz 1
+from jarvis.execution.context import ExecutionContext
 from jarvis.graph.role_router import for_unattended_turn, select_role
 from jarvis.graph.tool_router import classify_query
 from jarvis.graph.tool_accounting import (  # Faz 1.1: shared outcome judgement
@@ -1458,6 +1459,10 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": transport,
+                # Faz 2.75 (Paket C): who is on the other end, decided here
+                # rather than re-derived from the transport string inside a
+                # node. See jarvis/execution/context.py.
+                "execution_context": ExecutionContext.for_transport(transport).to_dict(),
                 # Sprint 2 (Faz 2A): the deterministic capability route — the
                 # agent node binds only this subset's schemas for the turn.
                 "tool_route": tool_route.to_dict(),
@@ -1841,6 +1846,10 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": transport,
+                # Faz 2.75 (Paket C): who is on the other end, decided here
+                # rather than re-derived from the transport string inside a
+                # node. See jarvis/execution/context.py.
+                "execution_context": ExecutionContext.for_transport(transport).to_dict(),
                 # Sprint 2 (Faz 2A): the deterministic capability route — the
                 # agent node binds only this subset's schemas for the turn.
                 "tool_route": tool_route.to_dict(),
@@ -2257,6 +2266,9 @@ class JarvisAgent:
                 "critic_verdict": "",
                 "critique": "",
                 "transport": f"monitor-{source}",
+                "execution_context": ExecutionContext.for_transport(
+                    f"monitor-{source}"
+                ).to_dict(),
                 # Faz 2A: a background check gets the same scoped subset as a
                 # live turn — Faz 7's live incident (an unrelated
                 # procedure_save hallucinated during a proactive email check)
@@ -2396,6 +2408,7 @@ class JarvisAgent:
             "critic_verdict": "",
             "critique": "",
             "transport": transport,
+            "execution_context": ExecutionContext.for_transport(transport).to_dict(),
             "tool_route": tool_route.to_dict(),  # Faz 2A: scoped subset
         }
         # Usage IS recorded for a background turn — only the foreground

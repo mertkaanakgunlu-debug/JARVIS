@@ -30,6 +30,14 @@ class JarvisState(TypedDict):
                           # | "api" | "api-stream" | "api-upload" | "task-async" — set by
                           # JarvisAgent.chat()/chat_stream(); audit_log's provenance tag
 
+    # Post-MVP Faz 2.75 (Paket C): ExecutionContext.to_dict() — whether a human
+    # is present, can answer a confirmation, and is watching. Derived ONCE at
+    # the entry point rather than re-sniffed from `transport` inside a node,
+    # because a denylist on that string ("not monitor-*") silently counted the
+    # background TaskExecutor as attended and let an unwatched calendar create
+    # through. Absent ⇒ derive from `transport` (old checkpoints).
+    execution_context: dict
+
     # Sprint 2 (Faz 2A): the turn's capability route as a plain dict
     # (ToolRoute.to_dict()) — the agent node binds only this subset's schemas.
     # Absent/empty ⇒ full pre-router toolset (background paths, old checkpoints).

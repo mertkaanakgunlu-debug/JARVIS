@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from jarvis.execution.context import ExecutionContext
 from jarvis.graph.state import JarvisState
 from jarvis.graph.tool_router import ToolRoute  # Faz 1.4: history-echo guard reads the turn's route
 
@@ -271,33 +272,21 @@ def _is_turkish(state: JarvisState) -> bool:
     return bool(_TURKISH_HINT_RE.search(query))
 
 
-# Transports on which a human is present RIGHT NOW and can answer a
-# confirmation prompt. Everything not listed is unattended.
-#
-# An allowlist, not a denylist, and the difference was a live bug. This read
-# `not transport.startswith("monitor-")` from Post-MVP Faz 2 until 2026-08-01,
-# which made "a human is present" the default for every transport nobody had
-# thought about -- including `task-async`, the background TaskExecutor. A
-# background job that proposed a calendar create therefore got the Faz 2
-# confidence downgrade and wrote an L3 external event with NOBODY WATCHING:
-#
-#   evaluate("google_calendar", {"action": "create", ...}, interactive=True)
-#     -> requires_confirmation=False, risk_level=3
-#
-# Faz 2's own notes claimed background turns "never reach the downgrade". That
-# was verified for monitor-* and assumed for the rest; `task-async` does not
-# start with "monitor-". The lesson is MEMORY.md's verify-each-branch one: a
-# denylist has to be re-audited every time a transport is added, and the person
-# adding one has no reason to look here.
-#
-# So: unrecognized transport, empty transport, an old checkpoint with no
-# transport at all -> unattended. Costs a confirmation prompt; the alternative
-# costs an unwatched write.
-_ATTENDED_TRANSPORTS = frozenset({
-    "cli", "cli-text",                        # the Rich REPL
-    "api", "api-stream", "api-upload",        # a client is holding the request
-    "voice-cli", "voice-local", "voice-remote",  # the gate speaks the prompt
-})
+def _context_of(state: JarvisState) -> ExecutionContext:
+    """The turn's ExecutionContext: from state if the entry point put one
+    there, otherwise derived from `transport`.
+
+    The fallback is for states this node can legitimately receive without one
+    -- an old checkpoint mid-resume, a direct-node unit test, any future caller
+    that builds state by hand. Deriving is safe because for_transport() fails
+    closed on anything it does not recognize; assuming the dataclass default
+    would NOT be, since that default is "unattended" and would silently
+    downgrade a resumed foreground turn.
+    """
+    ctx = ExecutionContext.from_dict(state.get("execution_context"))
+    if ctx is not None:
+        return ctx
+    return ExecutionContext.for_transport(state.get("transport"))
 
 
 def _gate_inputs(state: JarvisState) -> tuple[bool, str]:
@@ -316,8 +305,13 @@ def _gate_inputs(state: JarvisState) -> tuple[bool, str]:
     Picking up one of this node's own synthetic ack messages instead is
     harmless: they contain no date, time or weekday, so every check on them
     returns "no objection".
+
+    Faz 2.75 (Paket C): `interactive` is now read off the turn's
+    ExecutionContext rather than pattern-matched on the transport string here.
+    See jarvis/execution/context.py for the unattended-write incident that
+    motivated moving the decision out of this function.
     """
-    interactive = (state.get("transport") or "") in _ATTENDED_TRANSPORTS
+    interactive = _context_of(state).may_act_without_asking
     utterance = str(state.get("user_query") or "")
     if not utterance:
         for message in reversed(state.get("messages") or []):
@@ -1020,7 +1014,16 @@ def make_confirmation_node(settings):
             return {"confirmation_result": "approved"}
 
         transport = state.get("transport") or "unknown"
-        is_proactive = transport.startswith("monitor-")
+        # Faz 2.75 (Paket C): ORIGIN, not "unattended".
+        #
+        # The read-only clamp below exists for turns JARVIS started by itself
+        # — a monitor poll nobody asked for. A background TaskExecutor job is
+        # also unattended, but the user did ask for it ("bunu arka planda
+        # yap"), and clamping its local writes would break the reports and
+        # files such jobs exist to produce. Same behaviour as the old
+        # startswith("monitor-") test, now stated as the thing it means.
+        ctx = _context_of(state)
+        is_proactive = ctx.origin == "monitor"
         # Post-MVP Faz 2: `interactive` means a human is present in this turn
         # to see what happens; `utterance` is what they actually said. Both
         # come from the shared _gate_inputs() helper so this node and
