@@ -34,12 +34,23 @@
 
 ## Per-action, not per-tool (BUG-6 — fixed)
 
-The four gated `external_api` tools (`google_calendar`, `gmail`, `google_drive`, `itu_mail`) each
-mix read actions with write actions under one `ToolSpec`. `policy_guard._READ_ACTIONS` downgrades
-the documented read actions (list/search/read/download/...) back to L1/no-confirm for exactly
-those four tools — every other tool's actions still share its `ToolSpec.risk_level` uniformly, since
-they don't have this split to begin with. See `jarvis/policy_guard.py`'s module docstring for the
-exact action tables.
+Several tools dispatch on an `action` argument and mix reads with writes under one `ToolSpec`.
+`ToolSpec.actions` (populated from `tool_registry._TOOL_ACTIONS`) downgrades the documented read
+actions back to L1/no-confirm; an action that is not listed keeps its tool's risk, which is always
+the stricter answer, so a forgotten action — or one added later — fails safe.
+
+**Post-MVP Faz 2.75 (Paket E) widened this past the four external tools it used to cover.** The
+table lived in `policy_guard._READ_ACTIONS` and listed only `google_calendar`, `gmail`,
+`google_drive` and `itu_mail`. `todo`, `schedule` and `finance` are L2/`local_write` at the tool
+level, so their pure reads were classified as writes — and the proactive read-only clamp fires on
+`risk_level >= 2 and not requires_confirmation`, which every one of them matched. Measured
+2026-08-01: `todo("list")`, `schedule("list")` and `finance("summary")` were **blocked** on a
+self-initiated turn while `google_calendar("list")` and `gmail("list_unread")` passed. A briefing
+running on that path could read the calendar and the mailbox and not the to-do list.
+
+Read `todo`'s and `schedule`'s `done` before editing the table: `todo("done")` MARKS a task
+complete (a write); `schedule("done")` LISTS completed tasks (a read). Same word, opposite
+operation — which is why the table is per-tool rather than a global set of read-ish verbs.
 
 ## Kill switch vs. confirmation gate — different jobs
 

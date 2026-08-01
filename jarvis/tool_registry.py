@@ -35,11 +35,28 @@ mcp   — Faz 5: tools discovered at runtime from an external MCP server
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Literal
+from dataclasses import dataclass, field, replace
+from typing import Literal, Mapping
 
 from jarvis.execution.postcondition import PostconditionSpec
 from jarvis.execution import args_schemas  # Agent Runtime rev.2, Faz 6
+
+
+@dataclass(frozen=True)
+class ActionSpec:
+    """One action's own risk, when it differs from its tool's.
+
+    Post-MVP Faz 2.75, Paket E. A `ToolSpec` describes a *tool*, but several
+    tools dispatch on an `action` argument and their actions are not alike:
+    `todo("list")` reads a local table, `todo("delete")` destroys a row.
+    Classifying both as the tool's L2/local_write is what blocked a proactive
+    turn from reading the to-do list at all -- the proactive clamp fires on
+    `risk_level >= 2 and not requires_confirmation`, which every read matched.
+    """
+
+    risk_level: int
+    side_effect_type: str
+    requires_confirmation: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +102,21 @@ class ToolSpec:
         # derived from side_effect_type/risk_level here: getting this wrong
         # now would need re-deciding in Faz 7 anyway, so it stays honestly
         # unclassified until that phase does the real per-tool pass.
+    actions: Mapping[str, ActionSpec] = field(default_factory=dict, hash=False)
+        # Post-MVP Faz 2.75 (Paket E): {action_name: ActionSpec} for the
+        # actions that DIFFER from this tool's own classification. Populated
+        # from _TOOL_ACTIONS below, never per-ctor (same shape as _TOOL_DOMAINS).
+        #
+        # Deliberately NOT exhaustive, and the direction matters: an action
+        # nobody listed keeps the tool's risk, which is the higher one. A table
+        # that had to name every action would silently downgrade any action
+        # somebody forgot -- or worse, any action added later.
+        #
+        # hash=False because a dict is unhashable and ToolSpec is a frozen
+        # value object that was hashable before this field existed. Excluding
+        # it from __hash__ (but not from __eq__) keeps that property: two specs
+        # differing only in their action table compare unequal and hash equal,
+        # which is exactly what the hash/eq contract permits.
     contract_status: str = "shadow_validated"
         # Folded in below from the Faz 0 alpha allowlist (_ALPHA_STATUS) --
         # see get_alpha_status(). Kept as plain str, not
@@ -323,9 +355,13 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         # EXTERNAL_WRITES_ENABLED=false block is unaffected (it keys on
         # "external_write", which this is not -- so a read-only live run can
         # still sync and export). Risk level stays L2: a local, overwritable file
-        # in the workspace is a reversible write, and there is no
-        # policy_guard._READ_ACTIONS entry because finance has no per-action risk
-        # split of the kind gmail/calendar/drive have.
+        # in the workspace is a reversible write.
+        #
+        # Faz 2.75 (Paket E) gave finance the per-action split it lacked: its
+        # reads (summary/recent/top_categories/budget_status) are declared in
+        # _TOOL_ACTIONS as L1/local_read, while sync, import_statement,
+        # set_budget, export and chart all keep this L2. The tool-level value
+        # here is still the worst case, which is the point of it.
         "finance", "external_api", 2, False, "local_write",
         timeout_seconds=60, supports_background=True,
         description=(
@@ -456,14 +492,85 @@ _TOOL_DOMAINS: dict[str, str] = {
     "workflow_start": "workflow", "workflow_status": "workflow",
 }
 
+# ── Per-action risk (Post-MVP Faz 2.75, Paket E) ────────────────────────────
+#
+# Only the READS are listed, and only for tools whose actions genuinely differ
+# from the tool's own classification. An action that is not here keeps its
+# tool's risk_level/side_effect_type, which is always the stricter answer --
+# so a forgotten action, or one added next year, fails safe.
+#
+# This replaces policy_guard's private _READ_ACTIONS table, which covered only
+# the four Google/mail tools. todo, schedule and finance were left on their
+# tool-level L2/local_write, and the proactive clamp (risk >= 2 and no
+# confirmation) therefore blocked `todo("list")`, `schedule("list")` and
+# `finance("summary")` on the very path Faz 3's briefing runs on -- while
+# `google_calendar("list")` and `gmail("list_unread")` passed. Verified live
+# 2026-08-01.
+#
+# Read `schedule`'s and `todo`'s "done" carefully before editing: they are
+# opposite operations that share a word. `todo("done")` MARKS a task complete
+# (a write, absent here); `schedule("done")` LISTS completed tasks (a read).
+# That collision is the argument for this table being per-tool rather than a
+# global set of "read-ish verbs".
+_LOCAL_READ = ActionSpec(risk_level=1, side_effect_type="local_read")
+_EXTERNAL_READ = ActionSpec(risk_level=1, side_effect_type="external_read")
+
+_TOOL_ACTIONS: dict[str, dict[str, ActionSpec]] = {
+    # External-API tools: pure reads against a remote account. Migrated
+    # verbatim from policy_guard._READ_ACTIONS -- same actions, same result.
+    "google_calendar": {"list": _EXTERNAL_READ, "search": _EXTERNAL_READ},
+    "gmail": {
+        "list_unread": _EXTERNAL_READ, "search": _EXTERNAL_READ, "read": _EXTERNAL_READ,
+    },
+    "itu_mail": {
+        "list_unread": _EXTERNAL_READ, "search": _EXTERNAL_READ, "read": _EXTERNAL_READ,
+    },
+    "google_drive": {
+        "search": _EXTERNAL_READ, "list": _EXTERNAL_READ,
+        "read": _EXTERNAL_READ, "download": _EXTERNAL_READ,
+    },
+    # Local stores. New in Paket E -- these are the ones Faz 3 needs.
+    # todo: add/done/delete/analyze/edit all mutate and stay L2.
+    "todo": {"list": _LOCAL_READ, "today": _LOCAL_READ},
+    # schedule: add/delete/pause/resume mutate and stay L2.
+    "schedule": {"list": _LOCAL_READ, "done": _LOCAL_READ},
+    # finance: sync/import_statement/set_budget write rows; export/chart write
+    # files. All stay L2.
+    "finance": {
+        "summary": _LOCAL_READ, "recent": _LOCAL_READ,
+        "top_categories": _LOCAL_READ, "budget_status": _LOCAL_READ,
+    },
+}
+
 TOOL_SPECS = {
-    name: replace(spec, domain=_TOOL_DOMAINS[name])
+    name: replace(
+        spec,
+        domain=_TOOL_DOMAINS[name],
+        actions=_TOOL_ACTIONS.get(name, {}),
+    )
     for name, spec in TOOL_SPECS.items()
 }
 
 _missing = set(_TOOL_DOMAINS) - set(TOOL_SPECS)
 if _missing:  # pragma: no cover — import-time wiring assertion
     raise RuntimeError(f"_TOOL_DOMAINS names unknown tools: {sorted(_missing)}")
+
+_missing_actions = set(_TOOL_ACTIONS) - set(TOOL_SPECS)
+if _missing_actions:  # pragma: no cover — import-time wiring assertion
+    raise RuntimeError(f"_TOOL_ACTIONS names unknown tools: {sorted(_missing_actions)}")
+
+
+def get_action_spec(tool_name: str, action: str) -> "ActionSpec | None":
+    """This action's own classification, or None to use the tool's.
+
+    None is the common answer and the safe one: most tools have no action
+    split at all, and an unlisted action on a tool that does keeps the
+    stricter tool-level risk.
+    """
+    spec = TOOL_SPECS.get(tool_name)
+    if spec is None:
+        return None
+    return (spec.actions or {}).get((action or "").strip().lower())
 
 
 def register_dynamic_spec(spec: ToolSpec) -> None:

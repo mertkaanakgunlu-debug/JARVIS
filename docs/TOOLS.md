@@ -114,7 +114,8 @@ network mocking, devtools, PDF, testing — are not enabled).
 
 Classification lives in `jarvis/mcp_integration.py`'s `_classify()` — a short explicit allow-list
 for the left two rows, everything else falls through to the fail-closed default. This mirrors
-`policy_guard._READ_ACTIONS`' existing per-action override pattern for the four mixed-risk Google/
+`ToolSpec.actions`' per-action override pattern (Faz 2.75, Paket E — formerly
+`policy_guard._READ_ACTIONS`) for the mixed-risk Google/
 ITU tools above, just keyed by MCP tool name instead of an `action` argument.
 
 > **Faz 4 (2026-07-14) finished what Phase 3 started**: `jarvis/graph/nodes.py`'s

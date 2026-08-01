@@ -2,7 +2,7 @@
 repair), plan section: "her capability args_schema tasir (args_schema=None
 yasak)". Priority order per the plan's own text: plot_data first (the B6-
 adjacent discriminated-union example), then the action-dispatch tools (their
-`action: str` is free-text today; policy_guard._READ_ACTIONS already keys
+`action: str` is free-text today; ToolSpec.actions already keys
 risk decisions off this same string).
 
 Part 1 defined these schemas and left them completely unwired. Part 2 wires

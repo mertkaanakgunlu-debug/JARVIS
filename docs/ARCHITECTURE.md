@@ -152,8 +152,8 @@ config entry, not new code.
 - **Gating — fail-closed by design:** every discovered MCP tool gets a `ToolSpec` synthesized at
   connect time (`tool_registry.register_dynamic_spec()`), so `policy_guard`, `audit_log`, and the
   async scheduler cover it identically to a native tool with zero changes to any of them (they only
-  ever call `get_spec()`/read `TOOL_SPECS`). Classification mirrors `policy_guard._READ_ACTIONS`'
-  existing per-action override pattern: a short explicit allow-list of pure-inspection
+  ever call `get_spec()`/read `TOOL_SPECS`). Classification mirrors `ToolSpec.actions`'
+  per-action override pattern (Faz 2.75, Paket E — formerly `policy_guard._READ_ACTIONS`): a short explicit allow-list of pure-inspection
   (`browser_snapshot`, `browser_take_screenshot`, `browser_console_messages`, …) and
   inconsequential-navigation (`browser_navigate`, `browser_wait_for`, …) tool names get L1/L2
   no-confirm; **everything else — including any tool name never seen before, e.g. a future

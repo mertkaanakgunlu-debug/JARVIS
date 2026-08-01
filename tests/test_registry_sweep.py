@@ -109,6 +109,10 @@ def test_dynamic_spec_defaults_are_fail_closed():
     assert minimal.args_schema is None
     assert minimal.postconditions == ()
     assert minimal.contract_status == "shadow_validated"
+    # Paket E: no per-action downgrades for a tool nobody has classified. An
+    # MCP server that happens to expose an action called "list" must not get a
+    # read downgrade out of a name collision.
+    assert minimal.actions == {}
 
 
 def test_toolspec_has_no_unswept_fields():
@@ -119,6 +123,7 @@ def test_toolspec_has_no_unswept_fields():
         "side_effect_type", "timeout_seconds", "supports_background",
         "description", "domain", "args_schema", "postconditions",
         "idempotency", "effect_scope", "contract_status", "timeout_class",
+        "actions",
     }
     actual = {f.name for f in dataclass_fields(ToolSpec)}
     assert actual == known, (
@@ -184,3 +189,36 @@ def test_file_write_postcondition_wiring_is_intact(isolated_cwd, tmp_path):
     by_kind = {r.spec.kind: r for r in results}
     assert by_kind["file_exists"].status == "failed"
     assert by_kind["file_exists"].spec.severity == "required"
+
+
+# ── Post-MVP Faz 2.75, Paket E: the per-action table ────────────────────────
+
+@pytest.mark.parametrize("name", sorted(TOOL_SPECS))
+def test_action_specs_are_action_specs(name):
+    """Same shape check the postconditions sweep does: a plain dict slipped in
+    here would be read by policy_guard as attribute access and blow up at the
+    worst moment -- inside a live gate decision."""
+    from jarvis.tool_registry import ActionSpec
+
+    for action, spec in (TOOL_SPECS[name].actions or {}).items():
+        assert isinstance(action, str) and action == action.strip().lower(), (name, action)
+        assert isinstance(spec, ActionSpec), (name, action, type(spec))
+
+
+@pytest.mark.parametrize("name", sorted(TOOL_SPECS))
+def test_a_declared_action_is_never_riskier_than_its_tool(name):
+    """The table exists to DOWNGRADE documented reads. Using it to raise a
+    single action's risk would hide that escalation from every reader of the
+    tool's own risk_level -- if an action needs to be riskier than its tool,
+    the tool is classified wrong."""
+    spec = TOOL_SPECS[name]
+    for action, aspec in (spec.actions or {}).items():
+        assert aspec.risk_level <= spec.risk_level, (name, action)
+
+
+def test_toolspec_stays_hashable():
+    """ToolSpec is a frozen value object and was hashable before `actions`
+    existed. A dict field silently removes that unless it is excluded from
+    __hash__; nothing depends on it today, which is exactly why the loss would
+    have gone unnoticed until something did."""
+    assert isinstance(hash(TOOL_SPECS["todo"]), int)

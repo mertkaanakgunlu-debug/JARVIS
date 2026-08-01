@@ -58,7 +58,8 @@ logger = logging.getLogger("jarvis.mcp")
 # no lasting external effect -- everything else that server exposes (click,
 # type, fill_form, press_key, select_option, file_upload, drag, drop, hover,
 # handle_dialog, evaluate, run_code_unsafe, ...) falls through to the
-# fail-closed default below. This mirrors policy_guard._READ_ACTIONS' existing
+# fail-closed default below. This mirrors ToolSpec.actions' (Faz 2.75, Paket E;
+# formerly policy_guard._READ_ACTIONS) existing
 # per-action override pattern for the four mixed-risk Google/ITU tools --
 # same idea, just keyed by MCP tool name instead of an `action` argument.
 _READ_ONLY_TOOLS = frozenset({

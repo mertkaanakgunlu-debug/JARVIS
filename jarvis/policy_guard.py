@@ -8,14 +8,17 @@ exactly one place that answers this question rather than one per transport.
 Depends on nothing graph-shaped (no LangGraph/LangChain imports) so it stays
 reusable outside the graph.
 
-Per-action, not per-tool (BUG-6): the four gated external_api tools
-(google_calendar, gmail, google_drive, itu_mail) mix read actions
-(list/search/read/...) with write actions (create/send/delete/...) under one
-ToolSpec — gating the whole tool interrupts "list my emails" exactly like
-"delete this email". _READ_ACTIONS downgrades the documented read actions
-back to L1/no-confirm for those four tools; every other tool's actions all
-share its ToolSpec risk_level uniformly (they don't have this read/write
-split to begin with).
+Per-action, not per-tool (BUG-6): a tool that dispatches on an `action`
+argument mixes reads with writes under one ToolSpec — gating the whole tool
+interrupts "list my emails" exactly like "delete this email". The per-action
+table lives on `ToolSpec.actions` (see `tool_registry._TOOL_ACTIONS`); this
+module reads it and owns no copy.
+
+It used to own one, covering only the four external_api tools, which is how
+`todo("list")`, `schedule("list")` and `finance("summary")` stayed L2
+local_write and got blocked on the proactive path while `gmail("list_unread")`
+passed. Moving the table to the registry (Faz 2.75, Paket E) makes policy, the
+audit log, the proactive clamp and the workflow engine read one source.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from jarvis import kill_switch
-from jarvis.tool_registry import ToolSpec, get_alpha_status, get_spec
+from jarvis.tool_registry import ToolSpec, get_action_spec, get_alpha_status, get_spec
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
@@ -33,15 +36,6 @@ if TYPE_CHECKING:
 # switch still allows local reversible writes (file_write, todo, ...); it is
 # an emergency stop for "JARVIS acting on the outside world", not a full halt.
 _KILL_SWITCH_RISK_THRESHOLD = 3
-
-# (tool_name -> action names that are pure reads) — only the four tools whose
-# ToolSpec risk_level covers a mix of read and write actions need an entry.
-_READ_ACTIONS: dict[str, frozenset[str]] = {
-    "google_calendar": frozenset({"list", "search"}),
-    "gmail": frozenset({"list_unread", "search", "read"}),
-    "google_drive": frozenset({"search", "list", "read", "download"}),
-    "itu_mail": frozenset({"list_unread", "search", "read"}),
-}
 
 
 @dataclass(frozen=True)
@@ -53,8 +47,8 @@ class PolicyDecision:
     allowed: bool          # False => hard veto (kill switch) — never even offer confirmation
     reason: str = ""
     # Patch 1.1: per-CALL side-effect class. Mirrors ToolSpec.side_effect_type
-    # except on the mixed read/write external tools (_READ_ACTIONS), where a
-    # read action resolves to "external_read" — so a gate keyed on "did this
+    # except on tools with a per-action entry (ToolSpec.actions), where a
+    # read action resolves to "external_read"/"local_read" — so a gate keyed on "did this
     # call write externally" (EXTERNAL_WRITES_ENABLED=false) stops denying
     # `gmail read` / `calendar list` along with `send`/`create`. "unknown"
     # when no ToolSpec is registered for the tool.
@@ -162,11 +156,18 @@ def _resolve_risk(
     thing confidence buys is not interrupting the user to ask.
     """
     action = str(args.get("action", "")).strip().lower()
-    read_actions = _READ_ACTIONS.get(tool_name)
-    if read_actions and action in read_actions:
-        # _READ_ACTIONS only lists tools whose ToolSpec is external_write —
-        # their documented pure-read actions are, per call, external READS.
-        return 1, False, "external_read", ""
+    # Faz 2.75 (Paket E): the per-action table lives on the ToolSpec now, so
+    # policy_guard, the audit log, the proactive clamp and the workflow engine
+    # all read one source instead of this module owning a private copy that
+    # covered four tools.
+    action_spec = get_action_spec(tool_name, action)
+    if action_spec is not None:
+        return (
+            action_spec.risk_level,
+            action_spec.requires_confirmation,
+            action_spec.side_effect_type,
+            "",
+        )
 
     if (
         tool_name == "google_calendar"
@@ -264,7 +265,7 @@ def evaluate(
     # This condition used to read `requires_confirmation and risk_level >= 3`.
     # That was a safe no-op for as long as requires_confirmation was implied by
     # risk_level >= 3 (tests/test_registry_sweep.py's "L3 => confirmation"
-    # invariant guarantees it for every ToolSpec, and _READ_ACTIONS only ever
+    # invariant guarantees it for every ToolSpec, and the per-action table only ever
     # downgrades to L1). Faz 2's confidence path is the first thing that can
     # produce risk_level=3 WITH requires_confirmation=False -- under the old
     # condition, an auto-approved calendar create would have walked straight
