@@ -99,11 +99,12 @@
 **Faz 3'ten taşınan, bilinçli olarak yapılmayanlar:**
 
 - **Uçtan uca gecikme kapısı KARŞILANMADI, veri kapısı fazlasıyla karşılandı.** Ölçüm (n=10,
-  qwen3:8b, `cloud_policy=off`): **veri toplama p50 0.31 sn / p95 0.44 sn** — kapı 5/10 sn.
-  Uçtan uca **p50 ~22 sn**, çünkü kalan her şey modelin Türkçe yazmasıdır. Bu bir brifing hatası
-  değil, katman maliyeti; brifing kendi payını 15 kat aşımla geçiyor. Uçtan uca rakamı ancak daha
-  hızlı bir katman (Kimi K3 — Faz 9) veya daha kısa bir anlatım sözleşmesi düşürür, ikisi de
-  kendi ölçümünü ister.
+  qwen3:8b, `cloud_policy=off`, makine boştayken): **veri toplama p50 0.32 sn / p95 0.79 sn** —
+  kapı 5/10 sn, yani ~15 kat aşımla geçildi. Uçtan uca **p50 22.9 sn / p95 25.2 sn**, çünkü
+  aradaki her şey modelin Türkçe yazmasıdır. Bu bir brifing hatası değil, katman maliyeti. Uçtan
+  uca rakamı ancak daha hızlı bir katman (Kimi K3 — Faz 9) veya daha kısa bir anlatım sözleşmesi
+  düşürür, ikisi de kendi ölçümünü ister. Uydurma: **30 canlı turda 0**; araç disiplini 10/10;
+  araç-hatası dürüstlüğü 10/10 (başlık uyarısından önce 7/10'du).
 - **Brifing zamanlanmadı.** Üç araç da L1, yani Faz 2.75'in proaktif kıskacını geçiyorlar —
   *engel kalktı*. Ama 07:00 işini gerçekten kurmak ayrı bir değişiklik ve kendi teslimat sorusu
   var (push mu, toast mu, ikisi mi).

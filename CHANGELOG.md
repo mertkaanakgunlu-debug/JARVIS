@@ -71,9 +71,36 @@ nedenle takvim bölümüne giriş yapılamadı"* — it admits the failure **and
 the same breath, so a stems-only honesty check passes it. "I could not read your calendar" makes
 the user go and look; "you have nothing today" makes them stop thinking about it.
 
-Every check is conservative in the same direction. One of them produced its own false positive
-live (*"o günün etkinlikleri hakkında bilgi bulunmuyor"* — no *information*, which is true and
-honest) and was tightened, because a fabrication metric with false positives is worse than none.
+Every check is conservative in the same direction, and both directions were earned live. One
+produced a false **positive** (*"o günün etkinlikleri hakkında bilgi bulunmuyor"* — no
+*information*, which is true and honest) and was tightened. Another produced three false
+**negatives**: the model answered `### Takvim (bugün)` / `DURUM: ALINAMADI — ...`, the most honest
+output it could possibly give, and a per-line split scored it as a silent omission because the
+heading and the admission landed on opposite sides of a newline. A markdown heading now carries
+down onto the lines under it.
+
+### The numbers (n=10 per scenario, qwen3:8b, `cloud_policy=off`, nothing else running)
+
+| scenario | p50 | p95 | **data** p50 | **data** p95 | tool discipline | fabricated |
+|---|---|---|---|---|---|---|
+| `full` | 22.91 s | 25.19 s | **0.32 s** | **0.79 s** | 10/10 | **0** |
+| `degraded` (calendar forced to fail) | 20.68 s | 22.72 s | 0.30 s | 0.55 s | 10/10 | **0** |
+| `weather_only` | 15.87 s | 17.30 s | — | — | 10/10 | **0** |
+
+Tool-failure honesty: **10/10**. Before the header warning it was 7/10 — three runs read past a
+`DURUM: ALINAMADI` several hundred tokens down a structured block and presented the dead calendar
+as an empty day.
+
+**The latency gate is not met, and the split says why.** Data collection beats its 5 s / 10 s
+budget by ~15×; everything from there to 22.9 s is the model writing Turkish. That is the tier's
+cost, not the briefing's, and it moves only with a faster tier (Kimi K3 — Faz 9) or a shorter
+narration contract — each its own measurement. Reported as two axes precisely so this is
+attributable rather than a single number nobody can act on.
+
+*(A first attempt at these numbers was discarded: `pytest -q` was running concurrently and one
+`full` run came in at 43 s against a clean max of 25 s. The plan's own rule — never run the live
+harness alongside anything else — exists for exactly that, and the numbers above are from a
+re-run with the machine idle.)*
 
 ### Also in this phase
 
