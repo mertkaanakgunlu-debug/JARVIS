@@ -221,10 +221,33 @@ class WorkingSetStore:
             is_active=bool(row["is_active"]),
         )
 
+    @staticmethod
+    def bare_id(object_id: str) -> str:
+        """`chart:ab12c3` → `ab12c3`. Accepts either form.
+
+        Found by the Faz 4 gate re-run (2026-08-02): a live chain drew a chart,
+        then failed its very next revision with "düzenlenecek bir grafik yok"
+        about an object that plainly existed -- the model had passed
+        `object_id="chart:9fd36f"`, which is EXACTLY what the system told it to
+        use. `WorkingObject.ref`'s own docstring calls that "how the model
+        names it in a tool call", `render()` prints it into the prompt every
+        turn, and then `get()` looked the whole string up as a primary key and
+        found nothing. `working_set_control`'s activate branch had been
+        stripping the prefix by hand since Faz 4, so the codebase already knew;
+        it just was not applied where revisions go.
+
+        Normalized in the STORE rather than in each tool, so a future consumer
+        (email, report, table) cannot reintroduce the same gap. Ids are
+        `uuid4().hex[:6]` and never contain a colon, so this cannot swallow a
+        real id.
+        """
+        text = str(object_id or "").strip()
+        return text.rsplit(":", 1)[-1] if ":" in text else text
+
     def get(self, object_id: str) -> WorkingObject | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM working_objects WHERE id=?", (object_id,)
+                "SELECT * FROM working_objects WHERE id=?", (self.bare_id(object_id),)
             ).fetchone()
         return self._row(row) if row else None
 
@@ -437,6 +460,7 @@ class WorkingSetStore:
             )
 
     def activate(self, conversation_id: str, object_id: str) -> WorkingObject | None:
+        object_id = self.bare_id(object_id)
         obj = self.get(object_id)
         if obj is None or obj.conversation_id != conversation_id:
             # Cross-conversation activation is refused rather than allowed and

@@ -259,6 +259,54 @@ def test_explicitly_revising_an_inactive_chart_activates_it(store, workspace, pl
     assert "title" not in store.get(first.id).spec
 
 
+def test_the_ref_the_prompt_shows_is_a_usable_object_id(store, workspace, plots):
+    """Found by the Faz 4 gate re-run, in a live chain that had just drawn a
+    chart: `chart_revise` answered "düzenlenecek bir grafik yok" about an object
+    that plainly existed, because the model passed `chart:9fd36f` -- the string
+    the system itself prints into the prompt every turn and calls, in
+    WorkingObject.ref's docstring, "how the model names it in a tool call"."""
+    obj = _chart(store, workspace)
+    assert obj.ref.startswith("chart:")
+
+    out = chart_revise(
+        **_base(store, workspace, plots),
+        changes={"color": "kırmızı"}, object_id=obj.ref,
+    )
+
+    assert not out.startswith("[ERROR]"), out
+    assert store.get(obj.id).spec["color"] == "kırmızı"
+
+
+@pytest.mark.parametrize("action", ["show", "activate", "undo"])
+def test_working_set_actions_accept_the_ref_too(store, workspace, plots, action):
+    obj = _chart(store, workspace)
+    chart_revise(**_base(store, workspace, plots), changes={"kind": "bar"})
+
+    out = working_set_control(
+        **_base(store, workspace, plots), action=action, object_id=obj.ref,
+    )
+
+    assert not out.startswith("[ERROR]"), f"{action} rejected the rendered ref: {out}"
+
+
+def test_a_bare_id_still_works(store, workspace, plots):
+    """Both spellings, forever -- the fix must not swap one break for another."""
+    obj = _chart(store, workspace)
+    out = chart_revise(
+        **_base(store, workspace, plots), changes={"color": "mavi"}, object_id=obj.id,
+    )
+    assert not out.startswith("[ERROR]"), out
+    assert store.get(obj.id).spec["color"] == "mavi"
+
+
+def test_a_genuinely_unknown_id_is_still_refused(store, workspace, plots):
+    _chart(store, workspace)
+    out = chart_revise(
+        **_base(store, workspace, plots), changes={"color": "mavi"}, object_id="chart:zzzzzz",
+    )
+    assert out.startswith("[ERROR]")
+
+
 def test_a_redraw_finds_an_inactive_twin_instead_of_forking(store, workspace, plots):
     """Redraw only ever compared against the ACTIVE chart, so redrawing one the
     user had stepped away from produced a second object with the same identity."""

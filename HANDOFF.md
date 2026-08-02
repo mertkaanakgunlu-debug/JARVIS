@@ -188,11 +188,11 @@ yamalanacak bir şey değil.
 ## Doğrulama (2026-08-02/03, bu oturumda çalıştırıldı)
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q                        # 2818 passed, 5 deselected, 5 dk 50 sn
+.venv\Scripts\python.exe -m pytest -q                        # 2824 passed, 5 deselected, 5 dk 55 sn
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests  # All checks passed!
 ```
 
-Suite 2739 → **2818** (bu oturumda +79 test, 6 yeni dosya). **Her düzeltme, düzeltme olmadan düşen
+Suite 2739 → **2824** (bu oturumda +85 test, 6 yeni dosya). **Her düzeltme, düzeltme olmadan düşen
 bir testle bağlandı** — hazırlığın P0'ı ve monitör için bunu geri-alma koşusuyla fiilen doğruladım
 (P0: 2 test düştü; monitör: *"blocked for 10.0s"*).
 
@@ -211,6 +211,55 @@ tests/test_calendar_from_mail_gating.py           # L1/L3 ayrımı, fail-closed,
 
 **KURAL (hâlâ geçerli):** canlı harness (`revision_gate.py`, `briefing_gate.py`) başka hiçbir
 şeyle aynı anda koşulmaz.
+
+---
+
+# Faz 4 kapısı yeniden ölçüldü (2026-08-03) — **GEÇMEDİ, ve kötüleşti**
+
+`revision_gate.py --runs 5`, qwen3:8b, `cloud_policy=off`, tek başına koştu.
+**Tam zincir: 5'te 1** (önceki ölçüm 5'te 3). Hipotezim — kimlik düzeltmelerinin kapıyı
+iyileştireceği — **yanlış çıktı.**
+
+| tur | sonuç | önceki |
+|---|---|---|
+| oluştur → nesne var | **2/5** | 4/5 |
+| renk | 1/5 | 4/5 |
+| başlık | 2/5 | 4/5 |
+| tür | 2/5 | 4/5 |
+| ilgisiz soru — dokunmamalı | **5/5** | 5/5 |
+| "Teşekkürler" — dokunmamalı | **5/5** | 5/5 |
+| geri al | **5/5** | 4/5 |
+
+**Zincir 0. turda ölüyor.** Başarısız 3 zincirin hiçbiri `plot_data`'yı **çağırmadı**:
+`file_list`/`csv_read` çağırıp durdular, `spec={}`. Yani revizyon turlarının 1/5, 2/5, 2/5
+olması bir revizyon sorunu değil — 2/5 tavanın altında kalmaları. **Nesne oluşan 2 zincirin
+1'i 7/7 tam doğru.**
+
+n=5 → n=5 karşılaştırması olduğu için 4/5→2/5 farkı istatistiksel olarak zayıf; ama yön
+yanlış ve *"kimlik düzeltmeleri kapıyı düzeltir"* iddiası **desteklenmedi**. Bunu ölçüm
+olarak yazıyorum, gerekçe olarak değil.
+
+## Ölçümün bulduğu gerçek hata (düzeltildi)
+
+Nesne oluşan zincirlerden biri, grafiği çizdikten hemen sonra **var olan bir nesne için**
+*"düzenlenecek bir grafik yok"* aldı. Sebep: model `object_id="chart:9fd36f"` gönderdi — yani
+**sistemin ona gösterdiği string'in aynısı**. `WorkingObject.ref`'in docstring'i onu
+*"araç çağrısında modelin onu böyle adlandırdığı"* diye tanımlıyor, `render()` her tur prompt'a
+basıyor, ama `get()` tüm string'i primary key olarak arıyordu. `working_set_control`'ün
+`activate` dalı Faz 4'ten beri prefix'i elle soyuyordu — yani kod tabanı bunu **biliyordu**,
+sadece revizyon yoluna uygulanmamıştı.
+
+Normalizasyon artık **store'da** (`WorkingSetStore.bare_id`), her tüketici için: ileride
+`email`/`report`/`table` araçları aynı boşluğu yeniden açamaz. 4 regresyon testi; fix olmadan
+3'ü düşüyor.
+
+## Sıradaki hipotez (test EDİLMEDİ)
+
+0. turda araç alt kümesi şu sırada: `csv_read, file_read, file_write, file_list, data_analyze,
+plot_data, chart_revise, working_set`. `_by_relevance` sorguda geçen adı öne alıyor ve
+*"satis.csv"* dosya araçlarını adlandırıyor — yani **model `plot_data`'yı listenin sonunda
+görüyor.** Dosyayı okuyup görevi bitmiş sayması bununla açıklanabilir. Ucuz ve deterministik
+olarak test edilebilir; **routing değişikliği ölçümsüz yapılmamalı.**
 
 ---
 
@@ -263,10 +312,8 @@ Ledger sorgusu için hazır: `MailEventLedger.list_by_state("ambiguous")` /`("er
 
 ## Önceki oturumlardan taşınan, değişmeyen işler
 
-- Faz 4'ten: **zincir kapısı 5'te 3 ile GEÇMEDİ.** İki hatadan biri (*"CSV'yi yeniden yazdı"*)
-  yukarıda **yeniden sınıflandırıldı** — kısmen affordance kaynaklı. Diğeri (`undo` beklenenden
-  farklı revizyonu aldı) bu oturumun kimlik düzeltmeleriyle **kısmen** adreslendi (sheet + kanonik
-  yol + inactive eşleşme), ama **yeniden ölçülmedi** — `revision_gate.py --runs 5` tekrar koşmalı.
+- Faz 4'ten: **zincir kapısı hâlâ GEÇMEDİ** — yukarıda yeniden ölçüldü (5'te 1). Darboğaz artık
+  net: modelin 0. turda `plot_data` çağırmaması. `undo` ise **5/5** (önceki 4/5).
 - Faz 3'ten: **brifing zamanlanmadı**; `audit_narration` kapı değil ölçüm aracı; denetim göreli gün
   sözcüklerine sessiz.
 - Faz 2.75'ten: **P1-1** tanımsız araç fail-closed değil; **P1-2** critic hata durumunda sessizce

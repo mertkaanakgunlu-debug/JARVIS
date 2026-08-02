@@ -514,7 +514,7 @@ def working_set_control(
     if action == "activate":
         if not object_id:
             return "[ERROR] 'object_id' gerekli. Listelemek için: working_set('list')."
-        obj = store.activate(conversation_id, object_id.split(":")[-1])
+        obj = store.activate(conversation_id, object_id)
         if obj is None:
             return f"[ERROR] '{object_id}' bu konuşmada bulunamadı."
         return f"[WorkingSet] Aktif nesne artık {obj.ref}.\n{obj.render()}"
