@@ -157,6 +157,37 @@ def frame_from_inline(data_json: str, x: str, y: str) -> tuple["pd.DataFrame | N
 _ISO_DATE_TICK = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 
+# Turkish colour names → matplotlib names. The model is talking to a Turkish
+# user and relays their word; "kırmızı" reaching matplotlib raises rather than
+# drawing, and a revision that errors on the one word the user actually said is
+# the feature failing at its most common input. Diacritic-folded keys too,
+# since ASR transcripts and casual typing routinely drop them.
+_COLORS_TR: dict[str, str] = {
+    "kırmızı": "red", "kirmizi": "red",
+    "mavi": "blue", "yeşil": "green", "yesil": "green",
+    "sarı": "gold", "sari": "gold",
+    "turuncu": "orange", "mor": "purple", "pembe": "hotpink",
+    "siyah": "black", "beyaz": "white", "gri": "gray",
+    "kahverengi": "saddlebrown", "lacivert": "navy",
+    "turkuaz": "turquoise", "bordo": "darkred", "altın": "gold", "altin": "gold",
+}
+
+
+def _resolve_color(color: str) -> dict:
+    """`{"color": ...}` for seaborn, or `{}` when nothing was asked for.
+
+    An UNRECOGNIZED name is passed straight through rather than dropped:
+    matplotlib knows hundreds of names and every hex string, and silently
+    ignoring "chartreuse" would make the tool report a change it did not make.
+    If matplotlib rejects it, the caller gets a real error -- which is the
+    honest outcome, not a chart that quietly stayed blue.
+    """
+    name = (color or "").strip()
+    if not name:
+        return {}
+    return {"color": _COLORS_TR.get(name.lower(), name)}
+
+
 def _make_x_axis_readable(ax, plt) -> None:
     """Stop the x-axis becoming an unreadable smear of overlapping labels.
 
@@ -217,6 +248,7 @@ def generate_plot(
     *,
     df: "pd.DataFrame | None" = None,
     sheet: str = "",
+    color: str = "",
 ) -> str:
     """Generate a chart from a CSV/Excel file (or an inline DataFrame) and save as PNG.
 
@@ -235,6 +267,13 @@ def generate_plot(
                    historical behavior (pandas' default: the FIRST sheet), which
                    silently made any workbook whose data sits on a later sheet
                    unchartable -- including finance('export')'s output.
+        color:     Single colour for the marks ("red"/"kırmızı"/"#c0392b").
+                   Post-MVP Faz 4: revision needs at least one purely cosmetic
+                   knob, because *"çizgiyi kırmızı yap"* is the canonical
+                   follow-up and there was nothing in this signature it could
+                   change. IGNORED when `hue` is set -- hue means "colour
+                   encodes a column", and a single colour would silently
+                   destroy that encoding rather than layer on top of it.
 
     Returns:
         Absolute path to the saved PNG, or an error string starting with [ERROR].
@@ -323,23 +362,29 @@ def generate_plot(
     sns.set_theme(style="whitegrid", palette="tab10")
     fig, ax = plt.subplots(figsize=(10, 6))
 
+    # Only when hue is absent -- see the `color` docstring entry. Passing both
+    # to seaborn is not merely redundant: the single colour wins and the
+    # grouping silently stops being visible, which is a worse chart that
+    # reports success.
+    tint = {} if hue else _resolve_color(color)
+
     try:
         if kind == "line":
-            sns.lineplot(data=df, x=x, y=y, hue=hue or None, ax=ax)
+            sns.lineplot(data=df, x=x, y=y, hue=hue or None, ax=ax, **tint)
         elif kind == "scatter":
-            sns.scatterplot(data=df, x=x, y=y, hue=hue or None, ax=ax)
+            sns.scatterplot(data=df, x=x, y=y, hue=hue or None, ax=ax, **tint)
         elif kind == "bar":
-            sns.barplot(data=df, x=x, y=y, hue=hue or None, ax=ax)
+            sns.barplot(data=df, x=x, y=y, hue=hue or None, ax=ax, **tint)
         elif kind == "hist":
             col = x or y
             if not col:
                 plt.close(fig)
                 return "[ERROR] hist requires x (the column to histogram)."
-            sns.histplot(data=df, x=col, hue=hue or None, kde=True, ax=ax)
+            sns.histplot(data=df, x=col, hue=hue or None, kde=True, ax=ax, **tint)
         elif kind == "box":
-            sns.boxplot(data=df, x=x or None, y=y or None, hue=hue or None, ax=ax)
+            sns.boxplot(data=df, x=x or None, y=y or None, hue=hue or None, ax=ax, **tint)
         elif kind == "violin":
-            sns.violinplot(data=df, x=x or None, y=y or None, hue=hue or None, ax=ax)
+            sns.violinplot(data=df, x=x or None, y=y or None, hue=hue or None, ax=ax, **tint)
         elif kind == "heatmap":
             num_df = df.select_dtypes(include="number")
             if num_df.shape[1] < 2:

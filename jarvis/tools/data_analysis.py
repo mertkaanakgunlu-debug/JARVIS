@@ -42,6 +42,70 @@ def _load_dataframe(path: Path):
     return df, None
 
 
+def describe_schema(path: Path, sheet: str = "") -> tuple[dict | None, str]:
+    """Column names, dtypes and 3 sample rows. Returns (schema, error).
+
+    Post-MVP Faz 4's "schema first" rule. The invented-column class of failure
+    -- the model asks for `y="satış"` when the file says `satis`, or invents
+    `tarih` outright -- is not a reasoning failure it can be prompted out of:
+    the model has never seen the file. It is closed by making the schema part
+    of the same call that draws, so there is no turn in which the columns are
+    unknown.
+
+    `numeric` and `categorical` are split out because the choice a chart needs
+    ("what goes on y") is a dtype question, and answering it here means the
+    caller can pick a valid default instead of guessing a name.
+    """
+    try:
+        import pandas as pd  # noqa: F401
+    except ImportError:
+        return None, "[ERROR] pandas is not installed. Run: pip install pandas openpyxl"
+
+    if sheet:
+        try:
+            import pandas as pd
+            df = pd.read_excel(path, sheet_name=sheet)
+        except Exception as exc:  # noqa: BLE001
+            return None, f"[ERROR] Could not read sheet '{sheet}': {exc}"
+    else:
+        df, err = _load_dataframe(path)
+        if err:
+            return None, err
+
+    columns = [str(c) for c in df.columns]
+    dtypes = {str(c): str(df[c].dtype) for c in df.columns}
+    numeric = [str(c) for c in df.select_dtypes(include="number").columns]
+    return {
+        "columns": columns,
+        "dtypes": dtypes,
+        "numeric": numeric,
+        "categorical": [c for c in columns if c not in numeric],
+        "rows": int(len(df)),
+        # Rendered as strings here rather than left as pandas objects: this
+        # goes into a prompt, and a Timestamp repr is noise the model then has
+        # to parse back.
+        "sample": [
+            {str(k): ("" if v is None else str(v)) for k, v in row.items()}
+            for row in df.head(3).to_dict(orient="records")
+        ],
+    }, ""
+
+
+def render_schema(schema: dict, source_label: str = "") -> str:
+    """Schema → the lines a model reads before choosing columns."""
+    head = f"Kolonlar ({schema['rows']} satır"
+    head += f", {source_label})" if source_label else ")"
+    lines = [head]
+    for name in schema["columns"]:
+        tag = "sayısal" if name in schema["numeric"] else "metin/tarih"
+        lines.append(f"  - {name}  [{tag}, {schema['dtypes'][name]}]")
+    if schema["sample"]:
+        lines.append("Örnek satırlar:")
+        for row in schema["sample"]:
+            lines.append("  " + " | ".join(f"{k}={v}" for k, v in row.items()))
+    return "\n".join(lines)
+
+
 def _truncate(text: str, limit: int = MAX_CHARS) -> str:
     if len(text) <= limit:
         return text
