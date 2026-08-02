@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -73,6 +74,17 @@ class JarvisMonitor:
         self._agent = agent
         self._last_proactive_ts: float = 0.0  # time.monotonic() of the last proactive_turn() call
 
+        # GPT review (Faz 5 hazırlığı): proactive judgement runs on its OWN
+        # thread, fed by a bounded queue. It used to run inline via
+        # asyncio.run() on this class's single polling thread, so one 20-80 s
+        # model call stalled EVERY other check behind it -- calendar, scheduler,
+        # todo, finance, GCP -- for its whole duration. The queue is bounded and
+        # a full queue drops with a log line rather than growing without limit:
+        # a backlog of stale "is this worth surfacing?" questions has no value,
+        # and silent truncation is what makes "why did nothing fire" unanswerable.
+        self._proactive_queue: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=4)
+        self._proactive_thread: threading.Thread | None = None
+
         # Faz 19A-0: FCM push (lazily initialised on first notification)
         self._fcm = None
         self._push_store = None
@@ -95,6 +107,11 @@ class JarvisMonitor:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
+        # The proactive worker polls _stop on a 1 s timeout, so it exits on its
+        # own; joined here so stop() means stopped. It can still be mid-model-
+        # call, which is why the join is bounded and the thread is a daemon.
+        if self._proactive_thread:
+            self._proactive_thread.join(timeout=5)
 
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
@@ -344,26 +361,65 @@ class JarvisMonitor:
             logger.debug("Proactive check (%s) throttled", source)
             return
         self._last_proactive_ts = now
+
+        # Hand off and return immediately -- the poll loop must keep its
+        # cadence regardless of how long the model takes.
+        self._ensure_proactive_worker()
         try:
-            from jarvis.notify import toast
-            outcome = asyncio.run(self._agent.proactive_turn(prompt, source=source))
-            if outcome.kind == "response":
-                toast("🤖 JARVIS'ten öneri", outcome.text[:200])
-                self._dispatch_push(
-                    "🤖 JARVIS'ten öneri", outcome.text[:200],
-                    {"category": "proactive", "source": source},
-                )
-            elif outcome.kind == "needs_confirmation":
-                tools = ", ".join(outcome.tools)
-                msg = f"Onayınız gerekiyor ({tools}) — JARVIS'e doğrudan sorun."
-                toast("🤖 JARVIS onay bekliyor", msg)
-                self._dispatch_push(
-                    "🤖 JARVIS onay bekliyor", msg,
-                    {"category": "proactive_confirm", "source": source},
-                )
-            # kind == "none": nothing worth surfacing — stay silent, by design.
-        except Exception as exc:
-            logger.debug("Proactive check (%s) error: %s", source, exc)
+            self._proactive_queue.put_nowait((prompt, source))
+        except queue.Full:
+            logger.info(
+                "Proactive check (%s) dropped: worker still busy, queue full", source
+            )
+
+    def _ensure_proactive_worker(self) -> None:
+        """Start the proactive worker thread on first use (idempotent)."""
+        if self._proactive_thread and self._proactive_thread.is_alive():
+            return
+        self._proactive_thread = threading.Thread(
+            target=self._proactive_loop, daemon=True, name="jarvis-proactive"
+        )
+        self._proactive_thread.start()
+
+    def _proactive_loop(self) -> None:
+        """Drain the proactive queue, one judgement call at a time.
+
+        Serial on purpose: two concurrent proactive turns would double the
+        token spend of a background self-check nobody asked for, and the
+        throttle in _maybe_proactive already assumes one-at-a-time pacing.
+        """
+        while not self._stop.is_set():
+            try:
+                prompt, source = self._proactive_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self._run_proactive(prompt, source)
+            except Exception as exc:  # noqa: BLE001 -- a worker must never die
+                logger.debug("Proactive check (%s) error: %s", source, exc)
+            finally:
+                self._proactive_queue.task_done()
+
+    def _run_proactive(self, prompt: str, source: str) -> None:
+        """The actual model call + notification dispatch (worker thread only)."""
+        from jarvis.notify import toast
+
+        outcome = asyncio.run(self._agent.proactive_turn(prompt, source=source))
+        if outcome.kind == "response":
+            toast("🤖 JARVIS'ten öneri", outcome.text[:200])
+            self._dispatch_push(
+                "🤖 JARVIS'ten öneri", outcome.text[:200],
+                {"category": "proactive", "source": source},
+            )
+        elif outcome.kind == "needs_confirmation":
+            tools = ", ".join(outcome.tools)
+            msg = f"Onayınız gerekiyor ({tools}) — JARVIS'e doğrudan sorun."
+            toast("🤖 JARVIS onay bekliyor", msg)
+            self._dispatch_push(
+                "🤖 JARVIS onay bekliyor", msg,
+                {"category": "proactive_confirm", "source": source},
+            )
+        # kind == "none": nothing worth surfacing — stay silent, by design.
 
     # ── Faz 13-D: To-do reminders ──────────────────────────────────────────────
 

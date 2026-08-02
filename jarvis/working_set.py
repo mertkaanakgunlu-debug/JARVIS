@@ -327,7 +327,7 @@ class WorkingSetStore:
         history = list(current.revision_history) + [
             Revision(version=version, changes=effective, before=before, at=_now())
         ]
-        return self._write(current, spec, version, history)
+        return self._write(current, spec, version, history, sync_title="title" in effective)
 
     def undo(self, object_id: str) -> tuple[WorkingObject | None, str]:
         """Take back the last revision. Returns (object, what was undone).
@@ -353,7 +353,30 @@ class WorkingSetStore:
                 spec.pop(key, None)
         history = list(current.revision_history[:-1])
         version = max(1, current.version - 1)
-        return self._write(current, spec, version, history), last.describe()
+        return (
+            self._write(current, spec, version, history, sync_title="title" in last.before),
+            last.describe(),
+        )
+
+    def peek_undo(self, object_id: str) -> tuple[dict[str, Any] | None, str]:
+        """The spec undo WOULD restore, without touching stored state.
+
+        GPT review (Faz 5 hazırlığı): undo used to pop history, write the new
+        spec, and only THEN re-render -- so a render failure left the store
+        rolled back while the artifact the user is looking at still showed the
+        newer version. Stored state and visible output disagreed, and the code
+        reported that in a string instead of preventing it. Callers now render
+        this candidate FIRST and commit only if it worked.
+        """
+        current = self.get(object_id)
+        if current is None or not current.revision_history:
+            return None, ""
+        last = current.revision_history[-1]
+        spec = {**current.spec, **last.before}
+        for key, value in last.before.items():
+            if value is None:
+                spec.pop(key, None)
+        return spec, last.describe()
 
     def _write(
         self,
@@ -361,20 +384,36 @@ class WorkingSetStore:
         spec: dict[str, Any],
         version: int,
         history: list[Revision],
+        sync_title: bool = False,
     ) -> WorkingObject:
+        """Persist a spec change. `sync_title` keeps the `title` COLUMN equal to
+        the spec's title whenever this change touched it.
+
+        GPT review (Faz 5 hazırlığı): a chart's title lived in two places --
+        `WorkingObject.title` (the column, shown in the prompt header) and
+        `spec["title"]` (what the renderer draws). chart_revise patched only the
+        spec, so after a title change the prompt showed the object as
+        `chart:ab12c3 v2 "Eski Başlık"` on one line and `title=Yeni Başlık` on
+        the next, every turn, with no way for the model to tell which was real.
+        The spec is now the single source; the column follows it in the same
+        write. Objects whose title never enters the spec (a create-time fallback
+        like "satis / ay") keep theirs -- hence the flag rather than an
+        unconditional overwrite.
+        """
+        title = str(spec.get("title") or "") if sync_title else current.title
         updated = replace(
-            current, spec=spec, version=version,
+            current, spec=spec, version=version, title=title,
             revision_history=tuple(history), updated_at=_now(),
         )
         with self._lock:
             self._conn.execute(
                 """UPDATE working_objects
-                   SET spec_json=?, version=?, history_json=?, updated_at=?
+                   SET spec_json=?, version=?, history_json=?, updated_at=?, title=?
                    WHERE id=?""",
                 (
                     json.dumps(spec, ensure_ascii=False), version,
                     json.dumps([r.to_dict() for r in history], ensure_ascii=False),
-                    updated.updated_at, current.id,
+                    updated.updated_at, title, current.id,
                 ),
             )
         return updated
@@ -423,11 +462,47 @@ class WorkingSetStore:
             pass
 
 
+_default_store: WorkingSetStore | None = None
+_default_store_path: Path | None = None
+_default_store_lock = threading.Lock()
+
+
 def default_store() -> WorkingSetStore:
-    """The process store, alongside sessions/todos/entities."""
+    """The process store, alongside sessions/todos/entities.
+
+    GPT review (Faz 5 hazırlığı): this was a constructor in disguise. Despite
+    the name it returned a NEW store -- a new SQLite connection, a new WAL
+    setup -- on every call, and every `plot_data` / `chart_revise` /
+    `working_set` invocation called it once and never closed the result, so
+    connections accumulated until GC happened to collect them. Memoized now, so
+    the name is true and the agent's long-lived store and the tools' store are
+    the same object.
+
+    Keyed on the resolved path: tests move JARVIS_HOME between cases (see
+    tests/conftest.py's isolated_cwd), and a cache that ignored that would hand
+    a test the previous test's database.
+    """
+    global _default_store, _default_store_path
     from jarvis import paths
 
-    return WorkingSetStore(paths.data_dir() / "sessions.db")
+    path = paths.data_dir() / "sessions.db"
+    with _default_store_lock:
+        if _default_store is None or _default_store_path != path:
+            if _default_store is not None:
+                _default_store.close()
+            _default_store = WorkingSetStore(path)
+            _default_store_path = path
+        return _default_store
+
+
+def reset_default_store() -> None:
+    """Drop the memoized store (tests, and JARVIS_HOME switches)."""
+    global _default_store, _default_store_path
+    with _default_store_lock:
+        if _default_store is not None:
+            _default_store.close()
+        _default_store = None
+        _default_store_path = None
 
 
 # ── Prompt injection ─────────────────────────────────────────────────────────
@@ -497,12 +572,11 @@ def block_for_conversation(
     """One call for the agent: conversation id → prompt block (or "")."""
     if not conversation_id:
         return ""
-    owned = store is None
+    # No close(): default_store() is memoized now, so the store handed back here
+    # is the process-wide one every tool call shares -- closing it would pull the
+    # connection out from under them.
     store = store or default_store()
     try:
         return render_block(store.list(conversation_id), max_chars=max_chars)
     except Exception:  # noqa: BLE001 -- a prompt block must never kill a turn
         return ""
-    finally:
-        if owned:
-            store.close()

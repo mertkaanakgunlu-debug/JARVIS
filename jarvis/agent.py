@@ -52,7 +52,10 @@ from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
 from jarvis.scheduler import SchedulerStore  # Faz 13-C
 from jarvis.todo_store import TodoStore      # Faz 13-D
-from jarvis.working_set import WorkingSetStore, render_block  # Post-MVP Faz 4
+from jarvis.working_set import (  # Post-MVP Faz 4
+    default_store as default_working_set_store,
+    render_block,
+)
 from jarvis.facts_store import FactStore           # Faz 2
 from jarvis.procedure_store import ProcedureStore  # Faz 2
 from jarvis.graph.graph import build_graph, make_checkpointer
@@ -726,9 +729,23 @@ class JarvisAgent:
         # is always [] here -- see connect_mcp_tools()'s docstring.
         self._mcp = McpToolManager()
         self._mcp_graph_rebuilt = False  # guards connect_mcp_tools()'s one-time graph rebuild
+
+        # Post-MVP Faz 4: the objects this conversation is still editing.
+        # One instance held here rather than opened per turn (it is on the hot
+        # path, unlike todo()'s per-call store) -- it is internally locked and
+        # every read is keyed by conversation_id, so sharing it across the
+        # clients this one agent serves is exactly as safe as not sharing it.
+        #
+        # Opened BEFORE the graph so the chart tools can be handed this very
+        # object (GPT review, Faz 5 hazırlığı): they used to build their own per
+        # call, so the agent's store and the tools' store were two connections
+        # to the same file with no shared cache, transaction or invalidation.
+        self.working_set = default_working_set_store()
+
         self._graph = build_graph(
             settings, self.workspace, self.memory, self._checkpointer,
             extra_tools=self._mcp.tools,
+            working_set=self.working_set,
         )
 
         self.usage = UsageTracker(paths.data_dir() / "usage.json")
@@ -763,12 +780,8 @@ class JarvisAgent:
         # Faz 13-D: to-do store (same DB file, separate table)
         self.todo_store = TodoStore(paths.data_dir() / "sessions.db")
 
-        # Post-MVP Faz 4: the objects this conversation is still editing.
-        # One instance held here rather than opened per turn (it is on the hot
-        # path, unlike todo()'s per-call store) -- it is internally locked and
-        # every read is keyed by conversation_id, so sharing it across the
-        # clients this one agent serves is exactly as safe as not sharing it.
-        self.working_set = WorkingSetStore(paths.data_dir() / "sessions.db")
+        # (Post-MVP Faz 4's working set is opened above, before build_graph, so
+        # the graph's tools can be handed the same instance.)
 
         # Faz 2: semantic memory (facts) + procedural memory (procedures) stores
         self.facts_store = FactStore(paths.data_dir() / "sessions.db")
@@ -1175,6 +1188,7 @@ class JarvisAgent:
         new_graph = build_graph(
             new_settings, self.workspace, self.memory, self._checkpointer,
             extra_tools=self._mcp.tools,  # Faz 5: don't drop already-connected MCP tools on a model switch
+            working_set=self.working_set,
         )
         with self._state_lock:
             self._graph = new_graph
@@ -1385,6 +1399,7 @@ class JarvisAgent:
             self._graph = build_graph(
                 self.settings, self.workspace, self.memory, self._checkpointer,
                 extra_tools=self._mcp.tools,
+                working_set=self.working_set,
             )
             self._mcp_graph_rebuilt = True
 
@@ -2363,9 +2378,17 @@ class JarvisAgent:
         "should I say anything?" self-talk as if it were a real prior
         exchange, and it would get persisted to SQLite as one.
 
-        Still serialized via _state_lock (BUG-8) like every other entry
-        point, so a proactive check can never interleave with a real turn's
-        read-modify-write of shared agent state (self._history/_turn/...).
+        _state_lock is held only for SETUP (connect_mcp_tools' shared-state
+        mutation, plus a consistent read of session_id), never across the
+        model call. GPT review, Faz 5 hazırlığı: it used to wrap the whole
+        ainvoke(), and since proactive turns measure 20-80 s while chat() and
+        chat_stream() wait on that same lock, a routine "new mail arrived"
+        check could freeze the user's live conversation for a minute. The
+        justification for holding it -- "never interleave with a real turn's
+        read-modify-write of shared agent state" -- does not apply to the
+        model call itself: this method deliberately touches no shared state
+        (see the paragraph above), which is precisely why the isolation is
+        safe. background_turn() already draws the line in the same place.
 
         Never raises ConfirmationRequired — there is no interactive channel
         for a background thread to answer it (same constraint
@@ -2375,96 +2398,101 @@ class JarvisAgent:
         kind="needs_confirmation" instead — "confirm-or-notify, not silent
         execution" per ROADMAP.md's Faz 7 constraint.
         """
+        # Brief critical section: connect_mcp_tools() rebuilds self._graph, and
+        # session_id must be read consistently with it. Released before the
+        # model call below -- see the docstring.
         await self._acquire_state_lock()
         try:
             await self.connect_mcp_tools()  # no-op after the first real connect
-            needs_planning = False
-            tool_route, role_decision = _route_query(prompt, needs_planning)
-            # Faz 2.5: nobody is watching this one — see for_unattended_turn.
-            role_decision = for_unattended_turn(role_decision)
-            use_pro_agent = role_decision.use_pro_agent
-            state = {
-                "messages": [
-                    SystemMessage(content=_proactive_system_prompt(self.settings)),
-                    HumanMessage(content=prompt),
-                ],
-                "user_query": prompt,
-                "language": "tr",
-                "memory_context": "",
-                "needs_planning": needs_planning,
-                "use_pro_agent": use_pro_agent,
-                "plan": "",
-                "response": "",
-                "revise_count": 0,
-                "critic_verdict": "",
-                "critique": "",
-                "transport": f"monitor-{source}",
-                "execution_context": ExecutionContext.for_transport(
-                    f"monitor-{source}"
-                ).to_dict(),
-                # Faz 2A: a background check gets the same scoped subset as a
-                # live turn — Faz 7's live incident (an unrelated
-                # procedure_save hallucinated during a proactive email check)
-                # becomes structurally unlikely when the model never sees that
-                # schema in the first place.
-                "tool_route": tool_route.to_dict(),
-            }
-            # Usage IS recorded for a proactive turn (real tokens were really
-            # spent) — only the foreground /status label is left untouched
-            # (_last_turn_trace is never written below), so a background
-            # self-check can never clobber what the user sees as "the last
-            # thing I asked".
-            recorder = LlmTraceRecorder(
-                usage=self.usage,
-                requested_role=role_decision.role,
-                role_reason=role_decision.reason,
-            )
-            config = {
-                "configurable": {
-                    "thread_id": f"{self.session_id}-proactive-{uuid.uuid4().hex[:8]}",
-                    "transport": f"monitor-{source}",
-                    "conversation_id": self.session_id,
-                },
-                "callbacks": [_HudEventCallback(f"monitor-{source}"), recorder],
-                "recursion_limit": self.settings.graph_recursion_limit,
-            }
-            try:
-                result = await self._graph.ainvoke(state, config=config)
-            except GraphInterrupt as exc:
-                try:
-                    payload = exc.args[0][0].value
-                except Exception:
-                    payload = {}
-                tools = [t.get("name", "?") for t in (payload or {}).get("tools", [])]
-                return ProactiveOutcome(kind="needs_confirmation", tools=tools or ["gated action"])
-            except Exception:
-                # A background self-check must never take the monitor thread
-                # down — swallow and report nothing-to-say, same posture as
-                # this file's other fire-and-forget background paths
-                # (_schedule_memory_extraction et al.).
-                return ProactiveOutcome(kind="none")
-
-            # Faz 3 finding: non-streaming ainvoke surfaces a dynamic
-            # interrupt as result["__interrupt__"] instead of raising on this
-            # LangGraph version -- same confirm-or-notify handling.
-            pending_interrupts = result.get("__interrupt__") or []
-            if pending_interrupts:
-                try:
-                    payload = pending_interrupts[0].value
-                except Exception:
-                    payload = {}
-                tools = [t.get("name", "?") for t in (payload or {}).get("tools", [])]
-                return ProactiveOutcome(kind="needs_confirmation", tools=tools or ["gated action"])
-
-            response = result.get("response", "")
-            if not response:
-                from langchain_core.messages import AIMessage
-                for m in reversed(result.get("messages", [])):
-                    if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-                        response = m.content
-                        break
+            origin_session_id = self.session_id
         finally:
             self._state_lock.release()
+
+        needs_planning = False
+        tool_route, role_decision = _route_query(prompt, needs_planning)
+        # Faz 2.5: nobody is watching this one — see for_unattended_turn.
+        role_decision = for_unattended_turn(role_decision)
+        use_pro_agent = role_decision.use_pro_agent
+        state = {
+            "messages": [
+                SystemMessage(content=_proactive_system_prompt(self.settings)),
+                HumanMessage(content=prompt),
+            ],
+            "user_query": prompt,
+            "language": "tr",
+            "memory_context": "",
+            "needs_planning": needs_planning,
+            "use_pro_agent": use_pro_agent,
+            "plan": "",
+            "response": "",
+            "revise_count": 0,
+            "critic_verdict": "",
+            "critique": "",
+            "transport": f"monitor-{source}",
+            "execution_context": ExecutionContext.for_transport(
+                f"monitor-{source}"
+            ).to_dict(),
+            # Faz 2A: a background check gets the same scoped subset as a
+            # live turn — Faz 7's live incident (an unrelated
+            # procedure_save hallucinated during a proactive email check)
+            # becomes structurally unlikely when the model never sees that
+            # schema in the first place.
+            "tool_route": tool_route.to_dict(),
+        }
+        # Usage IS recorded for a proactive turn (real tokens were really
+        # spent) — only the foreground /status label is left untouched
+        # (_last_turn_trace is never written below), so a background
+        # self-check can never clobber what the user sees as "the last
+        # thing I asked".
+        recorder = LlmTraceRecorder(
+            usage=self.usage,
+            requested_role=role_decision.role,
+            role_reason=role_decision.reason,
+        )
+        config = {
+            "configurable": {
+                "thread_id": f"{origin_session_id}-proactive-{uuid.uuid4().hex[:8]}",
+                "transport": f"monitor-{source}",
+                "conversation_id": origin_session_id,
+            },
+            "callbacks": [_HudEventCallback(f"monitor-{source}"), recorder],
+            "recursion_limit": self.settings.graph_recursion_limit,
+        }
+        try:
+            result = await self._graph.ainvoke(state, config=config)
+        except GraphInterrupt as exc:
+            try:
+                payload = exc.args[0][0].value
+            except Exception:
+                payload = {}
+            tools = [t.get("name", "?") for t in (payload or {}).get("tools", [])]
+            return ProactiveOutcome(kind="needs_confirmation", tools=tools or ["gated action"])
+        except Exception:
+            # A background self-check must never take the monitor thread
+            # down — swallow and report nothing-to-say, same posture as
+            # this file's other fire-and-forget background paths
+            # (_schedule_memory_extraction et al.).
+            return ProactiveOutcome(kind="none")
+
+        # Faz 3 finding: non-streaming ainvoke surfaces a dynamic
+        # interrupt as result["__interrupt__"] instead of raising on this
+        # LangGraph version -- same confirm-or-notify handling.
+        pending_interrupts = result.get("__interrupt__") or []
+        if pending_interrupts:
+            try:
+                payload = pending_interrupts[0].value
+            except Exception:
+                payload = {}
+            tools = [t.get("name", "?") for t in (payload or {}).get("tools", [])]
+            return ProactiveOutcome(kind="needs_confirmation", tools=tools or ["gated action"])
+
+        response = result.get("response", "")
+        if not response:
+            from langchain_core.messages import AIMessage
+            for m in reversed(result.get("messages", [])):
+                if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
+                    response = m.content
+                    break
 
         text = response.strip()
         if not text or text.upper().startswith(_NO_ACTION_MARKER):
@@ -2571,11 +2599,23 @@ class JarvisAgent:
             requested_role=role_decision.role,
             role_reason=role_decision.reason,
         )
+        # GPT review (Faz 5 hazırlığı, P0): keyed on origin_session_id, NOT on
+        # self.session_id. Everything above this line -- memory context, the
+        # working-set prompt block, the history append below -- was already
+        # pinned to the conversation that SUBMITTED the task; these three lines
+        # were still reading whichever conversation happens to be live when the
+        # worker starts. A task queued in conversation A while the user moves to
+        # B therefore showed the model A's working set in its prompt and handed
+        # every config-reading tool (chart_revise, working_set) B's id: the tool
+        # would edit B's chart, or refuse with "bu nesne bu konuşmaya ait değil"
+        # about an object the prompt had just described. That is exactly the
+        # cross-conversation contamination the working set is keyed to prevent,
+        # reopened on the background path.
         config = {
             "configurable": {
-                "thread_id": f"{self.session_id}-task-{uuid.uuid4().hex[:8]}",
+                "thread_id": f"{origin_session_id}-task-{uuid.uuid4().hex[:8]}",
                 "transport": transport,
-                "conversation_id": self.session_id,
+                "conversation_id": origin_session_id,
             },
             "callbacks": [_HudEventCallback(transport), recorder],
             "recursion_limit": self.settings.graph_recursion_limit,

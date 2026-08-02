@@ -218,11 +218,30 @@ def test_the_rule_never_removes_a_domain():
 
 # ── The redraw-patches rule (the measured failure) ───────────────────────────
 
-def test_same_chart_is_identity_not_presentation():
+def test_same_chart_is_identity_not_presentation(workspace):
     spec = {"source": "a.csv", "x": "ay", "y": "satis", "kind": "line", "color": "red"}
-    assert _same_chart(spec, {"source": "a.csv", "x": "ay", "y": "satis", "kind": "bar"})
-    assert not _same_chart(spec, {"source": "a.csv", "x": "ay", "y": "gider"})
-    assert not _same_chart(spec, {"source": "b.csv", "x": "ay", "y": "satis"})
+    assert _same_chart(spec, {"source": "a.csv", "x": "ay", "y": "satis", "kind": "bar"}, workspace)
+    assert not _same_chart(spec, {"source": "a.csv", "x": "ay", "y": "gider"}, workspace)
+    assert not _same_chart(spec, {"source": "b.csv", "x": "ay", "y": "satis"}, workspace)
+
+
+def test_the_same_file_named_three_ways_is_one_chart(workspace):
+    """`satis.csv`, `./satis.csv` and the absolute path are one file. Comparing
+    the raw strings the model happened to type made them three charts."""
+    spec = {"source": "a.csv", "x": "ay", "y": "satis"}
+    for spelling in ("a.csv", "./a.csv", str(workspace / "a.csv"), str(workspace / "." / "a.csv")):
+        assert _same_chart(
+            spec, {"source": spelling, "x": "ay", "y": "satis"}, workspace
+        ), f"{spelling} should resolve to the same chart"
+
+
+def test_two_sheets_of_one_workbook_are_two_charts(workspace):
+    """One workbook's Ocak and Şubat sheets routinely carry the same column
+    names; without `sheet` in the key the second silently patched the first."""
+    ocak = {"source": "finance.xlsx", "sheet": "Ocak", "x": "tarih", "y": "tutar"}
+    subat = {"source": "finance.xlsx", "sheet": "Şubat", "x": "tarih", "y": "tutar"}
+    assert not _same_chart(ocak, subat, workspace)
+    assert _same_chart(ocak, dict(ocak, kind="bar"), workspace)
 
 
 def test_a_redraw_that_omits_a_field_keeps_it(store, workspace):

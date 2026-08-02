@@ -51,6 +51,7 @@ from jarvis.subagents.coder import run_coder
 if TYPE_CHECKING:
     from jarvis.config import Settings
     from jarvis.memory import Memory
+    from jarvis.working_set import WorkingSetStore
 
 # BUG-16: asyncio only holds a *weak* reference to a task created via
 # create_task() -- one with no other referent (module-level here, since
@@ -60,8 +61,50 @@ if TYPE_CHECKING:
 _todo_bg_tasks: set[asyncio.Task] = set()
 
 
-def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
-    """Build LangChain tool instances capturing workspace/settings/memory in closures."""
+def _materialize_inline(df, plots_dir: Path) -> str:
+    """Write an inline DataFrame beside its chart; return the path (or "").
+
+    The chart's own run-artifact directory, so the data and the PNG it produced
+    stay together and a later revision re-reads exactly the numbers that drew
+    it. Best-effort: failing to persist must not fail a chart that already
+    rendered -- it only costs that chart its revisability.
+    """
+    try:
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        target = plots_dir / "inline_data.csv"
+        df.to_csv(target, index=False, encoding="utf-8")
+        return str(target)
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return ""
+
+
+def make_tools(
+    workspace: Path,
+    settings: "Settings",
+    memory: "Memory",
+    working_set_store: "WorkingSetStore | None" = None,
+) -> list:
+    """Build LangChain tool instances capturing workspace/settings/memory in closures.
+
+    `working_set_store` is the store the chart tools mutate. GPT review (Faz 5
+    hazırlığı): JarvisAgent opens one long-lived WorkingSetStore, but the tools
+    ignored it and called `default_store()` per invocation -- which, despite the
+    name, built a fresh store and SQLite connection every time and never closed
+    it. Injected here so the agent's store and the tools' store are one object.
+    Optional so every existing caller (and ~15 tests) keeps working; when
+    omitted the tools fall back to `default_store()`, which is now genuinely
+    memoized.
+
+    NOT named `working_set`: `@tool def working_set(...)` below rebinds that
+    name in this function's scope, so a closure reading it would get the
+    StructuredTool instead of the store -- silently, because register_chart
+    swallows exceptions rather than failing a chart that already drew.
+    """
+
+    def _working_set() -> "WorkingSetStore":
+        from jarvis.working_set import default_store
+
+        return working_set_store if working_set_store is not None else default_store()
 
     @tool
     def shell_run(command: str) -> str:
@@ -219,11 +262,9 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         return str(((config or {}).get("configurable") or {}).get("conversation_id") or "")
 
     def _chart_kwargs(config) -> dict:
-        from jarvis.working_set import default_store
-
         return {
             "conversation_id": _conversation_of(config),
-            "store": default_store(),
+            "store": _working_set(),
             "workspace": workspace,
             "plots_dir": RunContext.for_execution(workspace).artifact_dir,
         }
@@ -238,6 +279,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         hue: str = "",
         source: str = "",
         object_id: str = "",
+        clear_fields: list[str] = [],  # noqa: B006 -- read-only, never mutated
         config: RunnableConfig = None,
     ) -> str:
         """Change ONE thing about the chart already on screen, and redraw it.
@@ -251,19 +293,28 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         "sütun grafiği yap"        → chart_revise(kind="bar")
         "başlığı 'Q1 Satış' yap"   → chart_revise(title="Q1 Satış")
 
+        To REMOVE a setting use clear_fields — an empty string does nothing:
+
+        "başlığı kaldır"           → chart_revise(clear_fields=["title"])
+        "gruplamayı kaldır"        → chart_revise(clear_fields=["hue"])
+        "rengi varsayılana döndür" → chart_revise(clear_fields=["color"])
+
         To go back to the previous version use working_set("undo") — do not
         try to reverse a change by describing the old value.
 
         Args:
-            color:     New colour for the marks.
-            kind:      New chart type.
-            title:     New title.
-            x:         New x-axis column (validated against the file).
-            y:         New y-axis column (validated against the file).
-            hue:       New grouping column.
-            source:    New data file.
-            object_id: Only when editing a chart that is not the active one;
-                       omit otherwise.
+            color:       New colour for the marks.
+            kind:        New chart type.
+            title:       New title.
+            x:           New x-axis column (validated against the file).
+            y:           New y-axis column (validated against the file).
+            hue:         New grouping column.
+            source:      New data file.
+            object_id:   Only when editing a chart that is not the active one;
+                         omit otherwise.
+            clear_fields: Names of settings to DELETE, e.g. ["title"]. Use this
+                         for "kaldır"/"sil"/"varsayılana döndür"; do not pass a
+                         field both here and as a value.
         """
         from jarvis.tools.chart_objects import chart_revise as _chart_revise
 
@@ -272,6 +323,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
             changes={"color": color, "kind": kind, "title": title,
                      "x": x, "y": y, "hue": hue, "source": source},
             object_id=object_id,
+            clear_fields=list(clear_fields or ()),
         )
         event_bus.show_hud()
         return result
@@ -470,13 +522,28 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         # charts instead of competing with it.
         if not result.startswith("[ERROR]"):
             from jarvis.tools.chart_objects import register_chart
-            from jarvis.working_set import default_store
+
+            # Inline data is written to disk before the chart is registered.
+            # GPT review (Faz 5 hazırlığı): a data_json chart was stored with
+            # source="" -- which resolves to the workspace DIRECTORY -- so it
+            # appeared in the working set as editable and then failed on the
+            # first `chart_revise`, because the data that drew it existed only
+            # in this function's local DataFrame. Either every chart is
+            # revisable or none is; an invisible split ("some charts can be
+            # made red") is the worse of the two.
+            source = path
+            spec_extra: dict = {}
+            if df is not None:
+                materialized = _materialize_inline(df, plots_dir)
+                if materialized:
+                    source = materialized
+                    spec_extra["_source_type"] = "inline_materialized"
 
             register_chart(
                 conversation_id=_conversation_of(config),
-                store=default_store(), workspace=workspace, png=result,
-                source=path, x=x, y=y, kind=kind, title=title,
-                hue=hue, sheet=sheet,
+                store=_working_set(), workspace=workspace, png=result,
+                source=source, x=x, y=y, kind=kind, title=title,
+                hue=hue, sheet=sheet, extra=spec_extra,
             )
         event_bus.show_hud()
         # The PNG path stays the FIRST line: this return value is read in 120+

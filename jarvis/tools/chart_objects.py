@@ -26,6 +26,7 @@ What is left here:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,8 @@ from jarvis.working_set import (
     WorkingObject,
     WorkingSetStore,
 )
+
+logger = logging.getLogger(__name__)
 
 # Spec keys a chart understands. Anything else is refused rather than stored:
 # a spec that accumulates keys the renderer ignores would show the user a
@@ -96,25 +99,78 @@ def normalize(spec: dict[str, Any]) -> dict[str, Any]:
     return spec
 
 
-def _merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
-    """base + incoming, with the hue/color exclusion applied to `incoming`."""
-    merged = dict(base)
-    for key, value in incoming.items():
-        if value in (None, ""):
+def canonicalize_chart_patch(
+    current: dict[str, Any],
+    requested: dict[str, Any],
+    clear: tuple[str, ...] | list[str] = (),
+) -> dict[str, Any]:
+    """Requested changes → the changes that will actually be applied.
+
+    THE single mutation path for a chart spec. GPT review (Faz 5 hazırlığı):
+    the hue/color exclusion below existed only on the redraw path
+    (`register_chart`'s merge), while `chart_revise` patched the store
+    directly. So "rengi kırmızı yap" on a chart grouped by `hue` stored BOTH
+    -- the renderer ignores `color` whenever `hue` is set, so the chart did not
+    turn red, while the prompt told the model every turn that it had. That is
+    exactly the inconsistency this module's comments say the rule exists to
+    prevent, reappearing on the path a user actually takes. Both callers now
+    come through here.
+
+    `clear` names fields to DELETE (mapped to None, which the store reads as
+    "remove the key"). The store always supported deletion; nothing
+    model-facing could reach it, so "başlığı kaldır" / "gruplamayı kaldır"
+    were unaskable.
+    """
+    changes: dict[str, Any] = {}
+
+    for key in clear:
+        name = str(key or "").strip().lower()
+        if name in CHART_FIELDS:
+            changes[name] = None
+
+    for key, value in requested.items():
+        if key not in CHART_FIELDS or value in (None, ""):
             continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if key == "kind":
+            text = text.lower()
+        # Mutually exclusive at the renderer: setting one deletes the other,
+        # and whichever is named LAST wins.
         if key == "hue":
-            merged.pop("color", None)
+            changes["color"] = None
         elif key == "color":
-            merged.pop("hue", None)
-        merged[key] = value
-    return normalize(merged)
+            changes["hue"] = None
+        changes[key] = text
+
+    # Deleting a key that was never there is a no-op, not a revision: it would
+    # otherwise bump the version and give `undo` a step that undoes nothing.
+    return {k: v for k, v in changes.items() if v is not None or k in current}
 
 
-def _same_chart(spec: dict[str, Any], incoming: dict[str, Any]) -> bool:
+def _canonical_source(source: str, workspace: Path) -> str:
+    """A source path reduced to its identity.
+
+    `satis.csv`, `./satis.csv` and `C:\\...\\satis.csv` are one file and were
+    three different charts, because identity compared the raw strings the model
+    happened to type.
+    """
+    text = str(source or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(_resolve(text, workspace).resolve()).casefold()
+    except (OSError, ValueError):
+        return text.casefold()
+
+
+def _same_chart(spec: dict[str, Any], incoming: dict[str, Any], workspace: Path) -> bool:
     """Is `incoming` a redraw of `spec`, or a different chart?
 
-    Identity is (source, x, y). Everything else -- kind, title, colour, hue --
-    is presentation, and changing presentation is what a revision IS.
+    Identity is (source, sheet, x, y) with the source canonicalized. Everything
+    else -- kind, title, colour, hue -- is presentation, and changing
+    presentation is what a revision IS.
 
     This exists because of a measured failure. Asked to change only the title,
     a live run called `plot_data` rather than `chart_revise`, copying the spec
@@ -124,10 +180,22 @@ def _same_chart(spec: dict[str, Any], incoming: dict[str, Any]) -> bool:
     tool, which is more durable than trying to make it pick the right one --
     the first cut of this phase already tried the docstring route and lost.
 
+    `sheet` joined the key on review: one workbook's Ocak and Şubat sheets
+    routinely carry the same column names, so charting both drew one chart that
+    silently overwrote itself.
+
     A genuinely new chart from the same file ("bir de gider grafiği çiz")
     names a different y, so it still creates its own object.
     """
-    for key in ("source", "x", "y"):
+    if _canonical_source(spec.get("source", ""), workspace) != _canonical_source(
+        incoming.get("source", ""), workspace
+    ):
+        return False
+    if str(spec.get("sheet") or "").strip().casefold() != str(
+        incoming.get("sheet") or ""
+    ).strip().casefold():
+        return False
+    for key in ("x", "y"):
         if str(spec.get(key, "")).strip() != str(incoming.get(key, "")).strip():
             return False
     return True
@@ -147,6 +215,7 @@ def register_chart(
     hue: str = "",
     color: str = "",
     sheet: str = "",
+    extra: dict[str, Any] | None = None,
 ) -> WorkingObject | None:
     """Keep a chart `plot_data` just drew, so the next turn can patch it.
 
@@ -172,6 +241,10 @@ def register_chart(
         "source": str(source), "kind": kind, "x": x, "y": y,
         "hue": hue, "title": title, "color": color, "sheet": sheet,
     })
+    # Metadata (leading underscore) describes the object rather than
+    # configuring it -- WorkingObject.render() gives those their own line and
+    # canonicalize_chart_patch ignores them, since they are not CHART_FIELDS.
+    incoming.update(extra or {})
 
     if source:
         path = _resolve(source, workspace)
@@ -181,21 +254,27 @@ def register_chart(
                 incoming["_columns"] = ", ".join(schema["columns"])
 
     try:
-        active = store.active(conversation_id, KIND_CHART)
         # A redraw of the SAME chart patches it. See _same_chart for the live
         # run this rule exists for -- and note what it preserves: fields the
         # model did NOT restate, which is precisely what a redraw loses and
         # what a working set is for.
-        if active is not None and _same_chart(active.spec, incoming):
-            merged = _merge(active.spec, incoming)
-            changes = {
-                key: merged.get(key)          # absent in merged ⇒ None ⇒ removed
-                for key in set(merged) | set(active.spec)
-                if active.spec.get(key) != merged.get(key)
-            }
-            obj = store.patch(active.id, changes) if changes else active
+        #
+        # Checked against EVERY chart in the conversation, active first, not
+        # only the active one (GPT review): redrawing a chart the user had
+        # stepped away from used to fork a second object with the same identity,
+        # so the conversation then held two charts that were the same chart.
+        candidates = store.list(conversation_id, KIND_CHART)
+        candidates.sort(key=lambda o: not o.is_active)
+        match = next(
+            (o for o in candidates if _same_chart(o.spec, incoming, workspace)), None
+        )
+        if match is not None:
+            changes = canonicalize_chart_patch(match.spec, incoming)
+            obj = store.patch(match.id, changes) if changes else match
             if obj is not None:
                 store.record_artifact(obj.id, png)
+                if not obj.is_active:
+                    store.activate(conversation_id, obj.id)
             return obj
 
         obj = store.create(
@@ -204,6 +283,13 @@ def register_chart(
             source_artifacts=(png,),
         )
     except Exception:  # noqa: BLE001 -- registration must never fail a drawn chart
+        # Logged, not merely swallowed. Silence here costs the user the whole
+        # feature -- the chart draws, nothing enters the working set, and every
+        # later revision fails with "düzenlenecek bir grafik yok" -- with no
+        # trace of why. A wiring bug hid behind this exact `return None` during
+        # the Faz 5 prep (a closure captured the `working_set` TOOL instead of
+        # the store, because @tool rebinds that name in make_tools' scope).
+        logger.warning("chart registration failed; chart drawn but not editable", exc_info=True)
         return None
     return obj
 
@@ -295,6 +381,7 @@ def chart_revise(
     plots_dir: Path,
     changes: dict[str, Any],
     object_id: str = "",
+    clear_fields: tuple[str, ...] | list[str] = (),
 ) -> str:
     """Patch the active chart with only the named fields and re-render."""
     obj = store.get(object_id) if object_id else store.active(conversation_id, KIND_CHART)
@@ -306,25 +393,41 @@ def chart_revise(
     if obj.conversation_id != conversation_id:
         return "[ERROR] Bu nesne bu konuşmaya ait değil."
 
-    changes = {k: v for k, v in changes.items() if k in CHART_FIELDS and v not in (None, "")}
+    unknown = [
+        str(f).strip().lower() for f in clear_fields
+        if str(f).strip().lower() not in CHART_FIELDS
+    ]
+    if unknown:
+        return (
+            f"[ERROR] Silinemeyecek alan(lar): {', '.join(unknown)}. "
+            f"Geçerli alanlar: {', '.join(CHART_FIELDS)}."
+        )
+
+    changes = canonicalize_chart_patch(obj.spec, changes, clear_fields)
     if not changes:
         return (
             "[ERROR] Hiçbir alan verilmedi. Değiştirilebilir alanlar: "
             f"{', '.join(CHART_FIELDS)}."
         )
 
-    if "kind" in changes:
-        kind = str(changes["kind"]).strip().lower()
+    if changes.get("kind"):
+        kind = str(changes["kind"])
         if kind not in SUPPORTED_KINDS:
             return f"[ERROR] kind '{kind}' desteklenmiyor. Seçenekler: {sorted(SUPPORTED_KINDS)}"
-        changes["kind"] = kind
 
     # Column changes are validated against the file, not accepted on faith.
     # A revision that renames y to a column that does not exist would
     # otherwise store a spec that cannot render -- which breaks not just this
     # turn but every later revision, since the stored spec is the base.
-    if {"x", "y", "hue", "source"} & set(changes):
+    #
+    # A DELETION (value None, via clear_fields) names no column, so it is not
+    # validated as one -- "hue kullanma" must not be answered with "there is no
+    # column called None".
+    if {"x", "y", "hue", "source"} & {k for k, v in changes.items() if v is not None}:
         merged = {**obj.spec, **changes}
+        for key, value in changes.items():
+            if value is None:
+                merged.pop(key, None)
         path = _resolve(str(merged.get("source") or ""), workspace)
         if not path.exists():
             return f"[ERROR] Veri dosyası bulunamadı: {path}"
@@ -332,14 +435,15 @@ def chart_revise(
         if err:
             return err
         for role in ("x", "y", "hue"):
-            if role in changes:
-                resolved = _resolve_column(str(changes[role]), schema["columns"])
-                if not resolved:
-                    return (
-                        f"[ERROR] '{changes[role]}' diye bir kolon yok.\n"
-                        + render_schema(schema, path.name)
-                    )
-                changes[role] = resolved
+            if changes.get(role) is None:
+                continue
+            resolved = _resolve_column(str(changes[role]), schema["columns"])
+            if not resolved:
+                return (
+                    f"[ERROR] '{changes[role]}' diye bir kolon yok.\n"
+                    + render_schema(schema, path.name)
+                )
+            changes[role] = resolved
 
     before_version = obj.version
     patched = store.patch(obj.id, changes)
@@ -360,7 +464,18 @@ def chart_revise(
         return f"{png}\n(Değişiklik geri alındı, grafik v{before_version} olarak kaldı.)"
 
     store.record_artifact(patched.id, png)
-    applied = ", ".join(f"{k}={v}" for k, v in changes.items())
+    # The object the user just edited becomes the active one. GPT review
+    # (Faz 5 hazırlığı): chart_revise(object_id=B) edited B but left A active,
+    # and `active(kind)` orders by is_active before updated_at -- so the very
+    # next "şimdi başlığını da değiştir" went back to A, silently, while the
+    # user was plainly still talking about B. "This" means the thing last
+    # touched.
+    if not patched.is_active:
+        store.activate(conversation_id, patched.id)
+
+    applied = ", ".join(
+        (f"{k} silindi" if v is None else f"{k}={v}") for k, v in changes.items()
+    )
     return _describe(patched, png, note=f"Değişen: {applied}")
 
 
@@ -410,15 +525,32 @@ def working_set_control(
             return "[ERROR] Geri alınacak nesne yok."
         if not obj.revision_history:
             return f"[WorkingSet] {obj.ref} zaten ilk halinde (v{obj.version}) — geri alınacak bir şey yok."
+
+        if obj.kind != KIND_CHART:
+            reverted, undone = store.undo(obj.id)
+            if reverted is None:
+                return "[ERROR] Geri alınamadı."
+            return f"[WorkingSet] {reverted.ref} v{reverted.version}'e döndü (geri alınan: {undone})."
+
+        # Render FIRST, commit second. GPT review (Faz 5 hazırlığı): this used
+        # to pop the history, write the older spec, and only then try to draw
+        # it -- so a render failure left the store one version back while the
+        # PNG on the user's screen was still the newer one. Stored state and
+        # visible artifact disagreed, and the code described that in a sentence
+        # instead of preventing it. Nothing is written unless the chart drew.
+        candidate, undone = store.peek_undo(obj.id)
+        if candidate is None:
+            return "[ERROR] Geri alınamadı."
+        png = _render(candidate, workspace, plots_dir)
+        if png.startswith("[ERROR]"):
+            return f"{png}\n(Geri alma UYGULANMADI — grafik v{obj.version} olarak kaldı.)"
+
         reverted, undone = store.undo(obj.id)
         if reverted is None:
             return "[ERROR] Geri alınamadı."
-        if reverted.kind != KIND_CHART:
-            return f"[WorkingSet] {reverted.ref} v{reverted.version}'e döndü (geri alınan: {undone})."
-        png = _render(reverted.spec, workspace, plots_dir)
-        if png.startswith("[ERROR]"):
-            return f"{png}\n(Spec v{reverted.version}'e döndü ama yeniden çizilemedi.)"
         store.record_artifact(reverted.id, png)
+        if not reverted.is_active:
+            store.activate(conversation_id, reverted.id)
         return _describe(reverted, png, note=f"Geri alındı: {undone}")
 
     return f"[ERROR] Bilinmeyen action '{action}'. Geçerli: list | show | activate | undo."

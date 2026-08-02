@@ -147,6 +147,7 @@ def build_graph(
     memory: "Memory",
     checkpointer=None,
     extra_tools: list | None = None,
+    working_set=None,
 ):
     """Build and compile the JARVIS LangGraph state machine (Faz 2).
 
@@ -161,8 +162,11 @@ def build_graph(
                       itself stays synchronous, unchanged for every existing
                       caller that doesn't pass this). Dual-layer: appended
                       alongside, never replacing, make_tools()'s ~34 wrappers.
+        working_set:  Post-MVP Faz 4 / Faz 5 hazırlığı -- the WorkingSetStore
+                      the chart tools mutate. Passed through so the agent's
+                      long-lived store IS the tools' store; see make_tools().
     """
-    tools = make_tools(workspace, settings, memory)
+    tools = make_tools(workspace, settings, memory, working_set)
     if extra_tools:
         tools = [*tools, *extra_tools]
 
