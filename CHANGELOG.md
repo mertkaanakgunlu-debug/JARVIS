@@ -6,6 +6,151 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Post-MVP Faz 5: mail → calendar, staged] — 2026-08-02
+
+The first feature where a **background trigger** can lead to a **real external write**. So the
+thing it deliberately does not build is the obvious one:
+
+```
+yeni mail geldi → model → Google Calendar create        ← not this
+```
+
+An unattended model call writing to a real calendar has nobody watching it choose the wrong day.
+The flow is staged instead, and the stage the user sees is a proposal:
+
+```
+message_id → fetch → deterministic extraction → validation → dedup
+           → calendar_candidate (working set) → USER APPROVAL → calendar create
+```
+
+### Four decisions, each answering a failure this repo has already had
+
+**The tool takes only `message_id`.** Not sender, not subject, not date. A model asked to relay
+those re-types them, and a re-typed value is how Faz 4's chart lost its colour and how `'Tarih'`
+became a column that did not exist. The service reads the message itself, by canonical id.
+
+**Extraction calls no LLM.** Faz 3 measured what happens when a model is asked for a fact it
+believes it already knows: `weather` fabricated a temperature in 4 of 5 runs. A date in a mail is
+exactly that kind of fact, so it comes out of `jarvis/nlu/temporal.py` and
+`jarvis/nlu/event_text.py` — the same resolvers, the same confidence bands, that
+`google_calendar`'s own create uses. The model relays; it does not compute.
+
+**Confidence is recorded, never spent.** Even a 0.99 extraction produces a candidate, not an event.
+Trusted-sender auto-create is the only thing confidence would unlock and it is deliberately not
+built: it needs measurement, and the measurement needs this ledger to exist first.
+
+**A mail that mentions no meeting produces nothing.** A date in the text is not an appointment —
+an invoice due date, a newsletter's "since 2019" — and without this the feature is a machine for
+filling the calendar with marketing mail.
+
+### `mail_event_candidates` — the durable ledger
+
+`message_id` is the primary key, which is the idempotency guarantee rather than a hint: a retry, a
+restart or a second user request returns the event that already exists. States are
+`new → extracted | ambiguous → proposed → confirmed → created | ignored | error`, and **`error` is
+not terminal** — the whole point is that a mail which failed for a bad reason gets another chance.
+
+This is explicitly **not** `monitor._notified_email_ids`. That set is added to whether or not the
+work succeeded, and marks every already-unread mail as seen at startup. Both are correct for
+suppressing toast spam and fatal as a processing record. Ingestion also runs **outside** the
+proactive throttle: the 10-minute gap limits *notifying the user*, never candidate production.
+
+### The Working Set's second consumer
+
+Faz 4 built a kind-agnostic store and shipped exactly one kind, so "this primitive later holds a
+mail draft, a report, a table" was a claim with a single example. `calendar_candidate` is a second
+kind going through `create`/`activate`/prompt-injection **unchanged**, and an active one routes a
+bare *"evet, ekle"* to the calendar domain — without that, the approval turn classifies as
+`conversation`, the model gets zero tools, and it answers *"tamam, ekledim"* about an event that
+does not exist.
+
+### Gating
+
+`calendar_from_mail` is registered **L3 / external_write / requires_confirmation** at the tool
+level, with only `propose` split out as L1 `external_read`. The strict default is deliberate: an
+action added later without a table entry inherits the dangerous classification, and there is a test
+for that. `create` is a real interrupt on every path, including the proactive one.
+
+Supporting change: `calendar.create_event()` now returns a structured `EventCreation` and
+`_format_creation()` renders it — the mail flow needs the new event's id, and the only way to get
+it used to be regexing the display string, which is the exact defect `gmail.message_fields` was
+added to end (BUG-15). The rendered text is byte-identical.
+
+Background ingestion ships **off** (`calendar_from_mail_enabled`): the hint list that decides "is
+this mail about a meeting" has not been measured against a real mailbox, and a background job that
+fills the working set with unwanted proposals is worse than one that does nothing. The user-facing
+tool path is unaffected by the flag.
+
+---
+
+## [Faz 5 hazırlığı: ownership, blocking, spec integrity] — 2026-08-02
+
+An external review (GPT, on `langgraph-migration`'s real tip) found that Faz 4 shipped a store
+whose semantics were right and a tool layer that reached only part of them, plus two ways a
+background turn reaches into a foreground one. Faz 5 is the first unattended **external-action**
+feature (mail → calendar), so these are its entry gate, not a cleanup pass. Every item below is
+verified by a test that fails without its fix.
+
+### P0 — a background task ran with the wrong conversation's tool context
+
+`background_turn()` pinned `origin_session_id` at entry and used it for the memory context, the
+working-set prompt block and the history append. The `RunnableConfig` did not: `thread_id` and
+`conversation_id` still read `self.session_id`. A task queued in conversation A while the user
+moved to B showed the model **A's** working set and handed every config-reading tool (`chart_revise`,
+`working_set`) **B's** id — so the tool edited B's chart, or refused with *"bu nesne bu konuşmaya
+ait değil"* about an object the prompt had just described. The cross-conversation contamination the
+Working Set is keyed to prevent, reopened on the background path. `proactive_turn()` had the same
+split and got the same fix.
+
+### Proactive work no longer blocks the user
+
+* `proactive_turn()` held `_state_lock` across the whole `ainvoke()`. Proactive turns measure
+  20–80 s and `chat()`/`chat_stream()` wait on that same lock, so a routine "new mail arrived" check
+  could **freeze the live conversation for a minute**. The lock now covers setup only — which is
+  what `background_turn()` already did, and what this method's own isolation argument permits.
+* `monitor._maybe_proactive()` ran `asyncio.run(...)` inline on the monitor's single polling thread,
+  stalling calendar/scheduler/todo/finance/GCP checks for the model call's full duration. Measured
+  at **10.0 s blocked** before, sub-second after. Now a bounded queue drained by its own worker;
+  a full queue drops with a log line rather than growing.
+
+### Working Set spec integrity
+
+* **`hue`/`color` canonicalized on every path.** The exclusion existed only on the redraw path, so
+  *"rengi kırmızı yap"* on a grouped chart stored both. The renderer honours `hue` and ignores
+  `color` — the chart did not change while the prompt asserted every turn that it had. All mutations
+  now go through `canonicalize_chart_patch()`.
+* **One title.** `WorkingObject.title` (the column, shown in the prompt header) and `spec["title"]`
+  (what the renderer draws) could disagree after a title revision, showing the model two titles for
+  one object. The spec is the source; the column follows in the same write.
+* **`clear_fields`.** The store has read `None` as "delete this key" since day one and nothing
+  model-facing could express it, so *"başlığı kaldır"*, *"gruplamayı kaldır"* and *"rengi varsayılana
+  döndür"* were unaskable.
+* **Undo renders before it commits.** It used to pop history, write the older spec, then try to
+  draw it — a render failure left stored state one version back while the on-screen PNG was the
+  newer one. Nothing is written now unless the chart drew.
+* **The chart you just edited becomes the active one.** `chart_revise(object_id=B)` left A active,
+  and `active(kind)` orders `is_active` before `updated_at`, so the next bare *"şimdi başlığını da
+  değiştir"* silently went back to A.
+
+### Chart identity and storage
+
+* **Identity is `(source, sheet, x, y)` with the source canonicalized.** `sheet` joined the key
+  because one workbook's Ocak and Şubat sheets carry the same column names and drew one
+  self-overwriting chart; `satis.csv` / `./satis.csv` / the absolute path were three charts.
+  A redraw now also matches **inactive** charts instead of forking a duplicate.
+* **Inline `data_json` charts are revisable.** They were registered with `source=""` — which
+  resolves to the workspace *directory* — so they entered the working set as editable and failed on
+  the first revision. The frame is now written beside its PNG (`_source_type=inline_materialized`).
+  Either every chart is revisable or none is; an invisible split is worse than both.
+* **`default_store()` is a store, not a constructor.** It returned a new store and a new SQLite
+  connection on every call and nothing closed them; the agent's long-lived store and the tools'
+  store were different objects over one file. Memoized, and `make_tools()` now takes the agent's
+  instance directly.
+* **A failed chart registration is logged.** It returned `None` silently, which costs the user the
+  entire feature with no trace — a wiring bug hid behind that exact line during this work.
+
+---
+
 ## [Post-MVP Faz 4: Working Set] — 2026-08-02
 
 The plan's second acceptance milestone: a chart the user can keep changing across turns.

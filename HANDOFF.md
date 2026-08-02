@@ -10,173 +10,270 @@
 > bağlanır ("tests pass" tek başına yazılmaz). Branch ucunun CI sonucuna her zaman
 > `gh run list --branch langgraph-migration` ile canlı bakılır — bu dosyadan okunmaz.
 
-## Son oturum: 2026-08-01/02 — **Faz 3 (Daily Briefing)** + **Faz 4 (Working Set)**
+## Son oturum: 2026-08-02/03 — **Faz 5 hazırlığı** + **Faz 5 (mail → takvim)**
 
-**Durum tek cümlede:** iki kabul kilometre taşı da kuruldu ve ölçüldü; **Faz 3'ün uydurma ekseni
-temiz (30 turda 0), Faz 4'ün zincir kapısı geçmedi (5'te 3)** — ve Faz 4'ün kalan iki hatası da
-model tarafı, yapısal değil.
+**Durum tek cümlede:** dış inceleme (GPT, dalın gerçek ucunda) Faz 4'ün **8 yapısal açığını**
+buldu — 8'i de doğrulandı ve kapatıldı — ardından **Faz 5 kuruldu**: mail'den takvim etkinliği,
+ama *doğrudan yazma değil*, **onaylanabilir öneri** olarak.
+
+**Commit yapısı:** iki iş commit'i (`fix(faz5-prep)`, `feat(faz5)`) ve bu kapanış HANDOFF
+commit'i. İkisi ayrı tutuldu çünkü hazırlık Faz 5 olmadan da tek başına doğru ve gözden
+geçirilebilir; her ikisinin ağacı da kendi başına yeşil.
+
+**Ölçüm durumu, dürüstçe:** Faz 5'in tamamı **fixture** üzerinde doğrulandı (42 test).
+**Gerçek posta kutusunda hiç koşmadı** — owner OAuth onayı gerekiyor. Arka plan ingestion
+varsayılan **KAPALI**.
 
 ## Sıra ve plan
 
 Plan: `C:\Users\mertk\.claude\plans\c-users-mertk-downloads-jarvis-post-mvp-federated-kettle.md`
-(Faz 0A + 0B + 1 + 2 + 2.5 + 2.75 + **3** + **4** bitti). **Sıra: Faz 5 — Proaktif mail → takvim.**
+(Faz 0A + 0B + 1 + 2 + 2.5 + 2.75 + 3 + 4 + **hazırlık** + **5** bitti).
+**Sıra: canlı posta kutusunda ölçüm** (aşağıda), sonra Faz 6.
 
 ---
 
-# Faz 4 — Working Set (bu oturumun ikinci yarısı)
+# Faz 5 — mail → takvim (bu oturumun ikinci yarısı)
 
-## Sorun, tam olarak
+## Kurulmayan akış
 
-Biten tur geçmişe `[insan mesajı + kısa özet + final cevap]` olarak sıkıştırılıyor ve bu kural
-**doğru** — ham araç state'i mesaj listesinde birikmemeli. Bedeli şu: *"çizgiyi kırmızı yap"*
-geldiğinde ortada grafik yok. Model göremediği bir şeyi revize etmeye çalışıyor, tek cümleden
-sıfırdan kuruyor, kaynağı/kolonu/türü yanlış yapıyor.
+```
+yeni mail geldi → model → Google Calendar create        ← BU DEĞİL
+```
 
-Working Set bu kuralın **dar istisnası**: ham çıktı değil, **spec** — nesneyi yeniden üretebilecek
-yapılandırılmış tarif. Aktif nesnenin spec'i her tur sistem prompt'una ekleniyor, böylece revizyon
-**tek argümanlık patch** oluyor. Ölçülmüş model sınırı tam buna elveriyor.
+Arka planda çalışan bir model çağrısının yanlış günü seçtiğini görecek kimse yok. Onun yerine:
 
-**Nereye asıldı:** konuşma başına, SQLite'ta, `conversation_id` anahtarlı. `JarvisAgent`'a değil
-(tek agent tüm istemcilere hizmet ediyor, A'nın revizyonu B'nin grafiğine düşerdi), graph state'e
-de değil (compaction onu buduyor — sıkıştırmadan sağ çıkacak şeyi sıkıştırmayı yapan şeyin içine
-koymak olurdu). **Bu yüzden `ConversationRuntime` refactor'üne gerek kalmadı.**
+```
+message_id → fetch → deterministik çıkarım → doğrulama → dedup
+           → calendar_candidate (working set) → KULLANICI ONAYI → takvim create
+```
 
-## Ölçümle var olan üç düzeltme
+## Dört karar, her biri bu repo'nun yaşadığı bir hatanın cevabı
 
-**Grafik çizen TEK araç var.** İlk hal `plot_data`'nın yanına `chart_new` ekledi ve modele seçtirdi.
-Canlı koşuda model `plot_data`'yı seçti, nesne oluşmadı, ardından gelen **altı revizyon turunun
-hepsi düştü**. Belirsiz araç çifti bu kod tabanının en pahalı tekrar eden hatası; yetenek
-`plot_data`'nın **içine** taşındı — aynı isim, aynı argümanlar, aynı dönüş değeri (120+ yerde
-okunuyor), artı bir yan etki: çizdiğini saklıyor.
+- **Araç yalnız `message_id` alıyor.** Gönderen/konu/tarihi modele yeniden yazdırmak, Faz 4'te
+  grafiğin rengini kaybettiren ve `'Tarih'` diye olmayan bir kolon uyduran şeyin aynısı. Servis
+  maili kanonik kimlikle kendi okuyor.
+- **Çıkarım LLM çağırmıyor.** Faz 3 ölçtü: bildiğini sandığı bir olguyu model 5'te 4 uyduruyor
+  (`weather`). Maildeki tarih tam olarak o cins bir olgu. `nlu/temporal.py` + `nlu/event_text.py`
+  çözüyor — takvim aracının kendi kullandığı çözücüler, aynı güven bantları.
+- **Güven kaydediliyor, harcanmıyor.** 0.99 bile etkinlik değil, **aday** üretiyor. Güvenilir
+  gönderen için otomatik oluşturma bilinçli olarak **yapılmadı**: önce ölçüm gerekiyor, ölçüm için
+  de bu ledger'ın var olması gerekiyordu.
+- **Toplantıdan söz etmeyen mail hiçbir şey üretmiyor.** Metindeki tarih randevu değil (fatura
+  vadesi, bültendeki "2019'dan beri"); bu olmadan özellik takvimi reklam mailiyle dolduran bir
+  makine olurdu.
 
-**Aynı grafiğin yeniden çizimi onu PATCH'liyor.** Sadece başlığı değiştirmesi istenen canlı bir tur
-`plot_data` çağırdı, spec'i kendi prompt'undan kopyaladı, bir tur önce konan **rengi atladı** — ve
-kullanıcıya grafiğin hâlâ kırmızı olduğunu söyledi. Değildi. Kimlik `(source, x, y)`; gerisi
-sunum. Bu çağrıyı patch yapmak, modelin yanlış aracı seçmesinin **sonucunu** kaldırıyor — seçimi
-engellemeye çalışmaktan daha dayanıklı.
+## `mail_event_candidates` — kalıcı ledger
 
-**Uydurulan kolon düzeltiliyor, bildirilmiyor.** Önceki hal `plot_data`'nın hata vermesine izin
-veriyordu; hata zaten gerçek kolonları listeliyor, model tekrar dener diye. Listeliyor. **Model
-tekrar denemiyor:** `'Tarih'` diye bir kolon istedi, `[ERROR] Column 'Tarih' not found.
-Available: ['ay','satis','gider']` aldı, kullanıcıya cevap verdi ve hiç çizmedi — **5 canlı
-zincirin 3'ünü 0. turda öldürdü.** Artık her ikame dönüş değerinde bildiriliyor, çünkü asıl hata
-yanlış kolonu **sessizce** çizmek olurdu.
+`message_id` **primary key**; bu bir ipucu değil, idempotency garantisi: retry, restart veya
+ikinci bir kullanıcı isteği yeni etkinlik değil, **var olanın id'sini** döndürüyor. Durumlar:
+`new → extracted | ambiguous → proposed → confirmed → created | ignored | error`.
+**`error` terminal DEĞİL** — kötü bir sebeple düşen mailin tekrar denenmesi bu tablonun varlık
+sebebi.
 
-## Yönlendirme: canlı nesne, kimsenin sahiplenmediği turu sahipleniyor
+Bu, `monitor._notified_email_ids` **değil** ve olmamalı: o küme iş başarısız olsa bile ekliyor ve
+açılışta tüm okunmamışları "görülmüş" sayıyor. Toast spam'i için doğru, işleme kaydı olarak ölümcül.
+Ingestion ayrıca proaktif kıskacın **dışında**: 10 dk **bildirimi** sınırlar, aday üretimini değil.
 
-Çıplak bir revizyonda yetenek ismi geçmiyor, o yüzden `conversation`'a düşüyor ve model sıfır araç
-alıyor. Revizyon kelime dağarcığını tahmin etmek sınırsız bir iş — bu router zaten üç jenerik fiili
-hayalî alan ürettiği için silmişti. Onun yerine **state** cevaplıyor: aktif nesne, **hiçbir şeye
-uymayan** turu sahipleniyor. Bilinçli olarak yalnız o durumda; her tura uygulasaydım konuşmanın
-kalanındaki her tur multi-domain, yani reasoning katmanı olurdu. Ölçüldü: aktif grafik varken
-*"Teşekkürler"* **5/5** hiçbir araç çağırmadı.
+## Working Set'in ikinci tüketicisi
 
-## Ölçüm (n=5 zincir × 7 tur = 35 canlı tur, qwen3:8b, `cloud_policy=off`)
+Faz 4 kind-agnostik store'u tek tüketiciyle bırakmıştı. `calendar_candidate` ikinci kind ve
+`create`/`activate`/prompt-injection yolundan **değişiklik olmadan** geçiyor. Aktif bir aday varken
+çıplak *"evet, ekle"* `calendar` domain'ine yönleniyor — bu olmasa o tur `conversation`'a düşer,
+model sıfır araç alır ve var olmayan bir etkinlik için *"tamam, ekledim"* der.
 
-Puanlama **saklanan spec** üzerinden, cevap metni üzerinden değil — akıcı bir modelin uyduramadığı
-tek eksen bu. Her revizyon turu ayrıca **kullanıcının söylemediği alanların hayatta kaldığını** da
-doğruluyor.
+## Kapı
 
-| tur | sonuç | kullanılan araç |
-|---|---|---|
-| oluştur → nesne var | 4/5 | `plot_data` |
-| renk (source/x/y korunuyor) | 4/5 | `chart_revise` |
-| başlık (**renk** korunuyor) | 4/5 | `chart_revise` |
-| tür (**renk + başlık** korunuyor) | 4/5 | `chart_revise` |
-| ilgisiz soru — dokunmamalı | **5/5** | — |
-| "Teşekkürler" — dokunmamalı | **5/5** | — |
-| geri al (tür geri döner, gerisi kalır) | 4/5 | `working_set` |
+`calendar_from_mail` **tool düzeyinde L3 / external_write / requires_confirmation**; yalnız
+`propose` L1 `external_read` olarak ayrıldı. Katı varsayılan bilinçli: sonradan eklenen ve tabloya
+yazılmayan bir action **tehlikeli** sınıfı devralır — bunun testi var. `create` her yolda gerçek
+bir interrupt, proaktif yol dâhil.
 
-**Tam 7 turluk zincir: 3/5.** Revizyon turları 16/20; dokunmamalı turları **10/10**. Tur başına
-gecikme p50 25.7 sn / p95 78.8 sn.
-
-**KAPI GEÇMEDİ.** Kalan iki hata da model tarafı:
-
-- Bir zincir 0. turda hiç çizmedi — model CSV'yi okudu, **dosyayı büyük harfli kolon adlarıyla
-  yeniden yazdı**, tekrar okudu, `plot_data`'yı hiç çağırmadı. Grafik üreten 4 zincirin **3'ü tam
-  doğru.**
-- Bir zincirin `undo`'su beklenenden farklı bir revizyonu geri aldı. **Bilinen sınır, yazıldı:**
-  zincir ortasında bir redraw `(source, x, y)`'yi değiştirirse **yeni** nesne doğuyor ve `undo` onun
-  geçmişine uygulanıyor — kullanıcının aklındaki değişiklik orada olmayabilir.
-
-## Faz 4'te bilinçli olarak yapılmayanlar
-
-- **Yalnız `chart` kind'ının araçları var.** Store kind-agnostik (`email`/`report`/`table` destekli)
-  ama araçları yok. Planın *"aynı primitive sonra mail taslağı, rapor, tablo için"* maddesi **yarım**:
-  altyapı hazır, ikinci tüketici yazılmadı.
-- **`undo` nesne düzeyinde, konuşma düzeyinde değil** (yukarıdaki ölçülmüş sınır).
-- **Spec enjeksiyonunun gecikme maliyeti ayrıca A/B'lenmedi.** Blok `MAX_PROMPT_CHARS` ile sınırlı,
-  boş küme `""` döndürüyor, ama "aynı istek, working set var/yok" koşusu yapılmadı.
-- **`ConversationRuntime` refactor'ü** — artık Working Set için **gerekli değil** (store anahtarlı).
-  Kalan değeri gerçek paralellik, doğruluk değil.
+**Yan değişiklik:** `calendar.create_event()` artık yapılandırılmış `EventCreation` döndürüyor,
+`_format_creation()` render ediyor. Mail akışının yeni etkinliğin id'sine ihtiyacı vardı ve tek yol
+gösterim string'ini regex'lemekti — `gmail.message_fields`'in bitirmek için yazıldığı hatanın
+aynısı (BUG-15). Render edilen metin **bayt bayt aynı**.
 
 ---
 
-# Faz 3 — Daily Briefing (bu oturumun ilk yarısı)
+# Kapatılan sekiz bulgu
 
-`DailyBriefingService` (`jarvis/briefing.py`) takvim/todo/hava/haberi **kodda**, eşzamanlı, bölüm
-başına süre sınırıyla topluyor; LLM yalnız anlatıyor. İki yeni kaynak da **anahtarsız**
-(`jarvis/tools/weather.py` Open-Meteo, `jarvis/tools/news.py` RSS/Atom) — her sabah çalışan bir
-brifing bir kota bittiği için bozulamamalı.
+Hepsi `langgraph-migration` ucunda (`f4d0989`) doğrulandı. İnceleme dalın **162 commit** ileride
+olduğunu doğru saymış — CLAUDE.md'deki "136" bayat; **sayıyı okumayın, türetin:**
+`git rev-list --left-right --count origin/main...origin/langgraph-migration`.
 
-**Ölçüm (n=10/senaryo, 30 canlı tur, makine boşken):** uydurma **0**, araç disiplini 10/10,
-araç-hatası dürüstlüğü **10/10**. Veri toplama p50 **0.32 sn** / p95 0.79 sn (kapı 5/10 sn).
-Uçtan uca p50 **22.9 sn** — **gecikme kapısı KARŞILANMADI**, ve aradaki her şey modelin Türkçe
-yazması. Katman maliyeti, brifingin değil.
+## P0 — background görev YANLIŞ konuşmanın tool context'iyle koşuyordu
 
-**Genellenebilir bulgu:** `_FAST_DOMAINS`'in gerekçesi ("yapılandırılmış kaynağa tek deterministik
-çağrı") yanlışmış. `weather` tam olarak oydu ve `fast`'te **1/5** araç çağırdı, kalan dördünde
-*"sıcak ve güneşli, 32°C"* uydurdu (gerçek: 27.4°C, çok bulutlu); `reasoning`'de 5/5. `news` da tek
-çağrılık ve `fast`'te 5/5. Gerçek eksen: **model cevabı zaten bildiğini sanıyor mu.** Ölçülmemiş
-yedi üye (`tasks`, `media`, `memory`, `mail`, `drive`, `finance`, `math`) artık yalnız ölçülmemiş
-değil, **gerekçeleri de şüpheli.**
+`background_turn()` girişte `origin_session_id`'yi sabitliyor ve bellek bağlamı, working-set
+prompt bloğu ve geçmiş append'i için onu kullanıyordu. **`RunnableConfig` kullanmıyordu** —
+`thread_id` ve `conversation_id` hâlâ `self.session_id` okuyordu. A konuşmasında kuyruğa giren bir
+görev, kullanıcı B'ye geçtiğinde modele **A'nın** working set'ini gösteriyor, config okuyan her
+araca (`chart_revise`, `working_set`) **B'nin** kimliğini veriyordu: araç ya B'nin grafiğini
+düzenliyor ya da prompt'un az önce anlattığı nesne için *"bu nesne bu konuşmaya ait değil"* diyordu.
+`proactive_turn()`'de aynı ayrışma vardı, aynı düzeltmeyi aldı.
+
+## Proaktif çalışma artık foreground'u dondurmuyor
+
+- `proactive_turn()` `_state_lock`'ı **tüm `ainvoke()` boyunca** tutuyordu. Proaktif turlar 20-80 sn
+  ölçülüyor ve `chat()`/`chat_stream()` aynı kilidi bekliyor — yani rutin bir "yeni mail geldi"
+  kontrolü canlı konuşmayı bir dakika dondurabiliyordu. Kilit artık yalnız kurulumu kapsıyor;
+  `background_turn()` zaten bu çizgiyi çiziyordu.
+- `monitor._maybe_proactive()` monitörün **tek polling thread'inde** `asyncio.run(...)` çalıştırıyordu;
+  takvim/scheduler/todo/finans/GCP kontrolleri model çağrısı boyunca bekliyordu. **Ölçüldü:
+  düzeltmeden önce 10.0 sn bloke, sonra saniye altı.** Artık sınırlı (maxsize=4) kuyruk + kendi
+  worker'ı; kuyruk dolduğunda **log'layarak** düşürüyor.
+
+## Working Set spec bütünlüğü
+
+| bulgu | kullanıcının bir cümlede ulaştığı hâli |
+|---|---|
+| `hue`/`color` dışlaması yalnız redraw yolunda | *"rengi kırmızı yap"* gruplu grafikte **ikisini birden** saklıyordu; renderer `hue` varken `color`'ı yok sayıyor — grafik değişmiyor, prompt her tur değiştiğini söylüyordu |
+| başlık iki yerde | başlık revizyonundan sonra header eski, spec yeni başlığı gösteriyordu — model hangisinin gerçek olduğunu bilemezdi |
+| alan silinemiyordu | store ilk günden `None = sil` okuyor; model tarafında ifade edilemiyordu → *"başlığı kaldır"*, *"gruplamayı kaldır"* imkânsızdı |
+| `undo` önce yazıp sonra çiziyordu | render hatasında store bir sürüm geri, ekrandaki PNG yeni sürüm — **ayrışma** |
+| düzenlenen nesne aktif olmuyordu | `chart_revise(object_id=B)` A'yı aktif bırakıyordu; `active(kind)` `is_active`'i `updated_at`'ten önce sıraladığı için sonraki *"şimdi başlığını da değiştir"* sessizce A'ya gidiyordu |
+
+Tüm mutasyonlar artık tek `canonicalize_chart_patch()`'ten geçiyor; `clear_fields` argümanı eklendi.
+`undo` **çizip sonra commit ediyor**.
+
+## Grafik kimliği ve depolama
+
+- Kimlik artık **`(source, sheet, x, y)`**, source kanonikleştirilmiş. `sheet` anahtara girdi çünkü
+  bir workbook'un Ocak/Şubat sayfaları aynı kolon adlarını taşıyor ve tek, kendini ezen grafik
+  çiziyordu; `satis.csv` / `./satis.csv` / mutlak yol üç ayrı grafikti. Redraw artık **inactive**
+  grafiklerle de eşleşiyor (eskiden yalnız aktif olanla — kopya doğuruyordu).
+- **Inline `data_json` grafikleri revize edilebilir.** `source=""` ile kaydediliyorlardı — bu
+  workspace **dizinine** çözülüyor — yani working set'e "düzenlenebilir" diye girip ilk revizyonda
+  düşüyorlardı. Frame artık PNG'sinin yanına yazılıyor (`_source_type=inline_materialized`).
+- **`default_store()` artık gerçekten tek store.** Her çağrıda yeni store + yeni SQLite bağlantısı
+  üretiyordu ve hiçbiri kapatılmıyordu; agent'ın store'u ile araçlarınki aynı dosya üstünde iki ayrı
+  nesneydi. Memoize edildi, `make_tools()` agent'ın instance'ını alıyor.
+- **Başarısız grafik kaydı artık log'lanıyor.** Sessizce `None` dönüyordu — kullanıcıya tüm özelliği
+  kaybettiren, izi olmayan bir hata. **Bu iş sırasında tam o satırın arkasına bir wiring hatası
+  saklandı** (aşağıya bakın).
 
 ---
 
-## Doğrulama (2026-08-02, bu oturumda çalıştırıldı)
+# Bu oturumda öğrenilen iki şey
+
+**1. `make_tools()` içinde `@tool` isim gölgeliyor.** Enjekte edilen store parametresine önce
+`working_set` adını verdim; `@tool def working_set(...)` o adı fonksiyon kapsamında **StructuredTool
+ile yeniden bağlıyor**, yani closure store yerine aracı okuyordu. `register_chart`'ın
+`except Exception: return None`'ı bunu sessizce yuttu: grafik çiziliyor, working set'e hiçbir şey
+girmiyor, sonraki her revizyon *"düzenlenecek bir grafik yok"* diyor — **hiç iz yok.** Parametre
+`working_set_store` olarak adlandırıldı ve o `except` artık `logger.warning(exc_info=True)` yazıyor.
+
+**2. Router ölçümünü GERÇEK araç listesiyle yapın.** İncelemenin *"`file_write` görünüyorsa bu
+hatayı tamamen model-side sayamazsınız"* hipotezini test ettim. İlk ölçümüm `sorted(TOOL_SPECS)`
+besledi ve `file_write` **subset'te çıkmadı** — hipotezi çürüttüm sandım. `make_tools()`'un
+**gerçek** çıktısıyla (42 araç, farklı sıra) tekrar ölçünce `file_write` **subset'e giriyor**.
+Kayıt için: **inceleme haklı**, benim ilk ölçümüm yanlıştı — `_by_relevance` sıralaması araç
+listesinin sırasına duyarlı.
+
+```
+turn 0 gerçek subset: ['csv_read','file_read','file_write','file_list',
+                       'data_analyze','plot_data','chart_revise','working_set']
+```
+
+Yani Faz 4'ün *"CSV'yi yeniden yazdı"* hatası **tamamen model tarafı değil**: salt-okuma/çizim
+isteğinde sisteme kaynak veriyi değiştirme yeteneği görünürdü.
+
+**Ama incelemenin önerdiği filtrenin naif hâli özelliği kırar:** `plot_data` ve `chart_revise` de
+`side_effect_type="local_write"` taşıyor (`file_write` ile aynı). "Okuma isteğinde yazma araçlarını
+gizle" kuralı **grafik çizmeyi de kapatır**. Gereken ayrım *yazma/okuma* değil, **"yeni artifact
+üretir" vs "kullanıcının kaynak verisini değiştirir"** — bu, Faz 5'te tasarım işi, hazırlıkta
+yamalanacak bir şey değil.
+
+---
+
+## Doğrulama (2026-08-02/03, bu oturumda çalıştırıldı)
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q                        # 2739 passed, 5 deselected, 4 dk 14 sn
+.venv\Scripts\python.exe -m pytest -q                        # 2818 passed, 5 deselected, 5 dk 50 sn
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests  # All checks passed!
-npm test --prefix electron                                   # 27 passed (2026-08-01)
-.venv\Scripts\python.exe scripts\briefing_gate.py --runs 10  # Faz 3 tablosu
-.venv\Scripts\python.exe scripts\revision_gate.py --runs 5   # Faz 4 tablosu
 ```
 
-Suite 2549 → **2739** (bu oturumda +190 test).
+Suite 2739 → **2818** (bu oturumda +79 test, 6 yeni dosya). **Her düzeltme, düzeltme olmadan düşen
+bir testle bağlandı** — hazırlığın P0'ı ve monitör için bunu geri-alma koşusuyla fiilen doğruladım
+(P0: 2 test düştü; monitör: *"blocked for 10.0s"*).
 
-**İki yeni harness — ikisi de canlı model, izole `JARVIS_HOME`:**
+Faz 5 ayrıca **gerçek `@tool` nesnesi üzerinden uçtan uca** elle koşuldu (sahte Gmail/Calendar):
+propose → **0 takvim yazımı**, create → 1, tekrar create → hâlâ 1.
 
-```powershell
-.venv\Scripts\python.exe scripts\briefing_gate.py --runs 10 [--only degraded] [--offline]
-.venv\Scripts\python.exe scripts\revision_gate.py --runs 5  [--arm fast|reasoning]
+Yeni test dosyaları:
+```
+tests/test_background_conversation_ownership.py   # P0 + proaktif kilit
+tests/test_working_set_integrity.py               # hue/color, başlık, clear_fields, undo, aktiflik
+tests/test_chart_tool_wiring.py                   # inline revize + enjekte store (gerçek @tool'lar)
+tests/test_monitor_proactive_queue.py             # kuyruk, düşürme, worker dayanıklılığı
+tests/test_calendar_from_mail.py                  # çıkarım, staged akış, idempotency, retry, restart
+tests/test_calendar_from_mail_gating.py           # L1/L3 ayrımı, fail-closed, yönlendirme, monitör
 ```
 
-**KURAL (bu oturumda ihlal edildi, bir ölçüm çöpe gitti):** canlı harness başka hiçbir şeyle aynı
-anda koşulmaz. `pytest` eşzamanlı koşarken bir `full` turu 43 sn geldi (temiz koşuda maksimum 25).
+**KURAL (hâlâ geçerli):** canlı harness (`revision_gate.py`, `briefing_gate.py`) başka hiçbir
+şeyle aynı anda koşulmaz.
 
-## Bu oturumda üç hata, üç farklı şey tarafından yakalandı
+---
 
-- **Türkçe `casefold` hatası** kendi unit testi tarafından: `"AYNI".casefold()` → `ayni`,
-  `"Aynı".casefold()` → `aynı`, yani aynı manşet iki yazımda eşleşmiyordu.
-- **`fast` katmanının uydurması** canlı harness tarafından (yukarıdaki hava durumu ölçümü).
-- **Hermetik olmayan test** CI tarafından: enjekte edilmiş görünen kaynakların ikisi gerçek ağa
-  gidiyordu; makinede ağ olduğu için geçiyor, CI'da düşüyordu.
-- (**Dördüncüsü:** `test_background_turn`'ün duck-type stub'ı yeni bir metodu bilmediği için test
-  **sonsuza kadar askıda kaldı** — `AttributeError`, testin beklediği event set edilmeden fırladı.
-  Stub artık gerçek metodu ödünç alıyor.)
+# SIRADAKİ İŞ — Faz 5'in canlı ölçümü
+
+Faz 5'in tamamı **fixture** üzerinde yeşil. Gerçek posta kutusunda **hiç koşmadı**, ve bu ölçüm
+yapılana kadar arka plan ingestion **açılmamalı**. Yapılacaklar:
+
+1. **Owner OAuth onayı** (Gmail read + Calendar write) — Faz 2'den beri bekleyen aynı onay.
+2. `calendar_from_mail_enabled=True` ile **bir hafta gerçek gelen kutusu**, ve şu iki sayı:
+   - **yanlış pozitif:** aday üretilen ama toplantı olmayan mail (hedef: ~0; `_EVENT_HINTS`
+     listesi bunun için var ve **ölçülmedi**)
+   - **kaçırılan:** gerçek toplantı maili olup aday üretilmeyen (`ambiguous` satırlarını okuyun —
+     ledger hepsini `candidate_json` ile saklıyor, yani neyin neden kaçtığı sorgulanabilir)
+3. Sayılara göre `_EVENT_HINTS`'i genişletin **veya** çıkarımın ikinci katmanına LLM ekleyin —
+   ama **yalnız başlık için**, tarih için asla (Faz 3'ün uydurma ölçümü).
+4. Ancak bundan **sonra** güvenilir-gönderen otomatik oluşturma tartışılabilir.
+
+Ledger sorgusu için hazır: `MailEventLedger.list_by_state("ambiguous")` /`("error")`.
+
+## Faz 5'te bilinçli olarak YAPILMAYANLAR
+
+1. **Güvenilir-gönderen otomatik oluşturma** (incelemenin 10. maddesi) — güven bandı **kaydediliyor
+   ama harcanmıyor.** 0.99 bile aday üretiyor, etkinlik değil. Açmadan önce yukarıdaki canlı ölçüm
+   şart; ledger zaten gerekli veriyi topluyor.
+2. **`side_effect_type` ikinci filtresi** — `plot_data`/`chart_revise` de `local_write` taşıdığı
+   için naif hâli grafik çizmeyi kapatır (yukarıda). Gereken ayrım "yeni artifact üretir" vs
+   "kullanıcının kaynak verisini değiştirir" — ölçümsüz yamalanamaz, hâlâ açık.
+3. **`_notified_email_ids` değiştirilmedi** ve değiştirilmemeliydi: bugünkü amacı (toast dedup) için
+   doğru. Faz 5 onu işleme durumu olarak **kullanmıyor** — ayrı ledger kuruldu; ikisinin
+   karıştırılmaması `mail_ledger.py`'nin modül docstring'inde yazılı.
+4. **`duration_minutes` maildan çıkarılmıyor** — sabit 60 dk varsayılan. "14.00-15.30 arası"
+   yazan bir mail bunu söylüyor; okunmuyor. Küçük ve iyi sınırlanmış bir sonraki iş.
+
+## Hazırlık aşamasında bilinçli olarak yapılmayanlar (hâlâ açık)
+
+- **`create_separate: bool` argümanı** (inceleme öneriyor) — **eklenmedi.** Bu kod tabanının en
+  pahalı tekrar eden hatası modele belirsiz bir seçim sunmak (Faz 4'te `chart_new` altı revizyon
+  turunu öldürdü). Kimlik semantiğini değiştiren model-görünür bir boolean aynı riski taşıyor ve
+  ölçülmedi. `source_fingerprint` (size+mtime) de eklenmedi (inceleme "isteğe bağlı" diyor).
+- **Conversational negatif korpus (50-100 ifade) + mutasyon intent kapısı** — inceleme haklı:
+  *"Teşekkürler"* 5/5 temiz çıktı ama **tek ifade bir güvenlik sınırını doğrulamaz.** Canlı ölçüm
+  işi (ifade başına 20-80 sn). Aktif nesne varken `conversation` turlarının `data`'ya geçtiği
+  **doğrulandı** (router'la deterministik olarak): `Teşekkürler` + aktif grafik → `data` domain'i,
+  subset'te `chart_revise` + `plot_data` **var**. Faz 5 bu riski **büyüttü**: aktif bir
+  `calendar_candidate` varken çıplak bir tur artık `calendar` domain'ine gidiyor ve `create`
+  L3 — ama L3 olduğu için **kapıya takılıyor**, sessizce çalışmıyor. Kapının değeri tam burada.
+
+---
 
 ## Önceki oturumlardan taşınan, değişmeyen işler
 
-- Faz 3'ten: **brifing zamanlanmadı** (üç araç da L1, proaktif kıskaç artık engel değil — iş
-  kurulmadı); `audit_narration` çalışma zamanında kapı değil, ölçüm aracı; denetim **göreli gün
-  sözcüklerine sessiz** (canlı bir turda bugünkü 11:00 etkinliğine *"Dün"* dedi).
+- Faz 4'ten: **zincir kapısı 5'te 3 ile GEÇMEDİ.** İki hatadan biri (*"CSV'yi yeniden yazdı"*)
+  yukarıda **yeniden sınıflandırıldı** — kısmen affordance kaynaklı. Diğeri (`undo` beklenenden
+  farklı revizyonu aldı) bu oturumun kimlik düzeltmeleriyle **kısmen** adreslendi (sheet + kanonik
+  yol + inactive eşleşme), ama **yeniden ölçülmedi** — `revision_gate.py --runs 5` tekrar koşmalı.
+- Faz 3'ten: **brifing zamanlanmadı**; `audit_narration` kapı değil ölçüm aracı; denetim göreli gün
+  sözcüklerine sessiz.
 - Faz 2.75'ten: **P1-1** tanımsız araç fail-closed değil; **P1-2** critic hata durumunda sessizce
-  kabul ediyor ve turun rolünü izlemiyor; **P1-4** `local` rolü gerçekte local-only değil.
-- Faz 2'den: **Google Contacts kapalı**, entity resolver **hiçbir canlı yola bağlanmadı** — ikisi de
-  bir OAuth yeniden onayına, yani owner kararına bağlı.
-- Faz 1'den: **`enforce_reversible` açılmadı** (varsayılan `shadow`); doğrulama 5 araçta, 43'te
-  değil; `EvidenceSet.facts` boş.
+  kabul ediyor; **P1-4** `local` rolü gerçekte local-only değil.
+- Faz 2'den: **Google Contacts kapalı**, entity resolver hiçbir canlı yola bağlanmadı — owner
+  OAuth kararına bağlı.
+- Faz 1'den: **`enforce_reversible` açılmadı**; doğrulama 5 araçta, 43'te değil; `EvidenceSet.facts` boş.
 - 4 worktree branch read-through — ayrı go-ahead bekliyor (CLAUDE.md'de liste).
 - 7 direct-Gemini modülün shared gateway'e migrasyonu.
 - Electron `npm audit`; canlı HUD E2E'nin **Electron penceresi** ayağı.
