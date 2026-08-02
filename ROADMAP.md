@@ -27,8 +27,8 @@
 | **2.5** | **Otomatik rol seçimi** (`fast` vs `reasoning`) — `jarvis/graph/role_router.py` | ✅ **2026-08-01** |
 | **2.75** | **Runtime & Session Hardening** (GPT review, Paket A–F) | ✅ **2026-08-01** |
 | **3** | **Daily Briefing MVP** (1. kabul kilometre taşı) — `jarvis/briefing.py` + `weather`/`news` (ikisi de anahtarsız) | ✅ **2026-08-01** |
-| 4 | Working Set (5-10 tur revizyon) | ⬜ next |
-| 5 | Proaktif mail → takvim | ⬜ |
+| **4** | **Working Set** (2. kabul kilometre taşı) — `jarvis/working_set.py` + `chart_revise`/`working_set` | ✅ **2026-08-02** |
+| 5 | Proaktif mail → takvim | ⬜ next |
 | 6 | Derin kalıcı hafıza | ⬜ |
 | 7 | MATLAB kalitesinde render + harita | ⬜ |
 | 8 | `web_download` (kendi fazı — SSRF/streaming/karantina) | ⬜ |
@@ -115,6 +115,28 @@
   bugünkü 11:00 etkinliğine *"Dün"* dedi. Sayı da saat de doğruydu, yanlış olan tek şey sözcüktü.
   Sayıya indirgenemeyen iddiaları karşılaştırmayla kararlaştırmak mümkün değil, o yüzden denetim
   bu konuda **sessiz** — yanlış pozitif üretmektense kaçırmayı seçiyor.
+
+**Faz 4'ten taşınan, bilinçli olarak yapılmayanlar:**
+
+- **Kapı GEÇMEDİ: tam 7 turluk zincir 5 koşudan 3'ünde doğru** (n=5, 35 canlı tur, qwen3:8b).
+  Kalan iki hata da **model tarafı, yapısal değil.** Biri 0. turda hiç grafik çizmedi — model
+  CSV'yi okudu, **dosyayı büyük harfli kolon adlarıyla yeniden yazdı**, tekrar okudu ve
+  `plot_data`'yı hiç çağırmadı; grafik üreten 4 zincirin 3'ü tam doğru. Revizyon turları
+  16/20; "dokunmamalı" turları **10/10**, yani yönlendirme kuralı fazla hevesli değil.
+  Tur başına gecikme p50 25.7 sn / p95 78.8 sn.
+- **`undo`, zincir ortasında yeni nesne doğduğunda beklenmeyen revizyonu geri alabilir.** Bir
+  redraw `(source, x, y)`'yi değiştirirse **yeni** nesne oluşuyor ve `undo` onun geçmişine
+  uygulanıyor — kullanıcının aklındaki değişiklik orada olmayabilir. Ölçüldü (5'te 1),
+  düzeltilmedi: doğru düzeltme muhtemelen "undo" için konuşma düzeyinde bir eylem günlüğü,
+  nesne düzeyinde değil, ve bu kendi tasarım turunu ister.
+- **Yalnız `chart` kind'ının araçları var.** `email`/`report`/`table` store'da destekleniyor
+  (kind-agnostik) ama araçları yok. Planın "aynı primitive sonra mail taslağı, rapor, tablo için"
+  maddesi bu yüzden **yarım**: altyapı hazır, ikinci tüketici yazılmadı.
+- **`ConversationRuntime` refactor'ü hâlâ yapılmadı** — ama Working Set artık ona **ihtiyaç
+  duymuyor**: store `conversation_id` ile anahtarlı, yani paylaşılan tek agent doğru davranıyor.
+  Refactor'ün kalan değeri gerçek paralellik, doğruluk değil.
+- **Spec enjeksiyonunun gecikme maliyeti ayrıca ölçülmedi.** Blok `MAX_PROMPT_CHARS` ile sınırlı
+  ve boş küme "" döndürüyor, ama "aynı istek, working set var/yok" A/B'si koşulmadı.
 
 ## Direction (owner decisions, 2026-07-14)
 

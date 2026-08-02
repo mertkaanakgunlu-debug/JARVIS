@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. — Tool Registry
 
-41 native tools in the registry; `make_tools()` (`jarvis/graph/tools.py`) exposes **40** of them —
+43 native tools in the registry; `make_tools()` (`jarvis/graph/tools.py`) exposes **42** of them —
 `python_run` is alpha-disabled and structurally absent from the model's surface. (This line read
 "36" until Post-MVP Faz 3; it had not been updated for `workflow_start`/`workflow_status` either.
 Re-derive it with `len(TOOL_SPECS)` rather than trusting it.) Plus (Faz 5) a dynamic
@@ -57,9 +57,34 @@ MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSp
 | `google_drive` | L3 | external_api | ✓ | ✓ | 60s | Drive: search/read/download (L1) · upload/share/delete (L3) |
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
 | `procedure_save` | L2 | memory | — | — | 15s | Save a reusable multi-step workflow to procedural memory (Faz 2) |
+| `chart_revise` | L2 | compute | — | ✓ | 60s | Patch the active chart with only the named fields and redraw (Post-MVP Faz 4) |
+| `working_set` | L1 | memory | — | — | 30s | List / inspect / switch / **undo** this conversation's editable objects (Post-MVP Faz 4) |
 | `weather` | L1 | network | — | — | 15s | Current conditions + today's high/low via Open-Meteo (**no API key**) |
 | `news` | L1 | network | — | — | 20s | Top headlines from the configured RSS/Atom feeds (**no API key**) |
 | `daily_briefing` | L1 | network | — | — | 30s | Deterministic daily briefing facts — calendar, to-dos, weather, headlines (Post-MVP Faz 3) |
+
+### There is exactly ONE tool that draws a chart
+
+`plot_data`. It also, since Post-MVP Faz 4, keeps what it drew — the spec lands in the
+conversation's working set (`jarvis/working_set.py`) so the next turn can patch it with
+`chart_revise` instead of reconstructing it from a sentence.
+
+That is deliberately a **side effect of the existing tool** rather than a second, "editable"
+chart tool. The first cut of Faz 4 added `chart_new` alongside `plot_data` and let the model
+choose; a live run chose `plot_data`, no object was created, and all six following revision turns
+failed. An ambiguous pair is this repo's most expensive recurring bug, so the capability moved
+into the tool that already owned charts.
+
+`plot_data`'s name, arguments and return value are unchanged (120+ references across the repo read
+that return value). Two behaviours are new and both are structural:
+
+* **A redraw of the same chart patches it.** Identity is `(source, x, y)`; everything else is
+  presentation. So when the model redraws with the spec copied out of its own prompt and omits a
+  field, the field survives — that exact sequence was measured losing a colour the model then
+  claimed in prose was still applied.
+* **`hue` and `color` never coexist in a stored spec.** The renderer ignores `color` when `hue` is
+  set, so a spec holding both would state something untrue about its own output — and that spec is
+  injected into the model's prompt every turn until it is believed.
 
 ### `daily_briefing` is not a normal tool
 

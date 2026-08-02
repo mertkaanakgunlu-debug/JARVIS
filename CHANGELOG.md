@@ -6,6 +6,101 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Post-MVP Faz 4: Working Set] — 2026-08-02
+
+The plan's second acceptance milestone: a chart the user can keep changing across turns.
+
+### The problem, stated exactly
+
+A finished turn is compacted into history as `[human message + short summary + final answer]`, and
+that rule is **correct** — raw tool state must not accumulate in the message list. Its cost is
+that *"çizgiyi kırmızı yap"* arrives with no chart anywhere in context. The model is asked to
+revise something it cannot see, so it rebuilds the whole thing from one sentence and gets the
+source, the columns or the type wrong.
+
+The Working Set is the narrow exception: not the raw output, the **spec**. The active object's
+spec is appended to the system prompt every turn, so a revision is a *single-argument patch*
+against known state — exactly the shape the measured model limit allows (it fixes one argument per
+turn; it does not hold a whole set together).
+
+Per conversation, in SQLite, keyed by `conversation_id`. Not on `JarvisAgent` (one shared agent
+serves every client, so conversation A's revision would land on B's chart) and not in graph state
+(pruned and rewritten by compaction — putting the thing that survives compaction inside the thing
+that performs it). That also means **no `ConversationRuntime` refactor was needed** to be correct.
+
+### Three fixes that only exist because they were measured
+
+**One chart tool, not two.** The first cut added `chart_new` beside `plot_data`, gave it a careful
+docstring, and let the model choose. A live run chose `plot_data`, no object was created, and all
+six following revision turns failed. An ambiguous pair is this repo's most expensive recurring
+bug, so the capability moved *into* `plot_data` — same name, same arguments, same return value
+(120+ references read it), plus a side effect: it keeps what it drew.
+
+**A redraw of the same chart patches it.** Asked to change only the title, a live run called
+`plot_data`, copied the spec out of its own prompt, omitted the colour set one turn earlier — and
+then told the user the chart was still red. It was not. Identity is `(source, x, y)`; everything
+else is presentation. Making that call patch removes the *consequence* of picking the wrong tool,
+which is more durable than trying to prevent the choice.
+
+**An invented column is corrected, not reported.** The earlier version let `plot_data` fail,
+reasoning that its error already lists the real columns so the model could retry. It does list
+them. The model does not retry: it asked for a column named `'Tarih'`, got
+`[ERROR] Column 'Tarih' not found. Available: ['ay','satis','gider']`, answered the user, and
+never drew anything — **killing 3 of 5 live revision chains at turn 0**. Every substitution now
+comes back in the return value, because drawing the wrong column *silently* would be the real
+mistake.
+
+### Routing: a live object claims the turns nothing else claimed
+
+A bare revision has no capability noun in it, so it classifies as `conversation` and gets zero
+tools. Guessing revision vocabulary is unbounded — this router has already deleted three generic
+verbs for inventing phantom domains — so state answers it instead: an active object claims a turn
+that matched **nothing**. Narrow to that case on purpose; applying it always would make every
+later turn multi-domain and therefore reasoning-tier. Measured: with an active chart,
+*"Teşekkürler"* called no tool in 5/5 runs.
+
+### The numbers (n=5 chains × 7 turns = 35 live turns, qwen3:8b, `cloud_policy=off`)
+
+Scored on the **stored spec**, never the answer text — the only axis a fluent model cannot fake.
+Each revision turn also asserts that the fields the user did *not* mention survived it.
+
+| turn | outcome | tool used |
+|---|---|---|
+| create → an object exists | 4/5 | `plot_data` |
+| revise colour (source/x/y survive) | 4/5 | `chart_revise` |
+| revise title (**colour** survives) | 4/5 | `chart_revise` |
+| revise kind (**colour + title** survive) | 4/5 | `chart_revise` |
+| unrelated question — must not touch the chart | **5/5** | — |
+| "Teşekkürler" — must not touch the chart | **5/5** | — |
+| undo (kind reverts, rest survives) | 4/5 | `working_set` |
+
+**Full 7-turn chain correct: 3/5.** Revision turns overall 16/20; the two must-not-touch turns
+10/10, so the routing rule is not too eager. Per-turn latency p50 25.7 s, p95 78.8 s.
+
+**The gate does not pass**, and both residual failures are model-side rather than structural:
+
+* One chain never drew anything at turn 0 — the model read the CSV, **rewrote the file** with
+  upper-cased column names, read it again, and never called `plot_data`. Nothing downstream had an
+  object to revise. Of the 4 chains that produced a chart, 3 were fully correct.
+* One chain's `undo` reverted a different revision than the test expected. A known limit, now
+  written down: when a mid-chain redraw changes `(source, x, y)` it creates a **new** object, and
+  `undo` then applies to that object's history — which does not contain the change the user is
+  picturing.
+
+### Also
+
+- `generate_plot` gained `color` (Turkish names mapped — the model relays the user's word, and
+  "kırmızı" reaching matplotlib raises instead of drawing). It is ignored when `hue` is set, and
+  the two never coexist in a stored spec: the renderer would ignore one, so a spec holding both
+  states something untrue about its own output — and that spec goes into the prompt every turn.
+- `undo` **pops** rather than appending an inverse, so repeated undo walks backwards. The
+  per-revision PNGs are the durable trail.
+- A test hung **forever** rather than failing: `test_background_turn`'s duck-typed stub lacked the
+  new helper, and the `AttributeError` fired before the event the test waits on was set. The stub
+  now borrows the real method so a future helper cannot silently diverge.
+
+---
+
 ## [Post-MVP Faz 3: Daily Briefing MVP] — 2026-08-01
 
 The plan's first acceptance milestone: *"JARVIS bugün neler var"* → an hour-aware briefing over

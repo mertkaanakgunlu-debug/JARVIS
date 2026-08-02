@@ -235,7 +235,7 @@ Mobile (mobile/ — Flutter/Android):
 
 ---
 
-## Tool Registry (41 registered; `make_tools()` exposes 40)
+## Tool Registry (43 registered; `make_tools()` exposes 42)
 
 | # | Tool | Category | What it does |
 |---|---|---|---|
@@ -280,6 +280,8 @@ Mobile (mobile/ — Flutter/Android):
 | 39 | `weather` | Briefing | Open-Meteo current + today's high/low, **no API key** (Post-MVP Faz 3) |
 | 40 | `news` | Briefing | RSS/Atom headlines from the configured feeds, **no API key** (Post-MVP Faz 3) |
 | 41 | `daily_briefing` | Briefing | Calendar + to-dos + weather + headlines in one deterministic call (Post-MVP Faz 3) |
+| 42 | `chart_revise` | Data | Patch the active chart with only the named fields and redraw (Post-MVP Faz 4) |
+| 43 | `working_set` | Data | List / inspect / switch / undo this conversation's editable objects (Post-MVP Faz 4) |
 
 *Note (corrected 2026-07-14): `email_triage` was removed entirely from `graph/tools.py` in commit `576aa75` (2026-05-24) — this is no longer a loose end.*
 
@@ -297,6 +299,8 @@ re-derive with `len(TOOL_SPECS)` rather than trusting a written count.*
 | `jarvis/__main__.py` | Entry point — `--voice`, `--wakeword`, `--api`, `--monitor`, `--port` |
 | `jarvis/agent.py` | `JarvisAgent` — wraps LangGraph, manages session state, model fallback |
 | `jarvis/clock.py` | **The** source of "now" (Post-MVP Faz 2) — `SystemClock`/`FrozenClock`, configured from `settings.calendar_timezone`, plus the Turkish weekday/month tables and `format_long_date()` (Post-MVP Faz 3, moved out of `agent.py`). Consumers: the prompt's now-block, the calendar resolver, `scheduler.py`, `todo_store.py`, the briefing |
+| `jarvis/working_set.py` | The live objects a conversation is editing (Post-MVP Faz 4) — per-conversation SQLite store, single-argument patches, `undo`, and the bounded system-prompt block. The exception to history compaction: the **spec**, never the raw tool output |
+| `jarvis/tools/chart_objects.py` | `plot_data`'s charts as revisable objects (Post-MVP Faz 4) — `register_chart` (a redraw of the same chart patches it), `chart_revise`, `working_set_control` |
 | `jarvis/briefing.py` | `DailyBriefingService` → `BriefingFacts` (Post-MVP Faz 3) — four sources gathered **in code**, concurrently, behind a per-section deadline, so the model only narrates. Also `audit_narration()`, the deterministic no-fabrication check |
 | `jarvis/tools/weather.py` | Open-Meteo current + today's high/low, **keyless**; typed `WeatherReport` for the briefing, `[ERROR]`-prefixed string for the tool (Post-MVP Faz 3) |
 | `jarvis/tools/news.py` | RSS 2.0 + Atom headlines over stdlib ElementTree, **keyless**, per-feed failure isolation, round-robin interleave (Post-MVP Faz 3) |

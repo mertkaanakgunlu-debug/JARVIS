@@ -149,10 +149,38 @@ refuses a mismatched one; `AsyncTask` carries it from `submit()` to `background_
 `JarvisAgent` serves every client, so none of these can be re-derived later: by then another
 request may have moved the active session.
 
-## Tools (41 native + dynamic MCP)
+## Tools (43 native + dynamic MCP)
 
 See [TOOLS.md](TOOLS.md) for the full native-tool list with risk levels. Faz 5 adds a second,
 dynamically-discovered tool source — see the MCP layer section below.
+
+## Working set (Post-MVP Faz 4 — `jarvis/working_set.py`)
+
+A finished turn is compacted into history as `[human message + short summary + final answer]`, and
+that rule is correct — raw tool state must not accumulate in the message list. Its cost is that
+*"çizgiyi kırmızı yap"* arrives with no chart anywhere in context, so the model reconstructs one
+from a sentence and gets the source, the columns or the type wrong.
+
+The working set is the narrow exception: not the raw output, the **spec** — the structured
+description that can regenerate the object. The active object's spec is appended to the system
+prompt every turn, so a revision is a *single-argument patch* against known state. That is exactly
+what the measured model limit allows (one argument fixed per turn; a whole set not held together).
+
+```
+WorkingSetStore (SQLite, keyed by conversation_id)
+ └─ WorkingObject{ id, kind, version, spec, source_artifacts, revision_history }
+        ↑ plot_data registers                    ↓ appended to the system prompt
+        ↓ chart_revise patches (partial)         ↓ working_set('undo') pops
+```
+
+| Decision | Why |
+|---|---|
+| Keyed by `conversation_id`, in SQLite | One shared `JarvisAgent` serves every client, so an agent-level attribute would let conversation A's revision land on B's chart. Graph state was the other candidate and is pruned/rewritten by compaction — putting the thing that survives compaction inside the thing that performs it. Needs no `ConversationRuntime` refactor to be correct today. |
+| `undo` pops, not inverse-appends | Repeated undo walks backwards, which is what *"eski haline getir"* means. The per-revision PNGs on disk are the durable trail. |
+| The block is bounded (`MAX_PROMPT_CHARS`) | Injected on **every** turn. It names how many objects it dropped rather than truncating silently. |
+| An empty set renders `""` | Most turns, most conversations. A `(none)` placeholder would be a permanent token tax. |
+| An active object claims a turn that matched **nothing** | A bare revision has no capability noun in it, so it classifies as `conversation` and gets zero tools. Guessing revision vocabulary is unbounded (this router has already deleted three generic verbs for inventing phantom domains); state answers it exactly. Narrow to the `conversation` case on purpose — applying it always would make every later turn multi-domain and therefore reasoning-tier. |
+| The role is recomputed when that fires | A turn that just stopped being `conversation` no longer earns the fast tier for being one. |
 
 ## Daily briefing (Post-MVP Faz 3 — `jarvis/briefing.py`)
 
