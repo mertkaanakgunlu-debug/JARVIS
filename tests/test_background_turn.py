@@ -35,7 +35,20 @@ from jarvis.config import Settings
 
 
 class _FakeAgent:
-    """Minimal stand-in exposing exactly what background_turn() touches."""
+    """Minimal stand-in exposing exactly what background_turn() touches.
+
+    Helper METHODS are borrowed from the real class rather than re-stubbed
+    (see `_working_set_turn` below). That is not tidiness — it is the fix for a
+    failure mode this stub produced live: `background_turn` grew a call to a
+    new helper, the duck-typed stub did not have it, and the AttributeError
+    fired before `invoke_started` was set, so a test that waits on that event
+    hung FOREVER instead of failing. A hang is the worst way for a suite to
+    report a missing attribute, and borrowing the method means a future helper
+    exercises the real code here instead of silently diverging.
+    """
+
+    # Bound to the instance at call time, so `self` is this stub.
+    _working_set_turn = JarvisAgent._working_set_turn
 
     def __init__(self):
         self._history = []
@@ -69,6 +82,10 @@ class _FakeAgent:
         )
         self._graph = None
         self._mcp_connect_called = False
+        # Post-MVP Faz 4: background_turn now reads the submitting
+        # conversation's working set. An empty one is the right stand-in --
+        # these tests are about lock/history/session semantics, not charts.
+        self.working_set = SimpleNamespace(list=lambda _conversation: [])
         # LlmTraceRecorder(usage=self.usage, ...) reads this in background_turn()
         # -- None is a valid value (the recorder just skips accounting).
         self.usage = None

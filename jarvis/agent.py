@@ -38,7 +38,7 @@ from langgraph.errors import GraphInterrupt, GraphRecursionError
 from jarvis.execution.redaction import redact_preview  # Agent Runtime rev.2, Faz 1
 from jarvis.execution.context import ExecutionContext
 from jarvis.graph.role_router import for_unattended_turn, select_role
-from jarvis.graph.tool_router import classify_query
+from jarvis.graph.tool_router import classify_query, with_active_object
 from jarvis.graph.tool_accounting import (  # Faz 1.1: shared outcome judgement
     content_is_failure,
     parse_blocked_code,
@@ -52,6 +52,7 @@ from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
 from jarvis.scheduler import SchedulerStore  # Faz 13-C
 from jarvis.todo_store import TodoStore      # Faz 13-D
+from jarvis.working_set import WorkingSetStore, render_block  # Post-MVP Faz 4
 from jarvis.facts_store import FactStore           # Faz 2
 from jarvis.procedure_store import ProcedureStore  # Faz 2
 from jarvis.graph.graph import build_graph, make_checkpointer
@@ -762,6 +763,13 @@ class JarvisAgent:
         # Faz 13-D: to-do store (same DB file, separate table)
         self.todo_store = TodoStore(paths.data_dir() / "sessions.db")
 
+        # Post-MVP Faz 4: the objects this conversation is still editing.
+        # One instance held here rather than opened per turn (it is on the hot
+        # path, unlike todo()'s per-call store) -- it is internally locked and
+        # every read is keyed by conversation_id, so sharing it across the
+        # clients this one agent serves is exactly as safe as not sharing it.
+        self.working_set = WorkingSetStore(paths.data_dir() / "sessions.db")
+
         # Faz 2: semantic memory (facts) + procedural memory (procedures) stores
         self.facts_store = FactStore(paths.data_dir() / "sessions.db")
         self.procedure_store = ProcedureStore(paths.data_dir() / "sessions.db")
@@ -862,6 +870,44 @@ class JarvisAgent:
             return _label_for(self._active_model_id)
 
         return f"{s.local_model} (Ollama, local)"
+
+    def _working_set_turn(self, conversation_id, route, role_decision, query, needs_planning):
+        """(route, role_decision, prompt_block) for one turn's working set.
+
+        Post-MVP Faz 4. Takes `conversation_id` EXPLICITLY rather than reading
+        `self.session_id`: the working set is keyed by conversation, and one
+        shared agent serves every client, so "whichever session is loaded right
+        now" is not the same question as "whose turn is this" — the exact
+        distinction Faz 2.75 had to close for pending confirmations. Callers
+        pass it from inside the state lock, after any conversation switch.
+
+        Three effects, all from one read:
+          * an active object claims a turn that classified as `conversation`
+            (see tool_router.with_active_object for why only that case),
+          * the ROLE is then recomputed, because a turn that just stopped being
+            `conversation` no longer earns the fast tier for being one,
+          * the objects' specs are appended to the system prompt, so a revision
+            patches known state instead of reconstructing it from one sentence.
+
+        Never raises. A working set enhances a turn; failing to read it must
+        degrade to today's behaviour, not end the turn.
+        """
+        if not conversation_id:
+            return route, role_decision, ""
+        try:
+            objects = self.working_set.list(conversation_id)
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.debug("working set unavailable this turn", exc_info=True)
+            return route, role_decision, ""
+        if not objects:
+            return route, role_decision, ""
+
+        active = next((o for o in objects if o.is_active), objects[0])
+        block = render_block(objects)
+        augmented = with_active_object(route, active.kind)
+        if augmented.primary_domain == route.primary_domain:
+            return route, role_decision, block
+        return augmented, select_role(query, augmented, needs_planning), block
 
     @property
     def _env_block(self) -> str:
@@ -1424,6 +1470,13 @@ class JarvisAgent:
                 self._switch_session_locked(conversation_id)
                 event_bus.session(self.session_id, None)
             await self.connect_mcp_tools()  # Faz 5: no-op after the first real connect
+            # Post-MVP Faz 4: read INSIDE the lock and AFTER the switch above,
+            # so the working set answered for is this turn's conversation and
+            # not whichever one happened to be loaded when the request arrived.
+            tool_route, role_decision, working_set_block = self._working_set_turn(
+                self.session_id, tool_route, role_decision, clean_input, needs_planning,
+            )
+            use_pro_agent = role_decision.use_pro_agent
             ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(
                 self.settings, ctx.memory_ctx, detected_language,
@@ -1431,7 +1484,7 @@ class JarvisAgent:
                 ctx.past_sessions_block, ctx.open_todos_block,
                 ctx.facts_block, ctx.procedure_block,
                 transport=transport,
-            )
+            ) + working_set_block
 
             human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
 
@@ -1825,6 +1878,13 @@ class JarvisAgent:
                 self._switch_session_locked(conversation_id)
                 event_bus.session(self.session_id, None)
             await self.connect_mcp_tools()  # Faz 5: no-op after the first real connect
+            # Post-MVP Faz 4: read INSIDE the lock and AFTER the switch above,
+            # so the working set answered for is this turn's conversation and
+            # not whichever one happened to be loaded when the request arrived.
+            tool_route, role_decision, working_set_block = self._working_set_turn(
+                self.session_id, tool_route, role_decision, clean_input, needs_planning,
+            )
+            use_pro_agent = role_decision.use_pro_agent
             ctx = self._context_builder.build(clean_input, session_id=self.session_id)
             system_prompt = _load_system_prompt(
                 self.settings, ctx.memory_ctx, detected_language,
@@ -1832,7 +1892,7 @@ class JarvisAgent:
                 ctx.past_sessions_block, ctx.open_todos_block,
                 ctx.facts_block, ctx.procedure_block,
                 transport=transport,
-            )
+            ) + working_set_block
 
             human_msg = _build_human_message(clean_input, image_bytes, image_mime, extra_images)
 
@@ -2470,14 +2530,20 @@ class JarvisAgent:
         origin_session_id = conversation_id or self.session_id
 
         ctx = self._context_builder.build(user_query, session_id=origin_session_id)
+        tool_route, role_decision = _route_query(user_query, False)
+        # Post-MVP Faz 4: keyed on the SUBMITTING conversation, not on whatever
+        # self.session_id holds when the worker starts -- background_turn never
+        # switches sessions, so those are routinely different.
+        tool_route, role_decision, working_set_block = self._working_set_turn(
+            origin_session_id, tool_route, role_decision, user_query, False,
+        )
         system_prompt = _load_system_prompt(
             self.settings, ctx.memory_ctx, "tr",
             self._env_block, user_query, ctx.entities_block,
             ctx.past_sessions_block, ctx.open_todos_block,
             ctx.facts_block, ctx.procedure_block,
             transport=transport,
-        )
-        tool_route, role_decision = _route_query(user_query, False)
+        ) + working_set_block
         # Faz 2.5: a job the user sent to the background has nobody waiting on
         # it, so it keeps the reasoning tier — see for_unattended_turn.
         role_decision = for_unattended_turn(role_decision)

@@ -280,6 +280,47 @@ def classify_query(query: str) -> ToolRoute:
     return ToolRoute(ranked[0], ranked, confidence, explicit)
 
 
+# Which domain owns the tools that revise a given kind of working-set object
+# (Post-MVP Faz 4). Only `chart` has revision tools today; the rest are the
+# store's declared kinds, mapped now so adding their tools is a tool change and
+# not also a routing change.
+_KIND_DOMAINS: dict[str, str] = {
+    "chart": "data", "table": "data", "email": "mail", "report": "report",
+}
+
+
+def with_active_object(route: ToolRoute, kind: str) -> ToolRoute:
+    """Let a live working-set object claim a turn that matched NOTHING.
+
+    Post-MVP Faz 4. A revision is usually a sentence with no capability noun in
+    it at all -- *"rengini kırmızı yap"*, *"biraz daha büyük olsun"*, *"eski
+    haline getir"*. None of those match this module's table, so they classify
+    as `conversation`, the model is handed zero tools, and it answers *"tamam,
+    kırmızı yaptım"* without touching anything. That is the same shape as the
+    Faz 3 weather finding: a plausible answer exists, so the model writes one.
+
+    Guessing revision vocabulary was the obvious fix and is the wrong one --
+    it is unbounded, and this module has already had to delete three generic
+    verbs for inventing phantom domains. State answers it exactly: if this
+    conversation HAS an editable object, an unclassifiable turn is far more
+    likely to be about it than about nothing.
+
+    Deliberately narrow to the `conversation` case. Applying it to every turn
+    would attach the chart domain to *"hava durumu nasıl"*, making it
+    multi-domain and therefore reasoning-tier -- paying a latency tax on every
+    turn for the rest of the conversation. A turn that already routed somewhere
+    named what it wanted.
+
+    Note what this does NOT do: it never removes a domain, and it cannot turn a
+    turn that matched nothing into one that skips the gate. It changes which
+    tools the model SEES, and every safety layer sits after it, unchanged.
+    """
+    domain = _KIND_DOMAINS.get((kind or "").strip().lower())
+    if not domain or route.primary_domain != "conversation":
+        return route
+    return ToolRoute(domain, [domain], route.confidence, route.explicit_tool_intent)
+
+
 def _by_relevance(names: list[str], folded_query: str) -> list[str]:
     """Tools the query actually names, first; everything else in registry order.
 
