@@ -238,6 +238,27 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         args_schema=args_schemas.PlotDataArgs,
         postconditions=_ARTIFACT_POSTCONDITION,
     ),
+    # ── Post-MVP Faz 4: revising the chart plot_data drew ────────────────────
+    # Same L2/local_write as plot_data -- chart_revise shares its renderer and
+    # writes a PNG plus one SQLite row. There is deliberately NO second
+    # chart-CREATING tool; see jarvis/tools/chart_objects.py's header for the
+    # live run that settled that.
+    ToolSpec(
+        "chart_revise", "compute", 2, False, "local_write",
+        timeout_seconds=60, supports_background=True,
+        description="Patch the active chart with only the named fields and redraw",
+        postconditions=_ARTIFACT_POSTCONDITION,
+    ),
+    ToolSpec(
+        # L1: list/show/activate are reads, and `undo` rewinds a local spec
+        # this system itself wrote -- it destroys no user data and reaches
+        # nothing external. Being L1 also keeps it usable on the proactive
+        # path, same reasoning as the Faz 3 briefing tools.
+        "working_set", "memory", 1, False, "local_read",
+        timeout_seconds=30,
+        description="List, inspect, switch or rewind this conversation's editable objects",
+    ),
+
     ToolSpec(
         "report_write", "filesystem", 2, False, "local_write",
         timeout_seconds=30,
@@ -505,6 +526,11 @@ _TOOL_DOMAINS: dict[str, str] = {
     # maths -- five unrelated intents. Splitting it fixes the class: no single
     # domain is near the cap any more.
     "data_analyze": "data", "plot_data": "data",
+    # Post-MVP Faz 4. In "data" with plot_data because a revision request
+    # ("çizgiyi kırmızı yap") is a data-domain sentence, and because the
+    # active-object rule in tool_router guarantees these are offered on a turn
+    # that matched nothing at all -- which is what most bare revisions do.
+    "chart_revise": "data", "working_set": "data",
     "report_write": "report", "report_compile": "report",
     "report_compose": "report", "write_content": "report",
     "math_solve": "math", "geo_math": "math",
@@ -792,6 +818,8 @@ _TIMEOUT_CLASSES: dict[str, str] = {
     "csv_read": "soft_thread_timeout",
     "data_analyze": "soft_thread_timeout",
     "plot_data": "soft_thread_timeout",
+    "chart_revise": "soft_thread_timeout",
+    "working_set": "soft_thread_timeout",
     "report_write": "soft_thread_timeout",
     "report_compose": "soft_thread_timeout",
     "note_append": "soft_thread_timeout",
@@ -869,7 +897,14 @@ _IDEMPOTENCY: dict[str, str] = {
     "procedure_save": "natural",
     # none -- re-run may duplicate/compound
     "shell_run": "none", "python_run": "none", "geo_math": "none",
+    # chart_revise inherits plot_data's honest "none": each render
+    # counter-suffixes a NEW png rather than overwriting, and a replayed
+    # revision would advance the version a second time.
+    # working_set is "none" for `undo` alone: list/show are pure reads, but a
+    # replayed undo walks a second step backwards, which is a different end
+    # state. The field is per TOOL and must describe its worst action.
     "plot_data": "none", "note_append": "none",
+    "chart_revise": "none", "working_set": "none",
     "schedule": "none", "todo": "none",
     "spotify": "none", "hud_panels": "none",
     "google_calendar": "none", "gmail": "none",

@@ -207,6 +207,98 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         wanted = [s.strip().lower() for s in (sections or "").split(",") if s.strip()]
         return build_briefing(settings, include=wanted or None)
 
+    # ── Post-MVP Faz 4: charts as revisable objects ──────────────────────────
+    #
+    # conversation_id arrives through LangChain's injected RunnableConfig, never
+    # as a model-visible parameter: the working set is keyed by conversation
+    # precisely so one shared JarvisAgent cannot let conversation A's revision
+    # land on conversation B's chart, and a key the model could type would give
+    # that guarantee away. Same channel workflow_start uses for its audit rows.
+
+    def _conversation_of(config) -> str:
+        return str(((config or {}).get("configurable") or {}).get("conversation_id") or "")
+
+    def _chart_kwargs(config) -> dict:
+        from jarvis.working_set import default_store
+
+        return {
+            "conversation_id": _conversation_of(config),
+            "store": default_store(),
+            "workspace": workspace,
+            "plots_dir": RunContext.for_execution(workspace).artifact_dir,
+        }
+
+    @tool
+    def chart_revise(
+        color: str = "",
+        kind: str = "",
+        title: str = "",
+        x: str = "",
+        y: str = "",
+        hue: str = "",
+        source: str = "",
+        object_id: str = "",
+        config: RunnableConfig = None,
+    ) -> str:
+        """Change ONE thing about the chart already on screen, and redraw it.
+
+        Send ONLY the field the user asked to change. Every field you leave
+        out keeps its current value — you do not need to restate the source,
+        the columns or the title. The chart's current spec is in your system
+        prompt under "working set".
+
+        "çizgiyi kırmızı yap"      → chart_revise(color="kırmızı")
+        "sütun grafiği yap"        → chart_revise(kind="bar")
+        "başlığı 'Q1 Satış' yap"   → chart_revise(title="Q1 Satış")
+
+        To go back to the previous version use working_set("undo") — do not
+        try to reverse a change by describing the old value.
+
+        Args:
+            color:     New colour for the marks.
+            kind:      New chart type.
+            title:     New title.
+            x:         New x-axis column (validated against the file).
+            y:         New y-axis column (validated against the file).
+            hue:       New grouping column.
+            source:    New data file.
+            object_id: Only when editing a chart that is not the active one;
+                       omit otherwise.
+        """
+        from jarvis.tools.chart_objects import chart_revise as _chart_revise
+
+        result = _chart_revise(
+            **_chart_kwargs(config),
+            changes={"color": color, "kind": kind, "title": title,
+                     "x": x, "y": y, "hue": hue, "source": source},
+            object_id=object_id,
+        )
+        event_bus.show_hud()
+        return result
+
+    @tool
+    def working_set(action: str = "list", object_id: str = "", config: RunnableConfig = None) -> str:
+        """Inspect or rewind the editable objects in this conversation.
+
+        Actions:
+            list     — every object, with the active one marked
+            show     — one object's spec and its revision history
+            activate — make another object the one `chart_revise` edits
+            undo     — take back the last change (repeatable, walks backwards)
+
+        Use `undo` for "eski haline getir", "geri al", "önceki hali".
+
+        Args:
+            action:    list | show | activate | undo
+            object_id: For show/activate/undo on a specific object; omit for
+                       the active one.
+        """
+        from jarvis.tools.chart_objects import working_set_control
+
+        result = working_set_control(**_chart_kwargs(config), action=action, object_id=object_id)
+        event_bus.show_hud()
+        return result
+
     @tool
     def note_append(topic: str, body: str) -> str:
         """Save a markdown note to the vault when the user asks to remember something."""
@@ -294,6 +386,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         output: str = "",
         data_json: str = "",
         sheet: str = "",
+        config: RunnableConfig = None,
     ) -> str:
         """Generate a chart and save as PNG — from a CSV/Excel FILE or INLINE data.
 
@@ -344,11 +437,55 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         # state to key a shared run_id on (see RunContext.for_execution's
         # own docstring for why), so each call gets its own fresh,
         # collision-proof run directory instead.
+        # Post-MVP Faz 4, schema-first: correct an invented column against the
+        # file's real one BEFORE drawing. Measured: left to fail, the model
+        # does not recover -- it asked for a column named 'Tarih', got an error
+        # that listed the three real columns, and simply answered the user
+        # without drawing anything. See chart_objects.fit_columns.
+        #
+        # File path only. Inline `data_json` has no schema to read, and its
+        # columns come from the model's own JSON so they cannot be wrong about
+        # a file it never saw.
+        notes: list[str] = []
+        if full is not None and full.exists():
+            from jarvis.tools.chart_objects import fit_columns
+
+            x, y, hue, notes = fit_columns(full, sheet, x, y, hue)
+
         plots_dir = RunContext.for_execution(workspace).artifact_dir
         result = generate_plot(
             full, kind, x, y, title, hue, output, plots_dir, df=df, sheet=sheet,
         )
+        # Post-MVP Faz 4: the chart stays editable. A side effect on purpose --
+        # the return value is unchanged (the PNG path, or [ERROR]), because 120+
+        # references across this repo read it, and because the model does not
+        # need telling: the object appears in the NEXT turn's system prompt,
+        # which is exactly when a revision happens.
+        #
+        # This is why there is no second "editable chart" tool. The first cut of
+        # this phase added one and let the model choose between them; a live run
+        # chose plot_data, no object was created, and all six following revision
+        # turns failed. An ambiguous pair is this codebase's most expensive
+        # recurring bug, so the capability moved into the tool that already owns
+        # charts instead of competing with it.
+        if not result.startswith("[ERROR]"):
+            from jarvis.tools.chart_objects import register_chart
+            from jarvis.working_set import default_store
+
+            register_chart(
+                conversation_id=_conversation_of(config),
+                store=default_store(), workspace=workspace, png=result,
+                source=path, x=x, y=y, kind=kind, title=title,
+                hue=hue, sheet=sheet,
+            )
         event_bus.show_hud()
+        # The PNG path stays the FIRST line: this return value is read in 120+
+        # places and documented as the path. A substitution note is appended
+        # only when one actually happened, so the ordinary case is byte-identical
+        # to before -- and a silent substitution would be the thing worth
+        # objecting to, not the extra line.
+        if notes and not result.startswith("[ERROR]"):
+            return result + "\n[NOT] " + "; ".join(notes)
         return result
 
     @tool
@@ -1290,6 +1427,7 @@ def make_tools(workspace: Path, settings: "Settings", memory: "Memory") -> list:
         hud_panels,              # HUD panel control
         procedure_save,          # Faz 2 — procedural memory
         weather, news, daily_briefing,  # Post-MVP Faz 3 — daily briefing
+        chart_revise, working_set,  # Post-MVP Faz 4 — working set
     ]
     # Agent Runtime rev.2, Faz 0: a "disabled" alpha status means structurally
     # absent from the model-visible surface, not just documented as off-limits
