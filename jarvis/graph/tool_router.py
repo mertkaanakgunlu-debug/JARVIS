@@ -286,6 +286,12 @@ def classify_query(query: str) -> ToolRoute:
 # not also a routing change.
 _KIND_DOMAINS: dict[str, str] = {
     "chart": "data", "table": "data", "email": "mail", "report": "report",
+    # Post-MVP Faz 5: a staged calendar proposal. "Ekle" / "onayla" / "olur"
+    # name no capability, so the turn that APPROVES an event would otherwise
+    # classify as `conversation` and get zero tools -- the same shape the chart
+    # revision hit, with a worse failure mode, since the user believes the
+    # event was created.
+    "calendar_candidate": "calendar",
 }
 
 

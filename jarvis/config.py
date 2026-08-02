@@ -158,6 +158,17 @@ class Settings(BaseSettings):
     # calls, per ROADMAP.md's Faz 7 constraint.
     monitor_proactive_min_gap_sec: int = 600
 
+    # Post-MVP Faz 5: extract a calendar candidate from every new unread mail.
+    # Off by default. Unlike monitor_proactive_enabled the risk here is not
+    # cost or a runaway loop -- ingestion is deterministic, calls no model and
+    # writes nothing to the calendar -- it is noise: the hint list that decides
+    # "is this mail about a meeting" has not been measured against a real
+    # mailbox yet, and a background job that fills the working set with
+    # proposals nobody wants is worse than one that does nothing. Turn it on to
+    # measure it. The MODEL-facing path (calendar_from_mail as a tool) is
+    # unaffected by this flag: a user asking for a specific mail always works.
+    calendar_from_mail_enabled: bool = False
+
     # Faz 4: hard cap on LangGraph super-step recursion per turn (BUG-recursion)
     # -- without this, a model stuck in a tool-call loop (e.g. repeatedly
     # mis-calling a tool and retrying) runs unbounded instead of failing

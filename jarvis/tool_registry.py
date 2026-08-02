@@ -439,6 +439,19 @@ TOOL_SPECS: dict[str, "ToolSpec"] = {s.name: s for s in [
         description="Gmail: list/read/search (L1 actions) + send/reply/trash/mark_read (L3 actions)",
         args_schema=args_schemas.GmailArgs,
     ),
+    # Post-MVP Faz 5. L3 at the TOOL level on purpose: the strict default is
+    # the `create` action, which writes a real event to the user's calendar,
+    # and an action added later without a table entry must inherit that rather
+    # than the safe one. `propose` is split out below -- it reads one mail and
+    # stages a local proposal that does nothing until a human approves it.
+    ToolSpec(
+        "calendar_from_mail", "external_api", 3, True, "external_write",
+        timeout_seconds=45,
+        description=(
+            "Mail → calendar: propose (L1, reads one mail and stages a candidate) "
+            "+ create/ignore (L3, writes or drops the approved event)"
+        ),
+    ),
     ToolSpec(
         "google_drive", "external_api", 3, True, "external_write",
         timeout_seconds=60, supports_background=True,
@@ -510,6 +523,10 @@ _TOOL_DOMAINS: dict[str, str] = {
     # mail / calendar / drive — split on purpose; see ToolSpec.domain comment
     "gmail": "mail", "itu_mail": "mail",
     "google_calendar": "calendar",
+    # Post-MVP Faz 5: filed under `calendar`, not `mail`. The turn that reaches
+    # for it is "bunu takvime ekle" — the destination names the domain, and it
+    # is also the domain an active calendar_candidate routes to.
+    "calendar_from_mail": "calendar",
     "google_drive": "drive",
     # data / report / math — split out of one oversized "data" domain on
     # 2026-07-30. That domain held exactly 8 tools while the router's
@@ -575,6 +592,12 @@ _TOOL_ACTIONS: dict[str, dict[str, ActionSpec]] = {
     # External-API tools: pure reads against a remote account. Migrated
     # verbatim from policy_guard._READ_ACTIONS -- same actions, same result.
     "google_calendar": {"list": _EXTERNAL_READ, "search": _EXTERNAL_READ},
+    # `propose` reads one message and writes a local candidate nobody has
+    # approved yet -- classified as the external READ it is, so that showing
+    # the user a proposal never interrupts them. `create` and `ignore` are
+    # absent on purpose and keep the tool's L3: create writes to the calendar,
+    # and ignore is the answer to a question only a human should close.
+    "calendar_from_mail": {"propose": _EXTERNAL_READ},
     "gmail": {
         "list_unread": _EXTERNAL_READ, "search": _EXTERNAL_READ, "read": _EXTERNAL_READ,
     },
@@ -795,6 +818,7 @@ _TIMEOUT_CLASSES: dict[str, str] = {
     "deep_web_research": "external_request_timeout",
     "spotify": "external_request_timeout",
     "google_calendar": "external_request_timeout",
+    "calendar_from_mail": "external_request_timeout",
     "gmail": "external_request_timeout",
     "google_drive": "external_request_timeout",
     "itu_mail": "external_request_timeout",
@@ -905,6 +929,13 @@ _IDEMPOTENCY: dict[str, str] = {
     # state. The field is per TOOL and must describe its worst action.
     "plot_data": "none", "note_append": "none",
     "chart_revise": "none", "working_set": "none",
+    # calendar_from_mail is "natural" and, unusually, that is a LIVE claim
+    # rather than a declared destination: the mail_event_candidates ledger has
+    # message_id as its primary key and refuses to leave the `created` state
+    # twice, so a replayed create returns the existing event id instead of
+    # making a second event. That is the property this phase was built around
+    # -- see jarvis/mail_ledger.py.
+    "calendar_from_mail": "natural",
     "schedule": "none", "todo": "none",
     "spotify": "none", "hud_panels": "none",
     "google_calendar": "none", "gmail": "none",

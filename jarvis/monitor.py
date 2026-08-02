@@ -260,6 +260,15 @@ class JarvisMonitor:
                         f"Yeni bir okunmamış e-posta geldi.\nKimden: {sender}\nKonu: {subject}",
                         source="email",
                     )
+                    # Post-MVP Faz 5. Deliberately NOT inside _maybe_proactive:
+                    # that path is throttled (default 600 s across all sources)
+                    # and rightly so -- it exists to stop a dozen unread mails
+                    # each costing an LLM turn. Ingestion is a different thing:
+                    # deterministic, cheap, and skipping it loses the mail.
+                    # The review that gated this phase is explicit -- the
+                    # throttle limits NOTIFYING the user, never candidate
+                    # production.
+                    self._ingest_calendar_candidate(mid)
                 except Exception:
                     toast("📧 Yeni E-posta", "Okunmamış bir mesajınız var.")
                     self._dispatch_push(
@@ -371,6 +380,40 @@ class JarvisMonitor:
             logger.info(
                 "Proactive check (%s) dropped: worker still busy, queue full", source
             )
+
+    # ── Post-MVP Faz 5: mail → calendar candidate (deterministic ingest) ──────
+
+    def _ingest_calendar_candidate(self, message_id: str) -> None:
+        """Extract a calendar candidate from one new mail, durably.
+
+        No LLM and no calendar write: this reads the message, resolves a
+        date/time with the same resolvers the calendar tool uses, and records
+        the result in `mail_event_candidates`. Whether anything is ever created
+        is a separate decision a human makes later.
+
+        Off by default (`calendar_from_mail_enabled`) — an ingest that runs on
+        every unread mail should be opt-in until it has been measured on a real
+        mailbox, which is the state this ships in.
+
+        Never raises: a failed extraction is written to the ledger with its
+        attempt count, so the NEXT sweep can retry it. That retry is the whole
+        reason the ledger is separate from `_notified_email_ids` — see that
+        set's comment.
+        """
+        if not getattr(self.settings, "calendar_from_mail_enabled", False):
+            return
+        try:
+            from jarvis.calendar_from_mail import CalendarFromMailService
+
+            service = CalendarFromMailService(self.settings)
+            if not service.ledger.should_process(message_id):
+                return
+            outcome = service.propose(message_id)
+            logger.debug(
+                "calendar_from_mail ingest %s -> %s", message_id, outcome.state
+            )
+        except Exception as exc:  # noqa: BLE001 -- never take the monitor down
+            logger.debug("calendar_from_mail ingest error (%s): %s", message_id, exc)
 
     def _ensure_proactive_worker(self) -> None:
         """Start the proactive worker thread on first use (idempotent)."""

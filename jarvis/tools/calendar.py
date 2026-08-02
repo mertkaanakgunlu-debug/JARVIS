@@ -12,6 +12,7 @@ First run opens a browser for OAuth consent; token cached at data/.calendar_toke
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -211,6 +212,171 @@ def _fmt_event(event: dict) -> str:
     return "\n".join(parts)
 
 
+@dataclass(frozen=True)
+class EventCreation:
+    """The result of one calendar create, as data rather than as prose.
+
+    Post-MVP Faz 5. The create branch used to build its display string inline,
+    so the only way for another module to learn the new event's id was to regex
+    that string back apart -- the exact thing `gmail.message_fields` was added
+    to stop (BUG-15: a regex expected "[id]" while the formatter emitted
+    "• [id]", and a sync silently found zero messages for a long time). The
+    mail→calendar ledger needs the id to be idempotent, so the branch returns
+    structure and `_format_creation` renders it. The rendered text is
+    unchanged, byte for byte -- 100+ places read it and the audit log
+    classifies on its prefix.
+    """
+
+    ok: bool
+    event_id: str = ""
+    html_link: str = ""
+    title: str = ""
+    when: str = ""                  # temporal.describe(resolution)
+    tz_name: str = ""
+    duration_minutes: int = 0
+    title_note: str = ""            # clean_title's reason, when it changed
+    duplicate_of: str = ""          # an existing event's id -- nothing created
+    error: str = ""
+
+
+def create_event(
+    *,
+    title: str,
+    date: str,
+    time: str = "",
+    duration_minutes: int = 60,
+    description: str = "",
+    location: str = "",
+    settings: "Settings" = None,
+    service=None,
+) -> EventCreation:
+    """Create one Google Calendar event. The single place that writes one.
+
+    Shared by `calendar_control("create")` and the mail→calendar flow, so the
+    timezone handling, the title/description discipline and the duplicate guard
+    cannot exist in one path and not the other.
+    """
+    if not title or not date:
+        return EventCreation(
+            False, error="'title' and 'date' are required to create an event."
+        )
+    if service is None:
+        try:
+            service = _get_service(settings)
+        except RuntimeError as e:
+            return EventCreation(False, error=str(e))
+
+    clock = _clock_for(settings)
+    tz_name = clock.tz_name
+    # One resolution for the whole call: date and time are resolved TOGETHER
+    # (jarvis/nlu/temporal.resolve) so a model that put the time inside the
+    # date field ("yarın öğlen 3") still lands right, and so the instant is
+    # built in the user's zone rather than assembled from a UTC midnight.
+    resolution = temporal.resolve(date, time, clock=clock)
+    if not resolution.ok:
+        return EventCreation(False, error=resolution.reason)
+    start_dt = resolution.start
+    end_dt = start_dt + timedelta(minutes=duration_minutes)
+    time = "" if resolution.all_day else f"{start_dt:%H:%M}"
+
+    # Title/description discipline (Post-MVP Faz 2, plan item 4): a calendar
+    # holds a record of what is happening, not a copy of the instruction that
+    # created it. Applied HERE rather than only in the prompt so it holds
+    # whatever the model does -- but strictly subtractive, and never to the
+    # point of an empty title.
+    cleaning = event_text.clean_title(title)
+    title = cleaning.title
+    if event_text.description_is_restatement(title, description):
+        description = ""
+
+    # ── Deduplication guard ─────────────────────────────────────────────────
+    # An existing event with the same title at the same time. Prevents a
+    # duplicate when the agent loops or retries a call.
+    try:
+        # start_dt is timezone-aware in the configured zone already (the
+        # resolver builds it that way), so the window needs no reinterpretation
+        # -- the pre-Faz-2 `.replace(tzinfo=tz)` here was patching over the fact
+        # that _parse_date returned a UTC-stamped datetime whose wall clock
+        # meant local time.
+        win_start = start_dt - timedelta(minutes=5)
+        win_end   = start_dt + timedelta(minutes=5)
+        existing = service.events().list(
+            calendarId="primary",
+            q=title,
+            timeMin=win_start.isoformat(),
+            timeMax=win_end.isoformat(),
+            singleEvents=True,
+            maxResults=5,
+        ).execute()
+        for ev in existing.get("items", []):
+            if ev.get("summary", "").lower().strip() == title.lower().strip():
+                return EventCreation(
+                    True, event_id=ev["id"], title=title, duplicate_of=ev["id"],
+                    tz_name=tz_name, duration_minutes=duration_minutes,
+                    when=temporal.describe(resolution),
+                )
+    except Exception:
+        pass  # dedup is best-effort; never block creation on API error
+
+    # ── Create ──────────────────────────────────────────────────────────────
+    # Naive datetime string (no UTC offset) + explicit timeZone → Google
+    # Calendar stores the event in the user's local timezone, not UTC.
+    if not time:
+        event_body = {
+            "summary": title,
+            "description": description,
+            "location": location,
+            "start": {"date": start_dt.strftime("%Y-%m-%d")},
+            "end": {"date": _all_day_end(start_dt, duration_minutes)},
+        }
+    else:
+        dt_str  = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        event_body = {
+            "summary": title,
+            "description": description,
+            "location": location,
+            "start": {"dateTime": dt_str,  "timeZone": tz_name},
+            "end":   {"dateTime": end_str, "timeZone": tz_name},
+        }
+
+    created = service.events().insert(calendarId="primary", body=event_body).execute()
+    return EventCreation(
+        True,
+        event_id=created.get("id", ""),
+        html_link=created.get("htmlLink", ""),
+        title=title,
+        when=temporal.describe(resolution),
+        tz_name=tz_name,
+        duration_minutes=duration_minutes,
+        title_note=cleaning.reason if cleaning.changed else "",
+    )
+
+
+def _format_creation(result: EventCreation) -> str:
+    """EventCreation → the exact string calendar_control has always returned."""
+    if not result.ok:
+        return f"[ERROR] {result.error}"
+    if result.duplicate_of:
+        return (
+            f"[Calendar] SKIPPED — '{result.title}' already exists at this time "
+            f"(id: {result.duplicate_of[:16]}). No duplicate created."
+        )
+    # Report the RESOLVED date, not the expression the model passed. Echoing
+    # "yarın" back tells the user nothing about which day was actually written,
+    # and this string is what the model relays — the Faz 1 honesty kernel can
+    # only be as truthful as its inputs.
+    lines = [
+        f"[Calendar] Event created: '{result.title}'",
+        f"  Date: {result.when} ({result.tz_name})",
+        f"  Duration: {result.duration_minutes} min",
+    ]
+    if result.title_note:
+        lines.append(f"  Title normalised — {result.title_note}")
+    lines += [f"  id: {result.event_id}", f"  Link: {result.html_link}"]
+    return "\n".join(lines)
+
+
 def calendar_control(
     action: str,
     title: str = "",
@@ -315,98 +481,13 @@ def calendar_control(
             return "\n".join(results)
 
         elif action == "create":
-            if not title or not date:
-                return "[ERROR] 'title' and 'date' are required to create an event."
-
-            tz_name = clock.tz_name
-            # One resolution for the whole call: date and time are resolved
-            # TOGETHER (jarvis/nlu/temporal.resolve) so a model that put the
-            # time inside the date field ("yarın öğlen 3") still lands right,
-            # and so the instant is built in the user's zone rather than
-            # assembled from a UTC midnight.
-            resolution = temporal.resolve(date, time, clock=clock)
-            if not resolution.ok:
-                return f"[ERROR] {resolution.reason}"
-            start_dt = resolution.start
-            end_dt = start_dt + timedelta(minutes=duration_minutes)
-            time = "" if resolution.all_day else f"{start_dt:%H:%M}"
-
-            # Title/description discipline (Post-MVP Faz 2, plan item 4): a
-            # calendar holds a record of what is happening, not a copy of the
-            # instruction that created it. Applied HERE rather than only in
-            # the prompt so it holds whatever the model does -- but strictly
-            # subtractive, and never to the point of an empty title.
-            cleaning = event_text.clean_title(title)
-            title = cleaning.title
-            if event_text.description_is_restatement(title, description):
-                description = ""
-
-            # ── Deduplication guard ───────────────────────────────────────────
-            # Check for an existing event with the same title at the same time.
-            # Prevents duplicate creation when the agent loops or retries a call.
-            try:
-                # start_dt is timezone-aware in the configured zone already (the
-                # resolver builds it that way), so the window needs no
-                # reinterpretation — the pre-Faz-2 `.replace(tzinfo=tz)` here was
-                # patching over the fact that _parse_date returned a UTC-stamped
-                # datetime whose wall clock meant local time.
-                win_start = start_dt - timedelta(minutes=5)
-                win_end   = start_dt + timedelta(minutes=5)
-                existing = service.events().list(
-                    calendarId="primary",
-                    q=title,
-                    timeMin=win_start.isoformat(),
-                    timeMax=win_end.isoformat(),
-                    singleEvents=True,
-                    maxResults=5,
-                ).execute()
-                for ev in existing.get("items", []):
-                    if ev.get("summary", "").lower().strip() == title.lower().strip():
-                        return (
-                            f"[Calendar] SKIPPED — '{title}' already exists at this time "
-                            f"(id: {ev['id'][:16]}). No duplicate created."
-                        )
-            except Exception:
-                pass  # dedup is best-effort; never block creation on API error
-
-            # ── Create ────────────────────────────────────────────────────────
-            # Naive datetime string (no UTC offset) + explicit timeZone → Google Calendar
-            # stores the event in the user's local timezone, not UTC.
-            if not time:
-                event_body = {
-                    "summary": title,
-                    "description": description,
-                    "location": location,
-                    "start": {"date": start_dt.strftime("%Y-%m-%d")},
-                    "end": {"date": _all_day_end(start_dt, duration_minutes)},
-                }
-            else:
-                dt_str  = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
-                end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
-                event_body = {
-                    "summary": title,
-                    "description": description,
-                    "location": location,
-                    "start": {"dateTime": dt_str,  "timeZone": tz_name},
-                    "end":   {"dateTime": end_str, "timeZone": tz_name},
-                }
-
-            created = service.events().insert(calendarId="primary", body=event_body).execute()
-            eid = created.get("id", "")
-            link = created.get("htmlLink", "")
-            # Report the RESOLVED date, not the expression the model passed.
-            # Echoing "yarın" back tells the user nothing about which day was
-            # actually written, and this string is what the model relays — the
-            # Faz 1 honesty kernel can only be as truthful as its inputs.
-            lines = [
-                f"[Calendar] Event created: '{title}'",
-                f"  Date: {temporal.describe(resolution)} ({tz_name})",
-                f"  Duration: {duration_minutes} min",
-            ]
-            if cleaning.changed:
-                lines.append(f"  Title normalised — {cleaning.reason}")
-            lines += [f"  id: {eid}", f"  Link: {link}"]
-            return "\n".join(lines)
+            return _format_creation(
+                create_event(
+                    title=title, date=date, time=time,
+                    duration_minutes=duration_minutes, description=description,
+                    location=location, settings=settings, service=service,
+                )
+            )
 
         elif action == "delete":
             if not event_id and not query:

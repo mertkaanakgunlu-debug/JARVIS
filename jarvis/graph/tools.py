@@ -351,6 +351,71 @@ def make_tools(
         event_bus.show_hud()
         return result
 
+    # ── Post-MVP Faz 5: a mail becomes an event the user approves ────────────
+
+    @tool
+    def calendar_from_mail(
+        action: str = "propose",
+        message_id: str = "",
+        object_id: str = "",
+        duration_minutes: int = 60,
+        config: RunnableConfig = None,
+    ) -> str:
+        """Turn an e-mail into a calendar event — proposal first, never directly.
+
+        Give ONLY the message_id. Do NOT re-type the sender, subject, date or
+        time: this tool reads the message itself, and a re-typed date is how
+        events land on the wrong day.
+
+        "bu maili takvime ekle"      → calendar_from_mail(message_id="18f...")
+        "evet, ekle" / "onayla"      → calendar_from_mail(action="create")
+        "hayır, gerek yok"           → calendar_from_mail(action="ignore")
+
+        `propose` creates NOTHING in Google Calendar. It reads the mail,
+        extracts the date/time deterministically and shows the user a proposal
+        with its evidence and confidence. Only `create` writes the event, and
+        only after the user has said yes — call it with no arguments to confirm
+        the proposal already on screen.
+
+        Args:
+            action:           propose | create | ignore
+            message_id:       Gmail message id — required for `propose`.
+            object_id:        A specific proposal; omit for the active one.
+            duration_minutes: Event length for `create` (default 60).
+        """
+        from jarvis.calendar_from_mail import CalendarFromMailService
+
+        conversation_id = _conversation_of(config)
+        service = CalendarFromMailService(
+            settings, working_set=_working_set(),
+        )
+        verb = (action or "propose").strip().lower()
+        try:
+            if verb == "propose":
+                if not message_id:
+                    return (
+                        "[ERROR] 'message_id' gerekli. Maili bulmak için "
+                        "gmail('list_unread') veya gmail('search', query=...)."
+                    )
+                outcome = service.propose(
+                    message_id, conversation_id=conversation_id, force=True,
+                )
+            elif verb == "create":
+                outcome = service.confirm(
+                    conversation_id=conversation_id, object_id=object_id,
+                    duration_minutes=duration_minutes,
+                )
+            elif verb == "ignore":
+                outcome = service.ignore(
+                    conversation_id=conversation_id, object_id=object_id,
+                )
+            else:
+                return f"[ERROR] Bilinmeyen action '{verb}'. Geçerli: propose | create | ignore."
+        except Exception as exc:  # noqa: BLE001 -- a tool returns, never raises
+            return f"[ERROR] {exc}"
+        event_bus.show_hud()
+        return outcome.message
+
     @tool
     def note_append(topic: str, body: str) -> str:
         """Save a markdown note to the vault when the user asks to remember something."""
@@ -1495,6 +1560,7 @@ def make_tools(
         procedure_save,          # Faz 2 — procedural memory
         weather, news, daily_briefing,  # Post-MVP Faz 3 — daily briefing
         chart_revise, working_set,  # Post-MVP Faz 4 — working set
+        calendar_from_mail,         # Post-MVP Faz 5 — mail → approved event
     ]
     # Agent Runtime rev.2, Faz 0: a "disabled" alpha status means structurally
     # absent from the model-visible surface, not just documented as off-limits

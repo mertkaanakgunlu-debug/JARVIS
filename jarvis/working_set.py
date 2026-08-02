@@ -57,6 +57,12 @@ KIND_CHART = "chart"
 KIND_EMAIL = "email"
 KIND_REPORT = "report"
 KIND_TABLE = "table"
+# Post-MVP Faz 5 — the store's SECOND real consumer, and the point at which
+# "kind-agnostic" stops being a claim with one example. A calendar_candidate is
+# an event extracted from a mail that has NOT been created yet; it lives here
+# so the user can see it, correct it and approve it across turns, exactly like
+# a chart, with no new machinery.
+KIND_CALENDAR_CANDIDATE = "calendar_candidate"
 
 # How much of the working set may enter the system prompt. Post-MVP Faz 3
 # measured the briefing's end-to-end latency at p50 ~23 s with essentially all

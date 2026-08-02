@@ -54,6 +54,7 @@ MCP layer — see below. Formal specs live in `jarvis/tool_registry.py` (`ToolSp
 | `gcp_quota` | L1 | network | — | — | 30s | GCP Vertex AI quota status and usage tracking |
 | `google_calendar` | L3 | external_api | ✓* | — | 30s | Calendar: list/search (L1) · create/update/delete (L3). **\*** a SINGLE high-confidence `create` skips the prompt (Post-MVP Faz 2) — see below |
 | `gmail` | L3 | external_api | ✓ | — | 30s | Gmail: list/read/search (L1) · send/reply/trash (L3) |
+| `calendar_from_mail` | L3 | external_api | ✓ | — | 45s | Mail → calendar: `propose` (L1 — reads ONE mail, extracts the date deterministically, stages a `calendar_candidate` working object) · `create`/`ignore` (L3). Nothing reaches the calendar without a human; see below |
 | `google_drive` | L3 | external_api | ✓ | ✓ | 60s | Drive: search/read/download (L1) · upload/share/delete (L3) |
 | `itu_mail` | L3 | external_api | ✓ | — | 30s | ITU IMAP/SMTP: list/read/search (L1) · send/reply/trash (L3) |
 | `procedure_save` | L2 | memory | — | — | 15s | Save a reusable multi-step workflow to procedural memory (Faz 2) |
@@ -123,6 +124,27 @@ reported success is downgraded and surfaced to the user**; nothing declared → 
 a silent pass. Every other tool in the table above stays honestly "not independently verified".
 Mechanism: `jarvis/execution/artifacts.py` (declaration) and
 `jarvis/execution/postcondition_runner.py` (checking); see [SAFETY.md](SAFETY.md).
+
+## Mail → calendar: a proposal, never a direct write (Post-MVP Faz 5, 2026-08-02)
+
+`calendar_from_mail` is the first feature where a *background* trigger can lead to a *real
+external write*, so it is staged rather than direct:
+
+```
+message_id → fetch → deterministic extraction → validation → dedup
+           → calendar_candidate (working set) → USER APPROVAL → calendar create
+```
+
+| Property | Why it is built that way |
+|---|---|
+| The tool takes **only** `message_id` | A model asked to relay sender/subject/date re-types them, and a re-typed date lands the event on the wrong day. The service reads the message itself. |
+| Extraction calls **no LLM** | Faz 3 measured a model fabricating a temperature in 4 of 5 runs when asked for a fact it thought it knew. A date in a mail is that kind of fact. `jarvis/nlu/temporal.py` resolves it, with the same confidence bands the calendar tool uses. |
+| Confidence is recorded, **never spent** | Even a 0.99 extraction produces a candidate, not an event. Trusted-sender auto-create is deliberately not built — it needs measurement, and the measurement needs the ledger. |
+| `mail_event_candidates` is the idempotency key | `message_id` is the primary key and `created` is terminal, so a retry, a restart or a second user request returns the existing event id instead of making a second event. |
+| Processing state is **not** the notification set | `monitor._notified_email_ids` marks a mail seen whether or not the work succeeded, and marks every unread mail seen at startup. Correct for toasts, useless for processing — a transient failure would lose the mail forever. |
+
+Background ingestion is off by default (`calendar_from_mail_enabled`); the user-facing tool path
+always works. See `jarvis/calendar_from_mail.py` and `jarvis/mail_ledger.py`.
 
 ## Calendar: the one action that can skip its prompt (Post-MVP Faz 2, 2026-07-31)
 
