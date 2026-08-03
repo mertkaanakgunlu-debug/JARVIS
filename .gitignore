@@ -53,3 +53,7 @@ server.log
 
 # Generated finance artifacts (contain REAL bank data)
 exports/
+
+# Live-gate measurement output (jarvis/evals/results.py) — kept out of git but
+# never overwritten, so an earlier run can always be recomputed under a new rule.
+.eval-results/

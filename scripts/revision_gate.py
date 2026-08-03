@@ -39,11 +39,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import hashlib
 import os
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +63,10 @@ os.chdir(SCRATCH)
 import jarvis.agent as agent_mod                                   # noqa: E402
 from jarvis.briefing import summarize_latency                      # noqa: E402
 from jarvis.config import Settings                                 # noqa: E402
+from jarvis.evals.results import (                                 # noqa: E402
+    ResultWriter, default_path, head_commit, timestamp,
+)
+from jarvis.evals.revision_scoring import aggregate, score_step    # noqa: E402
 from jarvis.graph.role_router import FAST, REASONING, RoleDecision  # noqa: E402
 from jarvis.graph.tool_router import classify_query                # noqa: E402
 
@@ -227,6 +232,11 @@ async def run_chain(settings, arm: str | None, index: int) -> list[dict]:
     for step, turn in enumerate(CHAIN):
         TOOL_CALLS.clear()
         TOOL_OUTPUTS.clear()
+        # Read BEFORE the turn: whether this step could demonstrate anything at
+        # all is a property of the state it started from, not of what it left
+        # behind. See jarvis/evals/revision_scoring.py for the run this split
+        # exists because of.
+        pre_obj = agent.working_set.active(conversation, KIND_CHART)
         started = time.monotonic()
         error = ""
         try:
@@ -243,67 +253,97 @@ async def run_chain(settings, arm: str | None, index: int) -> list[dict]:
         called = [t for t in TOOL_CALLS if t in CHART_TOOLS]
 
         if not turn["accept"]:
-            tool_ok = not called
+            raw_tool_ok = not called
         else:
-            tool_ok = any(t in called for t in turn["accept"])
-        spec_ok, why = turn["check"](spec, previous)
+            raw_tool_ok = any(t in called for t in turn["accept"])
+        raw_spec_ok, why = turn["check"](spec, previous)
+        score = score_step(
+            step=step, pre_obj=pre_obj,
+            raw_spec_ok=raw_spec_ok, raw_tool_ok=raw_tool_ok, raw_why=why,
+        )
+        # Updated even when the step was skipped: an ineligible turn can still
+        # have moved the state, and that IS what the next turn started from.
         previous = dict(spec)
 
         rows.append({
             "run": index, "arm": arm or "auto", "step": step, "note": turn["note"],
             "say": turn["say"], "elapsed": round(elapsed, 2),
             "role": (agent.last_turn_trace or {}).get("requested_role", "?"),
-            "tools": list(TOOL_CALLS), "tool_ok": tool_ok,
-            "spec_ok": spec_ok, "why": why,
+            "tools": list(TOOL_CALLS), "why": why,
             "version": obj.version if obj else 0,
             "spec": spec, "error": error, "answer": (answer or "")[:200],
             "tool_outputs": list(TOOL_OUTPUTS),
+            **score.to_dict(),
         })
     return rows
 
 
 def _report(results: list[dict], arms: list[str | None]) -> bool:
-    print("\n" + "=" * 100)
-    print(f"{'arm':6s} {'step':4s} {'what':44s} {'OUTCOME':>8s} {'tool':>7s} {'p50':>7s}  used")
-    print("-" * 100)
-    passed = True
+    """Three rates per step, because they answer three different questions.
+
+    `demonstrated` is the headline: eligible AND passed, over EVERY run. The
+    column this replaced was a plain pass/total, and it reported `undo 5/5` for
+    a run in which only two chains ever held a chart -- the other three scored
+    `{} == {}` as a success. `raw-check` keeps that number visible as a
+    diagnostic, in parentheses, because it is useful for debugging the harness
+    and useless as evidence about the system.
+    """
+    print("\n" + "=" * 116)
+    print(f"{'arm':6s} {'step':4s} {'what':40s} {'demonstr':>9s} {'eligible':>9s} "
+          f"{'N/A':>4s} {'raw':>7s} {'tool':>7s} {'p50':>7s}  used")
+    print("-" * 116)
+    overall_pass = True
     for arm in arms:
         label = arm or "auto"
-        for step, turn in enumerate(CHAIN):
-            rows = [r for r in results if r["arm"] == label and r["step"] == step]
-            if not rows:
-                continue
-            tool_ok = sum(1 for r in rows if r["tool_ok"])
-            spec_ok = sum(1 for r in rows if r["spec_ok"])
-            latency = summarize_latency([r["elapsed"] for r in rows])
-            used = sorted({t for r in rows for t in r["tools"] if t in CHART_TOOLS})
-            print(f"{label:6s} {step:4d} {turn['note'][:44]:44s} "
-                  f"{spec_ok:3d}/{len(rows):<4d} {tool_ok:3d}/{len(rows):<3d} "
-                  f"{latency['p50']:7.2f}  {','.join(used) or '-'}")
-            # The OUTCOME axis is the gate. The tool axis gates only the two
-            # turns where "no chart tool ran" IS the outcome being claimed.
-            if spec_ok < len(rows):
-                passed = False
-            if not turn["accept"] and tool_ok < len(rows):
-                passed = False
+        rows = [r for r in results if r["arm"] == label]
+        if not rows:
+            continue
+        report = aggregate(rows, chain_len=len(CHAIN))
+        by_step = {s.step: s for s in report.steps}
 
-        chains = {}
-        for r in results:
-            if r["arm"] == label:
-                chains.setdefault(r["run"], []).append(r)
-        whole = sum(1 for rows in chains.values() if all(x["spec_ok"] for x in rows))
-        print(f"{label:6s} {'':4s} {'FULL CHAIN (all 7 turns correct)':46s} {whole:3d}/{len(chains):<3d}")
-    print("=" * 100)
-    print("GATE: " + ("PASS" if passed else "FAIL"))
-    return passed
+        for step, turn in enumerate(CHAIN):
+            s = by_step.get(step)
+            if s is None:
+                continue
+            step_rows = [r for r in rows if r["step"] == step]
+            latency = summarize_latency([r["elapsed"] for r in step_rows])
+            used = sorted({t for r in step_rows for t in r["tools"] if t in CHART_TOOLS})
+            flag = "" if s.sufficient else "  <-- few samples"
+            print(f"{label:6s} {step:4d} {turn['note'][:40]:40s} "
+                  f"{s.demonstrated:4d}/{s.total:<4d} {s.eligible_pass:4d}/{s.eligible_n:<4d} "
+                  f"{s.na:4d} {'(' + str(s.raw_pass) + '/' + str(s.total) + ')':>7s} "
+                  f"{s.tool_pass:3d}/{s.eligible_n:<3d} "
+                  f"{latency['p50']:7.2f}  {','.join(used) or '-'}{flag}")
+
+        fu_n, fu_d = report.full_chain_unconditional
+        fc_n, fc_d = report.full_chain_conditional
+        print(f"{label:6s} {'':4s} {'FULL CHAIN unconditional':40s} {fu_n:4d}/{fu_d:<4d}")
+        print(f"{label:6s} {'':4s} {'FULL CHAIN conditional-on-creation':40s} {fc_n:4d}/{fc_d:<4d}")
+        print(f"{label:6s} {'':4s} {'GATE OUTCOME':40s} {report.outcome_status}")
+        print(f"{label:6s} {'':4s} {'COVERAGE':40s} {report.coverage_status}")
+        overall_pass = overall_pass and report.gate_pass
+
+    print("=" * 116)
+    # Two axes, never collapsed: a run can be a behavioural failure, an
+    # under-observed one, or both -- and the motivating run was both.
+    print("GATE: " + ("PASSED" if overall_pass else "NOT PASSED"))
+    return overall_pass
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--arm", default="", help="fast | reasoning (default: whatever the router picks)")
-    parser.add_argument("--out", default="revision_gate_results.json")
+    # Default is an ABSOLUTE, timestamped path under the repo. It used to be a
+    # bare relative filename, and since this module chdir()s into SCRATCH at
+    # import, every run overwrote the last one inside a temp directory -- which
+    # is how a previous run's raw data was lost and a comparison had to be
+    # withdrawn instead of recomputed.
+    parser.add_argument("--out", default="")
     args = parser.parse_args()
+
+    stamp = timestamp()
+    out_path = Path(args.out).resolve() if args.out else default_path("revision-gate", stamp)
 
     (SCRATCH / "Desktop" / "satis.csv").write_text(FIXTURE, encoding="utf-8")
     (SCRATCH / "satis.csv").write_text(FIXTURE, encoding="utf-8")
@@ -315,6 +355,17 @@ async def main() -> int:
     settings = Settings()
     print(f"local_model={settings.local_model} cloud_policy={settings.cloud_policy} home={SCRATCH}",
           flush=True)
+
+    writer = ResultWriter(out_path, metadata={
+        "gate": "revision-gate",
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "commit": head_commit(),
+        "model": settings.local_model,
+        "cloud_policy": settings.cloud_policy,
+        "runs": args.runs,
+        "arms": [a or "auto" for a in arms],
+        "fixture_sha256": hashlib.sha256(FIXTURE.encode("utf-8")).hexdigest(),
+    })
 
     warm = agent_mod.JarvisAgent(settings)
     started = time.monotonic()
@@ -328,17 +379,21 @@ async def main() -> int:
             rows = await run_chain(settings, arm, index)
             results.extend(rows)
             for r in rows:
-                flag = "" if (r["tool_ok"] and r["spec_ok"]) else "   <-- MISS"
+                if r["claim_ok"] is None:
+                    flag = f"   <-- N/A ({r['skip_reason']})"
+                elif r["claim_ok"]:
+                    flag = ""
+                else:
+                    flag = "   <-- MISS"
                 print(f"  {r['arm']:6s} #{r['run']:02d}.{r['step']} {r['elapsed']:6.2f}s "
                       f"role={r['role']:9s} tools={r['tools']} v{r['version']} "
                       f"{r['why']}{flag}", flush=True)
-            Path(args.out).write_text(
-                json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8"
-            )
+            writer.extend(rows)
             print("", flush=True)
 
     ok = _report(results, arms)
-    print(f"raw -> {Path(args.out).resolve()}")
+    writer.set_summary(aggregate(results, chain_len=len(CHAIN)).to_dict())
+    print(f"raw -> {out_path}")
     return 0 if ok else 1
 
 
