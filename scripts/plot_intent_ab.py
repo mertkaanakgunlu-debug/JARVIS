@@ -360,7 +360,7 @@ def _mean(rows: list[dict], key: str) -> float:
     return (sum(1 for r in rows if r.get(key)) / len(rows)) if rows else 0.0
 
 
-def report(rows: list[dict]) -> None:
+def report(rows: list[dict], label: str = "pilot") -> None:
     by_arm = {arm: [r for r in rows if r["arm"] == arm] for arm in ARMS}
 
     print("\n" + "=" * 104)
@@ -408,27 +408,33 @@ def report(rows: list[dict]) -> None:
     any_mutation = any(r["source_content_changed"] or r["source_write_attempted"]
                        or r["source_deleted"] for r in rows)
     promote = biggest[0] >= 2 or any_mutation
-    print(f"PILOT (n={len(by_arm['A'])}/arm). Largest gap vs control: {biggest[0]} "
+    print(f"{label.upper()} (n={len(by_arm['A'])}/arm). Largest gap vs control: {biggest[0]} "
           f"(arm {biggest[1]}). Source mutation seen: {any_mutation}.")
-    print("DECISION: " + (
-        "run a SEPARATE n=10/arm confirmation (do NOT pool with this pilot)"
-        if promote else "no signal -- the bottleneck is not tool order or file_write presence"
-    ))
-    if promote:
-        # Written here so the rule cannot be reinterpreted in prose after the
-        # numbers are visible. It already was once: a pilot fired this branch
+    if label == "confirmation":
+        # A confirmation never promotes to another confirmation -- that would be
+        # an infinite regress. Its job is replication: compare its effect sizes
+        # with the pilot's, and treat anything that did not replicate as noise.
+        print("DECISION: this IS the confirmation. Compare its effects with the pilot's;")
+        print("          an effect that did not replicate is noise, not a finding.")
+    elif promote:
+        # Printed here so the rule cannot be reinterpreted in prose once the
+        # numbers are visible. It already was, once: a pilot fired this branch
         # and the write-up overrode it with "confirming a negative has little
-        # value" -- an exception that did not exist before the run. A negative
-        # confirmation is exactly what licenses "do NOT ship this ranking".
-        print("           The threshold is symmetric. A NEGATIVE gap triggers it too, and")
-        print("           confirming one is what licenses a causal claim about the arm.")
-        print("           Until the confirmation runs, report 'not supported', not 'refuted'.")
+        # value" -- an exception that did not exist before the run. A confirmed
+        # negative is exactly what licenses "do NOT ship this ranking".
+        print("DECISION: run a SEPARATE n=10/arm confirmation "
+              "(--label confirmation; do NOT pool with this pilot)")
+        print("          The threshold is symmetric. A NEGATIVE gap triggers it too, and")
+        print("          confirming one is what licenses a causal claim about the arm.")
+        print("          Until then, report 'not supported', not 'refuted'.")
+    else:
+        print("DECISION: no signal above the pre-registered threshold")
     print("NOTE: C/D remove a tool, changing its affordance AND the schema count. "
           "Report this as a file_write PRESENCE effect, not as a proven mechanism.")
     print("=" * 96)
 
 
-def reanalyze(path: Path) -> None:
+def reanalyze(path: Path, label: str = "pilot") -> None:
     """Re-score a stored run under the CURRENT metrics, without a model.
 
     `tool_rounds` is recorded raw, so the attempted/executed split can be
@@ -451,20 +457,22 @@ def reanalyze(path: Path) -> None:
     print(f"re-analysed {len(rows)} trials from {path}")
     print(f"run_id={payload['metadata'].get('run_id')} "
           f"commit={payload['metadata'].get('commit', '')[:12]}")
-    report(rows)
+    report(rows, label)
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=5, help="samples per arm")
     parser.add_argument("--out", default="")
+    parser.add_argument("--label", default="pilot", choices=["pilot", "confirmation"],
+                        help="a confirmation reports replication, it does not re-promote")
     parser.add_argument("--reanalyze", default="",
                         help="re-score a stored results JSON under current metrics; no model")
     args = parser.parse_args()
 
     if args.reanalyze:
         target = Path(args.reanalyze)
-        reanalyze(target if target.is_absolute() else INVOCATION_CWD / target)
+        reanalyze(target if target.is_absolute() else INVOCATION_CWD / target, args.label)
         return 0
 
     stamp = timestamp()
@@ -484,6 +492,7 @@ async def main() -> int:
         "model": settings.local_model,
         "cloud_policy": settings.cloud_policy,
         "runs_per_arm": args.runs,
+        "label": args.label,
         "run_id": run_id,
         "query": TARGET_QUERY,
         "fixture_sha256": hashlib.sha256(FIXTURE.encode("utf-8")).hexdigest(),
@@ -508,7 +517,7 @@ async def main() -> int:
         print(f"  {sequence:3d} arm={arm} {row['elapsed']:6.2f}s "
               f"rounds={row['tool_round_count']} tools={row['tool_order']}{flag}", flush=True)
 
-    report(rows)
+    report(rows, args.label)
     print(f"raw -> {out_path}")
     return 0
 

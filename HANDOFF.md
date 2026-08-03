@@ -188,12 +188,13 @@ yamalanacak bir şey değil.
 ## Doğrulama (2026-08-02/03, bu oturumda çalıştırıldı)
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q                        # 2853 passed, 5 deselected, 6 dk 18 sn
+.venv\Scripts\python.exe -m pytest -q                        # 2855 passed, 5 deselected, 5 dk 51 sn
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests  # All checks passed!
-.venv\Scripts\python.exe scripts\plot_intent_ab.py --runs 5  # 2×2 pilot, 20 canlı tur
+.venv\Scripts\python.exe scripts\plot_intent_ab.py --runs 5   # 2×2 pilot, 20 canlı tur
+.venv\Scripts\python.exe scripts\plot_intent_ab.py --runs 10 --label confirmation  # 40 tur
 ```
 
-Suite 2739 → **2853** (bu oturumda +114 test, 8 yeni dosya). **Her düzeltme, düzeltme olmadan düşen
+Suite 2739 → **2855** (bu oturumda +116 test, 8 yeni dosya). **Her düzeltme, düzeltme olmadan düşen
 bir testle bağlandı** — hazırlığın P0'ı ve monitör için bunu geri-alma koşusuyla fiilen doğruladım
 (P0: 2 test düştü; monitör: *"blocked for 10.0s"*).
 
@@ -306,20 +307,52 @@ olmaması (`executed` −0.50). D'nin cevaplarında görünen de bu: *"`path` ve
 parametresi eksik"*, `[INVALID_ARGS:y]`. Yani orijinal hipotezin **öncülü** —
 "geç sırada olduğu için seçilmiyor" — pilot verisinde desteklenmiyor.
 
-**Durum: "desteklenmedi", "çürüdü" DEĞİL.** Önceden yazılmış eşik (≥2/5) D'nin −4/5'i ile
-aşıldı, yani protokol bağımsız bir `n=10/arm` doğrulama koşusu gerektiriyor. O koşmadan
-nedensel karar verilmiyor ve **üretim ranking'i değiştirilmiyor.**
+## Doğrulama koşusu KOŞULDU — n=10/arm, 40 tur (2026-08-03)
 
-**İki yan gözlem:**
+Protokol gereği bağımsız koşu; pilot örnekleriyle **havuzlanmadı**.
 
-- **Kontrol burada 4/5, gate koşusunda 2/5** — aynı sorgu, aynı model, n=5 vs n=5
-  (Fisher p≈0.24, anlamlı değil). Farkın kendisi kayda değer: **0. tur yüksek varyanslı**,
-  gate'in 2/5'i "sistemin gerçek oranı" değil.
-- **20 turun hiçbirinde kaynak mutasyonu yok**, `file_write` sunulan 10 turda bile.
+| arm | nesne | denendi | çalıştı | | pilot nesne |
+|---|---|---|---|---|---|
+| A (kontrol) | 8/10 | 8/10 | 8/10 | | 4/5 |
+| B (öne, fw var) | **4/10** | **10/10** | **4/10** | | 3/5 |
+| C (mevcut, fw yok) | 9/10 | 10/10 | 10/10 | | 5/5 |
+| D (öne, fw yok) | 5/10 | 7/10 | 5/10 | | **0/5** |
 
-**Ham veri:** `.eval-results/plot-intent-ab/` (gitignore'da — dizin adı, `run_id` ve
-`commit` her JSON'un `metadata` bloğunda). Pilot: `run_id=20260803T041417+0300-0e1df18f`,
-`commit=19690814395a`.
+```
+                     DOĞRULAMA (n=10)              PİLOT (n=5)
+object_created       öne -0.40 · fw -0.10 · etk +0.00   |  öne -0.60 · fw +0.20 · etk -0.80
+plot_data_attempted  öne -0.05 · fw +0.05 · etk -0.50   |  öne +0.00 · fw +0.00 · etk -0.40
+plot_data_executed   öne -0.45 · fw -0.15 · etk -0.10   |  öne -0.50 · fw +0.10 · etk -0.60
+```
+
+**Tekrarlanan:** `plot_data`'yı öne almanın nesne oluşturmayı **düşürmesi** (−0.60 → −0.40) ve
+çalıştırmayı düşürmesi (−0.50 → −0.45); **seçimi etkilememesi** (−0.05, +0.00).
+
+**Tekrarlanmayan:** pilotun manşeti olan **etkileşim −0.80 → +0.00**, ve D **0/5 → 5/10**.
+Yani "D yıkıcı" bulgusu **gürültüydü** — pilotu tek başına rapor etseydim yanlış bir nedensel
+hikâye anlatmış olurdum. Doğrulamayı atlama gerekçem tam da bu yüzden yanlıştı.
+
+**`file_write` etkisi de gürültü:** +0.20 → −0.10, işaret değiştiriyor.
+
+### Nedensel karar (artık verilebilir)
+
+- **`plot_data`'yı öne alma üretimde YAPILMAMALI.** İki bağımsız koşuda da nesne oluşturmayı
+  düşürüyor. Mekanizma tutarlı: B'de model aracı **10/10 deniyor**, yalnız **4/10**
+  çalışıyor — argümanlar geçersiz (*"`path` eksik"*, `[INVALID_ARGS:y]`).
+- **Orijinal hipotezin öncülü desteklenmedi.** "6. sırada olduğu için seçilmiyor" yanlış:
+  seçim oranı konumdan bağımsız (kontrol 8/10 deniyor).
+- **Gelecekteki intent-aware ranking için kural:** "çıktı aracını öne taşı" sezgisi bu modelde
+  ters teper. Ölçülmüş bir uyarı olarak kayda geçti.
+
+**Yan gözlem:** kontrol burada **8/10**, gate koşusunda **2/5**. Bu fark açıklanmadı ve
+gate'in 2/5'i **sistemin kararlı oranı değil.** 60 turun (pilot+doğrulama) hiçbirinde kaynak
+mutasyonu yok.
+
+**Ham veri:** `.eval-results/plot-intent-ab/` (gitignore'da; `run_id` + `commit` her JSON'un
+`metadata` bloğunda).
+Pilot: `run_id=20260803T041417+0300-0e1df18f`, `commit=19690814395a`.
+Doğrulama: `plot_intent_ab_20260803T053849+0300.json`, `label=confirmation`.
+Yeniden analiz için model gerekmez: `plot_intent_ab.py --reanalyze <json> --label confirmation`.
 
 ---
 
