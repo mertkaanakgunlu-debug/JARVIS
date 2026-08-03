@@ -249,6 +249,39 @@ def test_a_clean_run_with_enough_samples_passes():
     assert report.gate_pass is True
 
 
+def test_two_arms_with_colliding_run_indices_stay_separate_chains():
+    """`--arm both` numbers runs 0..n-1 inside EACH arm. Grouping on `run`
+    alone fused fast#0 and reasoning#0 into one 14-row "chain", which then
+    failed the length check -- the on-screen report filtered by arm first and
+    never saw it, the stored summary did."""
+    rows = []
+    for arm in ("fast", "reasoning"):
+        for run in range(MIN_ELIGIBLE):
+            chain = _chain(run, created=True, eligible_after=True)
+            for row in chain:
+                row["arm"] = arm
+            rows.extend(chain)
+
+    report = aggregate(rows)
+
+    assert report.full_chain_unconditional == (6, 6), "chains were fused across arms"
+    assert report.gate_pass is True
+
+
+def test_a_conditional_step_with_no_rows_is_not_silently_covered():
+    """An absent step is unobserved, which is the definition of insufficient --
+    the previous `if s in by_index` filter dropped it and let all() pass."""
+    rows = []
+    for run in range(MIN_ELIGIBLE):
+        chain = _chain(run, created=True, eligible_after=True)
+        rows.extend(r for r in chain if r["step"] != STEP_UNDO)   # run truncated
+
+    report = aggregate(rows)
+
+    assert report.coverage_status == "INSUFFICIENT"
+    assert report.gate_pass is False
+
+
 def test_enough_samples_but_a_real_failure_still_fails():
     rows = []
     for run in range(MIN_ELIGIBLE):

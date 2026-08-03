@@ -268,52 +268,58 @@ Normalizasyon artık **store'da** (`WorkingSetStore.bare_id`), her tüketici iç
 `email`/`report`/`table` araçları aynı boşluğu yeniden açamaz. 4 regresyon testi; fix olmadan
 3'ü düşüyor.
 
-## Araç sırası hipotezi ÖLÇÜLDÜ — ve çürüdü (2026-08-03)
+## Araç sırası hipotezi — pilot koşuldu, DOĞRULAMA BEKLİYOR (2026-08-03)
 
-Hipotez şuydu: `plot_data` alt kümede 6. sırada göründüğü için model dosyayı okuyup duruyor.
+Hipotez: `plot_data` alt kümede 6. sırada göründüğü için model dosyayı okuyup duruyor.
 `scripts/plot_intent_ab.py --runs 5` ile 2×2, yalnız 0. tur, 20 canlı tur, dengeli blok
-sırası (`A B C D / B C D A / ...`). Müdahale **yalnız harness'ta** — üretim kodu değişmedi.
+sırası. Müdahale **yalnız harness'ta** — üretim kodu değişmedi.
 
-| arm | sıra | `file_write` | nesne oluştu | `plot_data` çağrıldı |
-|---|---|---|---|---|
-| A (kontrol) | mevcut | var | 4/5 | 4/5 |
-| B | `plot_data` öne | var | 3/5 | 3/5 |
-| C | mevcut | yok | **5/5** | 5/5 |
-| D | `plot_data` öne | yok | **0/5** | 1/5 |
+**Bu bölüm bir kez yanlış yazıldı ve düzeltildi — iki ayrı hata:**
+
+1. **Metrik yanlış adlandırılmıştı.** `plot_data_called` `on_tool_start`'tan hesaplanıyordu,
+   ama args doğrulamasında reddedilen çağrı oraya hiç ulaşmıyor. Yani ölçülen şey *"model
+   aracı seçti mi"* değil, *"çağrı doğrulamayı geçip çalıştı mı"*ydı. D için yazdığım
+   "1/5 çağrıldı" **modelin aracı aramadığı** gibi okunuyordu — gerçeğin tersi.
+2. **Önceden kayıtlı karar kuralını sonucu gördükten sonra deldim.** Harness
+   `run a SEPARATE n=10/arm confirmation` bastı; ben "negatif sonucu doğrulamanın değeri yok"
+   diye deneyden **önce yazılmamış** bir istisna uydurdum. Eşik simetriktir.
+
+Ham `tool_rounds` kaydedildiği için pilot **modeli yeniden koşmadan** yeniden analiz edildi
+(`--reanalyze`):
+
+| arm | sıra | `file_write` | nesne | `plot_data` **denendi** | **çalıştı** |
+|---|---|---|---|---|---|
+| A (kontrol) | mevcut | var | 4/5 | 4/5 | 4/5 |
+| B | `plot_data` öne | var | 3/5 | 5/5 | 3/5 |
+| C | mevcut | yok | 5/5 | 5/5 | 5/5 |
+| D | `plot_data` öne | yok | 0/5 | **4/5** | **1/5** |
 
 ```
-object_created   sıra ana etkisi -0.60 | file_write presence effect -0.20 | etkileşim -0.80
-plot_data_called sıra ana etkisi -0.50 | file_write presence effect -0.10 | etkileşim -0.60
+object_created       plot-forward -0.60 | file_write PRESENCE +0.20 | etkileşim -0.80
+plot_data_attempted  plot-forward +0.00 | file_write PRESENCE +0.00 | etkileşim -0.40
+plot_data_executed   plot-forward -0.50 | file_write PRESENCE +0.10 | etkileşim -0.60
 ```
 
-**Sırayı öne almak yardım etmiyor, zarar veriyor** — ve `file_write` kaldırmasıyla birleşince
-yıkıcı (D = 0/5). Mekanizma D'nin cevap metinlerinde görünüyor: model `plot_data`'ya **daha
-erken uzanıyor ama argümanları eksik** — *"`path` veya `data_json` parametresi eksik"*,
-`[INVALID_ARGS:y]`. Bu çağrılar args doğrulamasında reddedildiği için `on_tool_start` hiç
-ateşlenmiyor; `plot_data_called` 1/5 görünmesinin sebebi bu. Yani aracı öne almak, modelin
-**dosyayı tanımadan** çizmeye kalkmasına yol açıyor. Tutarlı bir açıklama, kanıtlanmış
-mekanizma değil.
+**Ayrım her şeyi değiştiriyor:** sıra, modelin aracı **seçmesini hiç etkilemiyor**
+(`attempted` ana etkisi **+0.00**). Etkilediği şey, çağrının argümanlarının geçerli olup
+olmaması (`executed` −0.50). D'nin cevaplarında görünen de bu: *"`path` veya `data_json`
+parametresi eksik"*, `[INVALID_ARGS:y]`. Yani orijinal hipotezin **öncülü** —
+"geç sırada olduğu için seçilmiyor" — pilot verisinde desteklenmiyor.
 
-**Aksiyon çıkmıyor.** En iyi hücre C (5/5) ama kontrole farkı yalnız **+1/5** — önceden
-yazılmış ilerletme eşiği (≥2/5) karşılanmıyor. Doğrulama koşusu tetikleyen tek fark D'nin
-−4/5'i, o da negatif bir sonuç; "D kötü"yü doğrulamanın değeri yok. **Üretim ranking'i
-değiştirilmemeli.**
+**Durum: "desteklenmedi", "çürüdü" DEĞİL.** Önceden yazılmış eşik (≥2/5) D'nin −4/5'i ile
+aşıldı, yani protokol bağımsız bir `n=10/arm` doğrulama koşusu gerektiriyor. O koşmadan
+nedensel karar verilmiyor ve **üretim ranking'i değiştirilmiyor.**
 
-**İki yan gözlem, ikisi de dürüstlük notu:**
+**İki yan gözlem:**
 
-- **Kontrol burada 4/5, gate koşusunda 2/5** — aynı sorgu, aynı model. n=5 vs n=5'te bu fark
-  anlamlı değil (Fisher p≈0.24), ama iki ölçüm arasındaki farkın kendisi kayda değer:
-  **0. tur başarısı yüksek varyanslı.** Gate'in 2/5'ini "sistemin gerçek oranı" diye okumak
-  yanlış olurdu.
-- **20 turun hiçbirinde kaynak mutasyonu yok** (`content_changed`/`write_attempted`/`deleted`
-  hepsi 0), `file_write` sunulan 10 turda bile. Faz 4'te bir kez gözlenen *"CSV'yi yeniden
-  yazdı"* davranışı demek ki **nadir**, imkânsız değil — ama sık olduğu varsayımı desteklenmedi.
+- **Kontrol burada 4/5, gate koşusunda 2/5** — aynı sorgu, aynı model, n=5 vs n=5
+  (Fisher p≈0.24, anlamlı değil). Farkın kendisi kayda değer: **0. tur yüksek varyanslı**,
+  gate'in 2/5'i "sistemin gerçek oranı" değil.
+- **20 turun hiçbirinde kaynak mutasyonu yok**, `file_write` sunulan 10 turda bile.
 
-**Sıradaki hipotez (bu koşunun ürettiği):** darboğaz sıra değil, **okuma araçları arası
-rekabet ve terminal tamamlama sözleşmesinin yokluğu.** Çoğu turda ilk çağrılan araç
-`csv_read` değil `data_analyze`. Model veriyi analiz edip *"hangi formatta istersiniz?"* diye
-soruyor ve turu bitiriyor — hiçbir katman "kullanıcı grafik istedi, grafik yok" diyemiyor.
-Bu, plandaki `required_outputs` maddesinin ölçümle desteklenen gerekçesi.
+**Ham veri:** `.eval-results/plot-intent-ab/` (gitignore'da — dizin adı, `run_id` ve
+`commit` her JSON'un `metadata` bloğunda). Pilot: `run_id=20260803T041417+0300-0e1df18f`,
+`commit=19690814395a`.
 
 ---
 

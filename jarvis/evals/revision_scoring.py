@@ -268,7 +268,13 @@ def aggregate(rows: Iterable[dict], *, chain_len: int = 7) -> GateReport:
     by_run: dict[Any, list[dict]] = {}
     for row in rows:
         by_step.setdefault(row["step"], []).append(row)
-        by_run.setdefault(row["run"], []).append(row)
+        # Keyed on (arm, run), not run alone. `--arm both` numbers its runs
+        # 0..n-1 inside EACH arm, so a run-only key silently fuses the fast and
+        # reasoning chains with the same index into one 14-row "chain" -- which
+        # would then fail the length check and under-report full chains. The
+        # on-screen report filters by arm first and never saw this; the summary
+        # written into the results file did.
+        by_run.setdefault((row.get("arm", ""), row["run"]), []).append(row)
 
     steps = [summarize_step(s, by_step[s]) for s in sorted(by_step)]
     by_index = {s.step: s for s in steps}
@@ -296,8 +302,13 @@ def aggregate(rows: Iterable[dict], *, chain_len: int = 7) -> GateReport:
         if summary is not None and not summary.passed:
             outcome_ok = False
 
+    # A conditional step that produced NO rows at all is not "covered by
+    # default" -- the `if s in by_index` filter would drop it and let all()
+    # return True over what is left, so a truncated run could report
+    # SUFFICIENT. Absent means unobserved, which is the definition of
+    # insufficient.
     coverage_ok = all(
-        by_index[s].sufficient for s in CONDITIONAL_STEPS if s in by_index
+        s in by_index and by_index[s].sufficient for s in CONDITIONAL_STEPS
     )
 
     return GateReport(

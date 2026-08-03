@@ -49,6 +49,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Captured BEFORE the chdir below, so a relative path typed on the command line
+# still means what the user meant. Same class of bug as the results file that
+# went missing: a relative path plus a chdir resolves somewhere nobody looked.
+INVOCATION_CWD = Path.cwd()
+
 SCRATCH = Path(
     os.environ.get("PLOT_AB_HOME")
     or Path(tempfile.gettempdir()) / "jarvis-plot-intent-ab"
@@ -286,7 +291,15 @@ async def run_trial(agent, *, arm: str, run_id: str, sequence: int) -> dict:
 
     after = snapshot_sources()
     obj = agent.working_set.active(conversation, KIND_CHART)
-    tools = [c["tool"] for c in TOOL_CALLS]
+    # EXECUTED: reached on_tool_start, i.e. survived args validation.
+    # ATTEMPTED: the model emitted the tool call at all.
+    # These differ, and conflating them inverts the story. A first pilot
+    # reported D as "plot_data called 1/5" -- which reads as "the model never
+    # reached for the tool". Re-read from tool_rounds, D actually ATTEMPTED it
+    # 4/5 and had the calls rejected for missing `path`/invalid `y`. The
+    # bottleneck was argument quality, not tool selection.
+    executed = [c["tool"] for c in TOOL_CALLS]
+    attempted = [t for round_tools in TOOL_ROUNDS for t in round_tools]
     write_attempts = [c for c in TOOL_CALLS if c["tool"] == "file_write"]
 
     sources = {}
@@ -306,11 +319,15 @@ async def run_trial(agent, *, arm: str, run_id: str, sequence: int) -> dict:
         "conversation_id": conversation,
         # PRIMARY endpoint: the acceptance outcome.
         "object_created": obj is not None,
-        # SECONDARY: behavioural signal. A model can call plot_data and still
-        # fail on a bad column, so this is process, not acceptance.
-        "plot_data_called": "plot_data" in tools,
-        "first_tool": tools[0] if tools else "",
-        "tool_order": tools,
+        # SECONDARY, split. `attempted` is tool SELECTION; `executed` is
+        # selection that also produced valid arguments. A model can attempt
+        # plot_data and be rejected by args validation before the tool runs.
+        "plot_data_attempted": "plot_data" in attempted,
+        "plot_data_executed": "plot_data" in executed,
+        "first_tool_attempted": attempted[0] if attempted else "",
+        "first_tool_executed": executed[0] if executed else "",
+        "attempted_tools": attempted,
+        "tool_order": executed,
         "tool_rounds": [list(r) for r in TOOL_ROUNDS],
         "tool_round_count": len(TOOL_ROUNDS),
         # SAFETY endpoints.
@@ -346,36 +363,39 @@ def _mean(rows: list[dict], key: str) -> float:
 def report(rows: list[dict]) -> None:
     by_arm = {arm: [r for r in rows if r["arm"] == arm] for arm in ARMS}
 
-    print("\n" + "=" * 96)
-    print(f"{'arm':4s} {'order':10s} {'file_write':11s} {'object_created':>15s} "
-          f"{'plot_data':>11s} {'rounds p50':>11s} {'mutation':>9s}")
-    print("-" * 96)
+    print("\n" + "=" * 104)
+    print(f"{'arm':4s} {'order':10s} {'file_write':11s} {'object':>8s} "
+          f"{'attempt':>8s} {'exec':>8s} {'rounds p50':>11s} {'mutation':>9s}")
+    print("-" * 104)
     for arm in ARMS:
         arm_rows = by_arm[arm]
         if not arm_rows:
             continue
         created = _rate(arm_rows, "object_created")
-        called = _rate(arm_rows, "plot_data_called")
+        attempted = _rate(arm_rows, "plot_data_attempted")
+        executed = _rate(arm_rows, "plot_data_executed")
         rounds = sorted(r["tool_round_count"] for r in arm_rows)
         p50 = rounds[len(rounds) // 2] if rounds else 0
         mutated = sum(1 for r in arm_rows if r["source_content_changed"]
                       or r["source_write_attempted"] or r["source_deleted"])
         print(f"{arm:4s} {'plot-fwd' if arm in {'B','D'} else 'current':10s} "
               f"{'absent' if arm in {'C','D'} else 'present':11s} "
-              f"{created[0]:8d}/{created[1]:<5d} {called[0]:6d}/{called[1]:<4d} "
-              f"{p50:11d} {mutated:9d}")
+              f"{created[0]:4d}/{created[1]:<3d} {attempted[0]:4d}/{attempted[1]:<3d} "
+              f"{executed[0]:4d}/{executed[1]:<3d} {p50:11d} {mutated:9d}")
 
-    print("-" * 96)
+    print("-" * 104)
     # Factorial, not pairwise: "B beat A" says nothing if D lost to C.
-    for endpoint in ("object_created", "plot_data_called"):
+    # PRESENCE, not absence: A/B are the arms WITH file_write, so the contrast
+    # has to be present-minus-absent or the label contradicts the sign.
+    for endpoint in ("object_created", "plot_data_attempted", "plot_data_executed"):
         order_effect = ((_mean(by_arm["B"], endpoint) + _mean(by_arm["D"], endpoint)) / 2
                         - (_mean(by_arm["A"], endpoint) + _mean(by_arm["C"], endpoint)) / 2)
-        write_effect = ((_mean(by_arm["C"], endpoint) + _mean(by_arm["D"], endpoint)) / 2
-                        - (_mean(by_arm["A"], endpoint) + _mean(by_arm["B"], endpoint)) / 2)
+        presence_effect = ((_mean(by_arm["A"], endpoint) + _mean(by_arm["B"], endpoint)) / 2
+                           - (_mean(by_arm["C"], endpoint) + _mean(by_arm["D"], endpoint)) / 2)
         interaction = ((_mean(by_arm["D"], endpoint) - _mean(by_arm["C"], endpoint))
                        - (_mean(by_arm["B"], endpoint) - _mean(by_arm["A"], endpoint)))
-        print(f"{endpoint:20s} order main effect {order_effect:+.2f} | "
-              f"file_write presence effect {write_effect:+.2f} | "
+        print(f"{endpoint:22s} plot-forward effect {order_effect:+.2f} | "
+              f"file_write PRESENCE effect {presence_effect:+.2f} | "
               f"interaction {interaction:+.2f}")
 
     print("-" * 96)
@@ -394,20 +414,62 @@ def report(rows: list[dict]) -> None:
         "run a SEPARATE n=10/arm confirmation (do NOT pool with this pilot)"
         if promote else "no signal -- the bottleneck is not tool order or file_write presence"
     ))
+    if promote:
+        # Written here so the rule cannot be reinterpreted in prose after the
+        # numbers are visible. It already was once: a pilot fired this branch
+        # and the write-up overrode it with "confirming a negative has little
+        # value" -- an exception that did not exist before the run. A negative
+        # confirmation is exactly what licenses "do NOT ship this ranking".
+        print("           The threshold is symmetric. A NEGATIVE gap triggers it too, and")
+        print("           confirming one is what licenses a causal claim about the arm.")
+        print("           Until the confirmation runs, report 'not supported', not 'refuted'.")
     print("NOTE: C/D remove a tool, changing its affordance AND the schema count. "
           "Report this as a file_write PRESENCE effect, not as a proven mechanism.")
     print("=" * 96)
+
+
+def reanalyze(path: Path) -> None:
+    """Re-score a stored run under the CURRENT metrics, without a model.
+
+    `tool_rounds` is recorded raw, so the attempted/executed split can be
+    recovered from a run made before that split existed -- which is why the
+    first pilot did not need re-running when its `plot_data_called` metric
+    turned out to mean `plot_data_executed`.
+    """
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    rows = payload["rows"]
+    for row in rows:
+        attempted = [t for rd in row.get("tool_rounds", []) for t in rd]
+        executed = row.get("tool_order", [])
+        row.setdefault("attempted_tools", attempted)
+        row["plot_data_attempted"] = "plot_data" in attempted
+        row["plot_data_executed"] = (
+            row.get("plot_data_executed", "plot_data" in executed)
+        )
+        row.setdefault("first_tool_attempted", attempted[0] if attempted else "")
+        row.setdefault("first_tool_executed", executed[0] if executed else "")
+    print(f"re-analysed {len(rows)} trials from {path}")
+    print(f"run_id={payload['metadata'].get('run_id')} "
+          f"commit={payload['metadata'].get('commit', '')[:12]}")
+    report(rows)
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=5, help="samples per arm")
     parser.add_argument("--out", default="")
+    parser.add_argument("--reanalyze", default="",
+                        help="re-score a stored results JSON under current metrics; no model")
     args = parser.parse_args()
+
+    if args.reanalyze:
+        target = Path(args.reanalyze)
+        reanalyze(target if target.is_absolute() else INVOCATION_CWD / target)
+        return 0
 
     stamp = timestamp()
     run_id = f"{stamp}-{uuid.uuid4().hex[:8]}"
-    out_path = Path(args.out).resolve() if args.out else default_path("plot-intent-ab", stamp)
+    out_path = (INVOCATION_CWD / args.out).resolve() if args.out else default_path("plot-intent-ab", stamp)
 
     settings = Settings()
     schedule = build_schedule(args.runs)
