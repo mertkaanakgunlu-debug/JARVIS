@@ -1,0 +1,1165 @@
+{
+ "metadata": {
+  "gate": "plot-intent-ab",
+  "started_at": "2026-08-03T05:38:49+03:00",
+  "commit": "b1937cd9e4b03a93ca970a909329bd8c1ba8b7bc",
+  "model": "qwen3:8b",
+  "cloud_policy": "off",
+  "runs_per_arm": 10,
+  "run_id": "20260803T053849+0300-59c0eca1",
+  "query": "Masaüstündeki satis.csv dosyasının aylık satış grafiğini çiz",
+  "fixture_sha256": "7b4ee1c1904feecbf3194e753067939a566f31a6332229ff9dbda9514429b3fc",
+  "schedule": [
+   "A",
+   "B",
+   "C",
+   "D",
+   "B",
+   "C",
+   "D",
+   "A",
+   "C",
+   "D",
+   "A",
+   "B",
+   "D",
+   "A",
+   "B",
+   "C",
+   "C",
+   "A",
+   "B",
+   "D",
+   "A",
+   "B",
+   "C",
+   "D",
+   "B",
+   "C",
+   "D",
+   "A",
+   "C",
+   "D",
+   "A",
+   "B",
+   "D",
+   "A",
+   "B",
+   "C",
+   "C",
+   "A",
+   "B",
+   "D"
+  ],
+  "raw_filename": "plot_intent_ab_20260803T053849+0300.json",
+  "raw_sha256": "dadac2a44900672a4397f84a06951aab9d9ca2c50fde8f65d19e384ec24598cb",
+  "note": "Sanitized derivative. Synthetic fixture; no model prose, no paths."
+ },
+ "rows": [
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-000-A",
+   "arm": "A",
+   "sequence": 0,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 45.09,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-001-B",
+   "arm": "B",
+   "sequence": 1,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 68.57,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-002-C",
+   "arm": "C",
+   "sequence": 2,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ],
+    [
+     "chart_revise"
+    ]
+   ],
+   "tool_order": [
+    "plot_data",
+    "chart_revise"
+   ],
+   "attempted_tools": [
+    "plot_data",
+    "chart_revise"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 92.25,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-003-D",
+   "arm": "D",
+   "sequence": 3,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 74.02,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-004-B",
+   "arm": "B",
+   "sequence": 4,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 115.06,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-005-C",
+   "arm": "C",
+   "sequence": 5,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "executed_no_object",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 68.9,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-006-D",
+   "arm": "D",
+   "sequence": 6,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 96.18,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-007-A",
+   "arm": "A",
+   "sequence": 7,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 76.21,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-008-C",
+   "arm": "C",
+   "sequence": 8,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data",
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 95.0,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-009-D",
+   "arm": "D",
+   "sequence": 9,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 55.9,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-010-A",
+   "arm": "A",
+   "sequence": 10,
+   "object_created": false,
+   "plot_data_attempted": false,
+   "plot_data_executed": false,
+   "failure_class": "not_attempted",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 58.75,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-011-B",
+   "arm": "B",
+   "sequence": 11,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 107.75,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-012-D",
+   "arm": "D",
+   "sequence": 12,
+   "object_created": false,
+   "plot_data_attempted": false,
+   "plot_data_executed": false,
+   "failure_class": "not_attempted",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 85.07,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-013-A",
+   "arm": "A",
+   "sequence": 13,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 72.31,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-014-B",
+   "arm": "B",
+   "sequence": 14,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 129.74,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-015-C",
+   "arm": "C",
+   "sequence": 15,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 42.45,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-016-C",
+   "arm": "C",
+   "sequence": 16,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 53.32,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-017-A",
+   "arm": "A",
+   "sequence": 17,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 61.26,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-018-B",
+   "arm": "B",
+   "sequence": 18,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 98.04,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-019-D",
+   "arm": "D",
+   "sequence": 19,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 42.22,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-020-A",
+   "arm": "A",
+   "sequence": 20,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 64.19,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-021-B",
+   "arm": "B",
+   "sequence": 21,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 58.64,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-022-C",
+   "arm": "C",
+   "sequence": 22,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 66.33,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-023-D",
+   "arm": "D",
+   "sequence": 23,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 49.73,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-024-B",
+   "arm": "B",
+   "sequence": 24,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 102.31,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-025-C",
+   "arm": "C",
+   "sequence": 25,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ],
+    [
+     "chart_revise"
+    ]
+   ],
+   "tool_order": [
+    "plot_data",
+    "chart_revise"
+   ],
+   "attempted_tools": [
+    "plot_data",
+    "chart_revise"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 106.16,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-026-D",
+   "arm": "D",
+   "sequence": 26,
+   "object_created": false,
+   "plot_data_attempted": false,
+   "plot_data_executed": false,
+   "failure_class": "not_attempted",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 68.73,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-027-A",
+   "arm": "A",
+   "sequence": 27,
+   "object_created": false,
+   "plot_data_attempted": false,
+   "plot_data_executed": false,
+   "failure_class": "not_attempted",
+   "tool_rounds": [
+    [
+     "file_list"
+    ]
+   ],
+   "tool_order": [
+    "file_list"
+   ],
+   "attempted_tools": [
+    "file_list"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 51.23,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-028-C",
+   "arm": "C",
+   "sequence": 28,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 56.2,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-029-D",
+   "arm": "D",
+   "sequence": 29,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 76.89,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-030-A",
+   "arm": "A",
+   "sequence": 30,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 68.64,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-031-B",
+   "arm": "B",
+   "sequence": 31,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 72.53,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-032-D",
+   "arm": "D",
+   "sequence": 32,
+   "object_created": false,
+   "plot_data_attempted": false,
+   "plot_data_executed": false,
+   "failure_class": "not_attempted",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 77.56,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-033-A",
+   "arm": "A",
+   "sequence": 33,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 56.99,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-034-B",
+   "arm": "B",
+   "sequence": 34,
+   "object_created": false,
+   "plot_data_attempted": true,
+   "plot_data_executed": false,
+   "failure_class": "attempted_not_executed",
+   "tool_rounds": [
+    [
+     "data_analyze"
+    ],
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 103.84,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-035-C",
+   "arm": "C",
+   "sequence": 35,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ],
+    [
+     "chart_revise"
+    ]
+   ],
+   "tool_order": [
+    "plot_data",
+    "chart_revise"
+   ],
+   "attempted_tools": [
+    "plot_data",
+    "chart_revise"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 2,
+   "elapsed": 110.54,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-036-C",
+   "arm": "C",
+   "sequence": 36,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 43.71,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-037-A",
+   "arm": "A",
+   "sequence": 37,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "data_analyze",
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "data_analyze",
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 57.37,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-038-B",
+   "arm": "B",
+   "sequence": 38,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 93.71,
+   "role": "reasoning"
+  },
+  {
+   "trial_id": "20260803T053849+0300-59c0eca1-039-D",
+   "arm": "D",
+   "sequence": 39,
+   "object_created": true,
+   "plot_data_attempted": true,
+   "plot_data_executed": true,
+   "failure_class": "satisfied",
+   "tool_rounds": [
+    [
+     "plot_data"
+    ]
+   ],
+   "tool_order": [
+    "plot_data"
+   ],
+   "attempted_tools": [
+    "plot_data"
+   ],
+   "source_content_changed": false,
+   "source_write_attempted": false,
+   "source_deleted": false,
+   "tool_round_count": 1,
+   "elapsed": 66.33,
+   "role": "reasoning"
+  }
+ ]
+}

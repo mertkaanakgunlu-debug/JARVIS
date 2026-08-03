@@ -43,6 +43,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -324,6 +325,18 @@ async def run_trial(agent, *, arm: str, run_id: str, sequence: int) -> dict:
         # plot_data and be rejected by args validation before the tool runs.
         "plot_data_attempted": "plot_data" in attempted,
         "plot_data_executed": "plot_data" in executed,
+        # WHICH failure, not just that one happened. The three classes have
+        # different owners: "not_attempted" is what a required-output contract
+        # would target, "attempted_not_executed" belongs to the existing
+        # args-repair path (observed cause: validation rejecting a missing
+        # `path` or an invalid `y`), and "executed_no_object" is a
+        # postcondition/wiring problem rather than a model one.
+        "failure_class": (
+            "satisfied" if obj is not None
+            else "not_attempted" if "plot_data" not in attempted
+            else "attempted_not_executed" if "plot_data" not in executed
+            else "executed_no_object"
+        ),
         "first_tool_attempted": attempted[0] if attempted else "",
         "first_tool_executed": executed[0] if executed else "",
         "attempted_tools": attempted,
@@ -384,6 +397,14 @@ def report(rows: list[dict], label: str = "pilot") -> None:
               f"{executed[0]:4d}/{executed[1]:<3d} {p50:11d} {mutated:9d}")
 
     print("-" * 104)
+    print(f"{'arm':4s} {'not_attempted':>14s} {'attempted_not_exec':>19s} "
+          f"{'executed_no_object':>19s} {'satisfied':>10s}")
+    for arm in ARMS:
+        counts = Counter(r.get("failure_class", "?") for r in by_arm[arm])
+        print(f"{arm:4s} {counts['not_attempted']:14d} {counts['attempted_not_executed']:19d} "
+              f"{counts['executed_no_object']:19d} {counts['satisfied']:10d}")
+
+    print("-" * 104)
     # Factorial, not pairwise: "B beat A" says nothing if D lost to C.
     # PRESENCE, not absence: A/B are the arms WITH file_write, so the contrast
     # has to be present-minus-absent or the label contradicts the sign.
@@ -397,6 +418,16 @@ def report(rows: list[dict], label: str = "pilot") -> None:
         print(f"{endpoint:22s} plot-forward effect {order_effect:+.2f} | "
               f"file_write PRESENCE effect {presence_effect:+.2f} | "
               f"interaction {interaction:+.2f}")
+        # SIMPLE effects, always, next to the main effect. A main effect near
+        # zero can be two opposing conditional effects cancelling -- which is
+        # exactly what plot_data_attempted does (+0.20 with file_write present,
+        # negative without), and reading only the main effect produced the
+        # false claim "ordering does not affect selection at all". Arm A is the
+        # production-like cell, so B-A is the contrast that actually applies.
+        b_minus_a = _mean(by_arm["B"], endpoint) - _mean(by_arm["A"], endpoint)
+        d_minus_c = _mean(by_arm["D"], endpoint) - _mean(by_arm["C"], endpoint)
+        print(f"{'':22s}   simple: B-A (fw present, PRODUCTION-like) {b_minus_a:+.2f} | "
+              f"D-C (fw absent) {d_minus_c:+.2f}")
 
     print("-" * 96)
     # Pre-registered before any result was seen.
@@ -454,10 +485,60 @@ def reanalyze(path: Path, label: str = "pilot") -> None:
         )
         row.setdefault("first_tool_attempted", attempted[0] if attempted else "")
         row.setdefault("first_tool_executed", executed[0] if executed else "")
+        row.setdefault("failure_class", (
+            "satisfied" if row.get("object_created")
+            else "not_attempted" if not row["plot_data_attempted"]
+            else "attempted_not_executed" if not row["plot_data_executed"]
+            else "executed_no_object"
+        ))
     print(f"re-analysed {len(rows)} trials from {path}")
     print(f"run_id={payload['metadata'].get('run_id')} "
           f"commit={payload['metadata'].get('commit', '')[:12]}")
     report(rows, label)
+
+
+# Per-trial fields safe to commit: outcome classes and the tool sequence, no
+# model prose and no filesystem paths. The fixture is synthetic, so this carries
+# no user data -- and without it the numbers an architectural decision rests on
+# are only checkable by whoever has the gitignored raw file.
+_SUMMARY_FIELDS = (
+    "trial_id", "arm", "sequence", "object_created", "plot_data_attempted",
+    "plot_data_executed", "failure_class", "tool_rounds", "tool_order",
+    "attempted_tools", "source_content_changed", "source_write_attempted",
+    "source_deleted", "tool_round_count", "elapsed", "role",
+)
+
+
+def export_summary(source: Path, destination: Path) -> None:
+    """A sanitized, committable derivative of a raw results file."""
+    raw_bytes = Path(source).read_bytes()
+    payload = json.loads(raw_bytes.decode("utf-8"))
+    rows = payload["rows"]
+    for row in rows:
+        attempted = [t for rd in row.get("tool_rounds", []) for t in rd]
+        row.setdefault("attempted_tools", attempted)
+        row.setdefault("plot_data_attempted", "plot_data" in attempted)
+        row.setdefault("plot_data_executed", "plot_data" in row.get("tool_order", []))
+        row.setdefault("failure_class", (
+            "satisfied" if row.get("object_created")
+            else "not_attempted" if not row["plot_data_attempted"]
+            else "attempted_not_executed" if not row["plot_data_executed"]
+            else "executed_no_object"
+        ))
+    out = {
+        "metadata": {
+            **{k: v for k, v in payload["metadata"].items() if k != "summary"},
+            "raw_filename": Path(source).name,
+            "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "note": "Sanitized derivative. Synthetic fixture; no model prose, no paths.",
+        },
+        "rows": [{k: r.get(k) for k in _SUMMARY_FIELDS if k in r} for r in rows],
+    }
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"summary -> {destination}  ({len(rows)} trials, "
+          f"raw sha256 {out['metadata']['raw_sha256'][:16]}...)")
 
 
 async def main() -> int:
@@ -466,9 +547,18 @@ async def main() -> int:
     parser.add_argument("--out", default="")
     parser.add_argument("--label", default="pilot", choices=["pilot", "confirmation"],
                         help="a confirmation reports replication, it does not re-promote")
+    parser.add_argument("--export-summary", nargs=2, metavar=("RAW", "DEST"), default=None,
+                        help="write a sanitized, committable derivative of a raw results file")
     parser.add_argument("--reanalyze", default="",
                         help="re-score a stored results JSON under current metrics; no model")
     args = parser.parse_args()
+
+    if args.export_summary:
+        raw, dest = args.export_summary
+        rp, dp = Path(raw), Path(dest)
+        export_summary(rp if rp.is_absolute() else INVOCATION_CWD / rp,
+                       dp if dp.is_absolute() else INVOCATION_CWD / dp)
+        return 0
 
     if args.reanalyze:
         target = Path(args.reanalyze)

@@ -326,7 +326,21 @@ plot_data_executed   öne -0.45 · fw -0.15 · etk -0.10   |  öne -0.50 · fw +
 ```
 
 **Tekrarlanan:** `plot_data`'yı öne almanın nesne oluşturmayı **düşürmesi** (−0.60 → −0.40) ve
-çalıştırmayı düşürmesi (−0.50 → −0.45); **seçimi etkilememesi** (−0.05, +0.00).
+çalıştırmayı düşürmesi (−0.50 → −0.45).
+
+**DÜZELTME — "seçimi etkilemiyor" dedim, yanlıştı.** `attempted`'ın ana etkisi ≈0 (+0.00 /
+−0.05) ama bu, **birbirini götüren iki zıt koşullu etkiyi gizliyor**; etkileşim iki koşuda da
+güçlü ve aynı yönde (−0.40 / −0.50):
+
+| `plot_data` denendi | pilot | doğrulama |
+|---|---|---|
+| `file_write` VAR — **B−A (üretim benzeri)** | **+0.20** | **+0.20** |
+| `file_write` YOK — D−C | −0.20 | −0.30 |
+
+Üretim konfigürasyonu `file_write` içeren A koluna karşılık geldiğine göre ilgili karşılaştırma
+**B−A**, ve orada öne alma seçimi **her iki koşuda da +20 puan artırıyor**. Ana etkiye bakıp
+"konumdan bağımsız" demek, bu oturumda iki kez yaptığım hatanın (ikili yerine faktöriyel oku)
+tersten hâli. Rapor artık basit etkileri ana etkinin yanında basıyor.
 
 **Tekrarlanmayan:** pilotun manşeti olan **etkileşim −0.80 → +0.00**, ve D **0/5 → 5/10**.
 Yani "D yıkıcı" bulgusu **gürültüydü** — pilotu tek başına rapor etseydim yanlış bir nedensel
@@ -337,22 +351,49 @@ hikâye anlatmış olurdum. Doğrulamayı atlama gerekçem tam da bu yüzden yan
 ### Nedensel karar (artık verilebilir)
 
 - **`plot_data`'yı öne alma üretimde YAPILMAMALI.** İki bağımsız koşuda da nesne oluşturmayı
-  düşürüyor. Mekanizma tutarlı: B'de model aracı **10/10 deniyor**, yalnız **4/10**
-  çalışıyor — argümanlar geçersiz (*"`path` eksik"*, `[INVALID_ARGS:y]`).
-- **Orijinal hipotezin öncülü desteklenmedi.** "6. sırada olduğu için seçilmiyor" yanlış:
-  seçim oranı konumdan bağımsız (kontrol 8/10 deniyor).
-- **Gelecekteki intent-aware ranking için kural:** "çıktı aracını öne taşı" sezgisi bu modelde
-  ters teper. Ölçülmüş bir uyarı olarak kayda geçti.
+  düşürüyor (B−A: −0.40 doğrulamada). Mekanizma tutarlı: B'de model aracı **10/10 deniyor**,
+  yalnız **4/10** çalışıyor — argümanlar geçersiz (*"`path` eksik"*, `[INVALID_ARGS:y]`).
+- **Öne alma seçimi ARTIRIYOR ama tamamlanmayı artırmıyor.** Doğru ifade bu: aracı görünür
+  kılmak modele onu seçtiriyor (+0.20), fakat görevi bitirtmiyor. Yani **darboğaz "araç
+  seçilmiyor" değil.**
+- **Orijinal hipotezin öncülü tam olarak "yanlış" değil, sınırlı.** Geç sıra üretim benzeri
+  kolda seçimi bir miktar azaltıyor olabilir; ama seçimi artırmak sonucu düzeltmiyor. Asıl
+  problem seçilen aracın **geçerli argümanlarla çalıştırılamaması** ve modelin **eksik çıktıyla
+  turu bitirebilmesi.**
+- **Gelecekteki intent-aware ranking için kural:** "çıktı aracını öne taşı" sezgisi seçimi
+  artırsa da sonucu bozuyor. Ölçülmüş bir uyarı olarak kayda geçti.
+
+### Hata sınıfları — `required_outputs`'un neyi hedefleyeceğini bunlar söylüyor
+
+| arm | denenmedi | denendi, çalışmadı | çalıştı, nesne yok | nesne |
+|---|---|---|---|---|
+| **A (üretim benzeri)** | **2** | 0 | 0 | 8 |
+| B | 0 | **6** | 0 | 4 |
+| C | 0 | 0 | 1 | 9 |
+| D | 3 | 2 | 0 | 5 |
+
+**Üretim kontrolündeki iki başarısızlığın ikisi de "hiç denenmedi"** — tamamlama sözleşmesinin
+tam hedefi. B'nin altı başarısızlığı ise **invalid-args**, yani mevcut `args_repair_attempted`
+yolunun sorumluluğu, sözleşmenin değil. C'deki tek başarısızlık `executed_no_object` — bu bir
+model eksikliği değil, **postcondition/tool wiring** ihlali ve telemetride ayrı sert hata
+olmalı. Sözleşme bu dört durumu ayırmadan tasarlanırsa yanlış katmanı onarmaya çalışır.
 
 **Yan gözlem:** kontrol burada **8/10**, gate koşusunda **2/5**. Bu fark açıklanmadı ve
 gate'in 2/5'i **sistemin kararlı oranı değil.** 60 turun (pilot+doğrulama) hiçbirinde kaynak
 mutasyonu yok.
 
-**Ham veri:** `.eval-results/plot-intent-ab/` (gitignore'da; `run_id` + `commit` her JSON'un
-`metadata` bloğunda).
-Pilot: `run_id=20260803T041417+0300-0e1df18f`, `commit=19690814395a`.
-Doğrulama: `plot_intent_ab_20260803T053849+0300.json`, `label=confirmation`.
-Yeniden analiz için model gerekmez: `plot_intent_ab.py --reanalyze <json> --label confirmation`.
+**Ham veri ve denetlenebilirlik.** Ham koşular `.eval-results/plot-intent-ab/` altında ve
+gitignore'da (model nesri + mutlak yollar içeriyor). Mimari kararın dayandığı sayılar
+**commit'li**:
+
+```
+docs/eval-results/plot_intent_pilot_summary.json         (20 trial, raw sha256 f25c5697…)
+docs/eval-results/plot_intent_confirmation_summary.json  (40 trial, raw sha256 dadac2a4…)
+```
+
+Trial başına yalnız sonuç sınıfları ve araç dizisi — fixture sentetik olduğu için gizlilik
+riski yok. Üretimi: `plot_intent_ab.py --export-summary <raw> <dest>`.
+Modelsiz yeniden analiz: `plot_intent_ab.py --reanalyze <json> --label confirmation`.
 
 ---
 
