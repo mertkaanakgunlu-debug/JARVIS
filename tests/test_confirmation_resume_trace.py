@@ -197,6 +197,89 @@ async def test_resume_stores_the_user_query_not_just_the_answer(monkeypatch):
     assert extracted == [("Baran'a raporu gönder", "resumed answer")]
 
 
+# ── the graph's terminal answer, not the discarded draft (Faz 6 önkoşulu) ──
+
+def _checkpoint(**channel_values):
+    return SimpleNamespace(checkpoint={"channel_values": {
+        "tool_execution_ledger": [], **channel_values,
+    }})
+
+
+@pytest.mark.asyncio
+async def test_resume_persists_the_terminal_response_not_the_stream(monkeypatch):
+    """chat_stream() switched to the checkpoint's terminal `response` in Faz
+    2.75 (Paket A); this path kept rebuilding the answer from its own chunks.
+
+    Everything that REPLACES an answer after it was produced -- the critic's
+    revision, `verify`'s unbacked-claim repair, its honest-failure block --
+    writes state["response"] and keeps its tokens out of the stream. So on a
+    confirmed turn, history/memory got the draft that was thrown away.
+    """
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _fake_stream)
+    agent = _FakeResumeAgent({
+        "c1": {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None},
+    })
+    agent._checkpointer = SimpleNamespace(get_tuple=lambda cfg: _checkpoint(
+        user_query="Baran'a raporu gönder", response="corrected answer",
+    ))
+    stored: list[tuple] = []
+    agent.memory = SimpleNamespace(
+        store=lambda role, text, sid: stored.append((role, text)),
+        log_turn=lambda *a, **k: None,
+    )
+
+    chunks = [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert ("assistant", "corrected answer") in stored
+    assert not any(text == "resumed answer" for _, text in stored)
+    _, saved_history, _ = agent.saved_turns[-1]
+    assert any(
+        getattr(m, "content", "") == "corrected answer" for m in saved_history
+    ), "history must carry the terminal answer"
+    # ...and the user is TOLD, since the draft's tokens are already gone out.
+    assert any("__jarvis_final__" in c for c in chunks)
+    assert any("corrected answer" in c for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_resume_emits_no_correction_marker_when_nothing_changed(monkeypatch):
+    """The marker means 'actually, this' -- an unchanged answer must not
+    make every confirmed turn end with a redundant JSON frame."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _fake_stream)
+    agent = _FakeResumeAgent({
+        "c1": {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None},
+    })
+    agent._checkpointer = SimpleNamespace(get_tuple=lambda cfg: _checkpoint(
+        response="resumed answer",  # exactly what _fake_stream yielded
+    ))
+
+    chunks = [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert not any("__jarvis_final__" in c for c in chunks)
+    assert "".join(chunks) == "resumed answer"
+
+
+@pytest.mark.asyncio
+async def test_resume_falls_back_to_the_stream_without_a_checkpoint_response(monkeypatch):
+    """An old checkpoint (or a failed read) must persist what the user
+    actually saw rather than nothing -- same fallback chat_stream() takes."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _fake_stream)
+    agent = _FakeResumeAgent({
+        "c1": {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None},
+    })
+    agent._checkpointer = SimpleNamespace(get_tuple=lambda cfg: _checkpoint())
+    stored: list[tuple] = []
+    agent.memory = SimpleNamespace(
+        store=lambda role, text, sid: stored.append((role, text)),
+        log_turn=lambda *a, **k: None,
+    )
+
+    chunks = [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert ("assistant", "resumed answer") in stored
+    assert not any("__jarvis_final__" in c for c in chunks)
+
+
 @pytest.mark.asyncio
 async def test_resume_does_not_store_a_blank_user_row(monkeypatch):
     """An old checkpoint with no user_query must store nothing for the user

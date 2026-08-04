@@ -2305,7 +2305,7 @@ class JarvisAgent:
                 event_bus.state("idle")
                 return
 
-            full_response = "".join(chunks)
+            streamed_response = "".join(chunks)
 
             # Patch 1.1: without this, a confirmed turn's /status headline
             # kept showing the PREVIOUS turn's provider -- chat()/chat_stream()
@@ -2322,14 +2322,37 @@ class JarvisAgent:
             # and the ledger from the turn's checkpoint.
             ledger: list[dict] = []
             resumed_user_query = ""
+            terminal_response = ""
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
                 if checkpoint_tuple:
                     vals = checkpoint_tuple.checkpoint["channel_values"]
                     ledger = list(vals.get("tool_execution_ledger") or [])
                     resumed_user_query = str(vals.get("user_query") or "")
+                    terminal_response = str(vals.get("response") or "")
             except Exception:
                 pass
+
+            # The graph's TERMINAL response, not the accumulated stream -- the
+            # same rule chat_stream() adopted in Faz 2.75 (Paket A), which this
+            # path never got. Everything that REPLACES an answer after it was
+            # produced writes state["response"] and deliberately keeps its
+            # tokens out of the stream: the critic's revision, `verify`'s
+            # unbacked-claim repair, its honest-failure block. Reconstructing
+            # from `chunks` therefore persisted -- and showed -- the draft that
+            # was thrown away, on exactly the turns that ran a confirmed,
+            # risky action. Falls back to the streamed text when the checkpoint
+            # carries no response (old checkpoints, checkpointer-less tests).
+            full_response = terminal_response or streamed_response
+            if terminal_response and terminal_response != streamed_response:
+                # Tokens cannot be unsent, so the corrected text rides out on
+                # the same marker chat_stream() uses; every stream consumer
+                # already has a place to handle it (voice swallows it -- a
+                # sentence already spoken is already spoken).
+                yield json.dumps(
+                    {"__jarvis_final__": True, "text": terminal_response},
+                    ensure_ascii=False,
+                )
             exchange = _compact_completed_turn_for_history(
                 HumanMessage(content=resumed_user_query or "[onaylanan araç eylemi]"),
                 full_response,
