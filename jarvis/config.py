@@ -119,6 +119,29 @@ class Settings(BaseSettings):
         "off", "shadow", "enforce_read_only", "enforce_reversible", "enforce_all"
     ] = "shadow"
 
+    # Post-MVP Faz 6 (2026-08-03): the completion contract's own ladder --
+    # deliberately NOT folded into execution_contract_mode above, whose
+    # default is already "shadow" and whose node returns early on "off". A
+    # single switch would have made "execution contract off" silently mean
+    # "completion contract off" too, and the two answer different questions:
+    # that one asks whether the ANSWER is backed by evidence, this one asks
+    # whether the OUTPUT the user explicitly asked for was produced at all.
+    #
+    # off     the output_contract node is never even added to the graph, so
+    #         node set, edge map, initial state and checkpoint shape are
+    #         bit-for-bit what they were before this feature. The rollback.
+    # shadow  classify + record, and touch NOTHING else: no answer edit, no
+    #         repair, no shared repair budget, no streaming buffer.
+    # enforce one bounded completion repair, code-authored honest answers for
+    #         the classes that must never be retried, and contracted turns
+    #         buffered on the streaming surfaces.
+    #
+    # Starts at "off" rather than "shadow" (the honesty kernel's choice)
+    # because this one is measured before it is trusted: promotion is gated
+    # on a pre-registered A/B whose threshold was written before the run --
+    # see the plan's measurement section.
+    required_outputs_mode: Literal["off", "shadow", "enforce"] = "off"
+
     # Agent Runtime rev.2, Faz 2 (2026-07-21): how long a prepare_execution-
     # minted ExecutionRequest's HMAC approval stays valid. Unlike
     # execution_contract_mode above, approval binding itself is NOT part of

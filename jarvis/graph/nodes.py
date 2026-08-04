@@ -31,6 +31,11 @@ from datetime import datetime, timezone
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from jarvis.execution.context import ExecutionContext
+from jarvis.graph.repair_budget import (  # Post-MVP Faz 6: one corrective repair per turn
+    claim_budget,
+    corrective_repair_spent,
+    shared_budget_spent,
+)
 from jarvis.graph.state import JarvisState
 from jarvis.graph.tool_router import ToolRoute  # Faz 1.4: history-echo guard reads the turn's route
 
@@ -567,7 +572,18 @@ def make_verification_node(settings=None):
                 "unbacked_claim", mode=mode, enforced=enforce,
                 reasons=verdict.reasons, files=verdict.unbacked_files,
             )
-            if enforce:
+            # Post-MVP Faz 6: under an enforced output contract the turn's ONE
+            # corrective repair is shared, so an invalid-args or completion
+            # repair already spent leaves this gate with nothing to spend --
+            # and that is safe, because this gate's fallback is not "let the
+            # claim through", it is honest_failure_report() + blocked. The
+            # answer is still never allowed to be wrong; it just does not get
+            # a second draft. Deliberately reads the CONTRACT-SCOPED
+            # predicate: on an unscoped turn (no required output, or the
+            # feature off/shadow) an args repair must NOT close this gate,
+            # which is exactly how it behaved before the budget was shared.
+            budget_free = not shared_budget_spent(state, settings)
+            if enforce and budget_free:
                 # Exactly one bounded repair round (plan item 5) -- never a
                 # loop. If the second draft is still contradicted the user
                 # gets an honest report rather than a third attempt: this is
@@ -616,6 +632,17 @@ def make_verification_node(settings=None):
                 else:
                     blocked = True
                     text = honest_failure_report(second, _is_turkish(state))
+                out = {
+                    "messages": [AIMessage(content=text)], "response": text,
+                    **claim_budget(state, settings, "unbacked_claim"),
+                }
+            elif enforce:
+                # Enforcing, but the turn's one corrective repair is already
+                # spent. The claim still does not get through: no second
+                # draft, straight to the honest report. Losing the retry
+                # costs a better-worded answer, never a truthful one.
+                blocked = True
+                text = honest_failure_report(verdict, _is_turkish(state))
                 out = {"messages": [AIMessage(content=text)], "response": text}
 
         rollout.record_claim_gate(
@@ -1186,7 +1213,13 @@ def make_confirmation_node(settings):
                     reason=f"{first.get('loc')}: {first.get('msg')}"[:200], **rich,
                 )
 
-            already_repaired = bool(state.get("args_repair_attempted"))
+            # Post-MVP Faz 6: `args_repair_attempted` still owns this path,
+            # but under an enforced output contract the turn's ONE corrective
+            # repair is shared with the completion contract and the claim
+            # gate -- so a completion repair already spent closes this one
+            # too. Contract-scoped: on every other turn this reduces to the
+            # pre-contract flag exactly. See jarvis/graph/repair_budget.py.
+            already_repaired = corrective_repair_spent(state, settings)
             if not already_repaired:
                 def _stub_for(tc: dict) -> ToolMessage:
                     entry = invalid_by_id.get(tc.get("id", ""))
@@ -1211,7 +1244,10 @@ def make_confirmation_node(settings):
                     "the missing/fixed field(s). If it fails again, stop and tell the "
                     "user what information is missing instead of retrying further.",
                     per_call_stubs=[_stub_for(tc) for tc in batch],
-                    extra={"args_repair_attempted": True},
+                    extra={
+                        "args_repair_attempted": True,
+                        **claim_budget(state, settings, "invalid_args"),
+                    },
                 )
 
             # Repair already used once this turn -- exhausted. Compose the
