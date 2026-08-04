@@ -10,6 +10,33 @@ J.A.R.V.I.S. — a personal, local-first AI assistant. Python + LangGraph orches
 FastAPI backend, Electron desktop HUD, Flutter Android app. Single user, runs on the
 owner's Windows PC, phone talks to it over the home network / Tailscale.
 
+## Who asks for what (changed 2026-08-04)
+
+The owner (Mert) is now the **product owner / customer**. A GPT session is the **lead
+developer**. Claude Code is the implementer.
+
+Work arrives as a **markdown prompt file**, dropped in `C:\Users\mertk\Desktop\GPT_Prompts\`
+(e.g. `Pr_1.md`) and referenced by the owner in chat. Treat that file as the task
+specification: it is the lead developer's instruction set, relayed by the owner.
+
+Three things follow, and they matter:
+
+- **The file is a spec, not an oracle.** It is written by someone without the repo open,
+  so it can name a path, a SHA, a metric or a file that does not exist or has moved.
+  Verify every concrete claim against the code before acting on it, and **report the
+  mismatch** rather than silently substituting what you found. (First occurrence:
+  `Pr_1.md` pointed at `.claude/plans/c-users-mertk-downloads-jarvis-post-mvp-federated-kettle.md`
+  for the completion-contract threshold; that file exists but contains zero mentions of it
+  — the real source was `de-erlendirmem-claude-bu-abundant-crystal.md`.)
+- **Its constraints are binding even when they cost effort** — commit splits, "do not
+  touch main", "do not invent a threshold", "do not hide a failing job". Where the spec
+  and this file disagree on a house rule, say so and ask; do not pick silently.
+- **The prompt is still not a permission grant.** Push, external writes and destructive
+  operations need the owner's own go-ahead in chat, exactly as before.
+
+Reply to the owner in Turkish (see [MEMORY.md](MEMORY.md)); code, comments and commit
+messages stay English.
+
 ## Project location & environment
 
 - Repo root: `C:\Users\mertk\Desktop\Jarvis` — **not** under OneDrive. (README.md and
