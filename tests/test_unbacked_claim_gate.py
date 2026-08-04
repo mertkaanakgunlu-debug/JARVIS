@@ -425,20 +425,42 @@ async def test_exactly_one_gate_row_per_turn(monkeypatch, rollout_metrics_file):
 
 # ── graph wiring: the gate is only as good as the paths it sits on ─────────
 
-def test_every_path_to_end_passes_verify():
+@pytest.mark.parametrize("required_outputs_mode", ["off", "shadow", "enforce"])
+def test_every_path_to_end_passes_verify(required_outputs_mode, tmp_path):
     """Found by reading the live graph, not by a test: compose is NOT on
     every path to END, so a gate inside it never saw a plain conversational
     turn -- the single most likely shape of "claimed a file, called no
-    tool". Asserted against the real edge map so moving it back is a red
-    test, not a silent regression."""
-    import inspect
+    tool".
 
-    import jarvis.graph.graph as graph_mod
+    Asserted against the COMPILED edge map rather than build_graph's source
+    text, and across every rollout mode. The source check this replaced
+    matched two literal strings, so Post-MVP Faz 6 broke it simply by naming
+    the destination `terminal_target` -- while the property itself still
+    held. A wiring invariant should fail when the WIRING changes, not when
+    the spelling does; and the version that reads the real graph also proves
+    something the string version could not, namely that inserting
+    output_contract ahead of verify did not open a second route to END.
+    """
+    from unittest.mock import MagicMock
 
-    src = inspect.getsource(graph_mod.build_graph)
-    assert '{"compose": "compose", END: "verify"}' in src, "critic must end via verify"
-    assert '"agent": "agent", END: "verify"' in src, "confirmation must end via verify"
-    assert 'builder.add_edge("verify", END)' in src
+    from jarvis.graph.graph import build_graph
+
+    graph = build_graph(
+        Settings(_env_file=None, required_outputs_mode=required_outputs_mode),
+        tmp_path, MagicMock(),
+    ).get_graph()
+
+    reaches_end = {e.source for e in graph.edges if e.target == "__end__"}
+    assert reaches_end == {"verify"}, (
+        f"{sorted(reaches_end - {'verify'})} can finish a turn without the gate"
+    )
+
+    # ...and the nodes that DECIDE a turn is over still route into the chain
+    # that ends at verify, rather than to some node that merely happens to.
+    terminal = "output_contract" if required_outputs_mode != "off" else "verify"
+    ends_at = {(e.source, e.target) for e in graph.edges if str(e.data or "") == "__end__"}
+    assert ("critic", terminal) in ends_at
+    assert ("confirmation", terminal) in ends_at
 
 
 async def test_the_repair_round_is_tagged_for_the_stream_filter(monkeypatch):

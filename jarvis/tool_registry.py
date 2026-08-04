@@ -135,6 +135,23 @@ class ToolSpec:
         # Faz 3 does that classification pass together with actually
         # wiring enforcement, so a premature guess here would just be
         # re-decided then anyway.
+    working_object_kind: str = ""
+    working_object_operation: Literal["", "create", "revise"] = ""
+        # Post-MVP Faz 6: which Working Set object this tool produces, and
+        # whether it makes a new one or edits an existing one. Populated from
+        # _WORKING_OBJECTS below, never per-ctor (same shape as _TOOL_DOMAINS).
+        #
+        # Narrow on purpose. This is NOT the deferred `output_kind` taxonomy
+        # (read_only / creates_artifact / mutates_user_source / external_write)
+        # -- it is only the wiring fact the completion contract needs, and it
+        # exists so that fact has ONE home. The contract's capability set is
+        # derived from these two fields rather than hand-listed beside them:
+        # two hand-written constants naming the same tools do not prevent
+        # drift, they just make it quieter when a new chart tool is added.
+        #
+        # Both fields, not one: `kind` alone cannot tell plot_data from
+        # chart_revise, and a creation contract must not be satisfiable by
+        # revising some older object that happens to be the same kind.
 
 
 # Post-MVP Faz 1 (honesty kernel) -- shared by every tool that writes a file
@@ -954,6 +971,47 @@ TOOL_SPECS = {
     name: replace(spec, idempotency=_IDEMPOTENCY[name])
     for name, spec in TOOL_SPECS.items()
 }
+
+
+# Post-MVP Faz 6: which Working Set object each tool produces. Only tools that
+# genuinely register one appear -- absence means "produces no working object",
+# which is the honest default for the other ~34 tools and needs no entry.
+#
+# finance('export') is deliberately ABSENT even though its embedded chart
+# declares a kind="chart" artifact through the same generate_plot() path: the
+# workbook path does not register a Working Set object, so listing it here
+# would let the contract call a requirement satisfied by something the user
+# cannot then revise. See test_output_contract_registry.py.
+_WORKING_OBJECTS: dict[str, tuple[str, str]] = {
+    "plot_data": ("chart", "create"),
+    "chart_revise": ("chart", "revise"),
+}
+
+_unknown_wo = set(_WORKING_OBJECTS) - set(TOOL_SPECS)
+if _unknown_wo:  # pragma: no cover -- import-time wiring assertion
+    raise RuntimeError(f"_WORKING_OBJECTS names unknown tools: {sorted(_unknown_wo)}")
+
+TOOL_SPECS = {
+    name: (
+        replace(spec, working_object_kind=_WORKING_OBJECTS[name][0],
+                working_object_operation=_WORKING_OBJECTS[name][1])
+        if name in _WORKING_OBJECTS else spec
+    )
+    for name, spec in TOOL_SPECS.items()
+}
+
+
+def tools_producing(kind: str, operation: str) -> frozenset[str]:
+    """Tool names whose successful call produces `kind` via `operation`.
+
+    The completion contract's capability set comes from here, so adding a
+    second chart-creating tool is one line in _WORKING_OBJECTS rather than a
+    second edit somebody has to remember.
+    """
+    return frozenset(
+        name for name, spec in TOOL_SPECS.items()
+        if spec.working_object_kind == kind and spec.working_object_operation == operation
+    )
 
 
 # Convenience views ──────────────────────────────────────────────────────────────

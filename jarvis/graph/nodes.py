@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import secrets
 from datetime import datetime, timezone
@@ -33,11 +34,14 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from jarvis.execution.context import ExecutionContext
 from jarvis.graph.repair_budget import (  # Post-MVP Faz 6: one corrective repair per turn
     claim_budget,
+    completion_repair_subset,
     corrective_repair_spent,
     shared_budget_spent,
 )
 from jarvis.graph.state import JarvisState
 from jarvis.graph.tool_router import ToolRoute  # Faz 1.4: history-echo guard reads the turn's route
+
+logger = logging.getLogger(__name__)
 
 # Import lazily to avoid circular imports when ws module is not yet initialised
 def _bus():
@@ -195,6 +199,22 @@ def make_agent_node(tools: list, settings=None):
         # Faz 2.75 (Paket F): the query orders each domain's tools by relevance,
         # so a request naming a .csv does not spend its slots on pdf_vision.
         subset_names = select_tool_names(route, all_names, state.get("user_query") or "")
+        if state.get("output_contract_action") == "repair":
+            # Post-MVP Faz 6: a completion repair re-enters the agent to
+            # produce a MISSING output, so it needs nothing that changes
+            # anything else. Structural rather than a "do not modify the
+            # source file" line in the directive: the 2×2 experiment ran with
+            # file_write in the production subset, and a prompt-level wish is
+            # not a control. The cache key already includes the subset, so the
+            # narrowed round gets its own binding for free.
+            from jarvis.execution.output_contract import first_requirement
+            from jarvis.tool_registry import tools_producing
+
+            requirement = first_requirement(state.get("required_outputs"))
+            subset_names = completion_repair_subset(
+                subset_names,
+                tools_producing(*requirement) if requirement else frozenset(),
+            )
         llm = _llm_for(role, subset_names)
         try:
             response = await asyncio.wait_for(llm.ainvoke(state["messages"]), timeout=timeout_sec)
@@ -561,6 +581,25 @@ def make_verification_node(settings=None):
                 artifacts_declared=_declared_count(envelopes_raw, op.execution_id),
             )
 
+        # Post-MVP Faz 6: this answer was written by output_contract_node, not
+        # by a model. Detecting "unbacked claims" in it is a category error --
+        # and an actively harmful one for the class it most often carries:
+        # "the tool ran and honestly failed", which enforce mode could then
+        # spend a repair round re-writing. The contract has already decided
+        # that class must never go back to the model.
+        #
+        # Operation verification above still runs (those rows describe what
+        # the TOOLS did, which is unaffected by who wrote the prose), and a
+        # claim_gate row is still written so the per-turn count stays exactly
+        # one whoever authored the text.
+        if state.get("response_origin") == "output_contract":
+            rollout.record_claim_gate(
+                mode=mode, enforced=enforce, fired=False,
+                reasons=["code_authored_output_contract_response"],
+                unbacked_files=[], repaired=None, blocked=False,
+            )
+            return {}
+
         evidence = build_evidence_set(summary, envelopes_raw)
         verdict = detect_unbacked_claims(model_text, evidence)
         repaired: bool | None = None
@@ -654,6 +693,270 @@ def make_verification_node(settings=None):
 
     verification_node.__name__ = "verification_node"
     return verification_node
+
+
+# ── the completion contract (Post-MVP Faz 6) ───────────────────────────────
+
+#: Code-authored, so the model cannot soften them into a claim. One per class
+#: the contract must never retry -- the point of separating the classes is
+#: lost if they all produce the same sentence.
+_CONTRACT_TEXT: dict[str, tuple[str, str]] = {
+    "MISSING_TOOL_FAILURE": (
+        "İstediğiniz grafiği oluşturamadım: çizim aracı bir hata bildirdi{detail}. "
+        "Tekrar denemedim, çünkü hata kendini tekrar edecektir — eksik bilgiyi "
+        "söylerseniz doğrudan çizebilirim.",
+        "I could not produce the chart you asked for: the plotting tool reported "
+        "an error{detail}. I did not retry, since the same call would fail the same "
+        "way — tell me what is missing and I will draw it.",
+    ),
+    "MISSING_INVALID_ARGS": (
+        "Grafiği oluşturamadım: çizim çağrısının argümanları geçerli değildi{detail}. "
+        "Hangi dosya ve hangi sütunlar kullanılsın?",
+        "I could not produce the chart: the plotting call's arguments were not "
+        "valid{detail}. Which file and which columns should I use?",
+    ),
+    "MISSING_PREEXECUTION_BLOCK": (
+        "Grafiği çizmeyi denedim ama çağrı çalıştırılmadan durduruldu{detail}. "
+        "Kendiliğimden tekrar denemiyorum.",
+        "I did try to draw the chart, but the call was stopped before it ran"
+        "{detail}. I am not retrying on my own.",
+    ),
+    "EXECUTED_NO_OBJECT": (
+        "Grafik çizildi, ancak düzenlenebilir bir nesne olarak kaydedilemedi — "
+        "yani üzerinde değişiklik isteyemezsiniz. Bu bende bir kayıt hatası, "
+        "sizin isteğinizde değil.",
+        "The chart was drawn but could not be kept as an editable object, so you "
+        "cannot ask me to revise it. That is a registration fault on my side, not "
+        "a problem with your request.",
+    ),
+    "OUTPUT_EVIDENCE_MISMATCH": (
+        "Çizim aracı başarılı döndü ama ürettiği dosyayı bildirmedi, bu yüzden "
+        "grafiğin gerçekten oluştuğunu doğrulayamıyorum.",
+        "The plotting tool reported success but declared no file, so I cannot "
+        "confirm that the chart was actually produced.",
+    ),
+    "EVIDENCE_UNAVAILABLE": (
+        "Grafiğin oluşup oluşmadığını doğrulayamadım — kayıt defterini "
+        "okuyamadım{detail}. Oluştuğunu da oluşmadığını da iddia etmiyorum.",
+        "I could not verify whether the chart was produced — the working set was "
+        "unreadable{detail}. I am claiming neither that it exists nor that it does not.",
+    ),
+    "MISSING_NO_ATTEMPT": (
+        "Açıkça grafik istediniz ama bu turda bir grafik oluşturmadım ve "
+        "yeniden deneme hakkım kalmadı{detail}.",
+        "You explicitly asked for a chart, I did not produce one this turn, and I "
+        "have no retry left{detail}.",
+    ),
+}
+
+#: Given to the agent for its single completion-repair round, as a
+#: HumanMessage rather than a SystemMessage -- following planner_node's own
+#: "[Planning Mode — Execution Plan]" precedent, since a system message in the
+#: MIDDLE of a message list is the most provider-fragile shape available.
+#:
+#: The text itself lives in jarvis/execution/output_contract.py, next to the
+#: sanitiser that strips it back out if the model echoes it into its own
+#: answer. Two copies of the same block, one to emit and one to match, is
+#: exactly the drift that would leave half a directive in a user's answer.
+from jarvis.execution.output_contract import (  # noqa: E402 -- see the note above
+    REPAIR_DIRECTIVE as _REPAIR_DIRECTIVE,
+)
+
+
+def _contract_failure_text(status: str, detail: str, turkish: bool) -> str:
+    turkish_text, english_text = _CONTRACT_TEXT[status]
+    suffix = f" ({detail})" if detail else ""
+    return (turkish_text if turkish else english_text).format(detail=suffix)
+
+
+def make_output_contract_node(settings=None, working_set=None):
+    """TERMINAL node: was the output the user explicitly asked for produced?
+
+    Post-MVP Faz 6, and a sibling of make_verification_node rather than part
+    of it. They answer different questions -- that one asks whether the
+    ANSWER is backed by evidence, this one asks whether the OUTPUT exists at
+    all -- and keeping them apart buys three things that folding them in
+    would have cost: `required_outputs_mode` stays independent of
+    `execution_contract_mode` (whose node returns early on "off", which would
+    have silently disabled this one); the claim gate keeps its "exactly one
+    evaluation per turn" invariant even when this node runs twice; and this
+    node's own code-authored answer still passes THROUGH the claim gate
+    rather than around it.
+
+    Ordering: everything terminal now routes here first, and `continue` hands
+    off to `verify`. A repair routes back to `agent` instead -- the one place
+    in the graph that can still call a tool.
+
+    `off` is not handled here at all: build_graph() omits the node entirely,
+    so the node set, edge map, initial state and checkpoint shape are
+    bit-for-bit what they were before this phase. A `{}`-returning node would
+    still cost a super-step and change the checkpoint.
+    """
+    from jarvis import audit_log
+    from jarvis.execution import rollout
+    from jarvis.execution.output_contract import classify, first_requirement
+    from jarvis.tool_registry import tools_producing
+
+    mode = getattr(settings, "required_outputs_mode", "off") if settings is not None else "off"
+    max_rounds = getattr(settings, "max_tool_rounds_per_turn", 4) if settings is not None else 4
+    max_calls = getattr(settings, "max_tool_calls_per_turn", 6) if settings is not None else 6
+
+    async def output_contract_node(state: JarvisState, config=None) -> dict:
+        required = state.get("required_outputs") or []
+        requirement = first_requirement(required)
+        if mode == "off" or requirement is None:
+            # No contract on this turn: no evidence read, no telemetry row.
+            # Recording NOT_REQUIRED for every conversational turn would bury
+            # the rows that matter under the ones that never can.
+            return {"output_contract_action": "continue"}
+
+        kind, operation = requirement
+        verdict = classify(
+            required=required,
+            capabilities=tools_producing(kind, operation),
+            messages=state.get("messages") or [],
+            invalid_args_history=state.get("invalid_args_history"),
+            preexecution_history=state.get("preexecution_history"),
+            **_read_evidence(working_set, config, kind),
+            baseline_artifacts=(
+                (state.get("required_output_baseline") or {}).get(kind, {}) or {}
+            ).get("artifacts"),
+        )
+
+        # A completion repair is the only thing that writes this reason, and
+        # MISSING_NO_ATTEMPT is the only status it fires on -- so the turn's
+        # starting point is recoverable without a second state field to keep
+        # in sync.
+        repaired_this_turn = state.get("repair_reason") == "missing_required_output"
+        initial_status = "MISSING_NO_ATTEMPT" if repaired_this_turn else verdict.status
+
+        if mode != "enforce":
+            # Shadow: observe and record, mutate NOTHING. Not the answer, not
+            # the messages, not the repair budget. The single returned key is
+            # the router's own transient signal, which off does not have a
+            # node to write at all.
+            rollout.record_output_contract(
+                mode=mode, event="decision", status=verdict.status,
+                requirement=verdict.requirement, action="continue",
+                reason=verdict.reason, anomaly=verdict.anomaly,
+            )
+            return {"output_contract_action": "continue"}
+
+        if verdict.anomaly:
+            audit_log.record(
+                "output_contract_anomaly", requirement=verdict.requirement,
+                status=verdict.status, reason=verdict.reason,
+            )
+
+        if verdict.satisfied:
+            rollout.record_output_contract(
+                mode=mode, event="terminal", status=verdict.status,
+                requirement=verdict.requirement, action="continue",
+                initial_status=initial_status,
+                repair_reason=str(state.get("repair_reason") or ""),
+                repair_success=True if repaired_this_turn else None,
+            )
+            return {"output_contract_action": "continue"}
+
+        unavailable = _repair_unavailable_reason(state, settings, max_rounds, max_calls)
+        if verdict.repairable and not unavailable:
+            rollout.record_output_contract(
+                mode=mode, event="decision", status=verdict.status,
+                requirement=verdict.requirement, action="repair",
+                reason=verdict.reason, repair_reason="missing_required_output",
+            )
+            return {
+                "messages": [HumanMessage(content=_REPAIR_DIRECTIVE)],
+                "output_contract_action": "repair",
+                **claim_budget(state, settings, "missing_required_output"),
+            }
+
+        # Everything else is terminal: someone else's layer (invalid args, a
+        # pre-execution block), a tool that honestly failed, a postcondition
+        # defect of ours, or a repair we have no budget for. All of them get
+        # a code-authored answer -- the model's own draft got here by
+        # asserting or implying an output that does not exist.
+        if verdict.status == "EXECUTED_NO_OBJECT":
+            audit_log.record(
+                "output_postcondition_failed", requirement=verdict.requirement,
+                capability=",".join(sorted(tools_producing(kind, operation))),
+                declared=list(verdict.declared), reason=verdict.reason,
+            )
+        text = _contract_failure_text(
+            verdict.status, unavailable or verdict.reason, _is_turkish(state),
+        )
+        rollout.record_output_contract(
+            mode=mode, event="terminal", status=verdict.status,
+            requirement=verdict.requirement, action="continue",
+            reason=unavailable or verdict.reason, anomaly=verdict.anomaly,
+            initial_status=initial_status,
+            repair_reason=str(state.get("repair_reason") or ""),
+            repair_success=False if repaired_this_turn else None,
+        )
+        return {
+            "messages": [AIMessage(content=text)],
+            "response": text,
+            # Structural, not a marker in the text: `verify` must be able to
+            # tell a code-authored answer from a model's one, and a marker is
+            # part of the string it would be judging.
+            "response_origin": "output_contract",
+            "output_contract_action": "continue",
+        }
+
+    output_contract_node.__name__ = "output_contract_node"
+    return output_contract_node
+
+
+def _read_evidence(working_set, config, kind: str) -> dict:
+    """The working set's artifacts for `kind`, or the error that stopped us.
+
+    Never raises. An unreadable store must not be reported as "the model
+    produced nothing" -- that would blame a model for our own SQLite, and
+    (worse) offer it a repair for a chart it may already have drawn.
+    """
+    try:
+        conversation_id = str(((config or {}).get("configurable") or {}).get("conversation_id") or "")
+        if not conversation_id:
+            raise KeyError("conversation_id")
+        store = working_set
+        if store is None:
+            from jarvis.working_set import default_store
+            store = default_store()
+        obj = store.active(conversation_id, kind)
+        return {"registered_artifacts": tuple(obj.source_artifacts) if obj is not None else ()}
+    except Exception as exc:  # noqa: BLE001 -- see the docstring
+        logger.warning("output contract could not read the working set", exc_info=True)
+        return {"registered_artifacts": (), "evidence_error": type(exc).__name__}
+
+
+def _repair_unavailable_reason(state: JarvisState, settings, max_rounds: int, max_calls: int) -> str:
+    """Why a completion repair cannot be offered, or "" if it can.
+
+    The tool budgets matter as much as the repair budget: MISSING_NO_ATTEMPT
+    means no CHART tool was called, not that no tool was called at all. A turn
+    that spent its rounds on file_list/csv_read would take the directive,
+    re-enter the agent, and have the call rejected deterministically by
+    confirmation_node -- one wasted round for the same outcome, and a user
+    message that promised a retry which never happened.
+    """
+    if corrective_repair_spent(state, settings):
+        return "repair_unavailable: budget_spent"
+    if int(state.get("tool_rounds") or 0) >= max_rounds:
+        return "repair_unavailable: tool_round_budget_exhausted"
+    if int(state.get("tool_calls_attempted") or 0) >= max_calls:
+        return "repair_unavailable: tool_call_budget_exhausted"
+    return ""
+
+
+def route_from_output_contract(state: JarvisState) -> str:
+    """output_contract → 'repair' (back to the agent) | 'continue' (→ verify).
+
+    Reads ONLY the transient action the node just wrote. `repair_reason` and
+    `repair_attempts_total` persist for the rest of the turn by design, so a
+    router keyed on them would send the post-repair pass straight back into
+    another repair -- the same value it saw the first time, forever.
+    """
+    return "repair" if state.get("output_contract_action") == "repair" else "continue"
 
 
 def make_route_after_tool_accounting(settings=None):
@@ -945,6 +1248,11 @@ def make_prepare_execution_node(settings=None):
 
         now_iso = datetime.now(timezone.utc).isoformat()
         interactive, utterance = _gate_inputs(state)  # Post-MVP Faz 2 -- see the helper
+        # The round this batch belongs to. tool_rounds is incremented by
+        # confirmation_node AFTER this node runs, so the batch being prepared
+        # now is round N+1 -- stamped so the contract can tell a first-round
+        # rejection from a repair round's.
+        round_index = int(state.get("tool_rounds") or 0) + 1
         requests: list[dict] = []
         invalid_calls: list[dict] = []
         for tc in last_ai.tool_calls:
@@ -987,7 +1295,24 @@ def make_prepare_execution_node(settings=None):
                 "signature": approval.sign(req),
             })
 
-        return {"execution_requests": requests, "invalid_args_calls": invalid_calls}
+        # Post-MVP Faz 6: invalid_args_calls is OVERWRITTEN each round on
+        # purpose -- it describes the batch confirmation_node is deciding on
+        # right now. The completion contract needs the whole turn instead, and
+        # needs it keyed by tool_call_id: a blocked call and a call that
+        # genuinely failed both come back as a failing ToolMessage stub, so
+        # only an id-keyed record tells them apart. Read-extend-return because
+        # JarvisState has no reducer outside `messages` -- a returned list
+        # REPLACES, it does not append (same pattern the ledger uses in
+        # tool_accounting.py).
+        history = list(state.get("invalid_args_history") or [])
+        history.extend(
+            {"round": round_index, **c} for c in invalid_calls
+        )
+        return {
+            "execution_requests": requests,
+            "invalid_args_calls": invalid_calls,
+            "invalid_args_history": history,
+        }
 
     prepare_execution_node.__name__ = "prepare_execution_node"
     return prepare_execution_node
@@ -1115,12 +1440,51 @@ def make_confirmation_node(settings):
             stubs = per_call_stubs or [
                 ToolMessage(content=stub_text, tool_call_id=tc.get("id", "")) for tc in batch
             ]
+            # Post-MVP Faz 6: the ONE structured record of why a call never
+            # reached the tools node. It cannot be recovered downstream: the
+            # audit log is not in graph state, no ledger row is written for a
+            # call that never ran, and the stub text a blocked call leaves is
+            # indistinguishable from a real tool error. Written here because
+            # this closure is the single chokepoint every whole-batch refusal
+            # goes through -- including the kill switch and the user's own
+            # denial, which must never be retried.
+            #
+            # Append, not replace: JarvisState has no reducer outside
+            # `messages`.
+            history = list(state.get("preexecution_history") or [])
+            history.extend({
+                "round": int(state.get("tool_rounds") or 0) + 1,
+                "tool_call_id": tc.get("id", ""),
+                "capability": tc.get("name", ""),
+                "outcome": outcome,
+                "reason": ack_text[:200],
+            } for tc in batch)
             return {
                 "confirmation_result": "denied",
                 "messages": stubs + [HumanMessage(content=ack_text)],
+                "preexecution_history": history,
                 **counter_updates,
                 **(extra or {}),
             }
+
+        def _blocked_history(outcome: str, calls: list, reason: str = "") -> dict:
+            """The same structured record for the PER-CALL refusal paths.
+
+            Six of them return their own dict rather than going through
+            _reject_batch (kill switch, capability disabled, external writes
+            off, proactive read-only clamp, the user's own denial, stale or
+            duplicate approval). Every one of those is a terminal "this never
+            reached the tools node" -- the class the completion contract must
+            never offer a retry for, and the user's denial most of all."""
+            history = list(state.get("preexecution_history") or [])
+            history.extend({
+                "round": int(state.get("tool_rounds") or 0) + 1,
+                "tool_call_id": tc.get("id", ""),
+                "capability": tc.get("name", ""),
+                "outcome": outcome,
+                "reason": reason[:200],
+            } for tc in calls)
+            return {"preexecution_history": history}
 
         max_batch = getattr(settings, "max_tool_calls_per_ai_message", 4)
         if len(batch) > max_batch:
@@ -1344,7 +1708,8 @@ def make_confirmation_node(settings):
                     "available."
                 )
             ack_msg = HumanMessage(content=ack_text)
-            return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
+            return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg],
+                    **_blocked_history(outcome, last_ai.tool_calls, veto_reason), **counter_updates}
 
         # Stabilization sprint -- --profile test's structural guarantee.
         # Same hard-stop shape as the kill switch above (no interrupt, no
@@ -1394,7 +1759,9 @@ def make_confirmation_node(settings):
                         "Do NOT retry them. Tell the user this ran with external writes off."
                     )
                 )
-                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg],
+                        **_blocked_history("blocked_external_writes_disabled", blocked),
+                        **counter_updates}
 
         # GPT-5.6 review remediation, Faz 2 (P0) -- "proactive turn not
         # structurally read-only". Faz 7 already discards a genuinely-
@@ -1439,7 +1806,9 @@ def make_confirmation_node(settings):
                         "user's action, say so in your response instead."
                     )
                 )
-                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg],
+                        **_blocked_history("blocked_proactive_readonly", last_ai.tool_calls),
+                        **counter_updates}
 
         if not settings.confirmation_gate_enabled:
             return {"confirmation_result": "approved", **counter_updates}
@@ -1508,6 +1877,10 @@ def make_confirmation_node(settings):
             return {
                 "confirmation_result": "denied",
                 "messages": stub_msgs + [ack_msg],
+                # The one block that must NEVER be retried on the system's own
+                # initiative -- a completion contract that re-drove the model
+                # here would be overriding the user in their own name.
+                **_blocked_history("user_denied", last_ai.tool_calls, guidance),
                 **counter_updates,
             }
 
@@ -1561,7 +1934,9 @@ def make_confirmation_node(settings):
                     "or too much time passed. Do NOT assume it ran. Re-issue the call fresh so "
                     "it can be shown to the user and approved again."
                 ))
-                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg],
+                        **_blocked_history("blocked_stale_approval", last_ai.tool_calls, why),
+                        **counter_updates}
             if _idempotency.is_committed(req.execution_id):
                 audit_log.record(
                     "decision", tool=req.capability, action=req.action, risk_level=req.risk_level,
@@ -1586,7 +1961,9 @@ def make_confirmation_node(settings):
                     "that side effect (e.g. sending the same email twice). Do NOT retry it; "
                     "tell the user it already completed."
                 ))
-                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg], **counter_updates}
+                return {"confirmation_result": "denied", "messages": stub_msgs + [ack_msg],
+                        **_blocked_history("blocked_duplicate_execution", last_ai.tool_calls),
+                        **counter_updates}
             _approval.consume(req)
 
         return {"confirmation_result": "approved", **counter_updates}

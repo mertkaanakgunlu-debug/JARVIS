@@ -116,6 +116,46 @@ def record_claim_gate(
     })
 
 
+def record_output_contract(
+    *,
+    mode: str,
+    event: str,
+    status: str,
+    requirement: str = "",
+    action: str = "",
+    reason: str = "",
+    anomaly: bool = False,
+    initial_status: str = "",
+    repair_reason: str = "",
+    repair_success: bool | None = None,
+) -> None:
+    """The completion contract's own rows (Post-MVP Faz 6).
+
+    Two events, deliberately separate. `decision` is written on every pass of
+    the node -- so a turn that repairs writes one for the repair pass and one
+    `terminal` when it comes back. Folding them into a single row would make
+    `repair_triggered` and `repair_success` unreconstructable, which are two
+    of the A/B's pre-registered secondary metrics.
+
+    Kept apart from record_claim_gate/record_verification for the same reason
+    the node is separate from `verify`: those must stay exactly one row per
+    turn each, and they would not if a repaired turn's second pass could add
+    to them.
+    """
+    _append({
+        "event": f"output_contract_{event}",
+        "mode": mode,
+        "status": status,
+        "requirement": requirement,
+        "action": action,
+        "reason": reason,
+        "anomaly": anomaly,
+        **({"initial_status": initial_status} if initial_status else {}),
+        **({"repair_reason": repair_reason} if repair_reason else {}),
+        **({"repair_success": repair_success} if repair_success is not None else {}),
+    })
+
+
 def mark_false_positive(*, note: str, unbacked_files: list[str] | None = None) -> None:
     """Record an operator's judgment that a fired gate was wrong. See this
     module's docstring for why this cannot be automated."""

@@ -31,6 +31,7 @@ from jarvis.tool_registry import (
     TOOL_SPECS,
     ToolSpec,
     get_alpha_status,
+    tools_producing,
 )
 
 # Closed vocabularies, straight from tool_registry.py's own module docstring
@@ -113,6 +114,12 @@ def test_dynamic_spec_defaults_are_fail_closed():
     # MCP server that happens to expose an action called "list" must not get a
     # read downgrade out of a name collision.
     assert minimal.actions == {}
+    # Post-MVP Faz 6: an unclassified tool produces no Working Set object, so
+    # it can never satisfy a completion contract. Fail-closed in the same
+    # direction as the rest: the contract stays unmet rather than being
+    # answered by an MCP tool nobody mapped.
+    assert minimal.working_object_kind == ""
+    assert minimal.working_object_operation == ""
 
 
 def test_toolspec_has_no_unswept_fields():
@@ -123,13 +130,42 @@ def test_toolspec_has_no_unswept_fields():
         "side_effect_type", "timeout_seconds", "supports_background",
         "description", "domain", "args_schema", "postconditions",
         "idempotency", "effect_scope", "contract_status", "timeout_class",
-        "actions",
+        "actions", "working_object_kind", "working_object_operation",
     }
     actual = {f.name for f in dataclass_fields(ToolSpec)}
     assert actual == known, (
         f"ToolSpec fields changed: +{actual - known} -{known - actual} -- "
         "extend test_registry_sweep.py's field checks for the new field(s)"
     )
+
+
+# ── working-object metadata (Post-MVP Faz 6) ────────────────────────────────
+
+def test_the_contracts_capability_set_is_derived_not_hand_listed():
+    """The completion contract asks the registry which tools create a chart
+    rather than keeping its own list. Two constants naming the same tools do
+    not prevent drift -- they only make it quieter."""
+    assert tools_producing("chart", "create") == {"plot_data"}
+    assert tools_producing("chart", "revise") == {"chart_revise"}
+
+
+def test_no_tool_declares_half_the_metadata():
+    """A kind without an operation (or the reverse) would be invisible to
+    tools_producing() while looking classified in the registry."""
+    for name, spec in TOOL_SPECS.items():
+        assert bool(spec.working_object_kind) == bool(spec.working_object_operation), (
+            f"{name} declares only half of its working-object metadata"
+        )
+
+
+def test_a_tool_that_registers_no_working_object_declares_none():
+    """finance('export') draws a chart and declares a kind='chart' artifact
+    through the same generate_plot() path -- but it registers no Working Set
+    object, so the chart it produces cannot be revised. Claiming it here
+    would let a creation contract be satisfied by something the user then
+    cannot edit, which is the opposite of what the contract is for."""
+    assert TOOL_SPECS["finance"].working_object_kind == ""
+    assert "finance" not in tools_producing("chart", "create")
 
 
 # ── the TOOL_SPECS <-> make_tools() correspondence ──────────────────────────

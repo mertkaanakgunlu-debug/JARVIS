@@ -16,6 +16,12 @@ Graph topology (Agent Runtime rev.2, Faz 2 added prepare_execution):
   critic → END (accept or revise_count >= 2)
   critic → compose (revise/redirect, revise_count < 2 — bare regeneration)
 
+  Post-MVP Faz 6: every "→ END" above actually means "→ the terminal chain".
+  That chain is `verify → END` by default and
+  `output_contract → {agent | verify} → END` when required_outputs_mode is
+  not "off" — output_contract is the only node that can send a finished turn
+  back to the agent, which is what producing a missing artifact requires.
+
 LLMs (Faz 1 — resolved via jarvis.providers.get_llm(role, settings)):
   fast role      — executor; Ollama local model primary, cloud Flash fallback
                    on invocation error (see jarvis/providers/__init__.py)
@@ -56,6 +62,7 @@ from jarvis.graph.state import JarvisState
 from jarvis.graph.nodes import (
     make_agent_node,
     make_compose_node,
+    make_output_contract_node,
     make_verification_node,
     make_confirmation_node,
     make_planner_node,
@@ -66,6 +73,7 @@ from jarvis.graph.nodes import (
     route_from_agent,
     route_from_confirmation,
     route_from_critic,
+    route_from_output_contract,
 )
 from jarvis.graph.tools import make_tools
 
@@ -203,6 +211,30 @@ def build_graph(
     # make_verification_node's docstring.
     builder.add_node("verify", make_verification_node(settings))
 
+    # Post-MVP Faz 6: the completion contract sits one step BEFORE verify, so
+    # every terminal path now reads "... -> output_contract -> verify -> END".
+    # Two nodes rather than one because they answer different questions (see
+    # make_output_contract_node), and because only this one can send a turn
+    # back to the agent -- verify's own repair is an inline model call, but
+    # producing a missing chart needs a TOOL, and `agent` is the only node
+    # that can still issue one.
+    #
+    # With the feature off the node is not added at all and terminal_target
+    # stays "verify": node set, edge map and checkpoint shape are then
+    # bit-for-bit what they were before this phase, which a `{}`-returning
+    # node would not have been (it still costs a super-step).
+    terminal_target = "verify"
+    if getattr(settings, "required_outputs_mode", "off") != "off":
+        builder.add_node(
+            "output_contract", make_output_contract_node(settings, working_set)
+        )
+        builder.add_conditional_edges(
+            "output_contract",
+            route_from_output_contract,
+            {"repair": "agent", "continue": "verify"},
+        )
+        terminal_target = "output_contract"
+
     # START → planner (if /think) or directly to agent
     builder.add_conditional_edges(
         START,
@@ -228,12 +260,14 @@ def build_graph(
     builder.add_conditional_edges(
         "confirmation",
         route_from_confirmation,
-        # END routes through "verify" for the same single-choke-point reason
-        # as the critic edge below: confirmation_node's honest answer is
+        # END routes through the terminal chain for the same single-choke-point
+        # reason as the critic edge below: confirmation_node's honest answer is
         # code-authored and will never trip the gate, but "every path to END
         # passes verify" has to be literally true or the rollout metric is
-        # measured over an unknown fraction of turns.
-        {"tools": "tools", "agent": "agent", END: "verify"},
+        # measured over an unknown fraction of turns. Only the DESTINATION the
+        # END key maps to moves when the contract is on -- route_from_
+        # confirmation itself still returns END and is untouched.
+        {"tools": "tools", "agent": "agent", END: terminal_target},
     )
     # Patch 1.2 (Faz 1B): completed-fingerprint/ledger bookkeeping happens
     # AFTER execution -- the only point that knows how a call actually ended.
@@ -257,7 +291,7 @@ def build_graph(
     builder.add_conditional_edges(
         "critic",
         route_from_critic,
-        {"compose": "compose", END: "verify"},
+        {"compose": "compose", END: terminal_target},
     )
     builder.add_edge("verify", END)
 

@@ -100,3 +100,49 @@ class JarvisState(TypedDict):
     # "normalize -> validate -> one repair -> ..." wording needed exactly
     # this, not an implicit reliance on the round budget.
     args_repair_attempted: bool
+
+    # ── Post-MVP Faz 6: the completion contract ────────────────────────────
+    # All reset per turn like the Patch 1.2 fields above, and all read with
+    # .get() -- with required_outputs_mode="off" the entry points do not
+    # write them at all and the output_contract node is not even in the
+    # graph, so "off" leaves this TypedDict's populated shape unchanged.
+    #
+    # required_outputs is decided ONCE, deterministically, from the user's
+    # own words at the entry point (jarvis/nlu/output_intent.py) -- never
+    # inferred later by the verifying node, which would let the same model
+    # that skipped the tool also decide whether it was needed.
+    # [{"kind": "chart", "operation": "create"}] -- operation-aware because
+    # creating a chart and revising one are not the same postcondition.
+    required_outputs: list[dict]
+    # {"chart": {"object_id", "version", "artifacts"}} as of turn start.
+    # DIAGNOSTIC ONLY: success is decided by correlating the tool's declared
+    # artifact with the working set's, not by a version delta (record_artifact
+    # does not bump version, and register_chart skips patch() on an unchanged
+    # spec -- so a real redraw moves neither). The baseline's one live use is
+    # telling "nothing happened" apart from "something else wrote here".
+    required_output_baseline: dict
+    # TRANSIENT: rewritten on every pass of the output_contract node, and the
+    # ONLY thing route_from_output_contract reads. repair_reason below sticks
+    # for the whole turn, so a router keyed on it would re-enter the repair it
+    # just finished, forever.
+    output_contract_action: str        # "" | "repair" | "continue"
+    # Who wrote state["response"]. Structural rather than a marker in the
+    # text: the claim gate must not run its detector (or spend a repair) on
+    # an answer this codebase authored -- above all on the honest report for
+    # a tool that failed, which is the exact behaviour the honesty kernel
+    # wants to reward.
+    response_origin: str               # "model" | "output_contract"
+    # The turn's ONE corrective repair, shared between invalid-args,
+    # completion and unbacked-claim -- but only while an enforced contract is
+    # actually in force for this turn. See jarvis/graph/repair_budget.py for
+    # why sharing it unconditionally would change behaviour with the feature
+    # switched off.
+    repair_attempts_total: int
+    repair_reason: str                 # "" | invalid_args | missing_required_output | unbacked_claim
+    # Turn-scoped and append-only, unlike invalid_args_calls above which is
+    # overwritten per round (it describes the batch being decided on). The
+    # contract needs the whole turn's history and needs it keyed by
+    # tool_call_id: a blocked call and a call that genuinely failed both come
+    # back as a failing ToolMessage stub, and only these tell them apart.
+    invalid_args_history: list[dict]   # {"round","tool_call_id","capability","errors"}
+    preexecution_history: list[dict]   # {"round","tool_call_id","capability","outcome","reason"}
