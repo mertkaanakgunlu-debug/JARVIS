@@ -384,6 +384,110 @@ async def test_the_repaired_turn_records_exactly_one_row_of_each_kind(
     assert len(_rows(rollout_metrics_file, "terminal")) == 1
 
 
+def test_the_repair_lap_is_paid_for_in_the_recursion_budget():
+    """T-D, and it caught a real one. A repair sends a finished turn back to
+    `agent`, which costs the repair lap's own five super-steps plus a second
+    terminal chain. Sized against the pre-contract worst case that set
+    graph_recursion_limit to 30, that did not fit -- and the failure mode is
+    not a worse answer, it is GraphRecursionError on exactly the turns the
+    repair exists to rescue.
+
+    So the budget is raised while the contract is enforced, and left alone
+    otherwise. The cap still stops the loop it was added for (F16's tool-call
+    loop): what actually bounds a repair is the one-repair budget and the tool
+    budgets, not this number.
+    """
+    from jarvis.agent import _COMPLETION_REPAIR_SUPERSTEPS
+
+    # agent -> prepare_execution -> confirmation -> tools -> tool_result_accounting
+    repair_lap = 5
+    # compose -> critic -> output_contract -> verify
+    second_terminal_chain = 4
+    assert _COMPLETION_REPAIR_SUPERSTEPS == repair_lap + second_terminal_chain
+
+    base = Settings(_env_file=None).graph_recursion_limit
+    contracted = {"required_outputs": CHART}
+    assert _limit_for("enforce", contracted) == base + _COMPLETION_REPAIR_SUPERSTEPS
+
+    # ...and NOTHING else pays for it. A turn that cannot spend a completion
+    # repair must not have its loop ceiling raised as a side effect of the
+    # feature being switched on for other turns.
+    assert _limit_for("enforce", {"required_outputs": []}) == base
+    assert _limit_for("enforce", {}) == base
+    assert _limit_for("shadow", contracted) == base
+    assert _limit_for("off", contracted) == base
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
+@pytest.mark.parametrize("required", [None, [], CHART])
+def test_the_headroom_matches_the_budget_that_would_spend_it(mode, required):
+    """The headroom and the shared repair budget must never disagree: room
+    for a repair that cannot happen is dead ceiling, and a repair with no
+    room is a GraphRecursionError. Both read the same predicate, and this
+    pins that they keep agreeing across the whole grid."""
+    from jarvis.graph.repair_budget import contract_scoped
+
+    settings = Settings(_env_file=None, required_outputs_mode=mode)
+    state = {"required_outputs": required}
+    raised = _limit_for(mode, state) > settings.graph_recursion_limit
+    assert raised is contract_scoped(state, settings)
+
+
+def _limit_for(mode: str, state: dict) -> int:
+    from jarvis.agent import JarvisAgent
+
+    settings = Settings(_env_file=None, required_outputs_mode=mode)
+    return JarvisAgent._recursion_limit_for(MagicMock(settings=settings), state)
+
+
+# ── which entry points carry a contract at all ─────────────────────────────
+
+def _contract_fields(mode: str, query: str) -> dict:
+    from jarvis.agent import JarvisAgent
+
+    agent = MagicMock(settings=Settings(_env_file=None, required_outputs_mode=mode))
+    return JarvisAgent._output_contract_state(agent, query, {})
+
+
+def test_off_writes_no_contract_fields_at_all():
+    """T-E's other half. Zeroed fields still change a checkpoint diff and the
+    TypedDict's populated shape -- `off` promises to be indistinguishable, so
+    it writes nothing rather than writing falsy things."""
+    assert _contract_fields("off", "satis.csv grafiğini çiz") == {}
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_a_chart_request_carries_its_requirement_into_state(mode):
+    fields = _contract_fields(mode, "satis.csv grafiğini çiz")
+    assert fields["required_outputs"] == CHART
+    assert fields["response_origin"] == "model"
+    assert fields["repair_attempts_total"] == 0
+    assert fields["invalid_args_history"] == [] and fields["preexecution_history"] == []
+
+
+def test_an_analysis_request_carries_none():
+    assert _contract_fields("enforce", "satis.csv'yi analiz et")["required_outputs"] == []
+
+
+def test_a_proactive_turn_is_structurally_outside_the_contract():
+    """Test 8a. proactive_turn builds its own partial state and never writes
+    these fields, so a background self-check can never trigger a repair --
+    structurally, not by a mode flag somebody could flip. background_turn is
+    deliberately NOT in this class: that one is the USER's work (its own
+    docstring says so), just running off-thread."""
+    import inspect
+
+    from jarvis.agent import JarvisAgent
+
+    proactive = inspect.getsource(JarvisAgent.proactive_turn)
+    assert "_output_contract_state" not in proactive
+    background = inspect.getsource(JarvisAgent.background_turn)
+    assert "_output_contract_state" in background, (
+        "'run this in the background: draw the sales chart' is exactly the "
+        "request the contract exists for"
+    )
+
+
 # ── the two turn-scoped histories actually accumulate ──────────────────────
 
 def test_a_block_history_grows_across_rounds_instead_of_replacing():

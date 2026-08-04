@@ -80,6 +80,14 @@ class _FakeResumeAgent:
         self._record_turn_trace = types.MethodType(
             JarvisAgent._record_turn_trace, self
         )
+        # Post-MVP Faz 6: resume_and_stream now asks whether this turn's
+        # answer should be buffered until the graph finishes. Borrowed from
+        # the real class for the same reason as the setter above -- a local
+        # stub would let the streaming decision drift from production while
+        # every test here still passed.
+        self._contract_buffered = types.MethodType(
+            JarvisAgent._contract_buffered, self
+        )
         # get_tuple -> None makes the method take its documented fallback
         # path (rebuild history manually) -- no checkpointer machinery needed.
         self._checkpointer = SimpleNamespace(get_tuple=lambda cfg: None)

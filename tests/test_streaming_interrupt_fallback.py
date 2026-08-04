@@ -183,6 +183,11 @@ def _resume_agent(pending: dict, *, aget_state_return):
             agent, conf_id, config, recorder
         )
     )
+    # Post-MVP Faz 6: resume_and_stream asks whether this turn's answer is
+    # buffered until the graph finishes. Real method, same reason as the two
+    # above -- a local `lambda cfg: False` would keep these tests green while
+    # the streaming decision drifted.
+    agent._contract_buffered = lambda cfg: JarvisAgent._contract_buffered(agent, cfg)
     return agent
 
 

@@ -121,7 +121,17 @@ def test_chat_stream_persists_the_checkpoint_response_not_the_chunks():
 
     src = inspect.getsource(JarvisAgent.chat_stream)
     assert 'terminal_response = str(values.get("response") or "")' in src
-    assert "full_response = terminal_response or streamed_response" in src
+    # The precedence, not one spelling of it: Post-MVP Faz 6 wrapped this
+    # expression in finalize_terminal_response() and the old assertion went
+    # red although the rule it guards never moved. A source-level test should
+    # fail when the RULE changes.
+    assert "terminal_response or streamed_response" in src
+    assert "finalize_terminal_response(" in src, (
+        "the persisted/emitted text must go through the one canonical "
+        "sanitiser -- chat() cleaned its markers and this path did not, which "
+        "is how the same model output ended up scrubbed on one transport and "
+        "raw on another"
+    )
     assert '"".join(chunks)' in src and "streamed_response" in src, (
         "the accumulated stream must still exist as the fallback -- an "
         "interrupted or checkpoint-less run should persist what the user saw "

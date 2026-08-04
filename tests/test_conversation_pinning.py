@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +79,9 @@ class _FakeResumeAgent:
         self._last_turn_trace = None
         self._record_turn_trace = lambda trace: None
         self._checkpointer = SimpleNamespace(get_tuple=lambda cfg: None)
+        # Post-MVP Faz 6: the real method, not a stub -- see its docstring for
+        # why the buffering decision has to be read from the checkpoint here.
+        self._contract_buffered = types.MethodType(JarvisAgent._contract_buffered, self)
         self.settings = Settings(_env_file=None)
         self.saved: list[tuple] = []
         self.stored: list[tuple] = []

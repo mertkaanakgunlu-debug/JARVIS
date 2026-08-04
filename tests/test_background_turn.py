@@ -49,6 +49,17 @@ class _FakeAgent:
 
     # Bound to the instance at call time, so `self` is this stub.
     _working_set_turn = JarvisAgent._working_set_turn
+    # Post-MVP Faz 6, and the docstring above predicted it exactly:
+    # background_turn grew a call to _output_contract_state and this stub had
+    # to grow with it. Borrowed, not stubbed, so the contract's "background
+    # work is the USER's work" wiring is exercised here rather than faked.
+    _output_contract_state = JarvisAgent._output_contract_state
+    # Omitting this did not produce a failure -- it produced the HANG this
+    # class's docstring warns about, exactly as described: AttributeError
+    # fires before invoke_started is set, and the waiting test never wakes up.
+    # Twice now, which is what borrowing rather than stubbing is supposed to
+    # prevent -- and why the waits below are bounded (see _await_event).
+    _recursion_limit_for = JarvisAgent._recursion_limit_for
 
     def __init__(self):
         self._history = []
@@ -103,6 +114,30 @@ def _immediate_graph(response_text: str):
     return SimpleNamespace(ainvoke=ainvoke)
 
 
+# pytest-timeout is not installed in this project, so a coroutine that never
+# completes hangs the whole suite with no output -- which is exactly what
+# happened twice while this module's stand-in lagged behind background_turn's
+# growing set of collaborators. The AttributeError that should have failed
+# these tests instead fired inside the task, before `invoke_started` was set,
+# leaving the awaits below waiting forever.
+#
+# So the waits are bounded locally, and the timeout message says where to
+# look: a hang here is nearly always a method background_turn() now calls that
+# _FakeAgent has not borrowed yet.
+_EVENT_TIMEOUT_S = 10
+
+
+async def _await_event(event: asyncio.Event, what: str) -> None:
+    try:
+        await asyncio.wait_for(event.wait(), timeout=_EVENT_TIMEOUT_S)
+    except asyncio.TimeoutError:  # pragma: no cover -- only on a real hang
+        raise AssertionError(
+            f"{what} never happened within {_EVENT_TIMEOUT_S}s. background_turn() "
+            "most likely raised inside the task -- check that _FakeAgent borrows "
+            "every JarvisAgent helper it now calls."
+        ) from None
+
+
 @pytest.mark.asyncio
 async def test_background_turn_does_not_hold_lock_during_ainvoke():
     agent = _FakeAgent()
@@ -116,7 +151,7 @@ async def test_background_turn_does_not_hold_lock_during_ainvoke():
     agent._graph = SimpleNamespace(ainvoke=slow_ainvoke)
 
     task = asyncio.create_task(JarvisAgent.background_turn(agent, "do deep research"))
-    await invoke_started.wait()
+    await _await_event(invoke_started, "the background graph invocation")
 
     acquired = agent._state_lock.acquire(blocking=False)
     assert acquired, "background_turn must not hold _state_lock during the long ainvoke() call"
@@ -124,7 +159,7 @@ async def test_background_turn_does_not_hold_lock_during_ainvoke():
     assert agent._history == [], "self._history must be untouched while the task is still running"
 
     proceed.set()
-    result = await task
+    result = await asyncio.wait_for(task, timeout=_EVENT_TIMEOUT_S)
     assert result == "done"
 
 
@@ -183,7 +218,7 @@ async def test_background_result_lands_in_origin_session_after_midflight_reset()
     agent._graph = SimpleNamespace(ainvoke=slow_ainvoke)
 
     task = asyncio.create_task(JarvisAgent.background_turn(agent, "long research job"))
-    await invoke_started.wait()
+    await _await_event(invoke_started, "the background graph invocation")
 
     # Mid-flight reset: a new session becomes live.
     agent.session_id = "sess2-after-reset"
@@ -191,7 +226,7 @@ async def test_background_result_lands_in_origin_session_after_midflight_reset()
     agent._turn = 0
 
     proceed.set()
-    result = await task
+    result = await asyncio.wait_for(task, timeout=_EVENT_TIMEOUT_S)
 
     assert result == "done late"
     assert agent._history == [], "the live (post-reset) conversation must stay untouched"

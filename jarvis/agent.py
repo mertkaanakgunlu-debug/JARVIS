@@ -52,6 +52,8 @@ from jarvis.memory import Memory
 from jarvis.session_store import SessionStore
 from jarvis.scheduler import SchedulerStore  # Faz 13-C
 from jarvis.todo_store import TodoStore      # Faz 13-D
+from jarvis.execution.output_contract import strip_repair_directive  # Post-MVP Faz 6
+from jarvis.nlu.output_intent import required_outputs_for  # Post-MVP Faz 6
 from jarvis.working_set import (  # Post-MVP Faz 4
     default_store as default_working_set_store,
     render_block,
@@ -534,6 +536,36 @@ def strip_internal_markers(response: str) -> str:
     return _INTERNAL_MARKER.sub("", response, count=1)
 
 
+# Post-MVP Faz 6. The completion repair's directive is a code-authored
+# HumanMessage in graph state, and this codebase has already watched the model
+# copy a system-generated marker into its own answer once (the 2026-07-30
+# "[Tool execution summary: ...]" incident). Matched line-for-line against the
+# directive's own text -- see strip_repair_directive() for why a block regex
+# could not be made safe.
+strip_completion_contract_marker = strip_repair_directive
+
+
+#: Extra LangGraph super-steps a completion repair can cost: the repair lap's
+#: own agent -> prepare_execution -> confirmation -> tools ->
+#: tool_result_accounting (5), plus the second terminal chain it produces --
+#: compose -> critic -> output_contract -> verify (4). Named rather than
+#: inlined so the arithmetic is checkable against the graph, and asserted in
+#: tests/test_output_contract_graph.py.
+_COMPLETION_REPAIR_SUPERSTEPS = 9
+
+
+def finalize_terminal_response(response: str) -> str:
+    """The single sanitiser every surface runs before showing/persisting text.
+
+    There are four of them (chat, chat_stream, resume_and_stream,
+    background_turn) and before this only chat() cleaned anything, so the
+    exact same model output was scrubbed on one transport and not on the
+    other three. One function, called in four places, is the only version of
+    this that stays true.
+    """
+    return strip_completion_contract_marker(strip_internal_markers(response))
+
+
 def _compact_completed_turn_for_history(
     original_user_message: HumanMessage,
     final_assistant_response: str,
@@ -885,7 +917,7 @@ class JarvisAgent:
         return f"{s.local_model} (Ollama, local)"
 
     def _working_set_turn(self, conversation_id, route, role_decision, query, needs_planning):
-        """(route, role_decision, prompt_block) for one turn's working set.
+        """(route, role_decision, prompt_block, baseline) for one turn's working set.
 
         Post-MVP Faz 4. Takes `conversation_id` EXPLICITLY rather than reading
         `self.session_id`: the working set is keyed by conversation, and one
@@ -894,33 +926,145 @@ class JarvisAgent:
         distinction Faz 2.75 had to close for pending confirmations. Callers
         pass it from inside the state lock, after any conversation switch.
 
-        Three effects, all from one read:
+        Four effects, all from ONE read:
           * an active object claims a turn that classified as `conversation`
             (see tool_router.with_active_object for why only that case),
           * the ROLE is then recomputed, because a turn that just stopped being
             `conversation` no longer earns the fast tier for being one,
           * the objects' specs are appended to the system prompt, so a revision
-            patches known state instead of reconstructing it from one sentence.
+            patches known state instead of reconstructing it from one sentence,
+          * Post-MVP Faz 6: a per-kind snapshot for the completion contract.
+
+        The snapshot rides along here rather than being read again later for
+        two reasons. It is free (these objects are already in hand) and it is
+        race-free (a second read could straddle a concurrent background turn
+        writing to the same conversation). It is taken per KIND, not from the
+        globally active object: that one may be a calendar candidate while the
+        conversation's chart is still the output under discussion.
+
+        Diagnostic only -- see JarvisState.required_output_baseline. Success is
+        decided by artifact correlation, and the snapshot's one live use is
+        telling "nothing happened this turn" apart from "something outside
+        this turn wrote here".
 
         Never raises. A working set enhances a turn; failing to read it must
         degrade to today's behaviour, not end the turn.
         """
         if not conversation_id:
-            return route, role_decision, ""
+            return route, role_decision, "", {}
         try:
             objects = self.working_set.list(conversation_id)
         except Exception:  # noqa: BLE001 -- see the docstring
             logger.debug("working set unavailable this turn", exc_info=True)
-            return route, role_decision, ""
+            return route, role_decision, "", {}
         if not objects:
-            return route, role_decision, ""
+            return route, role_decision, "", {}
 
+        baseline: dict[str, dict] = {}
+        for obj in objects:
+            if obj.kind not in baseline:
+                baseline[obj.kind] = {
+                    "object_id": obj.id, "version": obj.version,
+                    "artifacts": list(obj.source_artifacts),
+                }
         active = next((o for o in objects if o.is_active), objects[0])
         block = render_block(objects)
         augmented = with_active_object(route, active.kind)
         if augmented.primary_domain == route.primary_domain:
-            return route, role_decision, block
-        return augmented, select_role(query, augmented, needs_planning), block
+            return route, role_decision, block, baseline
+        return augmented, select_role(query, augmented, needs_planning), block, baseline
+
+    def _output_contract_state(self, query: str, baseline: dict) -> dict:
+        """The completion contract's per-turn state fields, or {} when off.
+
+        Post-MVP Faz 6. Returning {} rather than zeroed fields is the point of
+        the `off` rung: with the node absent from the graph too, the initial
+        state dict, the checkpoint's channel set and the turn's super-step
+        count are all bit-for-bit what they were before this phase. Fields
+        that are merely unused still show up in a checkpoint diff.
+
+        The requirement is resolved HERE -- deterministically, from the user's
+        own words, before the graph runs. Leaving it to the verifying node
+        would let the same model that skipped the tool also decide whether the
+        tool was needed, and would make the A/B's two arms score different
+        populations of turns.
+        """
+        if self.settings.required_outputs_mode == "off":
+            return {}
+        return {
+            "required_outputs": required_outputs_for(query),
+            "required_output_baseline": baseline,
+            "output_contract_action": "",
+            "response_origin": "model",
+            "repair_attempts_total": 0,
+            "repair_reason": "",
+            "invalid_args_history": [],
+            "preexecution_history": [],
+        }
+
+    def _recursion_limit_for(self, state: dict) -> int:
+        """Super-step budget for one turn, with room for a completion repair.
+
+        Post-MVP Faz 6. A repair sends a finished turn back to `agent`, so the
+        worst case grows by a whole extra lap: the repair's own agent ->
+        prepare_execution -> confirmation -> tools -> tool_result_accounting,
+        plus a second compose -> critic -> output_contract -> verify chain.
+        Measured against the pre-contract worst case that sized
+        graph_recursion_limit at 30, that no longer fits -- and the failure
+        mode is not a slightly worse answer, it is GraphRecursionError on
+        exactly the turns the repair exists to rescue.
+
+        Scoped to the TURN, not just the mode, through the same predicate that
+        gates the shared repair budget: a turn carrying no required output can
+        never spend a completion repair, so handing it headroom would quietly
+        raise the loop ceiling for every "merhaba" while the feature happened
+        to be enforced. `contract_scoped` is the one place that decides what
+        "this turn is under a contract" means; asking it here keeps the
+        headroom and the budget from ever disagreeing.
+
+        The cap still bounds the loop it was added for (F16's tool-call loop):
+        what actually limits a repair is the one-repair budget and the tool
+        budgets, not this number.
+        """
+        from jarvis.graph.repair_budget import contract_scoped
+
+        limit = self.settings.graph_recursion_limit
+        if contract_scoped(state, self.settings):
+            limit += _COMPLETION_REPAIR_SUPERSTEPS
+        return limit
+
+    def _contract_buffered(self, config: dict) -> bool:
+        """Does this turn hold its stream back until the graph has finished?
+
+        Post-MVP Faz 6, and the honest answer to "an enforce-mode block cannot
+        un-send a streamed draft" for the one case where the correction is not
+        a correction at all but a REPLACEMENT. When a completion repair fires,
+        the user has already been streamed a whole answer (typically "which
+        format would you like?") and is about to be given a different one.
+        The existing __jarvis_final__ marker cannot cover that: voice
+        deliberately swallows it -- a sentence already spoken is already
+        spoken -- so the spoken user would hear the wrong answer and never
+        hear the right one, while a chart quietly appeared behind it.
+
+        Narrow on purpose: only turns that carry a required output, and only
+        under enforce. Those are already multi-round tool turns where time to
+        first token is not the axis anyone judges the experience on. Every
+        other turn streams exactly as before.
+
+        Reads the checkpoint because resume_and_stream() joins a turn already
+        in flight and has no state dict of its own. Never raises: an
+        unreadable checkpoint falls back to streaming, which is today's
+        behaviour.
+        """
+        if self.settings.required_outputs_mode != "enforce":
+            return False
+        try:
+            tuple_ = self._checkpointer.get_tuple(config)
+            values = tuple_.checkpoint["channel_values"] if tuple_ else {}
+            return bool(values.get("required_outputs"))
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.debug("could not read required_outputs for buffering", exc_info=True)
+            return False
 
     @property
     def _env_block(self) -> str:
@@ -1488,7 +1632,7 @@ class JarvisAgent:
             # Post-MVP Faz 4: read INSIDE the lock and AFTER the switch above,
             # so the working set answered for is this turn's conversation and
             # not whichever one happened to be loaded when the request arrived.
-            tool_route, role_decision, working_set_block = self._working_set_turn(
+            tool_route, role_decision, working_set_block, output_baseline = self._working_set_turn(
                 self.session_id, tool_route, role_decision, clean_input, needs_planning,
             )
             use_pro_agent = role_decision.use_pro_agent
@@ -1545,6 +1689,9 @@ class JarvisAgent:
                 # Agent Runtime rev.2, Faz 6 Part 2: explicit bounded-repair
                 # tracking -- see JarvisState's own comment on this field.
                 "args_repair_attempted": False,
+                # Post-MVP Faz 6: {} when required_outputs_mode is "off", so
+                # the rollback rung leaves the checkpoint's shape untouched.
+                **self._output_contract_state(clean_input, output_baseline),
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,
@@ -1565,7 +1712,7 @@ class JarvisAgent:
                 # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
                 # model stuck retrying a tool call fails clearly instead of
                 # looping unbounded.
-                "recursion_limit": self.settings.graph_recursion_limit,
+                "recursion_limit": self._recursion_limit_for(state),
             }
 
             event_bus.state("thinking")
@@ -1645,7 +1792,7 @@ class JarvisAgent:
             # The model has been observed copying the internal
             # "[Tool execution summary: ...]" marker into its own answer while
             # calling nothing -- see strip_internal_markers().
-            response = strip_internal_markers(response)
+            response = finalize_terminal_response(response)
 
             # Runtime truth: label the turn with the provider that ACTUALLY
             # answered (per-tier callback metadata), not the requested role.
@@ -1896,7 +2043,7 @@ class JarvisAgent:
             # Post-MVP Faz 4: read INSIDE the lock and AFTER the switch above,
             # so the working set answered for is this turn's conversation and
             # not whichever one happened to be loaded when the request arrived.
-            tool_route, role_decision, working_set_block = self._working_set_turn(
+            tool_route, role_decision, working_set_block, output_baseline = self._working_set_turn(
                 self.session_id, tool_route, role_decision, clean_input, needs_planning,
             )
             use_pro_agent = role_decision.use_pro_agent
@@ -1953,6 +2100,9 @@ class JarvisAgent:
                 # Agent Runtime rev.2, Faz 6 Part 2: explicit bounded-repair
                 # tracking -- see JarvisState's own comment on this field.
                 "args_repair_attempted": False,
+                # Post-MVP Faz 6: {} when required_outputs_mode is "off", so
+                # the rollback rung leaves the checkpoint's shape untouched.
+                **self._output_contract_state(clean_input, output_baseline),
             }
             recorder = LlmTraceRecorder(
                 usage=self.usage,
@@ -1971,7 +2121,7 @@ class JarvisAgent:
                 # BUG-recursion (Faz 4): cap LangGraph super-steps per turn so a
                 # model stuck retrying a tool call fails clearly instead of
                 # looping unbounded.
-                "recursion_limit": self.settings.graph_recursion_limit,
+                "recursion_limit": self._recursion_limit_for(state),
             }
 
             event_bus.state("thinking")
@@ -1980,14 +2130,22 @@ class JarvisAgent:
             _first_chunk = True
             _confirmation_issued = False
             interrupted = False
+            # Post-MVP Faz 6: known BEFORE the graph runs, because the
+            # requirement was resolved deterministically from the query at the
+            # top of this method. See _contract_buffered().
+            buffered = (
+                self.settings.required_outputs_mode == "enforce"
+                and bool(state.get("required_outputs"))
+            )
 
             try:
                 async for delta in graph_stream_to_text(self._graph, state, config):
-                    if _first_chunk:
+                    if _first_chunk and not buffered:
                         event_bus.state("speaking")
                         _first_chunk = False
                     chunks.append(delta)
-                    yield delta
+                    if not buffered:
+                        yield delta
             except GraphInterrupt as exc:
                 _confirmation_issued = True
                 try:
@@ -2078,22 +2236,34 @@ class JarvisAgent:
             # Falls back to the streamed text when the checkpoint has no
             # response: an interrupted or checkpoint-less run should persist
             # something the user actually saw rather than nothing.
-            full_response = terminal_response or streamed_response
+            full_response = finalize_terminal_response(
+                terminal_response or streamed_response
+            )
 
-            # ...and what the user is LOOKING at gets corrected. Tokens cannot
-            # be unsent, so the only honest options were to buffer the whole
-            # answer until `verify` (killing streaming, including sentence-wise
-            # TTS) or to stream and then say "actually, this". This is the
-            # second: a single marker carrying the authoritative text, which
-            # every stream consumer already has a place to handle because
-            # __jarvis_confirm__ established the shape.
-            #
-            # Voice is the honest exception and cannot be fixed here: a
-            # sentence already spoken is already spoken. jarvis/voice/session.py
-            # swallows the marker rather than reading JSON aloud.
-            if terminal_response and terminal_response != streamed_response:
+            if buffered:
+                # Nothing has been emitted yet -- the verified answer goes out
+                # once, as itself. No marker, because there is no earlier draft
+                # to correct: this IS the first thing the user sees.
+                event_bus.state("speaking")
+                yield full_response
+            elif terminal_response and terminal_response != streamed_response:
+                # ...and what the user is LOOKING at gets corrected. Tokens
+                # cannot be unsent, so the only honest options were to buffer
+                # the whole answer until `verify` (killing streaming, including
+                # sentence-wise TTS) or to stream and then say "actually,
+                # this". This is the second: a single marker carrying the
+                # authoritative text, which every stream consumer already has a
+                # place to handle because __jarvis_confirm__ established the
+                # shape.
+                #
+                # Voice is the honest exception and cannot be fixed here: a
+                # sentence already spoken is already spoken.
+                # jarvis/voice/session.py swallows the marker rather than
+                # reading JSON aloud. That exception is exactly why a
+                # completion repair -- which REPLACES the answer rather than
+                # correcting it -- takes the buffered branch above instead.
                 yield json.dumps(
-                    {"__jarvis_final__": True, "text": terminal_response},
+                    {"__jarvis_final__": True, "text": full_response},
                     ensure_ascii=False,
                 )
             exchange = _compact_completed_turn_for_history(
@@ -2225,6 +2395,11 @@ class JarvisAgent:
             chunks: list[str] = []
             _first_chunk = True
             interrupted = False
+            # Post-MVP Faz 6: read from the checkpoint, since this method
+            # joins a turn that chat_stream() started and has no state dict of
+            # its own. Decided BEFORE the first token, which is the only point
+            # at which the decision is still available.
+            buffered = self._contract_buffered(config)
 
             # BUG-12: reuse the same helper chat_stream() uses instead of an inline
             # copy-pasted filter — this method independently had the same
@@ -2234,11 +2409,12 @@ class JarvisAgent:
                 async for text in graph_stream_to_text(
                     self._graph, Command(resume=decision), config
                 ):
-                    if _first_chunk:
+                    if _first_chunk and not buffered:
                         event_bus.state("speaking")
                         _first_chunk = False
                     chunks.append(text)
-                    yield text
+                    if not buffered:
+                        yield text
             except GraphInterrupt as exc:
                 # Review remediation: chat_stream() keeps this handler as
                 # defense-in-depth even though _pending_interrupt_payload()'s
@@ -2343,14 +2519,21 @@ class JarvisAgent:
             # was thrown away, on exactly the turns that ran a confirmed,
             # risky action. Falls back to the streamed text when the checkpoint
             # carries no response (old checkpoints, checkpointer-less tests).
-            full_response = terminal_response or streamed_response
-            if terminal_response and terminal_response != streamed_response:
+            full_response = finalize_terminal_response(
+                terminal_response or streamed_response
+            )
+            if buffered:
+                # Nothing streamed yet: the verified answer goes out once, as
+                # itself, with no marker to correct a draft that never left.
+                event_bus.state("speaking")
+                yield full_response
+            elif terminal_response and terminal_response != streamed_response:
                 # Tokens cannot be unsent, so the corrected text rides out on
                 # the same marker chat_stream() uses; every stream consumer
                 # already has a place to handle it (voice swallows it -- a
                 # sentence already spoken is already spoken).
                 yield json.dumps(
-                    {"__jarvis_final__": True, "text": terminal_response},
+                    {"__jarvis_final__": True, "text": full_response},
                     ensure_ascii=False,
                 )
             exchange = _compact_completed_turn_for_history(
@@ -2479,7 +2662,7 @@ class JarvisAgent:
                 "conversation_id": origin_session_id,
             },
             "callbacks": [_HudEventCallback(f"monitor-{source}"), recorder],
-            "recursion_limit": self.settings.graph_recursion_limit,
+            "recursion_limit": self._recursion_limit_for(state),
         }
         try:
             result = await self._graph.ainvoke(state, config=config)
@@ -2585,7 +2768,7 @@ class JarvisAgent:
         # Post-MVP Faz 4: keyed on the SUBMITTING conversation, not on whatever
         # self.session_id holds when the worker starts -- background_turn never
         # switches sessions, so those are routinely different.
-        tool_route, role_decision, working_set_block = self._working_set_turn(
+        tool_route, role_decision, working_set_block, output_baseline = self._working_set_turn(
             origin_session_id, tool_route, role_decision, user_query, False,
         )
         system_prompt = _load_system_prompt(
@@ -2614,6 +2797,23 @@ class JarvisAgent:
             "transport": transport,
             "execution_context": ExecutionContext.for_transport(transport).to_dict(),
             "tool_route": tool_route.to_dict(),  # Faz 2A: scoped subset
+            # Post-MVP Faz 6: a background task is the USER's work -- "run this
+            # in the background: draw the sales chart" is exactly the request
+            # the completion contract exists for. Only proactive_turn (JARVIS's
+            # own monitor check) stays structurally outside it, by never
+            # writing these fields at all.
+            #
+            # Also the per-turn reset for the Patch 1.2 accounting fields and
+            # args_repair_attempted, which this path never set: they default
+            # through .get() today, but "the background path silently relies on
+            # a default" is how the foreground/background drift starts.
+            "tool_calls_attempted": 0,
+            "tool_rounds": 0,
+            "seen_tool_fingerprints": [],
+            "completed_tool_fingerprints": [],
+            "tool_execution_ledger": [],
+            "args_repair_attempted": False,
+            **self._output_contract_state(user_query, output_baseline),
         }
         # Usage IS recorded for a background turn — only the foreground
         # /status label is left untouched (same rule as proactive_turn).
@@ -2641,7 +2841,7 @@ class JarvisAgent:
                 "conversation_id": origin_session_id,
             },
             "callbacks": [_HudEventCallback(transport), recorder],
-            "recursion_limit": self.settings.graph_recursion_limit,
+            "recursion_limit": self._recursion_limit_for(state),
         }
 
         try:
@@ -2670,6 +2870,13 @@ class JarvisAgent:
                 if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
                     response = m.content
                     break
+
+        # Post-MVP Faz 6: sanitise BEFORE anything keeps it. This path builds
+        # its history pair by hand rather than through
+        # _compact_completed_turn_for_history, so it is the one surface where
+        # "what gets persisted" and "what gets cleaned" could drift apart
+        # silently -- and it is the surface with nobody watching in real time.
+        response = finalize_terminal_response(response)
 
         # Brief critical section -- not held across the ainvoke() above -- to
         # append this result into the *real* history, same shared-state

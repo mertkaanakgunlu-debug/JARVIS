@@ -409,11 +409,15 @@ def test_the_turn_hook_reads_the_conversation_it_was_given(store):
     route = classify_query("rengini kırmızı yap")
     decision = RoleDecision(FAST, "conversation")
 
-    _r, _d, block = agent._working_set_turn("mine", route, decision, "x", False)
-    assert block == ""
+    _r, _d, block, baseline = agent._working_set_turn("mine", route, decision, "x", False)
+    assert block == "" and baseline == {}
 
-    _r, _d, block = agent._working_set_turn("other", route, decision, "x", False)
+    _r, _d, block, baseline = agent._working_set_turn("other", route, decision, "x", False)
     assert "AKTİF" in block
+    # Post-MVP Faz 6: the contract's baseline comes off this same read, keyed
+    # per kind -- a second read could straddle a concurrent background turn.
+    assert baseline[KIND_CHART]["version"] == 1
+    assert baseline[KIND_CHART]["artifacts"] == []
 
 
 def test_a_claimed_turn_gets_its_role_recomputed(store):
@@ -425,7 +429,7 @@ def test_a_claimed_turn_gets_its_role_recomputed(store):
     route = classify_query("rengini kırmızı yap")
     assert route.primary_domain == "conversation"
 
-    new_route, decision, _block = agent._working_set_turn(
+    new_route, decision, _block, _baseline = agent._working_set_turn(
         "c1", route, RoleDecision(FAST, "conversation"), "rengini kırmızı yap", False,
     )
     assert new_route.primary_domain == "data"
@@ -440,7 +444,9 @@ def test_an_unreadable_working_set_degrades_instead_of_ending_the_turn(store):
     agent = _StubAgent(_Broken())
     route = classify_query("merhaba")
     decision = RoleDecision(FAST, "conversation")
-    assert agent._working_set_turn("c1", route, decision, "merhaba", False) == (route, decision, "")
+    assert agent._working_set_turn("c1", route, decision, "merhaba", False) == (
+        route, decision, "", {},
+    )
 
 
 def test_no_conversation_id_reads_nothing(store):
