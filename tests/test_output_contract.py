@@ -15,9 +15,14 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from jarvis.execution.output_contract import (
+    REPAIR_DIRECTIVE,
+    REPAIRABLE,
+    SOURCE_MISMATCH_BLOCK_OUTCOME,
     ContractVerdict,
     canonical,
     classify,
+    repair_directive_for,
+    strip_repair_directive,
     turn_tool_calls,
 )
 
@@ -32,6 +37,22 @@ def _ai(*calls) -> AIMessage:
     return AIMessage(content="", tool_calls=[
         {"name": name, "args": {}, "id": call_id} for name, call_id in calls
     ])
+
+
+def _ai_args(*calls) -> AIMessage:
+    """Like _ai, but each call is (name, call_id, args) -- for Source
+    Binding tests, which need to control what a plot_data call's own `path`/
+    `data_json` argument says."""
+    return AIMessage(content="", tool_calls=[
+        {"name": name, "args": args, "id": call_id} for name, call_id, args in calls
+    ])
+
+
+def _chart_with_source(basename: str) -> list[dict]:
+    return [{
+        "kind": "chart", "operation": "create",
+        "source": {"type": "file", "raw": basename, "basename": basename},
+    }]
 
 
 def _result(call_id: str, content: str = "chart drawn", *, artifact=None) -> ToolMessage:
@@ -339,3 +360,224 @@ def test_a_relative_declared_path_resolves_against_the_process_cwd(isolated_cwd)
     absolute = str(Path("out.png").resolve())
     assert canonical("out.png") == canonical(absolute)
     assert canonical(absolute) == os.path.normcase(os.path.normpath(absolute))
+
+
+# ── Source Binding (Pr_2 section 9, "Saf classifier" -- tests 9-15) ────────
+# GPT_Prompts/Pr_2.md finding 1: a completion repair could satisfy the
+# contract by drawing from a DIFFERENT file than the one the user named.
+# These pin the fix: a matched artifact must trace back, through both the
+# call that produced it and the working-set object that kept it, to the
+# requirement's own `source` -- or the verdict is not SATISFIED.
+
+def test_9_matching_source_on_both_legs_satisfies():
+    messages = [_ai_args(("plot_data", "c1", {"path": "satis.csv"})),
+                _result("c1", artifact=_chart_artifact(PNG))]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG],
+        artifact_sources={canonical(PNG): "satis.csv"},
+    )
+    assert verdict.status == "SATISFIED"
+    assert verdict.matched == (canonical(PNG),)
+
+
+def test_10_a_mismatched_call_source_is_output_source_mismatch():
+    """The call's OWN argument is the wrong file -- even though the object
+    it happened to register under (contrived here) looks right, the call is
+    what actually ran, and it did not run against the requested source."""
+    messages = [_ai_args(("plot_data", "c1", {"path": "other.csv"})),
+                _result("c1", artifact=_chart_artifact(PNG))]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG],
+        artifact_sources={canonical(PNG): "satis.csv"},
+    )
+    assert verdict.status == "OUTPUT_SOURCE_MISMATCH"
+    assert verdict.repairable is False
+
+
+def test_11_a_mismatched_working_set_source_is_output_source_mismatch():
+    """The call named the right file; the object it registered under does
+    not agree. Either leg lying is enough to withhold SATISFIED."""
+    messages = [_ai_args(("plot_data", "c1", {"path": "satis.csv"})),
+                _result("c1", artifact=_chart_artifact(PNG))]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG],
+        artifact_sources={canonical(PNG): "other.csv"},
+    )
+    assert verdict.status == "OUTPUT_SOURCE_MISMATCH"
+
+
+def test_12_missing_source_evidence_on_both_legs_is_evidence_unavailable():
+    """Neither the call's args nor the working-set object say anything
+    usable about source -- this is unreadable evidence, not a mismatch and
+    not a success. Never blame the model for a gap in OUR instrumentation."""
+    messages = [_ai(("plot_data", "c1")),  # no args captured -> call.source is None
+                _result("c1", artifact=_chart_artifact(PNG))]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG], artifact_sources={},
+    )
+    assert verdict.status == "EVIDENCE_UNAVAILABLE"
+    assert verdict.repairable is False
+
+
+def test_13_a_wrong_source_artifact_is_never_success_even_when_registered():
+    messages = [_ai_args(("plot_data", "c1", {"path": "other.csv"})),
+                _result("c1", artifact=_chart_artifact(PNG))]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG],
+        artifact_sources={canonical(PNG): "other.csv"},
+    )
+    assert verdict.status not in ("SATISFIED", "NOT_REQUIRED")
+    assert verdict.satisfied is False
+
+
+def test_14_one_correct_call_among_several_still_satisfies():
+    """Section 8: a wrong-source attempt elsewhere in the same turn does not
+    have to fail a genuinely correct one."""
+    messages = [
+        _ai_args(("plot_data", "bad", {"path": "other.csv"})),
+        _result("bad", artifact=_chart_artifact(OTHER_PNG)),
+        _ai_args(("plot_data", "good", {"path": "satis.csv"})),
+        _result("good", artifact=_chart_artifact(PNG)),
+    ]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG, OTHER_PNG],
+        artifact_sources={canonical(PNG): "satis.csv", canonical(OTHER_PNG): "other.csv"},
+    )
+    assert verdict.status == "SATISFIED"
+    assert verdict.matched == (canonical(PNG),)
+
+
+def test_14b_a_mismatched_sibling_is_recorded_not_silently_dropped():
+    """Section 8: 'kaydet ... otomatik olarak başarısız saymak zorunda
+    değilsin' -- the mismatched attempt does not fail the turn, but it must
+    show up somewhere rather than vanish."""
+    messages = [
+        _ai_args(("plot_data", "bad", {"path": "other.csv"})),
+        _result("bad", artifact=_chart_artifact(OTHER_PNG)),
+        _ai_args(("plot_data", "good", {"path": "satis.csv"})),
+        _result("good", artifact=_chart_artifact(PNG)),
+    ]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG, OTHER_PNG],
+        artifact_sources={canonical(PNG): "satis.csv", canonical(OTHER_PNG): "other.csv"},
+    )
+    assert verdict.status == "SATISFIED"
+    assert verdict.reason != ""
+    assert "1" in verdict.reason
+
+
+def test_15_output_source_mismatch_is_never_repairable():
+    verdict = ContractVerdict(status="OUTPUT_SOURCE_MISMATCH", requirement="chart/create")
+    assert verdict.repairable is False
+    assert "OUTPUT_SOURCE_MISMATCH" not in REPAIRABLE
+
+
+# ── source-mismatch pre-execution blocks reclassify (Pr_2 section 6) ───────
+
+def test_a_source_mismatch_block_reclassifies_from_the_generic_class():
+    """The pre-execution guard (nodes.py) writes SOURCE_MISMATCH_BLOCK_OUTCOME
+    to preexecution_history; classify() must read that outcome code, not the
+    stub text, the same discipline every other block class already follows."""
+    verdict = classify(
+        required=_chart_with_source("olmayan.csv"), capabilities=CREATE,
+        messages=[_ai_args(("plot_data", "c1", {"path": "satis.csv"})),
+                  _result("c1", "[BLOCKED: output source mismatch]")],
+        preexecution_history=[{"round": 1, "tool_call_id": "c1", "capability": "plot_data",
+                               "outcome": SOURCE_MISMATCH_BLOCK_OUTCOME}],
+    )
+    assert verdict.status == "OUTPUT_SOURCE_MISMATCH"
+    assert verdict.repairable is False
+
+
+def test_an_ordinary_preexecution_block_is_unaffected_by_source_binding():
+    """A budget/kill-switch/user-denial block on a source-bound requirement
+    must still read as the generic class -- only the one dedicated outcome
+    code reclassifies."""
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=[_ai(("plot_data", "c1")), _result("c1", "[BLOCKED: not executed]")],
+        preexecution_history=[{"round": 1, "tool_call_id": "c1", "capability": "plot_data",
+                               "outcome": "blocked_round_limit"}],
+    )
+    assert verdict.status == "MISSING_PREEXECUTION_BLOCK"
+
+
+# ── an unbound requirement is untouched (backward compatibility) ───────────
+
+def test_an_unbound_requirement_ignores_artifact_sources_even_if_given():
+    """No `source` key at all -- the exact pre-Source-Binding rule, proven by
+    showing it holds even when artifact_sources IS supplied and looks wrong:
+    nothing was named, so nothing here is compared against it."""
+    verdict = classify(
+        required=CHART, capabilities=CREATE,
+        messages=_drew(), registered_artifacts=[PNG],
+        artifact_sources={canonical(PNG): "completely-unrelated-file.csv"},
+    )
+    assert verdict.status == "SATISFIED"
+
+
+# ── exact-source failure: an honest tool error is unaffected (Pr_2 25-30) ──
+
+# ── the repair directive narrows for a source-bound requirement (Pr_2 7) ───
+
+def test_an_unbound_repair_directive_is_byte_identical_to_before():
+    """No `source` -- Source Binding must not touch the pre-existing "bu
+    dosya" repair path at all."""
+    assert repair_directive_for(None) == REPAIR_DIRECTIVE
+
+
+def test_a_source_bound_directive_names_the_requested_source():
+    text = repair_directive_for({"type": "file", "raw": "satis.csv", "basename": "satis.csv"})
+    assert "'satis.csv'" in text
+
+
+def test_a_source_bound_directive_forbids_substitution():
+    text = repair_directive_for({"type": "file", "raw": "olmayan.csv", "basename": "olmayan.csv"}).lower()
+    assert "do not" in text and "substitute" in text
+
+
+def test_a_source_bound_directive_allows_an_honest_tool_failure():
+    """Section 7's own rule: if the exact source cannot be found, the
+    directive must permit the tool to fail honestly rather than push the
+    model toward finding SOME chart to produce."""
+    text = repair_directive_for({"type": "file", "raw": "olmayan.csv", "basename": "olmayan.csv"}).lower()
+    assert "fail honestly" in text
+
+
+def test_a_source_bound_directive_never_carries_an_absolute_path():
+    text = repair_directive_for({"type": "file", "raw": r"C:\Users\mertk\Desktop\satis.csv",
+                                 "basename": "satis.csv"})
+    assert "satis.csv" in text
+    assert "C:\\" not in text and "Users" not in text
+
+
+def test_stripping_removes_an_echoed_source_bound_directive():
+    directive = repair_directive_for({"type": "file", "raw": "satis.csv", "basename": "satis.csv"})
+    echoed = directive + "\nGrafik hazır."
+    assert strip_repair_directive(echoed) == "Grafik hazır."
+
+
+def test_stripping_the_unbound_directive_is_unaffected():
+    echoed = REPAIR_DIRECTIVE + "\nGrafik hazır."
+    assert strip_repair_directive(echoed) == "Grafik hazır."
+
+
+def test_25_30_an_honest_failure_on_the_exact_requested_source_is_unaffected():
+    """The model calls plot_data with the EXACT requested (nonexistent)
+    source and the tool honestly fails. Source Binding must not change this
+    classification -- MISSING_TOOL_FAILURE, never repaired, no substitution
+    possible because there is no repair to substitute during."""
+    messages = [_ai_args(("plot_data", "c1", {"path": "olmayan.csv"})),
+                _result("c1", "[ERROR] Data file not found")]
+    verdict = classify(
+        required=_chart_with_source("olmayan.csv"), capabilities=CREATE, messages=messages,
+    )
+    assert verdict.status == "MISSING_TOOL_FAILURE"
+    assert verdict.repairable is False

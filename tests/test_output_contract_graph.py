@@ -34,10 +34,12 @@ PNG = "C:/tmp/run-1/chart.png"
 
 class _Store:
     """The one working-set call the node makes. `boom` turns the read into the
-    failure the EVIDENCE_UNAVAILABLE branch exists for."""
+    failure the EVIDENCE_UNAVAILABLE branch exists for. `source` is the
+    Source Binding leg: the object's own spec["source"], surfaced through
+    .list() the same way the real WorkingSetStore is (see nodes._read_evidence)."""
 
-    def __init__(self, artifacts=(), boom: Exception | None = None):
-        self._artifacts, self._boom = tuple(artifacts), boom
+    def __init__(self, artifacts=(), boom: Exception | None = None, source: str = ""):
+        self._artifacts, self._boom, self._source = tuple(artifacts), boom, source
 
     def active(self, conversation_id, kind=""):
         if self._boom is not None:
@@ -45,6 +47,18 @@ class _Store:
         if not self._artifacts:
             return None
         return MagicMock(source_artifacts=self._artifacts)
+
+    def list(self, conversation_id, kind=""):
+        if self._boom is not None:
+            raise self._boom
+        if not self._artifacts:
+            return []
+        # NOTE: `spec=` is a reserved MagicMock constructor kwarg (restricts
+        # the mock's interface) -- it does NOT set a `.spec` attribute, so
+        # the object's spec dict has to be assigned after construction.
+        obj = MagicMock(source_artifacts=self._artifacts)
+        obj.spec = {"source": self._source}
+        return [obj]
 
 
 def _node(mode="enforce", store=None):
@@ -157,6 +171,35 @@ async def test_shadow_observes_every_verdict_without_touching_the_turn(
     assert rows[0]["action"] == "continue"
 
 
+@pytest.mark.asyncio
+async def test_32_shadow_classifies_a_source_mismatch_without_blocking_or_mutating(
+    rollout_metrics_file,
+):
+    """Rollout parity 32. Shadow never blocks (unlike enforce), so this call
+    actually ran and registered against the WRONG source -- shadow must
+    still read that correctly as OUTPUT_SOURCE_MISMATCH from the evidence
+    alone, and it must not touch the answer or the messages doing it."""
+    required = [{
+        "kind": "chart", "operation": "create",
+        "source": {"type": "file", "raw": "olmayan.csv", "basename": "olmayan.csv"},
+    }]
+    ai = AIMessage(content="", tool_calls=[
+        {"name": "plot_data", "args": {"path": "satis.csv"}, "id": "c1", "type": "tool_call"},
+    ])
+    messages = [
+        HumanMessage(content="olmayan.csv dosyasının grafiğini çiz"), ai,
+        ToolMessage(content="chart drawn", tool_call_id="c1",
+                    artifact=[{"path": PNG, "kind": "chart"}]),
+    ]
+    state = _state(messages=messages, required_outputs=required, response="İşte grafiğiniz.")
+
+    out = await _node("shadow", _Store((PNG,), source="satis.csv"))(state, CONFIG)
+
+    assert out == {"output_contract_action": "continue"}, "shadow must mutate nothing"
+    rows = _rows(rollout_metrics_file, "decision")
+    assert [r["status"] for r in rows] == ["OUTPUT_SOURCE_MISMATCH"]
+
+
 # ── enforce: who gets a repair, and who must never ─────────────────────────
 
 @pytest.mark.asyncio
@@ -266,6 +309,76 @@ async def test_a_missing_conversation_id_is_unreadable_evidence_not_a_missing_ch
 
     assert _rows(rollout_metrics_file, "terminal")[0]["status"] == "EVIDENCE_UNAVAILABLE"
     assert out["output_contract_action"] == "continue"
+
+
+# ── Full enforce scenario: a blocked repair substitution ends honestly ─────
+# Pr_2 section 9 "Enforce integration" (tests 16-24), chained through the
+# real nodes -- no live model needed, since prepare_execution_node/
+# confirmation_node/output_contract_node are each already exercised
+# individually elsewhere in this suite. This pins them working TOGETHER.
+
+@pytest.mark.asyncio
+async def test_16_24_a_blocked_repair_substitution_ends_as_output_source_mismatch(
+    rollout_metrics_file,
+):
+    """User asks for a chart of `olmayan.csv` (does not exist). Round 1: the
+    model only lists the directory, no plot_data attempt -> the ONE
+    completion repair is offered. Repair round: the model finds `satis.csv`
+    via that listing and tries to substitute it (2026-08-05 pilot finding 1,
+    verbatim) -- the pre-execution guard must block that specific call, and
+    output_contract's second pass must read the block as
+    OUTPUT_SOURCE_MISMATCH, not SATISFIED and not a second repair."""
+    from jarvis.graph.nodes import make_confirmation_node, make_prepare_execution_node
+
+    settings = Settings(_env_file=None, required_outputs_mode="enforce")
+    required = [{
+        "kind": "chart", "operation": "create",
+        "source": {"type": "file", "raw": "olmayan.csv", "basename": "olmayan.csv"},
+    }]
+
+    first_messages = [
+        HumanMessage(content="olmayan.csv dosyasının grafiğini çiz"),
+        AIMessage(content="", tool_calls=[{"name": "file_list", "args": {}, "id": "fl1"}]),
+        ToolMessage(content="satis.csv, bozuk.csv", tool_call_id="fl1"),
+    ]
+    state = _state(messages=first_messages, required_outputs=required)
+    first = await _node(store=_Store())(state, CONFIG)
+    assert first["output_contract_action"] == "repair", "no chart tool was attempted round 1"
+
+    # Repair round: exactly Finding 1's move -- substitute the fixture the
+    # directory listing turned up.
+    repair_ai = AIMessage(content="", tool_calls=[
+        {"name": "plot_data", "args": {"path": "satis.csv"}, "id": "pd1", "type": "tool_call"},
+    ])
+    prep_state = {**state, **first, "messages": first_messages + [repair_ai]}
+    prep_out = await make_prepare_execution_node(settings)(prep_state)
+    assert len(prep_out["source_mismatch_calls"]) == 1, "the wrong-source repair call must be flagged"
+    assert prep_out["execution_requests"] == []
+
+    confirm_state = {**prep_state, **prep_out}
+    confirm_out = await make_confirmation_node(settings)(confirm_state)
+    assert confirm_out["confirmation_result"] == "denied", "plot_data(satis.csv) must not reach tools"
+
+    # output_contract's second pass reads the whole turn back out of
+    # `messages` -- the blocked call's stub is exactly what real graph
+    # execution would have appended by this point.
+    final_state = {
+        **confirm_state, **confirm_out,
+        "messages": confirm_state["messages"] + confirm_out["messages"],
+        "repair_attempts_total": 1, "repair_reason": "missing_required_output",
+    }
+
+    second = await _node(store=_Store())(final_state, CONFIG)
+
+    assert second["output_contract_action"] == "continue", "never a second repair"
+    assert second["response_origin"] == "output_contract"
+    assert final_state["repair_attempts_total"] == 1, "repair_count <= 1"
+    terminal = _rows(rollout_metrics_file, "terminal")[-1]
+    assert terminal["status"] == "OUTPUT_SOURCE_MISMATCH"
+    # The basename is expected and fine (Pr_2 section 5's own example does
+    # exactly this) -- what must never appear is an absolute path.
+    assert "olmayan.csv" in second["response"]
+    assert "C:\\" not in second["response"] and "\\Users\\" not in second["response"]
 
 
 # ── the answer this code wrote is not a model's claim ──────────────────────
@@ -458,8 +571,15 @@ def test_off_writes_no_contract_fields_at_all():
 
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])
 def test_a_chart_request_carries_its_requirement_into_state(mode):
+    """The named file also carries a `source` binding all the way into state
+    (Source Binding) -- checked here rather than loosened away, since this is
+    exactly the entry-point wiring that binding depends on."""
     fields = _contract_fields(mode, "satis.csv grafiğini çiz")
-    assert fields["required_outputs"] == CHART
+    [requirement] = fields["required_outputs"]
+    assert requirement["kind"] == "chart" and requirement["operation"] == "create"
+    assert requirement["source"] == {
+        "type": "file", "raw": "satis.csv", "basename": "satis.csv", "is_explicit_path": False,
+    }
     assert fields["response_origin"] == "model"
     assert fields["repair_attempts_total"] == 0
     assert fields["invalid_args_history"] == [] and fields["preexecution_history"] == []

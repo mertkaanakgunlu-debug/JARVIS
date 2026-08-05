@@ -33,11 +33,24 @@ Scope is deliberately CREATION-only this phase. "grafiği kırmızı yap" is a
 real request with a real postcondition, but a different one (an existing
 object changes; nothing new appears), so it carries no requirement here
 rather than a wrong one.
+
+**Source Binding** (completion contract pilot, 2026-08-05 finding 1): when the
+query names an explicit data file, the requirement now carries a `source`
+sub-dict alongside `kind`/`operation` -- see
+`jarvis.execution.source_identity.extract_source_ref`. The pilot's worst
+failure was a repair that could not tell "a chart" from "a chart of the file
+the user actually named", so it substituted a different fixture and the
+contract called the result satisfied. A generic reference ("bu dosyanın
+grafiği", "verilerden bir grafik") deliberately leaves `source` absent --
+inventing one would reject a perfectly good chart later for not matching a
+file nobody named.
 """
 
 from __future__ import annotations
 
 import re
+
+from jarvis.execution.source_identity import extract_source_ref
 
 #: Turkish consonant mutation makes the stem grafik/grafiğ; matching the stem
 #: covers grafik, grafiği, grafiğini, grafikler without a stemmer.
@@ -93,6 +106,20 @@ _REVISION = re.compile(
 CHART_CREATION: tuple[dict[str, str], ...] = ({"kind": "chart", "operation": "create"},)
 
 
+def _chart_creation_requirement(text: str) -> list[dict]:
+    """CHART_CREATION, plus an explicit source binding when `text` named one.
+
+    Called from both branches below unconditionally -- extract_source_ref
+    already returns None for a generic reference, so there is no separate
+    "should this carry a source" decision to keep in sync with it.
+    """
+    requirement = dict(CHART_CREATION[0])
+    source = extract_source_ref(text)
+    if source is not None:
+        requirement["source"] = source
+    return [requirement]
+
+
 def required_outputs_for(query: object) -> list[dict]:
     """The artifacts this turn is committed to producing, from the query alone.
 
@@ -112,7 +139,7 @@ def required_outputs_for(query: object) -> list[dict]:
         return []
 
     if _VISUALISE.search(text):
-        return [dict(spec) for spec in CHART_CREATION]
+        return _chart_creation_requirement(text)
     if _CHART_NOUN.search(text) and _CREATE_VERB.search(text):
-        return [dict(spec) for spec in CHART_CREATION]
+        return _chart_creation_requirement(text)
     return []

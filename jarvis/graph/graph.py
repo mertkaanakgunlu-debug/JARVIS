@@ -187,7 +187,7 @@ def build_graph(
     llm_pro = get_llm("reasoning", settings)                          # bare — critic/planner
 
     agent_node = make_agent_node(tools, settings)
-    prepare_execution_node = make_prepare_execution_node(settings)
+    prepare_execution_node = make_prepare_execution_node(settings, workspace)
     confirmation_node = make_confirmation_node(settings)
     planner_node = make_planner_node(llm_pro)
     critic_node = make_critic_node(llm_pro)
@@ -226,7 +226,7 @@ def build_graph(
     terminal_target = "verify"
     if getattr(settings, "required_outputs_mode", "off") != "off":
         builder.add_node(
-            "output_contract", make_output_contract_node(settings, working_set)
+            "output_contract", make_output_contract_node(settings, working_set, workspace)
         )
         builder.add_conditional_edges(
             "output_contract",

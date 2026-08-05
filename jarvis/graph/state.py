@@ -146,3 +146,16 @@ class JarvisState(TypedDict):
     # back as a failing ToolMessage stub, and only these tell them apart.
     invalid_args_history: list[dict]   # {"round","tool_call_id","capability","errors"}
     preexecution_history: list[dict]   # {"round","tool_call_id","capability","outcome","reason"}
+
+    # Completion Contract Source Binding: pending tool calls THIS round whose
+    # own source argument does not match a source-bound required_outputs
+    # entry -- built by prepare_execution_node (only when
+    # required_outputs_mode=="enforce" and the requirement carries a
+    # "source"; a no-op list otherwise), consumed by confirmation_node's own
+    # pre-gate to block the call before it reaches "tools". {"tool_call_id",
+    # "capability", "requested_label", "actual_label"} per entry -- labels
+    # only (source_identity.safe_source_label), never an absolute path, since
+    # these reach the audit log and rollout telemetry. Overwritten each
+    # round, same "describes only the batch currently being decided on"
+    # shape as invalid_args_calls/execution_requests above.
+    source_mismatch_calls: list[dict]

@@ -37,6 +37,19 @@ Mechanism = Literal["live", "deterministic"]
 CHART_CREATE = {"kind": "chart", "operation": "create"}
 
 
+def _chart_create_with_source(basename: str) -> dict:
+    """CHART_CREATE plus the `source` binding required_outputs_for() now
+    attaches when a query names an explicit file (Completion Contract Source
+    Binding). Calls normalize_source_ref() itself rather than hand-writing
+    the shape a second time -- a hand-written copy is exactly what drifted
+    out of sync the first time this shape gained a field (is_explicit_path)
+    and this test manifest did not, silently failing every A/C-corpus
+    resolver-agreement check until caught."""
+    from jarvis.execution.source_identity import normalize_source_ref
+
+    return {**CHART_CREATE, "source": normalize_source_ref(basename)}
+
+
 @dataclass(frozen=True)
 class Scenario:
     id: str
@@ -70,7 +83,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         corpus="A", mechanism="live",
         behaviour="explicit chart request",
         query="Masaüstündeki satis.csv dosyasının aylık satış grafiğini çiz",
-        expected_requirement=CHART_CREATE,
+        expected_requirement=_chart_create_with_source("satis.csv"),
         expected_status="SATISFIED",
         notes="The 2x2 experiment's own target query, kept verbatim so the "
               "control arm is comparable with the 2026-08-03 numbers.",
@@ -81,7 +94,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         corpus="A", mechanism="live",
         behaviour="MISSING_NO_ATTEMPT -- the class the contract exists for",
         query="satis.csv'nin grafiğini çiz",
-        expected_requirement=CHART_CREATE,
+        expected_requirement=_chart_create_with_source("satis.csv"),
         expected_status="MISSING_NO_ATTEMPT",
         repair_expected=True,
         notes="Cannot be forced: the model may well draw it. Scored on what "
@@ -93,7 +106,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         corpus="A", mechanism="live",
         behaviour="artifact already exists, user asks again",
         query="satis.csv'nin aylık satış grafiğini tekrar çiz",
-        expected_requirement=CHART_CREATE,
+        expected_requirement=_chart_create_with_source("satis.csv"),
         expected_status="SATISFIED",
         notes="A redraw with an unchanged spec bumps neither object_id nor "
               "version (register_chart skips patch(); record_artifact does not "
@@ -159,7 +172,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         corpus="C", mechanism="live",
         behaviour="MISSING_TOOL_FAILURE -- tool ran and honestly failed",
         query="yok_boyle_bir_dosya.csv dosyasının satış grafiğini çiz",
-        expected_requirement=CHART_CREATE,
+        expected_requirement=_chart_create_with_source("yok_boyle_bir_dosya.csv"),
         expected_status="MISSING_TOOL_FAILURE",
         notes="A non-existent file with structurally valid args. The gate "
               "forbids 'invalid column' as the trigger: fit_columns() repairs "
@@ -171,7 +184,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         corpus="C", mechanism="live",
         behaviour="MISSING_TOOL_FAILURE via an unsupported/corrupt file",
         query="bozuk.csv dosyasının grafiğini çiz",
-        expected_requirement=CHART_CREATE,
+        expected_requirement=_chart_create_with_source("bozuk.csv"),
         expected_status="MISSING_TOOL_FAILURE",
         tags=("failure",),
     ),

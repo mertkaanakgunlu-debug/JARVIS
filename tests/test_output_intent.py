@@ -15,6 +15,18 @@ from jarvis.nlu.output_intent import required_outputs_for
 CHART = [{"kind": "chart", "operation": "create"}]
 
 
+def _is_chart_creation(requirements: list[dict]) -> bool:
+    """kind/operation only -- deliberately blind to whether a `source` key
+    is also present, since Source Binding (Pr_2) adds one whenever the query
+    names an explicit file. Tests that care about the exact shape, source
+    included or not, check it directly instead of through this helper."""
+    return (
+        len(requirements) == 1
+        and requirements[0].get("kind") == "chart"
+        and requirements[0].get("operation") == "create"
+    )
+
+
 @pytest.mark.parametrize("query", [
     # the measured case: the 2x2 experiment's own target query
     "Masaüstündeki satis.csv dosyasının aylık satış grafiğini çiz",
@@ -29,7 +41,11 @@ CHART = [{"kind": "chart", "operation": "create"}]
     "create a plot from this csv file",
 ])
 def test_an_explicit_chart_request_carries_a_creation_contract(query):
-    assert required_outputs_for(query) == CHART
+    """Some of these queries also name an explicit file and therefore carry a
+    `source` binding (see the "Source Binding" section below) -- this test's
+    own concern is only "is a chart/create requirement present at all",
+    which _is_chart_creation checks without being coupled to that."""
+    assert _is_chart_creation(required_outputs_for(query))
 
 
 @pytest.mark.parametrize("query", [
@@ -76,7 +92,7 @@ def test_a_polite_request_is_still_a_request(query):
     question about ability. Treating the form as a capability question would
     silently drop the contract from the politest phrasings -- and those are
     how the owner actually writes."""
-    assert required_outputs_for(query) == CHART
+    assert _is_chart_creation(required_outputs_for(query))
 
 
 @pytest.mark.parametrize("query", [
@@ -117,20 +133,81 @@ def test_a_revision_request_is_out_of_this_phases_scope(query):
 
 def test_the_requirement_shape_is_operation_aware():
     """Not a bare ["chart"]: plot_data and chart_revise both produce a chart
-    and are not interchangeable, so the requirement has to say which."""
-    [requirement] = required_outputs_for("satis.csv'nin grafiğini çiz")
+    and are not interchangeable, so the requirement has to say which.
+
+    Deliberately a SOURCE-FREE query -- this test's only concern is the
+    kind/operation shape; the "Source Binding" section below covers the
+    `source` sub-dict a named-file query additionally carries.
+    """
+    [requirement] = required_outputs_for("verilerden bir grafik hazırla")
     assert requirement == {"kind": "chart", "operation": "create"}
 
 
 def test_the_result_is_a_fresh_list_each_call():
     """It goes straight into graph state and through a checkpointer; a shared
     module-level list would be one accidental mutation away from leaking
-    between turns."""
-    first = required_outputs_for("satis.csv'nin grafiğini çiz")
+    between turns. Source-free query -- see the fresh-list check for a named
+    file below, since that requirement also carries a nested `source` dict
+    that must not alias across calls either."""
+    first = required_outputs_for("verilerden bir grafik hazırla")
     first.append({"kind": "report", "operation": "create"})
-    assert required_outputs_for("satis.csv'nin grafiğini çiz") == CHART
+    assert required_outputs_for("verilerden bir grafik hazırla") == CHART
 
 
 @pytest.mark.parametrize("query", [None, 42, ["grafik çiz"]])
 def test_a_non_string_query_is_not_a_contract(query):
     assert required_outputs_for(query) == []
+
+
+# ── Source Binding (Pr_2): the `source` sub-dict a named file adds ─────────
+
+@pytest.mark.parametrize("query,expected_basename", [
+    ("satis.csv'nin grafiğini çiz", "satis.csv"),
+    ("Masaüstündeki satis.csv dosyasının aylık satış grafiğini çiz", "satis.csv"),
+    ("satis.csv'yi grafik olarak göster", "satis.csv"),
+    ("plot the sales column from satis.csv", "satis.csv"),
+    ("satis.csv'yi grafik olarak gösterebilir misin?", "satis.csv"),
+])
+def test_a_named_file_request_carries_a_source_binding(query, expected_basename):
+    [requirement] = required_outputs_for(query)
+    assert requirement["kind"] == "chart" and requirement["operation"] == "create"
+    assert requirement["source"] == {
+        "type": "file", "raw": expected_basename, "basename": expected_basename,
+        "is_explicit_path": False,
+    }
+
+
+@pytest.mark.parametrize("query", [
+    "bu dosyanın grafiğini oluştur",
+    "verilerden bir grafik hazırla",
+    "excel dosyasındaki satışların grafiğini çıkar",
+    "tablodaki değerleri görselleştir",
+    "draw a chart of the data",
+    "create a plot from this csv file",
+    "bu dosyanın grafiğini çizebilir misin?",
+    "verinin grafiğini çizer misin acaba",
+])
+def test_a_generic_reference_request_carries_no_source_binding(query):
+    """Section 1's rule: 'bu dosya' / 'veriler' / 'tablo' must not fabricate a
+    source. Exact equality with CHART (not just kind/operation) is the point
+    here -- a stray `source` key appearing would be exactly the bug this
+    pins against."""
+    assert required_outputs_for(query) == CHART
+
+
+def test_an_absolute_path_in_the_query_is_preserved_in_the_requirement():
+    query = r"C:\Users\mertk\Desktop\satis.csv dosyasının grafiğini çiz"
+    [requirement] = required_outputs_for(query)
+    source = requirement["source"]
+    assert source["basename"] == "satis.csv"
+    assert source["raw"] == r"C:\Users\mertk\Desktop\satis.csv"
+    assert source.get("path"), "an already-absolute path needs no workspace to canonicalize"
+
+
+def test_the_source_dict_is_a_fresh_object_each_call():
+    """Same mutation-isolation concern as the requirement list itself, one
+    level deeper: the nested `source` dict must not alias across turns."""
+    first = required_outputs_for("satis.csv'nin grafiğini çiz")
+    first[0]["source"]["basename"] = "corrupted.csv"
+    second = required_outputs_for("satis.csv'nin grafiğini çiz")
+    assert second[0]["source"]["basename"] == "satis.csv"

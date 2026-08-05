@@ -749,6 +749,27 @@ _CONTRACT_TEXT: dict[str, tuple[str, str]] = {
     ),
 }
 
+#: OUTPUT_SOURCE_MISMATCH gets its own template rather than joining
+#: _CONTRACT_TEXT above: every other status's {detail} is an OPTIONAL
+#: trailing parenthetical, but this one needs the requested source's safe
+#: label woven into the main sentence itself (Pr_2 section 5's own example),
+#: never omitted and never an absolute path.
+_OUTPUT_SOURCE_MISMATCH_TEXT: tuple[str, str] = (
+    "İstenen kaynak {source!r} idi; grafik çağrısı farklı bir kaynak kullanmaya "
+    "çalıştı. Yanlış kaynaktan grafik üretmedim ve görevi tamamlanmış saymıyorum.",
+    "The requested source was {source!r}; the chart call tried to use a "
+    "different one. I did not produce a chart from the wrong source, and I am "
+    "not marking this task complete.",
+)
+
+
+def _source_mismatch_text(required_source: dict | None, turkish: bool) -> str:
+    from jarvis.execution.source_identity import safe_source_label
+
+    label = safe_source_label(required_source) if required_source else "the requested source"
+    template = _OUTPUT_SOURCE_MISMATCH_TEXT[0 if turkish else 1]
+    return template.format(source=label)
+
 #: Given to the agent for its single completion-repair round, as a
 #: HumanMessage rather than a SystemMessage -- following planner_node's own
 #: "[Planning Mode — Execution Plan]" precedent, since a system message in the
@@ -759,7 +780,7 @@ _CONTRACT_TEXT: dict[str, tuple[str, str]] = {
 #: answer. Two copies of the same block, one to emit and one to match, is
 #: exactly the drift that would leave half a directive in a user's answer.
 from jarvis.execution.output_contract import (  # noqa: E402 -- see the note above
-    REPAIR_DIRECTIVE as _REPAIR_DIRECTIVE,
+    repair_directive_for as _repair_directive_for,
 )
 
 
@@ -769,7 +790,7 @@ def _contract_failure_text(status: str, detail: str, turkish: bool) -> str:
     return (turkish_text if turkish else english_text).format(detail=suffix)
 
 
-def make_output_contract_node(settings=None, working_set=None):
+def make_output_contract_node(settings=None, working_set=None, workspace=None):
     """TERMINAL node: was the output the user explicitly asked for produced?
 
     Post-MVP Faz 6, and a sibling of make_verification_node rather than part
@@ -794,7 +815,7 @@ def make_output_contract_node(settings=None, working_set=None):
     """
     from jarvis import audit_log
     from jarvis.execution import rollout
-    from jarvis.execution.output_contract import classify, first_requirement
+    from jarvis.execution.output_contract import classify, first_requirement, required_source_of
     from jarvis.tool_registry import tools_producing
 
     mode = getattr(settings, "required_outputs_mode", "off") if settings is not None else "off"
@@ -821,6 +842,11 @@ def make_output_contract_node(settings=None, working_set=None):
             baseline_artifacts=(
                 (state.get("required_output_baseline") or {}).get(kind, {}) or {}
             ).get("artifacts"),
+            # Source Binding: lets a bare filename and its absolute form
+            # compare equal (source_identity.source_matches). Absent
+            # entirely when the requirement is unbound -- classify() never
+            # even reads this then.
+            workspace=workspace,
         )
 
         # A completion repair is the only thing that writes this reason, and
@@ -866,7 +892,9 @@ def make_output_contract_node(settings=None, working_set=None):
                 reason=verdict.reason, repair_reason="missing_required_output",
             )
             return {
-                "messages": [HumanMessage(content=_REPAIR_DIRECTIVE)],
+                "messages": [HumanMessage(
+                    content=_repair_directive_for(required_source_of(required)),
+                )],
                 "output_contract_action": "repair",
                 **claim_budget(state, settings, "missing_required_output"),
             }
@@ -882,9 +910,12 @@ def make_output_contract_node(settings=None, working_set=None):
                 capability=",".join(sorted(tools_producing(kind, operation))),
                 declared=list(verdict.declared), reason=verdict.reason,
             )
-        text = _contract_failure_text(
-            verdict.status, unavailable or verdict.reason, _is_turkish(state),
-        )
+        if verdict.status == "OUTPUT_SOURCE_MISMATCH":
+            text = _source_mismatch_text(required_source_of(required), _is_turkish(state))
+        else:
+            text = _contract_failure_text(
+                verdict.status, unavailable or verdict.reason, _is_turkish(state),
+            )
         rollout.record_output_contract(
             mode=mode, event="terminal", status=verdict.status,
             requirement=verdict.requirement, action="continue",
@@ -914,6 +945,8 @@ def _read_evidence(working_set, config, kind: str) -> dict:
     produced nothing" -- that would blame a model for our own SQLite, and
     (worse) offer it a repair for a chart it may already have drawn.
     """
+    from jarvis.execution.output_contract import canonical
+
     try:
         conversation_id = str(((config or {}).get("configurable") or {}).get("conversation_id") or "")
         if not conversation_id:
@@ -923,10 +956,24 @@ def _read_evidence(working_set, config, kind: str) -> dict:
             from jarvis.working_set import default_store
             store = default_store()
         obj = store.active(conversation_id, kind)
-        return {"registered_artifacts": tuple(obj.source_artifacts) if obj is not None else ()}
+        # Source Binding: artifact path -> the REGISTERING object's own
+        # spec source, for every chart object in the conversation, not only
+        # the active one -- a matched artifact belongs to whichever object
+        # actually kept it, and that need not be the currently active chart
+        # (e.g. an earlier correct draw, later superseded by a revision).
+        artifact_sources = {
+            canonical(artifact): str(other.spec.get("source") or "")
+            for other in store.list(conversation_id, kind)
+            for artifact in other.source_artifacts
+            if other.spec.get("source")
+        }
+        return {
+            "registered_artifacts": tuple(obj.source_artifacts) if obj is not None else (),
+            "artifact_sources": artifact_sources,
+        }
     except Exception as exc:  # noqa: BLE001 -- see the docstring
         logger.warning("output contract could not read the working set", exc_info=True)
-        return {"registered_artifacts": (), "evidence_error": type(exc).__name__}
+        return {"registered_artifacts": (), "artifact_sources": {}, "evidence_error": type(exc).__name__}
 
 
 def _repair_unavailable_reason(state: JarvisState, settings, max_rounds: int, max_calls: int) -> str:
@@ -1180,7 +1227,7 @@ def route_from_critic(state: JarvisState) -> str:
 
 # ── Agent Runtime rev.2, Faz 2 ──────────────────────────────────────────────
 
-def make_prepare_execution_node(settings=None):
+def make_prepare_execution_node(settings=None, workspace=None):
     """Return a node that mints one signed ExecutionRequest per pending tool
     call (Agent Runtime rev.2, Faz 2, reviewer #2/#6) -- new routing:
     agent → prepare_execution → confirmation.
@@ -1205,6 +1252,15 @@ def make_prepare_execution_node(settings=None):
     partially executed" precedent every other pre-gate already follows)
     rather than silently letting a malformed call fall through to policy
     evaluation and signing.
+
+    Completion Contract Source Binding: a producer call (e.g. plot_data)
+    whose OWN source argument does not match a source-bound `required_
+    outputs` entry gets the same treatment -- no ExecutionRequest, recorded
+    in "source_mismatch_calls" instead -- but only when
+    `required_outputs_mode=="enforce"`; shadow/off never populate it, so
+    confirmation_node's pre-gate is a no-op there. Unlike invalid args there
+    is no one-time bounded retry: every mismatched attempt is blocked, every
+    round -- see jarvis.execution.output_contract.SOURCE_MISMATCH_BLOCK_OUTCOME.
 
     Deliberately calls policy_guard.evaluate() again here even though
     confirmation_node ALSO calls it independently for its own pre-gate
@@ -1231,11 +1287,18 @@ def make_prepare_execution_node(settings=None):
     from jarvis import policy_guard
     from jarvis.execution import approval
     from jarvis.execution.args_schemas import validate_args
+    from jarvis.execution.output_contract import (
+        call_source_ref,
+        first_requirement,
+        required_source_of,
+    )
     from jarvis.execution.request import ExecutionRequest, resolve_target_resource
+    from jarvis.execution.source_identity import safe_source_label, source_matches
     from jarvis.graph.tool_accounting import tool_call_fingerprint
-    from jarvis.tool_registry import get_spec
+    from jarvis.tool_registry import get_spec, tools_producing
 
     ttl = getattr(settings, "approval_ttl_sec", 300) if settings is not None else 300
+    mode = getattr(settings, "required_outputs_mode", "off") if settings is not None else "off"
 
     async def prepare_execution_node(state: JarvisState) -> dict:
         last_ai: AIMessage | None = None
@@ -1253,8 +1316,26 @@ def make_prepare_execution_node(settings=None):
         # now is round N+1 -- stamped so the contract can tell a first-round
         # rejection from a repair round's.
         round_index = int(state.get("tool_rounds") or 0) + 1
+
+        # Completion Contract Source Binding -- structural, not a prompt
+        # instruction: only meaningful in enforce mode, for a requirement
+        # that actually names a source, against the tools that produce it
+        # ("chart/create" -> plot_data this phase). An unbound requirement
+        # (generic "bu dosya") leaves required_source None and this whole
+        # block is a no-op, same as `off`/`shadow`.
+        required_source: dict | None = None
+        producer_capabilities: frozenset[str] = frozenset()
+        if mode == "enforce":
+            required = state.get("required_outputs") or []
+            pair = first_requirement(required)
+            if pair is not None:
+                required_source = required_source_of(required)
+                if required_source is not None:
+                    producer_capabilities = tools_producing(*pair)
+
         requests: list[dict] = []
         invalid_calls: list[dict] = []
+        source_mismatch_calls: list[dict] = []
         for tc in last_ai.tool_calls:
             name = tc.get("name", "")
             args = tc.get("args") or {}
@@ -1267,6 +1348,20 @@ def make_prepare_execution_node(settings=None):
                         "tool_call_id": tc.get("id", ""),
                         "capability": name,
                         "errors": errors,
+                    })
+                    continue
+
+            if required_source is not None and name in producer_capabilities:
+                actual_source = call_source_ref(name, args)
+                if not source_matches(required_source, actual_source, workspace):
+                    source_mismatch_calls.append({
+                        "tool_call_id": tc.get("id", ""),
+                        "capability": name,
+                        "requested_label": safe_source_label(required_source),
+                        "actual_label": (
+                            safe_source_label(actual_source)
+                            if actual_source is not None else "no source given"
+                        ),
                     })
                     continue
 
@@ -1312,6 +1407,7 @@ def make_prepare_execution_node(settings=None):
             "execution_requests": requests,
             "invalid_args_calls": invalid_calls,
             "invalid_args_history": history,
+            "source_mismatch_calls": source_mismatch_calls,
         }
 
     prepare_execution_node.__name__ = "prepare_execution_node"
@@ -1639,6 +1735,65 @@ def make_confirmation_node(settings):
                 "response": final_text,
                 **counter_updates,
             }
+
+        # Completion Contract Source Binding -- structural pre-execution
+        # block, same "whole batch rejected wholesale" precedent as every
+        # gate above (executing 'just the correct-source call' would need a
+        # partial-batch dispatch this graph does not have; the model gets it
+        # back next round instead). Unlike invalid_args there is no bounded
+        # one-time retry: every mismatched attempt is blocked, unconditionally,
+        # every round -- a repair round is exactly how the pilot's finding 1
+        # substituted a different file, so there is no "first free" version
+        # of this mistake to allow. prepare_execution_node only populates
+        # this list in enforce mode for a source-bound requirement, so this
+        # is a no-op in shadow/off and for an unbound request.
+        source_mismatch_calls = list(state.get("source_mismatch_calls") or [])
+        if source_mismatch_calls:
+            from jarvis.execution.output_contract import SOURCE_MISMATCH_BLOCK_OUTCOME
+
+            mismatch_by_id = {c["tool_call_id"]: c for c in source_mismatch_calls}
+            for c in source_mismatch_calls:
+                audit_log.record(
+                    "decision", tool=c["capability"], action="", risk_level=0,
+                    transport=transport, outcome=SOURCE_MISMATCH_BLOCK_OUTCOME,
+                    reason=f"requested {c['requested_label']!r}, call used "
+                           f"{c['actual_label']!r}"[:200],
+                    **rich,
+                )
+
+            def _stub_for_mismatch(tc: dict) -> ToolMessage:
+                entry = mismatch_by_id.get(tc.get("id", ""))
+                if entry is None:
+                    return ToolMessage(
+                        content="[SKIPPED: batched with a source-mismatched call -- "
+                                "re-issue this one alone if still needed]",
+                        tool_call_id=tc.get("id", ""),
+                    )
+                return ToolMessage(
+                    content=(
+                        f"[BLOCKED_OUTPUT_SOURCE_MISMATCH] requested source "
+                        f"{entry['requested_label']!r}; this call used "
+                        f"{entry['actual_label']!r} instead -- not executed."
+                    ),
+                    tool_call_id=tc.get("id", ""),
+                )
+
+            requested_labels = {c["requested_label"] for c in source_mismatch_calls}
+            requested_label = (
+                next(iter(requested_labels)) if len(requested_labels) == 1
+                else "the requested source"
+            )
+            return _reject_batch(
+                SOURCE_MISMATCH_BLOCK_OUTCOME,
+                "",  # unused -- per_call_stubs given
+                "One or more of these tool calls used a different data source than the "
+                f"one the user asked for ({requested_label!r}). Do NOT substitute a "
+                "different file and do NOT retry by drawing from whatever else you find "
+                "in the workspace -- if the exact requested source is genuinely "
+                "unavailable, tell the user that honestly instead of producing output "
+                "from something else.",
+                per_call_stubs=[_stub_for_mismatch(tc) for tc in batch],
+            )
 
         # Past the pre-gate: these calls now reach the policy layer, so their
         # fingerprints become 'seen' (exact repeats are blocked from here on,

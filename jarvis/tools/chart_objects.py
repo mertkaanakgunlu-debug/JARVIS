@@ -155,6 +155,19 @@ def _canonical_source(source: str, workspace: Path) -> str:
     `satis.csv`, `./satis.csv` and `C:\\...\\satis.csv` are one file and were
     three different charts, because identity compared the raw strings the model
     happened to type.
+
+    Same goal as jarvis.execution.source_identity.normalize_source_ref (also
+    written to answer "is this the same file"), and deliberately NOT merged
+    into it: that helper backs Source Binding's chart-CREATION-vs-the-user's-
+    request check, a different call site with its own dict-shaped evidence
+    (call args, an unresolved requirement) and its own test suite
+    (tests/test_source_identity.py). This function backs chart REVISION
+    identity (_same_chart, below) -- a live, separately tested mechanism
+    (tests/test_working_set.py) with its own established correctness
+    guarantees. Routing it through the newer helper would risk a subtle
+    behaviour change in a feature Source Binding was not asked to touch, for
+    the sake of removing a few lines of genuinely-shared logic -- exactly the
+    unnecessary broad refactor Pr_2 section 2 says not to do.
     """
     text = str(source or "").strip()
     if not text:

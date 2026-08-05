@@ -447,6 +447,255 @@ async def _invoke_and_get_interrupt(graph, state, config):
     return None, result
 
 
+# ── Completion Contract Source Binding (Pr_2 section 6): the pre-execution
+# guard. Detection lives in prepare_execution_node (this tier), blocking in
+# confirmation_node (tier 2 style, chained the same way as the rest of this
+# file) -- see jarvis.execution.output_contract.SOURCE_MISMATCH_BLOCK_OUTCOME.
+
+def _source_bound_state(
+    tool_name: str, args: dict, *, required_source: str = "satis.csv", call_id: str = "call_1",
+) -> dict:
+    return {
+        "messages": [_ai_tool_call(tool_name, args, call_id)],
+        "transport": "cli-text",
+        "required_outputs": [{
+            "kind": "chart", "operation": "create",
+            "source": {"type": "file", "raw": required_source, "basename": required_source},
+        }],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_mismatched_plot_data_call_is_flagged_in_enforce_mode(isolated_cwd):
+    settings = _settings(required_outputs_mode="enforce")
+    state = _source_bound_state("plot_data", {"path": "other.csv"})
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert len(result["source_mismatch_calls"]) == 1
+    entry = result["source_mismatch_calls"][0]
+    assert entry["tool_call_id"] == "call_1"
+    assert entry["capability"] == "plot_data"
+    assert entry["requested_label"] == "satis.csv"
+    assert entry["actual_label"] == "other.csv"
+    assert result["execution_requests"] == [], \
+        "no ExecutionRequest should be minted for a call that will be blocked anyway"
+
+
+@pytest.mark.asyncio
+async def test_a_matching_plot_data_call_is_not_flagged(isolated_cwd):
+    settings = _settings(required_outputs_mode="enforce")
+    state = _source_bound_state("plot_data", {"path": "satis.csv"})
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert result["source_mismatch_calls"] == []
+    assert len(result["execution_requests"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_bare_filename_request_is_not_flagged_when_the_call_uses_a_subdirectory(
+    isolated_cwd, tmp_path,
+):
+    """Regression for the false positive a live qwen3:8b smoke run caught
+    (Pr_2 section 10): asked for a bare 'satis.csv', the model reasonably
+    called plot_data(path='Desktop/satis.csv') -- that must NOT be flagged,
+    since the user never named a directory."""
+    (tmp_path / "Desktop").mkdir()
+    (tmp_path / "Desktop" / "satis.csv").write_text("x", encoding="utf-8")
+    settings = _settings(required_outputs_mode="enforce")
+    state = _source_bound_state("plot_data", {"path": "Desktop/satis.csv"})
+
+    result = await make_prepare_execution_node(settings, workspace=tmp_path)(state)
+
+    assert result["source_mismatch_calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_no_source_argument_at_all_is_caught_earlier_as_invalid_args(isolated_cwd):
+    """plot_data with neither `path` nor `data_json` never reaches the source
+    check at all: PlotDataArgs' own schema (args_schemas.py) already requires
+    exactly one of them, so this is MISSING_INVALID_ARGS territory, caught by
+    the more fundamental, pre-existing gate -- not silently waved through as
+    a source match, and not double-classified as a source mismatch either."""
+    settings = _settings(required_outputs_mode="enforce")
+    state = _source_bound_state("plot_data", {})
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert result["source_mismatch_calls"] == []
+    assert len(result["invalid_args_calls"]) == 1
+    assert result["invalid_args_calls"][0]["capability"] == "plot_data"
+
+
+@pytest.mark.asyncio
+async def test_inline_data_json_is_flagged_against_a_named_file_requirement(isolated_cwd):
+    settings = _settings(required_outputs_mode="enforce")
+    state = _source_bound_state("plot_data", {"data_json": "[1,2,3]"})
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert len(result["source_mismatch_calls"]) == 1
+    assert result["source_mismatch_calls"][0]["actual_label"] == "inline data"
+
+
+@pytest.mark.asyncio
+async def test_shadow_mode_never_flags_a_mismatch(isolated_cwd):
+    """Shadow must not block: this list is populated ONLY in enforce, so
+    confirmation_node's pre-gate is a no-op in shadow for the same call."""
+    settings = _settings(required_outputs_mode="shadow")
+    state = _source_bound_state("plot_data", {"path": "other.csv"})
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert result["source_mismatch_calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_off_mode_never_flags_a_mismatch(isolated_cwd):
+    settings = _settings(required_outputs_mode="off")
+    state = _source_bound_state("plot_data", {"path": "other.csv"})
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert result["source_mismatch_calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_unbound_requirement_never_flags_a_mismatch(isolated_cwd):
+    """No `source` key on the requirement -- a generic "bu dosya" request.
+    Nothing was named, so nothing is ever compared against."""
+    settings = _settings(required_outputs_mode="enforce")
+    state = {
+        "messages": [_ai_tool_call("plot_data", {"path": "whatever.csv"})],
+        "transport": "cli-text",
+        "required_outputs": [{"kind": "chart", "operation": "create"}],
+    }
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert result["source_mismatch_calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_producer_tool_call_is_never_flagged(isolated_cwd):
+    """file_list is not a chart producer -- only tools_producing(kind,
+    operation) are checked, even under an enforced, source-bound requirement."""
+    settings = _settings(required_outputs_mode="enforce")
+    state = _source_bound_state("file_list", {"path": "."})
+
+    result = await make_prepare_execution_node(settings)(state)
+
+    assert result["source_mismatch_calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_confirmation_node_blocks_a_flagged_call_before_the_interrupt(isolated_cwd, monkeypatch):
+    """The whole point: a mismatched producer call must never reach the real
+    confirmation interrupt (which a human might simply click through) -- it
+    is refused structurally, before that."""
+    def _fail_if_reached(payload):
+        raise AssertionError("must not reach the interrupt for a source-mismatched call")
+    monkeypatch.setattr("langgraph.types.interrupt", _fail_if_reached)
+
+    settings = _settings(required_outputs_mode="enforce")
+    prep_state = _source_bound_state("plot_data", {"path": "other.csv"})
+    prep_out = await make_prepare_execution_node(settings)(prep_state)
+    state = {**prep_state, **prep_out}
+
+    result = await make_confirmation_node(settings)(state)
+
+    assert result["confirmation_result"] == "denied"
+    assert any("BLOCKED_OUTPUT_SOURCE_MISMATCH" in m.content
+               for m in result["messages"] if hasattr(m, "content"))
+    outcomes = {e["outcome"] for e in result["preexecution_history"]}
+    assert "blocked_output_source_mismatch" in outcomes
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_source_mismatch_routes_back_to_the_agent_not_end(isolated_cwd):
+    """Same routing as every other structural pre-gate denial -- the model
+    gets the stub + ack back and decides what to say; it is NOT composed
+    into a final answer here (that is output_contract's job once the turn
+    reaches the terminal chain, not confirmation_node's)."""
+    from jarvis.graph.nodes import route_from_confirmation
+
+    settings = _settings(required_outputs_mode="enforce")
+    prep_state = _source_bound_state("plot_data", {"path": "other.csv"})
+    prep_out = await make_prepare_execution_node(settings)(prep_state)
+    state = {**prep_state, **prep_out}
+
+    result = await make_confirmation_node(settings)(state)
+
+    assert route_from_confirmation({**state, **result}) == "agent"
+
+
+@pytest.mark.asyncio
+async def test_a_correctly_sourced_call_is_not_blocked_by_this_guard(isolated_cwd, monkeypatch):
+    """Mirror case: a matching call proceeds to the ordinary policy gate
+    exactly as before Source Binding existed."""
+    monkeypatch.setattr("langgraph.types.interrupt", lambda payload: "approve")
+    settings = _settings(required_outputs_mode="enforce")
+    prep_state = _source_bound_state("plot_data", {"path": "satis.csv"})
+    prep_out = await make_prepare_execution_node(settings)(prep_state)
+    state = {**prep_state, **prep_out}
+
+    result = await make_confirmation_node(settings)(state)
+
+    assert result["confirmation_result"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_36_a_source_mismatch_block_never_spends_the_shared_repair_budget(isolated_cwd):
+    """Rollout parity 36. The shared corrective-repair budget
+    (jarvis.graph.repair_budget) is for completion repairs, invalid-args
+    repairs and the claim gate -- a structural source-mismatch block is none
+    of those and must not consume it, or a turn's legitimate ONE repair
+    would already be spent by a block this guard, not a repair, caused."""
+    from jarvis.graph.repair_budget import corrective_repair_spent
+
+    settings = _settings(required_outputs_mode="enforce")
+    prep_state = _source_bound_state("plot_data", {"path": "other.csv"})
+    prep_out = await make_prepare_execution_node(settings)(prep_state)
+    state = {**prep_state, **prep_out}
+
+    confirm_out = await make_confirmation_node(settings)(state)
+
+    assert "repair_attempts_total" not in confirm_out
+    assert "repair_reason" not in confirm_out
+    merged = {**state, **confirm_out}
+    assert corrective_repair_spent(merged, settings) is False
+
+
+@pytest.mark.asyncio
+async def test_a_mismatched_call_blocks_its_whole_batch_including_a_correct_sibling(isolated_cwd):
+    """Two plot_data calls in ONE round: this graph has no partial-batch
+    dispatch, so the correct sibling is blocked too THIS round -- the same
+    'whole batch rejected wholesale' precedent every other pre-gate in this
+    node already follows (batch limit, duplicates, invalid args). It is free
+    to retry the correct one alone next round -- section 8's 'at least one
+    source-correct call can still satisfy the requirement' is about the
+    TURN, not about salvaging part of one blocked batch."""
+    settings = _settings(required_outputs_mode="enforce")
+    ai = AIMessage(content="", tool_calls=[
+        {"name": "plot_data", "args": {"path": "other.csv"}, "id": "bad", "type": "tool_call"},
+        {"name": "plot_data", "args": {"path": "satis.csv"}, "id": "good", "type": "tool_call"},
+    ])
+    state = {
+        "messages": [ai], "transport": "cli-text",
+        "required_outputs": [{"kind": "chart", "operation": "create",
+                              "source": {"type": "file", "raw": "satis.csv", "basename": "satis.csv"}}],
+    }
+    prep_out = await make_prepare_execution_node(settings)(state)
+    state = {**state, **prep_out}
+
+    result = await make_confirmation_node(settings)(state)
+
+    assert result["confirmation_result"] == "denied"
+    ids_blocked = {e["tool_call_id"] for e in result["preexecution_history"]}
+    assert ids_blocked == {"bad", "good"}
+
+
 @pytest.mark.asyncio
 async def test_real_graph_interrupt_then_approve_executes_and_commits(isolated_cwd, tmp_path, monkeypatch):
     from jarvis.graph.graph import build_graph, make_checkpointer

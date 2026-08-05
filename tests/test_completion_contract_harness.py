@@ -131,6 +131,13 @@ class _Store:
     def active(self, conversation_id, kind=""):
         return MagicMock(source_artifacts=self._artifacts) if self._artifacts else None
 
+    def list(self, conversation_id, kind=""):
+        if not self._artifacts:
+            return []
+        obj = MagicMock(source_artifacts=self._artifacts)
+        obj.spec = {}  # no source binding exercised by this file's scenarios
+        return [obj]
+
 
 def _state(messages, **overrides):
     state = {
