@@ -1,0 +1,14 @@
+{
+ "required_outputs_mode": "off",
+ "execution_contract_mode": "shadow",
+ "cloud_policy": "off",
+ "local_model": "qwen3:8b",
+ "max_tool_rounds_per_turn": 4,
+ "max_tool_calls_per_turn": 6,
+ "max_tool_calls_per_ai_message": 4,
+ "max_identical_tool_call": 1,
+ "graph_recursion_limit": 30,
+ "confirmation_gate_enabled": true,
+ "calendar_timezone": "Europe/Istanbul",
+ "note": "Defaults as shipped at the pilot commit. required_outputs_mode stays off; the harness overrides it PER ARM only."
+}
