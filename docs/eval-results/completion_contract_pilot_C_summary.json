@@ -78,7 +78,10 @@
     "detail": "proven deterministically -- tests/test_output_contract_streaming.py"
    }
   ],
-  "decision": "ROLLOUT DECISION: NO PROMOTION -- stays at `shadow`"
+  "decision": "ROLLOUT DECISION: NO PROMOTION -- stays at `shadow`",
+  "gate_decision": "NO_PROMOTION",
+  "operational_mode_after_pilot": "off",
+  "rollout_state_note": "The 'decision' line above is the harness's own generated text, preserved verbatim as a historical record -- not restated or reworded. Its 'stays at `shadow`' phrasing assumes required_outputs_mode was already at `shadow` before this gate ran. It was not: the real starting AND current operational mode is `off`, and no pre-registered gate exists for an off -> shadow transition (only shadow -> enforce is gated by completion_contract_gate.md). This pilot's decision is NO_PROMOTION; required_outputs_mode remains `off`, unchanged by this result."
  },
  "trials": [
   {

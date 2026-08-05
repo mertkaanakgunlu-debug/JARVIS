@@ -18,6 +18,21 @@ metric, not a scenario definition.
 `required_outputs_mode` stays **`off`**. Two clauses of the conjunctive gate
 fail; one more is measured but causally ambiguous. Enforce is not recommended.
 
+### Rollout-state clarification (added 2026-08-05, no numbers changed)
+
+The pre-registered gate's own rollout-decision prose (`completion_contract_gate.md`)
+reads *"gate fails -> NO promotion. Stays at `shadow`."* -- language that assumes
+`required_outputs_mode` was already at `shadow` before this gate ran. It was not: the
+real starting **and** current operational mode is **`off`**, and no separate
+pre-registered gate exists for an `off -> shadow` transition -- only `shadow ->
+enforce` is gated by that document. This pilot's decision is `NO_PROMOTION`;
+`required_outputs_mode` stays **`off`**, unchanged by this result. The raw harness
+output and the three committed summary JSONs (`docs/eval-results/completion_contract_
+pilot_{A,B,C}_summary.json`) keep their original generated `decision` string verbatim
+as a historical record; `gate_decision`, `operational_mode_after_pilot` and this note
+were added alongside it, not in place of it. No trial row, metric, threshold or the
+pre-registered gate text itself was touched.
+
 | clause | result | measured |
 |---|---|---|
 | A: `object_created` delta ≥ +2/10 | **FAIL** | **+0.8/10** |

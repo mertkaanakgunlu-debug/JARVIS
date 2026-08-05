@@ -501,15 +501,35 @@ def _gate_verdict(per_arm: dict[str, list[dict]]) -> dict:
     failed = [c for c in clauses if c[1] is False]
     unmeasured = [c for c in clauses if c[1] is None]
     if failed:
-        decision = "ROLLOUT DECISION: NO PROMOTION -- stays at `shadow`"
+        # Neutral on purpose -- earlier phrasing said "stays at `shadow`",
+        # which assumes the ambient required_outputs_mode was already at
+        # `shadow` before this gate ran. It never was (see
+        # docs/eval/completion_contract_pilot_2026-08-05.md's rollout-state
+        # clarification): the real starting AND operational default is
+        # `off`, and there is no pre-registered off->shadow gate. The
+        # harness cannot assume a rollout stage it never measured.
+        gate_decision = "NO_PROMOTION"
+        decision = "ROLLOUT DECISION: NO PROMOTION"
     elif unmeasured:
+        gate_decision = "INCOMPLETE"
         decision = ("ROLLOUT DECISION: INCOMPLETE -- "
                     f"{len(unmeasured)} clause(s) unmeasured; no promotion")
     else:
+        gate_decision = "PROMOTION_LICENSED"
         decision = "ROLLOUT DECISION: promotion to `enforce` is licensed"
     print(f"\n{decision}\n")
-    return {"clauses": [{"clause": n, "pass": o, "detail": d} for n, o, d in clauses],
-            "decision": decision}
+    return {
+        "clauses": [{"clause": n, "pass": o, "detail": d} for n, o, d in clauses],
+        "decision": decision,
+        "gate_decision": gate_decision,
+        # The actual configured default, not a literal -- honest even if a
+        # future session ever changes required_outputs_mode's own default in
+        # jarvis/config.py. A "promotion licensed" verdict does not itself
+        # flip this: nothing in this repo auto-applies a gate result, so the
+        # operational mode after ANY pilot is whatever the default already
+        # was (see this task's own rule: this harness never changes it).
+        "operational_mode_after_pilot": Settings.model_fields["required_outputs_mode"].default,
+    }
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────
