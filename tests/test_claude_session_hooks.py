@@ -33,6 +33,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 START_SCRIPT = REPO_ROOT / "scripts" / "claude_session_start.py"
 END_SCRIPT = REPO_ROOT / "scripts" / "claude_session_end.py"
 
+#: The project's runtime interpreter, as referenced by the hook commands. It
+#: lives under the gitignored `.venv/`, so it is expected to be ABSENT from a
+#: clean checkout -- see test_hook_commands_use_repo_relative_paths_that_exist.
+EXPECTED_INTERPRETER = ".venv/Scripts/python.exe"
+
+
+def _split_command_paths(command: str) -> tuple[list[str], list[str]]:
+    """A hook command's path tokens, separated by what they actually are.
+
+    Scripts are repository artefacts and must exist; the interpreter is a
+    runtime environment path and must not be required to. Conflating the two
+    is exactly the bug this helper exists to make impossible to repeat.
+    """
+    tokens = [tok.strip('"') for tok in command.split()]
+    scripts = [tok for tok in tokens if tok.endswith(".py")]
+    interpreters = [tok for tok in tokens if tok.endswith(".exe")]
+    return scripts, interpreters
+
 
 def _load(path: Path, name: str):
     """Import a script by path — `scripts/` is not an importable package."""
@@ -241,6 +259,74 @@ def test_a_cleanly_closed_previous_session_is_reported_clean(repo):
     context = start_context(repo)
 
     assert "closed cleanly" in context
+
+
+def test_a_blocked_session_requires_reconciliation_and_is_never_clean(repo):
+    """The state that was missing. A push can succeed and CI still come back
+    red; that session is NOT closed, and the next one must be told so."""
+    _write_recovery(repo,
+                    {"session_id": "prev", "reason": "prompt_input_exit"},
+                    {"session_id": "prev", "state": "blocked",
+                     "reason_code": "CI_BLOCKING_FAILURE",
+                     "run_id": 31039728961, "blocking_jobs": ["python"]})
+
+    context = start_context(repo)
+
+    assert "FINALIZE BLOCKED by CI" in context
+    assert "reconcile before new work" in context
+    assert "run 31039728961" in context
+    assert "jobs: python" in context
+    assert "closed cleanly" not in context
+
+
+def test_a_blocked_marker_from_another_session_does_not_prove_a_clean_close(repo):
+    """A stale marker must never vouch for a different session, in either
+    direction -- neither certifying it clean nor blaming it for old CI."""
+    _write_recovery(repo,
+                    {"session_id": "prev-2", "reason": "other"},
+                    {"session_id": "prev-1", "state": "blocked",
+                     "reason_code": "CI_BLOCKING_FAILURE", "blocking_jobs": ["python"]})
+
+    context = start_context(repo)
+
+    assert "closed cleanly" not in context
+    assert "did NOT run /session-close" in context
+
+
+@pytest.mark.parametrize("marker_extra", [
+    {},                                        # no detail at all
+    {"reason_code": "CI_BLOCKING_FAILURE"},    # code but no run/jobs
+    {"run_id": 123},                           # run but no jobs
+    {"blocking_jobs": []},                     # empty job list
+    {"blocking_jobs": "python"},               # wrong type
+])
+def test_a_blocked_marker_missing_fields_still_fails_safe(repo, marker_extra):
+    """Fail-open on SHAPE, never on VERDICT: a malformed marker may lose its
+    detail, but it must still read as blocked rather than as a clean close."""
+    _write_recovery(repo,
+                    {"session_id": "prev", "reason": "other"},
+                    {"session_id": "prev", "state": "blocked", **marker_extra})
+
+    context = start_context(repo)
+
+    assert "FINALIZE BLOCKED by CI" in context
+    assert "reconcile before new work" in context
+    assert "closed cleanly" not in context
+
+
+def test_a_blocked_marker_leaks_no_absolute_path(repo):
+    """The marker is local and may hold machine paths; the context block is not."""
+    home = os.path.expanduser("~")
+    _write_recovery(repo,
+                    {"session_id": "prev", "reason": "other"},
+                    {"session_id": "prev", "state": "blocked",
+                     "blocking_jobs": ["python"],
+                     "transcript_path": f"{home}/secret/path.jsonl"})
+
+    context = start_context(repo)
+
+    assert home not in context
+    assert "secret/path.jsonl" not in context
 
 
 def test_a_prepared_but_unfinalized_session_is_distinguished(repo):
@@ -461,18 +547,112 @@ def test_project_settings_declare_both_session_hooks():
     ("SessionEnd", "claude_session_end.py"),
 ])
 def test_hook_commands_use_repo_relative_paths_that_exist(event, script_name):
-    """An absolute path here would break on any other checkout, and a path typo
-    would fail silently at session start where nobody is watching."""
+    """Two different kinds of token, two different contracts.
+
+    The original version of this test treated `.py` and `.exe` alike and
+    required BOTH to exist in the repository. That is wrong for the
+    interpreter: `.venv/` is gitignored runtime environment, so
+    `.venv/Scripts/python.exe` exists on a developer machine and never in a
+    clean checkout. The test therefore passed locally for the wrong reason and
+    failed the moment CI ran it (run 31039728961) -- a green result that was
+    measuring the developer's venv, not the repository.
+
+    The real contract:
+      * EVERY path token must be relative and free of a drive letter -- an
+        absolute or user-specific path breaks on any other checkout.
+      * The configured `.py` SCRIPT must exist in the repository; a typo there
+        fails silently at session start where nobody is watching.
+      * The INTERPRETER must be the expected relative runtime path, but its
+        existence is deliberately NOT asserted.
+    """
     settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     commands = [h["command"] for group in settings["hooks"][event] for h in group["hooks"]]
     command = next(c for c in commands if script_name in c)
 
-    referenced = [tok.strip('"') for tok in command.split() if tok.strip('"').endswith((".py", ".exe"))]
-    assert referenced, f"no script path found in: {command}"
-    for token in referenced:
-        assert not Path(token).is_absolute(), f"{token} must be repository-relative"
-        assert ":" not in token, f"{token} looks like a drive-absolute path"
-        assert (REPO_ROOT / token).exists(), f"{token} does not exist in the repo"
+    script_refs, interpreter_refs = _split_command_paths(command)
+
+    assert script_refs, f"no .py script found in: {command}"
+    assert interpreter_refs, f"no interpreter found in: {command}"
+
+    for ref in script_refs + interpreter_refs:
+        assert not Path(ref).is_absolute(), f"{ref} must be repository-relative"
+        assert ":" not in ref, f"{ref} looks like a drive-absolute path"
+
+    for ref in script_refs:
+        assert (REPO_ROOT / ref).is_file(), f"{ref} does not exist in the repo"
+
+    for ref in interpreter_refs:
+        assert ref == EXPECTED_INTERPRETER, (
+            f"interpreter is {ref!r}, expected the project runtime "
+            f"{EXPECTED_INTERPRETER!r}"
+        )
+
+
+def test_the_path_contract_holds_in_a_clean_checkout_without_a_venv(tmp_path):
+    """The regression, reproduced structurally. A fresh checkout has the scripts
+    but NO `.venv/` -- exactly CI. The script assertion must still hold and the
+    interpreter assertion must NOT depend on the interpreter existing."""
+    checkout = tmp_path / "clean-checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    for name in ("claude_session_start.py", "claude_session_end.py"):
+        (checkout / "scripts" / name).write_text("# stub\n", encoding="utf-8")
+    assert not (checkout / ".venv").exists(), "a clean checkout has no venv"
+
+    settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    for event in ("SessionStart", "SessionEnd"):
+        for group in settings["hooks"][event]:
+            for hook in group["hooks"]:
+                scripts, interpreters = _split_command_paths(hook["command"])
+
+                for ref in scripts:
+                    assert (checkout / ref).is_file(), \
+                        f"{ref} must exist even in a venv-less checkout"
+                for ref in interpreters:
+                    assert not (checkout / ref).exists(), \
+                        "the fixture must genuinely lack the interpreter"
+                    assert ref == EXPECTED_INTERPRETER
+                    assert not Path(ref).is_absolute() and ":" not in ref
+
+
+@pytest.mark.parametrize("bad_command", [
+    r'C:\Python313\python.exe scripts/claude_session_start.py',
+    "/usr/bin/python3 scripts/claude_session_start.py",
+])
+def test_an_absolute_interpreter_path_is_rejected(bad_command):
+    """An absolute interpreter is machine-specific: it leaks a local layout and
+    breaks on every other checkout."""
+    scripts, interpreters = _split_command_paths(bad_command)
+    offenders = [r for r in scripts + interpreters
+                 if Path(r).is_absolute() or ":" in r or r != EXPECTED_INTERPRETER]
+
+    assert offenders, "an absolute interpreter path must not pass the contract"
+
+
+@pytest.mark.parametrize("bad_command", [
+    ".venv/Scripts/python.exe scripts/does_not_exist.py",
+    ".venv/Scripts/python.exe",
+])
+def test_a_missing_or_absent_script_reference_is_rejected(bad_command):
+    """The half of the contract that must stay strict: a typo'd or absent
+    script path fails silently at session start, where nobody is watching."""
+    scripts, _ = _split_command_paths(bad_command)
+
+    if not scripts:
+        return  # no script at all is itself a rejection (asserted in the real test)
+    assert not all((REPO_ROOT / ref).is_file() for ref in scripts)
+
+
+def test_the_skill_forbids_closing_while_a_blocking_ci_failure_remains():
+    """The rule that was broken once: a session wrote `closed` while the branch
+    tip's python job was red."""
+    text = (REPO_ROOT / ".claude" / "skills" / "session-close" / "SKILL.md").read_text(
+        encoding="utf-8")
+
+    assert '"blocked"' in text, "the skill must define the blocked marker state"
+    assert "CI_BLOCKING_FAILURE" in text
+    assert "no blocking CI failure remains" in text
+    assert "CI-MOBILE-01" in text, "mobile's non-blocking signature must be named"
+    assert "never rerun it" in text, "diff-explained failures must not be rerun"
 
 
 def test_the_session_close_skill_exists_and_declares_both_modes():

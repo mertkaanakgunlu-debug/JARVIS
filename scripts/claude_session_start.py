@@ -167,12 +167,40 @@ def _handoff_verified_sha(root: Path, git: _Git) -> tuple[str | None, str]:
     return None, "no commit SHA found"
 
 
+def _blocked_detail(marker: dict) -> str:
+    """Why the previous finalize was blocked, from whatever the marker has.
+
+    Fail-open on shape: a marker missing `run_id` or `blocking_jobs` still
+    produces a correct, actionable sentence. The one thing that must never
+    happen is a blocked session reading as a clean one, so an unparsable
+    detail degrades the DETAIL, never the verdict.
+    """
+    bits = []
+    run_id = str(marker.get("run_id") or "").strip()
+    if run_id:
+        bits.append(f"run {run_id}")
+    jobs = marker.get("blocking_jobs")
+    if isinstance(jobs, (list, tuple)) and jobs:
+        names = ", ".join(str(j) for j in jobs if str(j).strip())
+        if names:
+            bits.append(f"jobs: {names}")
+    if not bits:
+        reason_code = str(marker.get("reason_code") or "").strip()
+        bits.append(reason_code or "no detail recorded")
+    return "; ".join(bits)
+
+
 def _recovery_state(root: Path) -> str:
     """Did the previous session close through the skill, or just vanish?
 
     `latest.json` is written by the SessionEnd hook on every exit; the marker is
     written only by /session-close. So "latest exists and the marker does not say
     closed for that same session" is exactly the unclean-exit signal.
+
+    Three marker states matter, and `blocked` is the one that was missing:
+    a session whose push succeeded but whose CI came back red must NOT read as
+    closed. It was written as `closed` once, which is exactly the "report an
+    unfinished check as passed" failure the protocol exists to prevent.
     """
     directory = root / RECOVERY_DIRNAME
     latest_path = directory / LATEST_NAME
@@ -184,10 +212,12 @@ def _recovery_state(root: Path) -> str:
         return "previous session record unreadable"
 
     marker_state, marker_session = "", ""
+    marker: dict = {}
     marker_path = directory / MARKER_NAME
     if marker_path.exists():
         try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            loaded = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker = loaded if isinstance(loaded, dict) else {}
             marker_state = str(marker.get("state") or "")
             marker_session = str(marker.get("session_id") or "")
         except Exception:  # noqa: BLE001
@@ -197,6 +227,9 @@ def _recovery_state(root: Path) -> str:
     reason = str(latest.get("reason") or "unknown")
     same = marker_session and prev_session and marker_session == prev_session
 
+    if marker_state == "blocked" and same:
+        return (f"previous session FINALIZE BLOCKED by CI ({_blocked_detail(marker)}) "
+                "-- reconcile before new work")
     if marker_state == "closed" and same:
         return f"previous session closed cleanly (exit: {reason})"
     if marker_state == "prepared" and same:

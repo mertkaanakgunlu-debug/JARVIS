@@ -168,25 +168,58 @@ git push origin <branch>:<branch>
 ### 4. CI — job level, not the workflow headline
 
 Inspect per job (`gh run view <id> --json jobs`) and report **Python, Electron
-and Mobile separately**. A workflow marked `success` can still contain a failed
-`continue-on-error` job — `mobile` does exactly this here.
+and Mobile separately**. **The overall workflow headline is not a decision
+source**: a run marked `success` can still contain a failed `continue-on-error`
+job — `mobile` does exactly this here.
 
-- Do not hide a first run behind a rerun. If a job was rerun, report both.
-- Only rerun a failed job when its failure is **not explainable by the commit
-  diff** (e.g. the known ChromaDB `no such table: acquire_write` flake), rerun it
-  **once**, and do not claim the root cause is proven because the rerun passed.
+Classify **every** failed job explicitly before going near the marker:
 
-### 5. Close out
+| job | classification |
+|---|---|
+| `python` | **blocking** |
+| `electron` | **blocking** |
+| `mobile` | **blocking** if the diff touches `mobile/**`. Otherwise, if the failure matches the existing `CI-MOBILE-01` signature (`flutter analyze`, `info`/`warning` findings only — `deprecated_member_use`, missing declared asset dirs), it may be reported **non-blocking**. **A different signature is blocking.** |
 
-Update the marker to `closed`:
+Rerun rules:
+
+- A failure **explained by the commit diff is deterministic — never rerun it.**
+  Fix it instead. (A rerun cannot make a wrong assertion right, and re-running
+  it reads as hoping rather than diagnosing.)
+- The known ChromaDB `no such table: acquire_write` flake may be rerun **once**.
+- If the rerun also fails, the job stays **blocking**.
+- Never hide the first run behind a rerun — report both.
+- A passing rerun does **not** prove a root cause.
+
+### 5. Close out — `closed` has to be earned
+
+Write `state: "closed"` **only** when all three hold:
+
+1. push and every post-push remote verification succeeded;
+2. **no blocking CI failure remains** (per the table above);
+3. any permitted rerun has completed **and passed**.
 
 ```json
 {"state": "closed", "session_id": "<id>", "prepared_at": "<iso8601>",
  "closed_at": "<iso8601>", "head": "<sha>", "branch": "<branch>"}
 ```
 
+If a blocking failure remains, the session is **not closed**. Write instead:
+
+```json
+{"state": "blocked", "session_id": "<id>", "blocked_at": "<iso8601>",
+ "reason_code": "CI_BLOCKING_FAILURE", "run_id": "<run>",
+ "blocking_jobs": ["python"], "head": "<sha>", "branch": "<branch>"}
+```
+
+…and **do not close the session**. Report the failure, its classification, and
+the fix — do not soften a red tip into a clean close. This rule exists because
+it was broken: a session once wrote `closed` while the branch tip's `python`
+job was failing, which is the same "report an unfinished check as passed" error
+the whole reporting standard forbids.
+
 **Do not** write the closing commit's own SHA or its CI outcome back into
 HANDOFF.md — that is the self-reference rule, and retro-editing the file after
-push is exactly how it was broken before.
+push is exactly how it was broken before. The marker is the right home for a CI
+outcome: it is local, gitignored, and written *after* the run finished.
 
 Then stop. **Do not start new product work.**
