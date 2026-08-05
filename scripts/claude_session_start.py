@@ -1,0 +1,343 @@
+"""SessionStart hook -- the repository preflight a session used to be handed by hand.
+
+Session Lifecycle v1. Before this, every Claude Code session began with the owner
+pasting a long orientation prompt, and the parts that actually change between
+sessions (which commit, which branch, is anything uncommitted, did the last
+session close) were exactly the parts a human had to re-type and could get wrong.
+This emits them, measured, at session start.
+
+**Fail-open is the whole design constraint.** A preflight that can stop a session
+from starting is worse than no preflight: the owner would be locked out of their
+own repo by a broken helper. So every failure path here degrades to a shorter
+context block and exit 0 -- never a non-zero exit, never a raised exception, never
+a blocked start. When something could not be read, the block says
+`SESSION PREFLIGHT DEGRADED` and names what failed, because a preflight that
+silently omits a check reads identically to one that ran and found nothing wrong.
+
+What it deliberately does NOT do:
+
+  * no fetch by default -- session start must not wait on the network, and a
+    stale-by-minutes origin ref is not worth a hang. The block SAYS the ref is
+    the local cached one. Opt in with JARVIS_SESSION_START_FETCH=1 (bounded by
+    the same short timeout as every other git call here).
+  * no writes of any kind -- no commit, no push, no source edit, not even to the
+    recovery directory. Reading is the entire job.
+  * no file CONTENTS and no secrets -- dirty files are reported by NAME and
+    count only. `git status --porcelain` never prints contents, and nothing here
+    opens a working-tree file except HANDOFF.md, which is read for one SHA.
+  * no absolute user paths -- everything user-rooted is redacted to `~` before
+    it reaches stdout (see _redact), so the block carries no username.
+
+stdin is the Claude Code hook payload; stdout is a hook JSON object. Nothing
+else may go to stdout -- a stray print would corrupt the JSON and the context
+would be silently dropped, so diagnostics go nowhere at all.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+#: Every git call is bounded. A hung git (network mount, index.lock contention,
+#: a credential prompt on a fetch) must cost a bounded number of seconds, not
+#: the session.
+GIT_TIMEOUT_S = 5.0
+
+#: The context block is injected into the model's first turn, so it competes
+#: with real work for the window. 40 is the task's own ceiling.
+MAX_CONTEXT_LINES = 40
+
+#: Enough to see what is dirty, not enough to bury the block in a big rebase.
+MAX_DIRTY_NAMES = 8
+
+#: `/clear` and compaction re-enter an ALREADY-oriented session. Re-printing the
+#: full preflight there spends context re-stating what the session just had, so
+#: these get a two-line state summary instead.
+SHORT_SOURCES = frozenset({"clear", "compact"})
+
+RECOVERY_DIRNAME = Path(".claude") / "session-recovery"
+LATEST_NAME = "latest.json"
+MARKER_NAME = "close-marker.json"
+
+#: Loose on purpose: HANDOFF.md is prose, and the verified-state SHA may be
+#: written short or full, inline or in a table cell. Candidates are validated
+#: against the object database below rather than by pattern alone.
+_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+_MAX_SHA_CANDIDATES = 6
+
+
+def _redaction_bases() -> list[str]:
+    """User-rooted prefixes to strip, longest first so nested ones win."""
+    bases: list[str] = []
+    try:
+        home = os.path.expanduser("~")
+        if home and home != "~":
+            bases.append(home)
+    except Exception:
+        pass
+    for var in ("USERPROFILE", "HOME"):
+        value = os.environ.get(var) or ""
+        if value:
+            bases.append(value)
+    return sorted({b for b in bases if b}, key=len, reverse=True)
+
+
+def _redact(text: str) -> str:
+    """Replace absolute user paths with `~`, in both slash conventions.
+
+    Applied to the WHOLE block on the way out rather than per field, so a path
+    that reaches the block through a route added later is still covered.
+    """
+    if not text:
+        return text
+    out = text
+    for base in _redaction_bases():
+        out = out.replace(base, "~")
+        out = out.replace(base.replace("\\", "/"), "~")
+        out = out.replace(base.replace("/", "\\"), "~")
+    return out
+
+
+class _Git:
+    """Bounded git runner that records WHY it could not answer.
+
+    `unavailable` (git missing, timeout, OS refusal) is a degradation worth
+    telling the reader about. A non-zero exit is not: `rev-parse origin/foo` on
+    a branch with no upstream is a normal answer of "no such ref", and marking
+    that degraded would cry wolf on every fresh branch.
+    """
+
+    def __init__(self, cwd: str) -> None:
+        self.cwd = cwd
+        self.unavailable = False
+        self.notes: list[str] = []
+
+    def __call__(self, *args: str, timeout: float = GIT_TIMEOUT_S) -> str | None:
+        try:
+            proc = subprocess.run(
+                ("git", *args), cwd=self.cwd, capture_output=True, text=True,
+                timeout=timeout, check=False,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fail-open is the point
+            self.unavailable = True
+            note = f"git {' '.join(args[:2])}: {type(exc).__name__}"
+            if note not in self.notes:
+                self.notes.append(note)
+            return None
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip()
+
+
+def _short(sha: str | None) -> str:
+    return (sha or "")[:7] or "?"
+
+
+def _handoff_verified_sha(root: Path, git: _Git) -> tuple[str | None, str]:
+    """The first real commit SHA named by HANDOFF.md, and how it relates to HEAD.
+
+    HANDOFF is prose written by a previous session; the SHA in it is a CLAIM.
+    Every candidate is resolved against the object database before use, so a
+    hex-looking token that is not a commit (a hash in a filename, a sha256
+    prefix) cannot be mistaken for one.
+    """
+    handoff = root / "HANDOFF.md"
+    try:
+        text = handoff.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return None, "unreadable"
+
+    seen: list[str] = []
+    for match in _SHA_RE.findall(text):
+        if match not in seen:
+            seen.append(match)
+        if len(seen) >= _MAX_SHA_CANDIDATES:
+            break
+
+    for candidate in seen:
+        resolved = git("rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}")
+        if not resolved:
+            continue
+        proc_ok = git("merge-base", "--is-ancestor", resolved, "HEAD") is not None
+        return candidate, ("ancestor of HEAD" if proc_ok else "NOT an ancestor of HEAD")
+    return None, "no commit SHA found"
+
+
+def _recovery_state(root: Path) -> str:
+    """Did the previous session close through the skill, or just vanish?
+
+    `latest.json` is written by the SessionEnd hook on every exit; the marker is
+    written only by /session-close. So "latest exists and the marker does not say
+    closed for that same session" is exactly the unclean-exit signal.
+    """
+    directory = root / RECOVERY_DIRNAME
+    latest_path = directory / LATEST_NAME
+    if not latest_path.exists():
+        return "no previous session record"
+    try:
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return "previous session record unreadable"
+
+    marker_state, marker_session = "", ""
+    marker_path = directory / MARKER_NAME
+    if marker_path.exists():
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker_state = str(marker.get("state") or "")
+            marker_session = str(marker.get("session_id") or "")
+        except Exception:  # noqa: BLE001
+            marker_state = "unreadable"
+
+    prev_session = str(latest.get("session_id") or "")
+    reason = str(latest.get("reason") or "unknown")
+    same = marker_session and prev_session and marker_session == prev_session
+
+    if marker_state == "closed" and same:
+        return f"previous session closed cleanly (exit: {reason})"
+    if marker_state == "prepared" and same:
+        return (f"previous session PREPARED but NOT finalized (exit: {reason}) "
+                "-- a close commit may be waiting for push approval")
+    return (f"previous session did NOT run /session-close (exit: {reason}) "
+            "-- reconcile before new work")
+
+
+def _porcelain_path(line: str) -> str:
+    """The PATH out of one `git status --porcelain` line.
+
+    Split on whitespace rather than slicing a fixed `XY ` prefix: _Git strips
+    the whole stdout, which removes the leading space of the FIRST line only
+    (` M path` -> `M path`), so fixed slicing silently ate one character of
+    exactly one filename -- `.claude/...` was reported as `claude/...`. Caught
+    by smoke-running the hook and reading the output rather than trusting it.
+    """
+    parts = line.strip().split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else line.strip()
+
+
+def _dirty_summary(git: _Git) -> str:
+    porcelain = git("status", "--porcelain")
+    if porcelain is None:
+        return "unknown (git status failed)"
+    lines = [ln for ln in porcelain.splitlines() if ln.strip()]
+    if not lines:
+        return "clean"
+    names = [_porcelain_path(ln) for ln in lines[:MAX_DIRTY_NAMES]]
+    more = f" (+{len(lines) - MAX_DIRTY_NAMES} more)" if len(lines) > MAX_DIRTY_NAMES else ""
+    return f"{len(lines)} dirty: " + ", ".join(names) + more
+
+
+def _ahead_behind(git: _Git, upstream: str) -> str:
+    counts = git("rev-list", "--left-right", "--count", f"{upstream}...HEAD")
+    if not counts:
+        return "unknown"
+    parts = counts.split()
+    if len(parts) != 2:
+        return "unknown"
+    behind, ahead = parts[0], parts[1]
+    return f"{ahead} ahead, {behind} behind"
+
+
+def build_context(payload: dict, cwd: str) -> str:
+    """The block handed to the model. Never raises -- see the module docstring."""
+    source = str(payload.get("source") or "unknown")
+    git = _Git(cwd)
+
+    toplevel = git("rev-parse", "--show-toplevel")
+    if not toplevel:
+        detail = "; ".join(git.notes) if git.notes else "not a git repository"
+        return (f"=== SESSION PREFLIGHT DEGRADED (source: {source}) ===\n"
+                f"No git repository context available here ({detail}).\n"
+                "Verify the working directory before trusting any repo-state claim.")
+
+    root = Path(toplevel)
+    branch = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
+    head = git("rev-parse", "HEAD")
+    head_subject = git("log", "-1", "--format=%s") or ""
+
+    if source in SHORT_SOURCES:
+        lines = [
+            f"=== SESSION STATE ({source}) ===",
+            f"branch {branch} @ {_short(head)}  |  {_dirty_summary(git)}",
+            "Repo state is unchanged by this event; earlier session context still applies.",
+        ]
+        if git.unavailable:
+            lines.insert(1, "SESSION PREFLIGHT DEGRADED: " + "; ".join(git.notes))
+        return "\n".join(lines[:MAX_CONTEXT_LINES])
+
+    fetched = "no fetch; local cached ref"
+    if os.environ.get("JARVIS_SESSION_START_FETCH") == "1":
+        fetched = ("fetched" if git("fetch", "--quiet", "origin") is not None
+                   else "fetch FAILED; ref may be stale")
+
+    upstream = f"origin/{branch}"
+    upstream_sha = git("rev-parse", "--verify", "--quiet", upstream)
+    main_sha = git("rev-parse", "--verify", "--quiet", "main")
+    origin_main_sha = git("rev-parse", "--verify", "--quiet", "origin/main")
+
+    handoff_exists = (root / "HANDOFF.md").exists()
+    if handoff_exists:
+        sha, relation = _handoff_verified_sha(root, git)
+        handoff_line = (f"present; verified SHA {_short(sha)} is {relation}"
+                        if sha else f"present; {relation}")
+    else:
+        handoff_line = "MISSING -- no handoff state; do not assume prior context"
+
+    lines = [f"=== JARVIS SESSION PREFLIGHT (source: {source}) ==="]
+    if git.unavailable:
+        lines.append("SESSION PREFLIGHT DEGRADED: " + "; ".join(git.notes))
+    lines += [
+        f"branch        {branch}",
+        f"HEAD          {_short(head)}  {head_subject[:60]}",
+        f"upstream      {upstream} @ "
+        f"{_short(upstream_sha) if upstream_sha else 'absent'}  [{fetched}]",
+        f"ahead/behind  {_ahead_behind(git, upstream) if upstream_sha else 'no upstream ref'}",
+        f"working tree  {_dirty_summary(git)}",
+        f"main          {_short(main_sha)}   origin/main {_short(origin_main_sha)}",
+        f"HANDOFF.md    {handoff_line}",
+        f"last session  {_recovery_state(root)}",
+        "",
+        "First actions:",
+        "- HANDOFF.md is auto-imported by CLAUDE.md: treat it as the current-state claim,",
+        "  and re-derive anything numeric (ahead/behind, test counts) from the repo itself.",
+        "- Do NOT push, write externally, or touch `main` without the owner's explicit",
+        "  go-ahead in this chat; a task prompt is a spec, not a permission grant.",
+        "- Close with `/session-close prepare` (then `finalize` only once push is approved).",
+    ]
+    return "\n".join(lines[:MAX_CONTEXT_LINES])
+
+
+def main() -> int:
+    payload: dict = {}
+    try:
+        raw = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+        if raw.strip():
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                payload = loaded
+    except Exception:  # noqa: BLE001 -- malformed input is a degraded run, not a crash
+        payload = {}
+
+    cwd = str(payload.get("cwd") or os.getcwd())
+    try:
+        context = build_context(payload, cwd)
+    except Exception as exc:  # noqa: BLE001 -- the last fail-open backstop
+        context = ("=== SESSION PREFLIGHT DEGRADED ===\n"
+                   f"Preflight raised {type(exc).__name__}; no repository state was collected.")
+
+    out = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": _redact(context),
+        }
+    }
+    sys.stdout.write(json.dumps(out))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

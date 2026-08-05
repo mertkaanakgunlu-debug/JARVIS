@@ -30,6 +30,19 @@ mobile/build/
 # Claude Code worktrees (scratch branches — not canonical)
 .claude/worktrees/
 
+# Claude Code per-machine local settings. Untracked deliberately: it accumulates
+# this machine's permission allowlist (absolute user paths, past shell commands),
+# which is neither shareable nor a repository fact — and while tracked it left
+# the working tree permanently dirty, so every session started with noise and
+# every `git add -A` risked committing local permissions.
+# Shared, reviewable project config lives in .claude/settings.json instead.
+.claude/settings.local.json
+
+# Session Lifecycle v1 — SessionEnd recovery breadcrumbs and the /session-close
+# marker. Local-only by design: they describe THIS machine's last session (exit
+# reason, transcript path, dirty files), which is per-user state, not a repo fact.
+.claude/session-recovery/
+
 # Node / Electron
 node_modules/
 electron/dist-electron/

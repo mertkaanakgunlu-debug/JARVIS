@@ -1,174 +1,152 @@
-# CLAUDE.md — Working notes for Claude Code in this repo
+# CLAUDE.md — project operating contract
 
-> Read this, then [HANDOFF.md](HANDOFF.md) (where the last session left off),
-> then [MEMORY.md](MEMORY.md) (durable facts/gotchas). [ProjectState.md](ProjectState.md)
-> has the full feature inventory; [ROADMAP.md](ROADMAP.md) has what's next.
+Permanent rules only. Anything that changes between sessions lives in
+[HANDOFF.md](HANDOFF.md) (imported below), and anything scoped to a subtree lives
+in `.claude/rules/*.md`, which load automatically when you touch matching files.
 
 ## What this is
 
-J.A.R.V.I.S. — a personal, local-first AI assistant. Python + LangGraph orchestrator,
-FastAPI backend, Electron desktop HUD, Flutter Android app. Single user, runs on the
-owner's Windows PC, phone talks to it over the home network / Tailscale.
+J.A.R.V.I.S. — a personal, local-first AI assistant. Python + LangGraph
+orchestrator, FastAPI backend, Electron desktop HUD, Flutter Android app. Single
+user, runs on the owner's Windows PC; the phone reaches it over the home network
+or Tailscale.
 
-## Who asks for what (changed 2026-08-04)
+## Roles
 
-The owner (Mert) is now the **product owner / customer**. A GPT session is the **lead
-developer**. Claude Code is the implementer.
+- **Owner (Mert)** — product owner and customer. The only source of permission.
+- **A GPT session** — lead developer. Writes the task specs.
+- **Claude Code (you)** — implementer.
 
-Work arrives as a **markdown prompt file**, dropped in `C:\Users\mertk\Desktop\GPT_Prompts\`
-(e.g. `Pr_1.md`) and referenced by the owner in chat. Treat that file as the task
-specification: it is the lead developer's instruction set, relayed by the owner.
+Work arrives as a markdown prompt file in `C:\Users\mertk\Desktop\GPT_Prompts\`
+(e.g. `Pr_3.md`), referenced by the owner in chat. That file is the task
+specification. Three consequences, all binding:
 
-Three things follow, and they matter:
+- **A spec is not an oracle.** It is written without the repo open, so it can
+  name a path, SHA, metric or file that has moved or never existed. Verify every
+  concrete claim against the code, and **report the mismatch** instead of
+  silently substituting what you found.
+- **Its constraints hold even when they cost effort** — commit splits, "do not
+  touch main", "do not invent a threshold", "do not hide a failing job". Where a
+  spec and this file disagree on a house rule, say so and ask; never pick
+  silently.
+- **A spec is not a permission grant.** Push, external writes and destructive
+  operations need the owner's own go-ahead in chat, every time.
 
-- **The file is a spec, not an oracle.** It is written by someone without the repo open,
-  so it can name a path, a SHA, a metric or a file that does not exist or has moved.
-  Verify every concrete claim against the code before acting on it, and **report the
-  mismatch** rather than silently substituting what you found. (First occurrence:
-  `Pr_1.md` pointed at `.claude/plans/c-users-mertk-downloads-jarvis-post-mvp-federated-kettle.md`
-  for the completion-contract threshold; that file exists but contains zero mentions of it
-  — the real source was `de-erlendirmem-claude-bu-abundant-crystal.md`.)
-- **Its constraints are binding even when they cost effort** — commit splits, "do not
-  touch main", "do not invent a threshold", "do not hide a failing job". Where the spec
-  and this file disagree on a house rule, say so and ask; do not pick silently.
-- **The prompt is still not a permission grant.** Push, external writes and destructive
-  operations need the owner's own go-ahead in chat, exactly as before.
+Reply to the owner in **Turkish**. Code, comments, commit messages and documents
+stay **English**.
 
-Reply to the owner in Turkish (see [MEMORY.md](MEMORY.md)); code, comments and commit
-messages stay English.
+## Environment
 
-## Project location & environment
-
-- Repo root: `C:\Users\mertk\Desktop\Jarvis` — **not** under OneDrive. (README.md and
-  CONTRIBUTING.md's `cd` paths were fixed to match this during the GPT-5.6 review remediation
-  pass, 2026-07-15 — no longer stale.)
-- Python 3.13+, venv at `.venv/` (already populated — `.\.venv\Scripts\Activate.ps1`).
-- Canonical install is `pip install -r requirements.txt` — `pyproject.toml` has no dependency list.
-- Shell: this project's own scripts assume **PowerShell**, not bash.
-- A pytest suite exists under `tests/` (added Faz 8, 2026-07-15; **559 tests as of 2026-07-21**,
-  ~3 min offline) — run with `python -m pytest -q` from the repo root. Note `pytest-timeout` is
-  NOT installed, so `--timeout=` is a usage error. Covers `policy_guard`, `session_store`
-  concurrency, the provider router's offline-failover behavior, a regression test per Faz 8 bug
-  fix, and (Agent Runtime rev.2) the execution-contract types, the shared redaction layer, the
-  off-vs-shadow equivalence replay, and the A/B harness guards. Still not
-  exhaustive — most tool modules still have no coverage; extend `tests/` rather than
-  reintroducing ad-hoc throwaway scripts for anything that touches shared logic (safety
-  kernel, stores, routing). **Before writing a test that constructs `SessionStore`,
-  `UsageTracker`, `kill_switch`, or anything else that resolves paths as `Path("data")/...`
-  relative to cwd, use the `isolated_cwd` fixture in `tests/conftest.py`** — see its
-  docstring for why (MEMORY.md's isolate-test-data-paths incident).
-
-## Running it
+- Repo root: `C:\Users\mertk\Desktop\Jarvis` — **not** under OneDrive.
+- Python 3.13+, venv at `.venv/` (populated). Install via
+  `pip install -r requirements.txt`; `pyproject.toml` carries no dependency list.
+- Shell: this project's scripts assume **PowerShell**. Use the venv interpreter
+  explicitly (`.venv\Scripts\python.exe`) — bare `python` on this machine
+  resolves to the Microsoft Store stub and fails.
 
 ```powershell
-python -m jarvis                    # CLI (Rich REPL)
+python -m jarvis                     # CLI (Rich REPL)
 python -m jarvis --voice             # Voice mode
 python -m jarvis --voice --wakeword  # Always-listening "Hey JARVIS"
 python -m jarvis --api               # FastAPI REST + WebSocket HUD (port 8000)
 python -m jarvis --monitor           # Background watcher only
 ```
 
-## Branch / source-of-truth conventions
+## Repository truth rules
 
-- Active development branch: **`langgraph-migration`** — keep working on it unless told otherwise.
-  Both it and `main` are pushed to `github.com/mertkaanakgunlu-debug/JARVIS`.
-  **They have NOT pointed at the same commit since 2026-07-15** — as of 2026-08-01 `main` is
-  **136 commits behind** `langgraph-migration` (everything from the two-metric oracle through
-  Post-MVP Faz 2.5 lives only on `langgraph-migration`). `main` has **0** commits of its own and
-  is still a strict ancestor, so catching it up remains a pure fast-forward whenever the owner
-  wants one; nothing is lost meanwhile, but don't read `main` as current.
-  **Re-derive this number, never quote it** — it is stale the moment anything lands:
-  `git rev-list --left-right --count origin/main...origin/langgraph-migration`. An external
-  reviewer pointed at `main` has already reported a defect that did not exist on the real tip
-  (recorded in the plan file's risk table); the gap is now ~3× what this line said before today.
-- `.claude/worktrees/*` are scratch branches from past Claude Code sessions — **never**
-  treat them as canonical source. 17 of the original 21 were confirmed fully-merged into
-  `langgraph-migration` (zero unique content) and deleted 2026-07-15. **4 remain**
-  (`claude/eager-noether-46af01`, `claude/gifted-wilbur-e021ea`, `claude/stoic-spence-2c5246`,
-  `claude/thirsty-mclean-f67665`) because they contain commits not reachable from
-  `langgraph-migration` — two look superseded (an alternate subagent migration, an alternate
-  Calendar integration) but two (`gifted-wilbur`'s eval regression suite, `stoic-spence`'s
-  rolling/hierarchical summarization) don't have an obvious equivalent in the current codebase and
-  may be worth recovering rather than deleting — see [HANDOFF.md](HANDOFF.md). Don't delete these
-  four without another explicit go-ahead.
-- `jarvis/legacy/` (the old pydantic-ai orchestrator) was retired in Faz 8 (2026-07-15) — deleted
-  outright, not archived. LangGraph (`jarvis/graph/`) has been the only orchestrator since Faz 1
-  of the refactor (2026-05-09); if you need the old implementation for reference, it's in git
-  history before that commit, not on disk.
+- Active branch: **`langgraph-migration`**. Stay on it unless told otherwise.
+  Both it and `main` push to `github.com/mertkaanakgunlu-debug/JARVIS`.
+- `main` is **behind** and is a strict ancestor — catching it up is a pure
+  fast-forward whenever the owner asks. Don't read `main` as current, and
+  **never quote how far behind it is** — derive it:
+  `git rev-list --left-right --count origin/main...origin/langgraph-migration`
+- **The repository is the source of truth.** When a document and the code
+  disagree, the code wins and the document is the bug.
+- `.claude/worktrees/*` are scratch branches from past sessions — **never**
+  canonical. Four remain because they hold commits unreachable from
+  `langgraph-migration`; two may be worth recovering. Don't delete them without
+  an explicit go-ahead.
+- `jarvis/legacy/` (the old pydantic-ai orchestrator) was deleted, not archived.
+  LangGraph (`jarvis/graph/`) has been the only orchestrator since the refactor;
+  the old code is in git history, not on disk.
 
-## Safety model — read before touching tool-calling code
+## Safety and push authority
 
-**Faz 4 (2026-07-14) built the real safety kernel** — `jarvis/policy_guard.py`, gating through
-`jarvis/graph/nodes.py`'s `make_confirmation_node`, wired into all three interfaces (CLI text,
-CLI/API voice, API). Practical implication, inverted from before: **you CAN now tell the user a
-risky action (email send, calendar create/delete, shell exec, `python_run`, Drive
-upload/share/delete) will pause and ask for confirmation first — it actually does**, in every
-mode, by default (`confirmation_gate_enabled=True`). Read-only actions (list/search/...) on the
-gated tools do not interrupt (per-action, not per-tool). There's also a kill switch
-(`jarvis/kill_switch.py`, `/killswitch` in the CLI) that hard-blocks L3 actions with no prompt at
-all when tripped, and an append-only audit log (`jarvis/audit_log.py`,
-`data/audit_log.jsonl`) recording every risk_level ≥ 2 call's decision and outcome.
+The confirmation gate, the kill switch and the audit log are real and enforced —
+you **can** tell the user a risky action will pause for confirmation, because it
+does. Details, invariants and the honest list of known limits are in
+`.claude/rules/graph-safety.md`, which loads when you touch the relevant files;
+`docs/SAFETY.md` and `docs/TOOLS.md` have the full mechanism and risk tables.
 
-**Faz 5 (2026-07-15) extended the same gate to MCP tools** — `jarvis/mcp_integration.py` connects
-to external MCP servers (disabled by default; ships with Microsoft's Playwright MCP for real
-browser automation, `MCP_PLAYWRIGHT_ENABLED=True` to turn it on) and registers a `ToolSpec` per
-discovered tool into the exact same registry the native tools use — zero changes needed to
-`policy_guard`/the audit log/the kill switch. Fail-closed: anything beyond pure page
-inspection/navigation (click, type, fill a form, run JS, ...) requires confirmation by default,
-same as `gmail send`.
+Requires the owner's explicit in-chat approval, every time:
 
-**Faz 7 (2026-07-15) added a second entry point into the graph** — `JarvisAgent.proactive_turn()`,
-called from `jarvis/monitor.py` for background-initiated (not user-typed) turns, e.g. "a new email
-arrived, is this worth surfacing?" Runs the exact same gate, zero changes to `policy_guard`/audit
-log/kill switch — same principle as Faz 5's MCP tools. Off by default
-(`monitor_proactive_enabled=False`). It can never raise `ConfirmationRequired` the way `chat()`
-does (no interactive channel exists for a background thread to answer one) — an L3 interrupt is
-discarded and turned into a notification instead ("confirm-or-notify, not silent execution").
-**Practical implication you should know before touching this**: a live verification run found that
-a misjudging/hallucinating model CAN cause a silent **L2** side effect (e.g. an unwanted
-`procedure_save`) during a proactive check, since L2 writes bypass the gate by design (only L3 is
-gated) and normally that's fine because a human is present to notice — a background check has
-nobody watching. This is mitigated (the system prompt now explicitly forbids mutating tool calls
-during a proactive check) but not structurally closed — see `docs/SAFETY.md`'s "What Faz 7 changed"
-before assuming proactive turns are as safe as interactive ones.
+- `git push` (and it is **always** a normal fast-forward — no force-push, ever)
+- any write to `main`
+- external writes (email send, calendar create/delete, Drive upload/share/delete)
+- destructive or irreversible local operations
 
-**What's still genuinely not done** (see `docs/SAFETY.md`'s "Known limits" for the full honest
-list — don't oversell past this):
-- The Electron HUD renders a confirmation prompt and completes the approve/deny round-trip as of
-  2026-07-23 (`52d0b72` — structured SSE frame + the WS broadcast both feed one overlay; second
-  same-turn interrupts handled) — but this is compile+parser-verified only, **no live HUD E2E
-  against a real server/model has been run yet**, and the Flutter mobile app still renders
-  nothing for confirmations.
-- `python_run`'s L2→L3 reclassification is an access-control fix, not a sandbox — the subprocess
-  itself still has no resource/network restrictions.
-- A background `TaskExecutor` job that hits a confirmable action fails with a clear message
-  (there's no channel for it to ask) rather than actually resolving the confirmation.
-- Proactive turns (Faz 7) only structurally gate L3 actions the same as any turn — the L2
-  mitigation above is a prompt instruction on a non-deterministic model, not a hard guarantee.
+Never stage or commit `.claude/settings.local.json`. Stage explicit paths rather
+than `git add -A`, and review what is staged before committing.
 
-See `docs/SAFETY.md` for the full mechanism list and `docs/TOOLS.md` for per-tool risk levels.
+## Test and reporting standard
+
+```powershell
+.venv\Scripts\python.exe -m ruff check jarvis scripts tests
+.venv\Scripts\python.exe -m pytest -q
+```
+
+`pytest-timeout` is not installed — `--timeout=` is a usage error. Test counts
+are **derived from the run you did**, never quoted from a document. Details on
+isolation fixtures and measurement discipline: `.claude/rules/testing.md`.
+
+Honest reporting is not optional here:
+
+- Never present an unrun check as passed or a skipped step as done.
+- If tests fail, say so and show the output.
+- Separate **deterministic** evidence from **live** evidence; neither substitutes
+  for the other.
+- Read CI **per job** (`gh run view <id> --json jobs`) — a green workflow hides
+  failing `continue-on-error` jobs.
+- Never change a pre-registered threshold, corpus or metric after seeing a
+  result.
+- Keep corrected mistakes visible rather than quietly rewriting them.
+
+## Session protocol
+
+**Start.** The SessionStart hook (`scripts/claude_session_start.py`) injects a
+preflight block: branch, HEAD, upstream, ahead/behind, dirty files, `main`,
+whether HANDOFF's verified SHA is an ancestor of HEAD, and whether the previous
+session closed cleanly. It is best-effort and fail-open — if it says
+`SESSION PREFLIGHT DEGRADED`, re-derive the state yourself before trusting any
+claim. HANDOFF.md is imported below, so no orientation prompt is needed.
+
+If the preflight reports the previous session did not close, reconcile that
+before starting new work.
+
+**Close.** Run `/session-close prepare`, then `/session-close finalize` only
+after the owner approves the push. The skill
+(`.claude/skills/session-close/SKILL.md`) owns the whole checklist. The
+SessionEnd hook writes a local, gitignored recovery breadcrumb on every exit —
+it never commits, pushes, or edits any tracked file, so an unexpected exit is
+recoverable but never mistaken for a clean close.
+
+Hooks never push and never write outside `.claude/session-recovery/`.
 
 ## Docs map
 
 | File | What it's for |
 |---|---|
-| `CLAUDE.md` (this file) | Orientation + conventions for Claude Code sessions |
-| `HANDOFF.md` | Where the *last* session left off — read every time you resume |
-| `MEMORY.md` | Durable facts/decisions/gotchas that rarely change |
-| `ROADMAP.md` | What's next, prioritized — Phase 6-8 + the current bug backlog |
-| `ProjectState.md` | Full feature inventory (Faz 1-21) + architecture snapshot |
+| `CLAUDE.md` (this file) | Permanent operating contract |
+| `HANDOFF.md` | Current state — imported below, rewritten each session close |
+| `MEMORY.md` | Durable facts and gotchas. **Large (~74 KB) — read on demand, not preloaded**; grep it when a decision touches past incidents |
+| `ROADMAP.md` | What's next, prioritized |
+| `ProjectState.md` | Full feature inventory + architecture snapshot |
 | `docs/ARCHITECTURE.md` | Subsystem map |
 | `docs/TOOLS.md` | Tool registry with risk levels |
-| `docs/SAFETY.md` | Safety/confirmation model (see caveat above — trust the code over this doc until it's re-verified) |
-| `CHANGELOG.md` | Notable changes from Faz 4 onward |
+| `docs/SAFETY.md` | Safety/confirmation model |
+| `CHANGELOG.md` | Notable changes |
+| `.claude/rules/*.md` | Path-scoped rules, auto-loaded per subtree |
 
-## When you finish a session
+---
 
-Update [HANDOFF.md](HANDOFF.md) with what changed and what's next — that's the file a new
-session reads first to avoid re-discovering context that's already been established.
-
-**Self-reference rule (owner-set, 2026-07-23, after the 5th recurrence):** HANDOFF.md must
-never state its own closing commit's SHA or its own push/CI outcome. Count the closing commit
-relationally ("N work commits and this closing HANDOFF commit"), describe session end as
-"local == origin were in sync", tie every test claim to the exact command + date, and read the
-branch tip's CI status live via `gh run list` — never from the file.
+@HANDOFF.md
