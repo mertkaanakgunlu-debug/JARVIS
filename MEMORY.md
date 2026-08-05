@@ -846,3 +846,19 @@ grafik olarak") rather than asking for a modification afterwards.
   fixed 2026-07-15 via a module-level strong-reference set + a per-task done-callback to prune it
   after completion). Check any other fire-and-forget `create_task(...)` call in this codebase for
   the same pattern before assuming it's fine.
+- **`.strip()` on whole `git status --porcelain` output corrupts exactly one filename.** Porcelain
+  lines are `XY PATH`, and a modified-tracked file's line begins with a *space* (` M path`).
+  Stripping the whole stdout removes that leading space from the **first line only**, so a fixed
+  `line[3:]` slice silently eats one character of that one path — `.claude/settings.local.json`
+  was reported as `claude/settings.local.json` (found 2026-08-05 while building the session
+  hooks, by reading a real smoke run's output rather than trusting the code). Split on whitespace
+  (`line.strip().split(None, 1)[1]`) instead of slicing a fixed prefix. Note also that git
+  **collapses untracked directories** (`?? .claude/`), so an untracked dotfile does not reproduce
+  this — only a tracked-and-modified one does, which matters when writing the regression test.
+- **A temp git repo in a test still inherits the developer's GLOBAL git config.** This machine has
+  a global ignore rule for `.claude/`, so `git add .claude/anything` inside a `tmp_path` repo
+  fails with "ignored by one of your .gitignore files" — a test that passes for one person and
+  fails for another, for reasons invisible in the test file. Neutralize it in the fixture
+  (`git config core.excludesFile <nonexistent path>`) so fixture behaviour comes from the fixture
+  alone. Same class as the `isolated_cwd` lesson: pin the environment or it will quietly decide
+  your result.
