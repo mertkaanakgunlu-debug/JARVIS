@@ -35,7 +35,7 @@ from jarvis.calendar_from_mail import (
     CalendarFromMailService,
     extract_candidate,
 )
-from jarvis.clock import SystemClock
+from jarvis.clock import FrozenClock
 from jarvis.config import Settings
 from jarvis.mail_ledger import (
     MailEventLedger,
@@ -48,7 +48,17 @@ from jarvis.mail_ledger import (
 from jarvis.working_set import KIND_CALENDAR_CANDIDATE, WorkingSetStore, render_block
 
 CONVERSATION = "c-mail"
-CLOCK = SystemClock("Europe/Istanbul")
+
+# Fixture tests must not depend on the wall-clock date. MEETING's body says
+# "5 Ağustos" with no year, and a bare day+month resolves FORWARD, so under a
+# real clock this file passed until 2026-08-05 and then resolved to 2027-08-05
+# for good. Freezing "now" the day before makes the expectation below a property
+# of the fixture instead of a property of when the suite happens to run.
+#
+# The year is not negotiable either: the body says "Çarşamba", and 5 August is a
+# Wednesday in 2026 but a Thursday in 2027 -- so moving the expected year forward
+# would leave the fixture text contradicting itself, and reset the same timer.
+CLOCK = FrozenClock.at("2026-08-04 12:00", tz_name="Europe/Istanbul")
 
 MEETING = {
     "id": "m-meeting",
