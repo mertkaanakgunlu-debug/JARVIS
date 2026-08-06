@@ -229,7 +229,38 @@ def test_clear_and_compact_get_only_a_short_state_summary(repo, source):
     assert len(context.splitlines()) <= 4
 
 
-# ── HANDOFF ancestry ────────────────────────────────────────────────────────
+# ── HANDOFF freshness ───────────────────────────────────────────────────────
+# The second flaw the CLI acceptance run found. Freshness used to be "is the
+# first hex token in the prose an ancestor of HEAD?" -- and a STALE handoff's
+# opening section always names an old commit, which is by construction an
+# ancestor. So the check reported "verified" for a document describing work
+# three commits ago exactly as confidently as for a current one. It is now
+# derived from declared metadata and a commit COUNT, which staleness cannot
+# satisfy by accident.
+
+def handoff_text(covered: str, *, branch: str = "langgraph-migration",
+                 schema: str = "1", body: str = "state\n") -> str:
+    return (f"---\nhandoff_schema: {schema}\nbranch: {branch}\n"
+            f"covered_through_sha: {covered}\n---\n\n# HANDOFF\n\n{body}")
+
+
+def commit_handoff(repo: Path, covered: str, **kw) -> None:
+    """Write HANDOFF naming the work it covers, then make the closing-doc commit."""
+    (repo / "HANDOFF.md").write_text(handoff_text(covered, **kw), encoding="utf-8")
+    _git(repo, "add", "HANDOFF.md")
+    _git(repo, "commit", "-q", "-m", "docs: refresh handoff")
+
+
+def commit_work(repo: Path, name: str) -> str:
+    (repo / name).write_text("work\n", encoding="utf-8")
+    _git(repo, "add", name)
+    _git(repo, "commit", "-q", "-m", f"work {name}")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def handoff_line(context: str) -> str:
+    return next(ln for ln in context.splitlines() if ln.startswith("HANDOFF.md"))
+
 
 def test_a_missing_handoff_is_reported_not_assumed(repo):
     (repo / "HANDOFF.md").unlink()
@@ -239,34 +270,143 @@ def test_a_missing_handoff_is_reported_not_assumed(repo):
     assert "HANDOFF.md    MISSING" in context
 
 
-def test_a_handoff_naming_an_ancestor_sha_is_reported_current(repo):
-    context = start_context(repo)
-    assert "is ancestor of HEAD" in context
+def test_valid_metadata_with_one_closing_commit_reads_current(repo):
+    """The shape a correct close produces: the document names the last WORK
+    commit, so exactly one commit -- itself -- follows it."""
+    covered = _git(repo, "rev-parse", "HEAD")
+    commit_handoff(repo, covered)
+
+    line = handoff_line(start_context(repo))
+
+    assert f"current; covers work through {covered[:7]}" in line
+    assert "closing-doc commit is HEAD" in line
+    assert "STALE" not in line and "INVALID" not in line
 
 
-def test_a_stale_handoff_sha_is_reported_as_not_an_ancestor(repo):
-    """A HANDOFF written on a history this HEAD never saw -- the SHA resolves,
-    so a naive 'does it exist' check would call it fine."""
+def test_a_commit_after_the_closing_doc_reads_stale(repo):
+    """The case the old heuristic could not see: work landed after the handoff,
+    and the SHA in the file is still a perfectly good ancestor."""
+    covered = _git(repo, "rev-parse", "HEAD")
+    commit_handoff(repo, covered)
+    commit_work(repo, "later.md")
+
+    line = handoff_line(start_context(repo))
+
+    assert "STALE" in line
+    assert "HEAD contains 2 commits after covered work" in line
+    assert "current;" not in line
+
+
+def test_many_commits_after_the_closing_doc_report_the_real_count(repo):
+    covered = _git(repo, "rev-parse", "HEAD")
+    commit_handoff(repo, covered)
+    for name in ("a.md", "b.md", "c.md"):
+        commit_work(repo, name)
+
+    assert "HEAD contains 4 commits after covered work" in handoff_line(start_context(repo))
+
+
+def test_a_covered_sha_equal_to_head_is_reported_as_self_reference(repo):
+    """The exact rule the owner set after five recurrences. Note the old check
+    would have called this the freshest possible state."""
+    covered = _git(repo, "rev-parse", "HEAD")
+    commit_handoff(repo, covered)
+    head = _git(repo, "rev-parse", "HEAD")
+    (repo / "HANDOFF.md").write_text(handoff_text(head), encoding="utf-8")
+
+    line = handoff_line(start_context(repo))
+
+    assert "INVALID" in line
+    assert "is HEAD itself" in line
+    assert "must name the last WORK commit" in line
+
+
+def test_a_covered_sha_from_another_history_is_invalid(repo):
     _git(repo, "checkout", "-q", "--orphan", "sidetrack")
     (repo / "other.md").write_text("side\n", encoding="utf-8")
     _git(repo, "add", "other.md")
     _git(repo, "commit", "-q", "-m", "unrelated")
     orphan = _git(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "-q", "langgraph-migration")
-    (repo / "HANDOFF.md").write_text(f"verified: `{orphan}`\n", encoding="utf-8")
+    (repo / "HANDOFF.md").write_text(handoff_text(orphan), encoding="utf-8")
 
-    context = start_context(repo)
+    line = handoff_line(start_context(repo))
 
-    assert "NOT an ancestor of HEAD" in context
+    assert "INVALID" in line
+    assert "NOT an ancestor of HEAD" in line
 
 
-def test_a_handoff_with_no_commit_sha_says_so(repo):
+def test_metadata_declaring_another_branch_is_invalid(repo):
+    """A handoff carried over from a different branch describes different work."""
+    covered = _git(repo, "rev-parse", "HEAD")
+    commit_handoff(repo, covered, branch="some-other-branch")
+
+    line = handoff_line(start_context(repo))
+
+    assert "INVALID" in line
+    assert "declares branch 'some-other-branch'" in line
+
+
+@pytest.mark.parametrize("covered,why", [
+    ("a02d4be", "a short SHA is exactly the shape the old prose heuristic ate"),
+    ("", "empty"),
+    ("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "not hex"),
+    ("a02d4be" + "0" * 40, "too long"),
+])
+def test_a_covered_sha_that_is_not_a_full_forty_characters_is_invalid(repo, covered, why):
+    (repo / "HANDOFF.md").write_text(handoff_text(covered), encoding="utf-8")
+
+    line = handoff_line(start_context(repo))
+
+    assert "INVALID" in line, why
+    assert "full 40-character SHA" in line
+
+
+def test_a_sha_that_is_not_a_commit_here_is_invalid(repo):
+    """Forty hex characters is a shape, not a commit."""
+    (repo / "HANDOFF.md").write_text(handoff_text("d" * 40), encoding="utf-8")
+
+    line = handoff_line(start_context(repo))
+
+    assert "INVALID" in line
+    assert "is not a commit here" in line
+
+
+@pytest.mark.parametrize("text", [
+    "---\nhandoff_schema: 2\nbranch: langgraph-migration\n"
+    "covered_through_sha: " + "0" * 40 + "\n---\n",                     # wrong schema
+    "---\nbranch: langgraph-migration\n---\n",                          # no schema key
+    "---\nhandoff_schema: 1\nthis line has no colon\n---\n",            # malformed line
+    "---\nhandoff_schema: 1\nbranch: langgraph-migration\n",            # unterminated
+])
+def test_malformed_metadata_is_reported_invalid_not_guessed(repo, text):
+    (repo / "HANDOFF.md").write_text(text, encoding="utf-8")
+
+    line = handoff_line(start_context(repo))
+
+    assert "INVALID" in line
+    assert "current;" not in line and "STALE" not in line
+
+
+def test_a_legacy_handoff_reports_that_freshness_is_unverifiable(repo):
+    """The fixture's HANDOFF is the pre-metadata shape: a SHA in prose. It must
+    NOT be classified -- the old check's whole failure was answering confidently
+    from exactly this."""
+    line = handoff_line(start_context(repo))
+
+    assert "legacy format; freshness cannot be verified" in line
+    assert "current;" not in line
+    assert "diagnostic only" in line, "an ancestor lookup may still be OFFERED"
+
+
+def test_a_legacy_handoff_with_no_sha_at_all_still_only_reports_legacy(repo):
     (repo / "HANDOFF.md").write_text("# Handoff\n\nNo SHAs here at all.\n",
                                      encoding="utf-8")
 
-    context = start_context(repo)
+    line = handoff_line(start_context(repo))
 
-    assert "no commit SHA found" in context
+    assert "legacy format" in line
+    assert "no commit SHA found in the text" in line
 
 
 def test_a_hex_token_that_is_not_a_commit_is_not_mistaken_for_one(repo):
@@ -274,9 +414,59 @@ def test_a_hex_token_that_is_not_a_commit_is_not_mistaken_for_one(repo):
     (repo / "HANDOFF.md").write_text(
         "raw sha256 `deadbeefdeadbeefdeadbeef` -- not a commit\n", encoding="utf-8")
 
-    context = start_context(repo)
+    line = handoff_line(start_context(repo))
 
-    assert "no commit SHA found" in context
+    assert "no commit SHA found in the text" in line
+
+
+def test_an_older_sha_in_the_prose_does_not_override_the_metadata(repo):
+    """The decisive test. The document's body names an ancestor -- which is what
+    the old heuristic would have latched onto and called verified -- while the
+    metadata says the work is two commits behind."""
+    ancestor = _git(repo, "rev-parse", "HEAD~1")
+    covered = _git(repo, "rev-parse", "HEAD")
+    commit_handoff(repo, covered,
+                   body=f"Last verified green by CI: `{ancestor}`.\n")
+    commit_work(repo, "later.md")
+
+    line = handoff_line(start_context(repo))
+
+    assert "STALE" in line
+    assert ancestor[:7] not in line
+    assert covered[:7] in line
+
+
+def test_a_single_following_commit_that_is_not_the_closing_doc_is_not_current(repo):
+    """Distance 1 alone is not enough: the commit after the covered work has to
+    BE the handoff refresh. Here the metadata was updated but something else was
+    committed last, so the file describes a tree nobody wrote it against."""
+    covered = _git(repo, "rev-parse", "HEAD")
+    commit_work(repo, "work.md")
+    (repo / "HANDOFF.md").write_text(handoff_text(covered), encoding="utf-8")
+
+    line = handoff_line(start_context(repo))
+
+    assert "INVALID" in line
+    assert "does not modify HANDOFF.md" in line
+    assert "current;" not in line
+
+
+def test_the_frontmatter_parser_needs_no_external_yaml_dependency():
+    """A hook whose design constraint is that it cannot fail must not gain an
+    import that can. The contract is three scalar keys; that does not need YAML."""
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    for forbidden in ("import yaml", "from yaml", "ruamel", "frontmatter import"):
+        assert forbidden not in source, f"the hook grew a {forbidden!r} dependency"
+
+    module = _load(START_SCRIPT, "hook_start_frontmatter")
+    parsed = module._parse_frontmatter(
+        "---\nhandoff_schema: 1\nbranch: langgraph-migration\n"
+        'covered_through_sha: "' + "a" * 40 + '"\n---\n\nbody\n')
+
+    assert parsed == {"handoff_schema": "1", "branch": "langgraph-migration",
+                      "covered_through_sha": "a" * 40}
+    assert module._parse_frontmatter("# no frontmatter\n") is None
+    assert module._parse_frontmatter("---\nunterminated: yes\n") == {}
 
 
 # ── previous-session recovery detection ─────────────────────────────────────

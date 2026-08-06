@@ -77,11 +77,35 @@ Overwrite it — HANDOFF is a snapshot, not a log. Sections:
 7. Human-required actions
 8. Session recovery notes
 
+Open the file with the freshness metadata the SessionStart preflight reads:
+
+```yaml
+---
+handoff_schema: 1
+branch: langgraph-migration
+covered_through_sha: <full 40-character SHA>
+---
+```
+
+`covered_through_sha` is **`HEAD` right now — before you create the closing
+commit.** It names the last *work* commit the document describes, never the
+closing commit's own SHA (which does not exist yet, and naming it is the
+self-reference bug). Get it with `git rev-parse HEAD` at this step, and use all
+40 characters; a short SHA is rejected.
+
+Done correctly, the next session's preflight reads `HANDOFF.md current` because
+exactly one commit — the closing-doc commit — follows the covered work. Every
+later commit that lands without a handoff refresh raises the count and the
+preflight says `STALE` on its own.
+
 Rules the file must obey (see `.claude/rules/documentation.md`):
 
 - It must **not** contain its own closing commit's SHA, and must **not** predict
   its own push or CI outcome. Count the closing commit relationally.
-- No fixed ahead/behind number stated as a durable fact — give the command.
+- No `unpushed`, no `push approval pending` for this closing commit, no fixed
+  ahead/behind number, no guess at this commit's CI result — those are derived
+  live (`git rev-list --left-right --count`, `gh run view <id> --json jobs`),
+  not stored.
 - Every test claim carries its command and date.
 - If it ever contradicts the repository, the repository wins — say so in the file.
 

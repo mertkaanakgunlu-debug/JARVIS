@@ -28,7 +28,8 @@ What it deliberately does NOT do:
     (see scripts/claude_session_state.py). No commit, no push, no source edit.
   * no file CONTENTS and no secrets -- dirty files are reported by NAME and
     count only. `git status --porcelain` never prints contents, and nothing here
-    opens a working-tree file except HANDOFF.md, which is read for one SHA.
+    opens a working-tree file except HANDOFF.md, of which only the metadata
+    block is used.
   * no absolute user paths -- everything user-rooted is redacted to `~` before
     it reaches stdout (see _redact), so the block carries no username.
 
@@ -68,11 +69,24 @@ RECOVERY_DIRNAME = Path(".claude") / "session-recovery"
 LATEST_NAME = "latest.json"
 MARKER_NAME = "close-marker.json"
 
-#: Loose on purpose: HANDOFF.md is prose, and the verified-state SHA may be
-#: written short or full, inline or in a table cell. Candidates are validated
-#: against the object database below rather than by pattern alone.
+#: Loose on purpose, and LEGACY ONLY: a HANDOFF without freshness metadata gets
+#: a diagnostic first-SHA lookup and nothing more. See _legacy_first_sha.
 _SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
 _MAX_SHA_CANDIDATES = 6
+
+#: The freshness contract's version. A HANDOFF declaring anything else is not
+#: read as "close enough" -- an unknown schema means the fields below may not
+#: mean what this code thinks they mean.
+HANDOFF_SCHEMA = 1
+
+#: Metadata must carry the FULL sha. A 7-char token is exactly the shape the old
+#: prose heuristic picked up by accident, and accepting one here would let the
+#: same ambiguity back in through the front door.
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+#: Frontmatter is a fixed three-key contract, not arbitrary YAML. Bounded so a
+#: document that merely STARTS with `---` cannot make the hook scan all of it.
+_MAX_FRONTMATTER_LINES = 40
 
 
 def _redaction_bases() -> list[str]:
@@ -187,34 +201,131 @@ def _record_current_session(payload: dict, cwd: str) -> str:
         return f"session identity NOT recorded ({type(exc).__name__})"
 
 
-def _handoff_verified_sha(root: Path, git: _Git) -> tuple[str | None, str]:
-    """The first real commit SHA named by HANDOFF.md, and how it relates to HEAD.
+def _legacy_first_sha(text: str, git: _Git) -> str:
+    """DIAGNOSTIC ONLY: the first resolvable commit SHA in a metadata-less HANDOFF.
 
-    HANDOFF is prose written by a previous session; the SHA in it is a CLAIM.
-    Every candidate is resolved against the object database before use, so a
-    hex-looking token that is not a commit (a hash in a filename, a sha256
-    prefix) cannot be mistaken for one.
+    This used to BE the freshness check, and that was the second flaw the CLI
+    acceptance run found. Scanning prose for the first hex token picks whichever
+    SHA a sentence happens to mention first -- and a stale HANDOFF's opening
+    section always names an old commit, which is by construction an ancestor of
+    HEAD. "Ancestor" was therefore reported for a document describing work three
+    commits ago exactly as confidently as for a current one: the check could
+    only ever fail on a HANDOFF from a different history, which is the rarest
+    way for a handoff to be wrong.
+
+    It survives as a diagnostic because a legacy document still has SOMETHING
+    worth naming, but its answer is never a freshness verdict -- see
+    _handoff_freshness, which refuses to classify a file with no metadata.
     """
-    handoff = root / "HANDOFF.md"
-    try:
-        text = handoff.read_text(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        return None, "unreadable"
-
     seen: list[str] = []
     for match in _SHA_RE.findall(text):
         if match not in seen:
             seen.append(match)
         if len(seen) >= _MAX_SHA_CANDIDATES:
             break
-
     for candidate in seen:
         resolved = git("rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}")
         if not resolved:
             continue
-        proc_ok = git("merge-base", "--is-ancestor", resolved, "HEAD") is not None
-        return candidate, ("ancestor of HEAD" if proc_ok else "NOT an ancestor of HEAD")
-    return None, "no commit SHA found"
+        relation = ("ancestor" if git("merge-base", "--is-ancestor", resolved, "HEAD")
+                    is not None else "NOT an ancestor")
+        return f"first SHA {candidate[:7]} is {relation} of HEAD"
+    return "no commit SHA found in the text"
+
+
+def _parse_frontmatter(text: str) -> dict | None:
+    """The HANDOFF metadata block: `None` when absent, `{}` when malformed.
+
+    Deliberately not a YAML parser and deliberately not a dependency. The
+    contract is three scalar keys at the top of one file; pulling in a YAML
+    library for that would add an import that can fail to a hook whose entire
+    design constraint is that it cannot fail.
+
+    Absent and malformed are kept apart because they call for different actions:
+    a file that never claimed freshness is a legacy file to migrate, while a
+    file whose claim is broken is a bug to fix now.
+    """
+    if not text.startswith("---"):
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    fields: dict[str, str] = {}
+    for line in lines[1:_MAX_FRONTMATTER_LINES]:
+        if line.strip() == "---":
+            return fields
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line:
+            return {}
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip().strip('"').strip("'")
+    return {}  # unterminated block
+
+
+def _handoff_freshness(root: Path, git: _Git, branch: str) -> str:
+    """Is HANDOFF.md describing THIS tip, measured from metadata rather than prose.
+
+    The verdict is derived, not claimed: `covered_through_sha` names the last
+    WORK commit the document covers, so a correctly-closed session leaves
+    exactly one commit after it -- the closing-doc commit itself. That makes
+    "current" a countable property (`distance == 1`, and that one commit
+    actually touched HANDOFF.md) instead of a judgement, and it makes staleness
+    impossible to miss: every extra commit raises the count.
+
+    It also keeps the self-reference rule enforceable. A document naming its own
+    closing commit gives `distance == 0`, which is reported as invalid rather
+    than as the freshest possible state -- the previous heuristic would have
+    called that ideal.
+    """
+    try:
+        text = (root / "HANDOFF.md").read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return "present; unreadable"
+
+    meta = _parse_frontmatter(text)
+    if meta is None:
+        return ("legacy format; freshness cannot be verified "
+                f"(diagnostic only: {_legacy_first_sha(text, git)})")
+    if not meta:
+        return "INVALID metadata; the frontmatter block is malformed or unterminated"
+
+    schema = meta.get("handoff_schema")
+    if schema != str(HANDOFF_SCHEMA):
+        return f"INVALID metadata; handoff_schema is {schema!r}, expected '{HANDOFF_SCHEMA}'"
+
+    declared_branch = meta.get("branch") or ""
+    if declared_branch != branch:
+        return (f"INVALID metadata; declares branch {declared_branch!r} "
+                f"but the session is on {branch!r}")
+
+    sha = (meta.get("covered_through_sha") or "").lower()
+    if not _FULL_SHA_RE.match(sha):
+        return "INVALID metadata; covered_through_sha is not a full 40-character SHA"
+
+    resolved = git("rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
+    if not resolved:
+        return f"INVALID metadata; covered_through_sha {sha[:7]} is not a commit here"
+    if git("merge-base", "--is-ancestor", resolved, "HEAD") is None:
+        return f"INVALID metadata; covered_through_sha {sha[:7]} is NOT an ancestor of HEAD"
+
+    counted = git("rev-list", "--count", f"{resolved}..HEAD")
+    if counted is None or not counted.isdigit():
+        return "DEGRADED; could not count the commits after covered_through_sha"
+    distance = int(counted)
+
+    if distance == 0:
+        return (f"INVALID metadata; covered_through_sha {sha[:7]} is HEAD itself "
+                "-- it must name the last WORK commit, not the closing-doc commit")
+    if distance > 1:
+        return (f"STALE -- HEAD contains {distance} commits after covered work "
+                f"{sha[:7]}")
+
+    changed = git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD") or ""
+    if "HANDOFF.md" not in changed.split():
+        return ("INVALID metadata; the one commit after covered work "
+                "does not modify HANDOFF.md")
+    return f"current; covers work through {sha[:7]}; closing-doc commit is HEAD"
 
 
 def _blocked_detail(marker: dict) -> str:
@@ -381,11 +492,8 @@ def build_context(payload: dict, cwd: str) -> str:
     main_sha = git("rev-parse", "--verify", "--quiet", "main")
     origin_main_sha = git("rev-parse", "--verify", "--quiet", "origin/main")
 
-    handoff_exists = (root / "HANDOFF.md").exists()
-    if handoff_exists:
-        sha, relation = _handoff_verified_sha(root, git)
-        handoff_line = (f"present; verified SHA {_short(sha)} is {relation}"
-                        if sha else f"present; {relation}")
+    if (root / "HANDOFF.md").exists():
+        handoff_line = _handoff_freshness(root, git, branch)
     else:
         handoff_line = "MISSING -- no handoff state; do not assume prior context"
 

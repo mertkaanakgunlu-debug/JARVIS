@@ -114,23 +114,33 @@ Honest reporting is not optional here:
 ## Session protocol
 
 **Start.** The SessionStart hook (`scripts/claude_session_start.py`) injects a
-preflight block: branch, HEAD, upstream, ahead/behind, dirty files, `main`,
-whether HANDOFF's verified SHA is an ancestor of HEAD, and whether the previous
-session closed cleanly. It is best-effort and fail-open — if it says
-`SESSION PREFLIGHT DEGRADED`, re-derive the state yourself before trusting any
-claim. HANDOFF.md is imported below, so no orientation prompt is needed.
+preflight block: branch, HEAD, upstream, ahead/behind, dirty files, `main`, a
+**HANDOFF freshness verdict derived from the file's frontmatter metadata**
+(`current` / `STALE — N commits after covered work` / `INVALID` / `legacy`), and
+whether the previous session closed cleanly. It is best-effort and fail-open —
+if it says `SESSION PREFLIGHT DEGRADED`, re-derive the state yourself before
+trusting any claim. HANDOFF.md is imported below, so no orientation prompt is
+needed.
 
-If the preflight reports the previous session did not close, reconcile that
-before starting new work.
+If the preflight reports the previous session did not close — or that its
+identity could not be verified — reconcile that before starting new work.
 
 **Close.** Run `/session-close prepare`, then `/session-close finalize` only
 after the owner approves the push. The skill
-(`.claude/skills/session-close/SKILL.md`) owns the whole checklist. The
-SessionEnd hook writes a local, gitignored recovery breadcrumb on every exit —
-it never commits, pushes, or edits any tracked file, so an unexpected exit is
-recoverable but never mistaken for a clean close.
+(`.claude/skills/session-close/SKILL.md`) owns the whole checklist.
 
-Hooks never push and never write outside `.claude/session-recovery/`.
+**Session identity is machine-authored and must stay that way.** Never infer a
+session id from a transcript filename, from "the newest file", or from memory,
+and never hand-write a recovery JSON file. SessionStart records the
+authoritative id from its own hook payload; every state transition goes through
+`scripts/claude_session_state.py`, which takes no id argument. If it refuses,
+report the refusal — do not route around it.
+
+Hooks never push and never write a tracked file. SessionStart's only write is
+the gitignored `current.json` identity record; SessionEnd's only write is the
+gitignored recovery breadcrumb. Neither commits, pushes, or edits anything
+tracked, so an unexpected exit is recoverable but never mistaken for a clean
+close.
 
 ## Docs map
 
