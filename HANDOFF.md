@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 1e1116e6ecf141c9aff59d8395d416df1a661a57
+covered_through_sha: 4806509f6bf11f0c2aafca3ba307994891285894
 ---
 
 # HANDOFF — current state
@@ -19,13 +19,17 @@ commit this snapshot describes — never this file's own closing commit.
 
 - Branch: **`langgraph-migration`** (the active branch; `main` is a strict
   ancestor and behind).
-- The branch tip at the start of this session was **`29f6995`**
-  (`fix(workflow): block session close on failed CI`), pushed, and read per job
-  as CI run **`31046333431`**: `python` success, `electron` success, `mobile`
-  failure — the existing `CI-MOBILE-01` signature.
-- This session added three work commits (§2) and this closing HANDOFF commit.
-  **Their push state and CI outcome are not asserted here** — both change after
-  this file is written. Derive them:
+- The branch tip at the start of this session was **`6bdd846`**
+  (`docs: refresh handoff after lifecycle acceptance`), pushed, and read per job
+  as CI run **`31064218844`**: `python` success, `electron` success, `mobile`
+  **failure** — the `CI-MOBILE-01` signature.
+- This session added two work commits (§2). Both are pushed, and CI run
+  **`31068220833`** was read per job on their tip `4806509`: `python` success,
+  `electron` success, **`mobile` success** — the first run in which `mobile`
+  genuinely passed rather than being hidden by `continue-on-error`.
+- On top of those sits this closing HANDOFF commit. **Its push state and CI
+  outcome are not asserted here** — both change after this file is written.
+  Derive them:
 
 ```bash
 git rev-list --left-right --count origin/langgraph-migration...HEAD
@@ -37,56 +41,63 @@ gh run list --branch langgraph-migration     # then: gh run view <id> --json job
 
 ## 2. Last completed work
 
-**Session Lifecycle acceptance fixes.** A real CLI acceptance run of Session
-Lifecycle v1 confirmed the mechanism works — project hooks are discovered, and
-the SessionStart context injection lands in the model's first turn — and found
-two structural flaws in it. Both are closed.
+**`CI-MOBILE-01` cleared at the source.** The `mobile` job had been red since
+long before any current work — 71 `flutter analyze` findings behind
+`continue-on-error: true`, so the workflow headline stayed green while the job
+stayed red. Nothing was suppressed to close it: no `analysis_options.yaml`, no
+`ignore_for_file`, no `ignore:` comment added, and `.github/workflows/ci.yml`
+untouched.
 
-1. **Session identity is machine-authored** (`dd41678`). The close marker used to
-   be JSON the model typed, so its `session_id` was whatever the model *believed*
-   the session was called — inferable only from a transcript filename, from "the
-   newest file", or from a guess. Two records agreeing on the same guess looked
-   exactly like two records agreeing on the truth. The id now travels one way
-   only: SessionStart records the authoritative payload value into the
-   gitignored `.claude/session-recovery/current.json`, and
-   `scripts/claude_session_state.py` is the only writer of any recovery state.
-   `prepare` / `close` / `block` take **no session-id argument at all** and
-   refuse on a cross-session marker, a moved HEAD or a changed branch. SessionEnd
-   records `identity_status` (`matched` | `current_missing` | `mismatch`); only
-   `matched` supports a clean close, and an **absent** field is unverified, not
-   clean. CI classification stays with the `/session-close` skill.
+1. **`fix(mobile): clear the analyzer debt at the source`** (`383cd67`).
+   69 × `deprecated_member_use`, each replacement checked against the
+   SDK/package source: 65 × `withOpacity(x)` → `withValues(alpha: x)` (the
+   deprecated method is literally `withAlpha((255.0 * opacity).round())`);
+   1 × `Matrix4.scale(x, y, 1.0)` → `scaleByDouble(x, y, 1.0, 1.0)` (the fourth
+   argument is the homogeneous `w` factor, and vector_math's own deprecated
+   `scale` forwards `1.0` there); 1 × `Switch.activeColor` → `activeThumbColor`
+   (`switch.dart:623,640` resolves `activeThumbColor ?? activeColor`, and the
+   `Slider` in the same file keeps its own **non-deprecated** `activeColor`);
+   2 × `listen(partialResults:)` → `listenOptions: SpeechListenOptions(...)`,
+   compared field by field against the implicitly-built options object.
 
-2. **HANDOFF freshness is verified from metadata** (`d606987`). Freshness was
-   "is the first hex token in the prose an ancestor of HEAD?" — which a stale
-   handoff satisfies by construction, since its opening section always names an
-   old commit and an old commit is always an ancestor. Freshness is now declared
-   in the frontmatter above and **counted**: exactly one commit after
-   `covered_through_sha`, and that commit must touch `HANDOFF.md`. Verdicts are
-   `current` / `STALE — N commits after covered work` / `INVALID` (including
-   `distance == 0`, the self-reference case) / `legacy` (no metadata, refused
-   rather than classified). Contract in `.claude/rules/documentation.md`.
+   Plus 2 × `asset_directory_does_not_exist`: the `pubspec.yaml` `assets:` block
+   was dead in every direction and was removed. Nothing in `lib/` touches
+   `rootBundle`/`DefaultAssetBundle`/`AssetManifest`; the `.ttf` files reach the
+   app through the `fonts:` section instead; and the wake-word model is read by
+   `WakeWordService.kt` via `assets.open("wake/…")`, the **Android** AssetManager
+   root, which a Flutter declaration can never populate (Flutter packages under
+   `flutter_assets/**`, `FlutterTaskHelper.kt:18`). That declaration never worked.
 
-3. **`test(calendar): freeze mail fixture clock`** (`1e1116e`). The mail→calendar
-   fixture tests built their service with the real wall clock while the fixture
-   body said "5 Ağustos" with no year and the assertions hard-coded `2026-08-05`.
-   A bare day+month resolves forward, so the file passed until 2026-08-05 and
-   then resolved to 2027 permanently. Now frozen at `2026-08-04 12:00`
-   Europe/Istanbul via the repository's injectable `jarvis.clock.FrozenClock` —
-   no `datetime.now` patching, no product-code change. The expected year was
-   deliberately not moved to 2027: the body also says "Çarşamba", which is true
-   of 5 August in 2026 and not in 2027.
+2. **`docs: record CI-MOBILE-01 as cleared, and retire its wave-through clause`**
+   (`4806509`). `.claude/rules/mobile.md` inverted: the job is expected clean, so
+   a failure is now a real regression. `.claude/skills/session-close/SKILL.md`
+   lost the clause that let a `mobile` failure be reported non-blocking when it
+   matched the CI-MOBILE-01 signature — an exemption with no referent is how a
+   real failure gets waved through. `mobile/assets/ASSETS_SETUP.md` had two
+   instructions that do not work (wake model in the wrong directory; "copy
+   Orbitron-Regular over Orbitron-Black", which would have collapsed weight 800
+   to Regular — the two files are distinct static instances, `Orbitron` vs
+   `Orbitron ExtraBold`).
 
-**Completion Contract Source Binding** (earlier, pushed as `a02d4be`). A
-source-bound requirement must trace its artifact back to the source the user
-named, through both the producing tool call's arguments and the working-set
-object's spec. Non-repairable verdict `OUTPUT_SOURCE_MISMATCH`; in `enforce` a
-mismatched `plot_data` call is blocked **before** execution. Shared identity in
-`jarvis/execution/source_identity.py`; scope limits in
-`docs/eval/completion_contract_source_binding.md`.
+`dart format` was deliberately **not** run: this repo is not dart-format
+formatted (4 of 5 untouched sample files would change), and formatting the 15
+touched files would have rewritten 1482 lines around a 64-line change.
+
+**Session Lifecycle acceptance fixes** (earlier, `dd41678` / `d606987` /
+`1e1116e`): session identity is machine-authored and travels one way only from
+the SessionStart payload; HANDOFF freshness is declared in frontmatter and
+*counted* rather than inferred from the first hex token in the prose; the
+mail→calendar fixture clock is frozen at `2026-08-04 12:00` Europe/Istanbul.
+
+**Completion Contract Source Binding** (earlier, `a02d4be`): a source-bound
+requirement must trace its artifact back to the source the user named, through
+both the producing tool call's arguments and the working-set object's spec.
+Non-repairable verdict `OUTPUT_SOURCE_MISMATCH`; shared identity in
+`jarvis/execution/source_identity.py`.
 
 ## 3. Operational modes and rollout decisions
 
-Defaults as shipped in `jarvis/config.py` (verify there, not here):
+Defaults re-read from `jarvis/config.py` on 2026-08-06 (verify there, not here):
 
 | setting | default | note |
 |---|---|---|
@@ -103,19 +114,19 @@ The completion-contract gate is **pre-registered and still unpassed**: the
 both failed. Nothing in this session re-ran or re-opened it. Do not change a
 pre-registered threshold, corpus or metric after seeing a result.
 
+**Mobile font binaries stay out of the repository** (owner decision,
+2026-08-06). `mobile/.gitignore` keeps ignoring `assets/fonts/*.ttf`; the
+consequence is recorded as an open issue in §5 rather than hidden.
+
 ## 4. Tests and CI
 
-Run on **2026-08-06**, on the tree of `1e1116e` (the last work commit):
+Run on **2026-08-06**, on the tree of `4806509` (the last work commit):
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests
 #   -> All checks passed!
-.venv\Scripts\python.exe -m pytest tests/test_calendar_from_mail.py -q
-#   -> 21 passed (9.50s)
-.venv\Scripts\python.exe -m pytest tests/test_claude_session_hooks.py -q
-#   -> 122 passed (3m27s)
 .venv\Scripts\python.exe -m pytest -q
-#   -> 3269 passed, 5 deselected (9m34s)
+#   -> 3269 passed, 5 deselected (474.76s)
 git diff --check
 #   -> clean
 ```
@@ -123,14 +134,35 @@ git diff --check
 The full-suite figure is the **first** run on this tree: no failures, so nothing
 was rerun and nothing is being reported behind a rerun.
 
-Lifecycle flows were additionally smoke-run end to end against **throwaway git
-repositories** — never the real `.claude/session-recovery/`: clean close,
-CI-blocked close, a mismatched synthetic SessionEnd, and the refusal paths. All
-passed, including the guard asserting the owner's real recovery directory was
-untouched.
+Flutter, same date, same tree — the analyzer result is reported for **two**
+layouts because they genuinely differ:
 
-**CI for this session's commits is deliberately not predicted here.** Read it
-live per job — a green workflow headline hides failing `continue-on-error` jobs:
+```powershell
+flutter analyze          # local tree, Flutter 3.44.6
+#   -> No issues found! (29.9s)
+flutter analyze          # copy of exactly `git ls-files mobile` (76 files)
+#   -> No issues found! (16.1s), exit code 0
+flutter test
+#   -> FAILS: "A Timer is still pending ..." -- pre-existing, see §5
+flutter build apk --debug
+#   -> COULD NOT RUN: "No Android SDK found" (flutter doctor: [X] Android toolchain)
+```
+
+The tracked-files-only copy exists because the local baseline is **not** CI's:
+`flutter analyze` reported 69 findings here and 71 in CI, the two extra being
+`asset_directory_does_not_exist` for directories that exist on this machine but
+are not carried by git.
+
+CI for `4806509`, read per job — run **`31068220833`**:
+
+| job | id | conclusion |
+|---|---|---|
+| `python` | 92510446960 | success |
+| `electron` | 92510446997 | success |
+| `mobile` | 92510446998 | **success** — `No issues found! (ran in 9.6s)`, Flutter `stable-3.44.8` |
+
+**CI for this closing commit is deliberately not predicted here.** Read it live
+per job — a green workflow headline hides failing `continue-on-error` jobs:
 
 ```bash
 gh run list --branch langgraph-migration
@@ -139,10 +171,32 @@ gh run view <id> --json jobs
 
 ## 5. Known open issues
 
-- **`CI-MOBILE-01` — `mobile` CI fails** (`flutter analyze`, ~71 findings, all
-  `info`/`warning`: `deprecated_member_use`, missing declared asset dirs). The
-  job is `continue-on-error: true`, so the workflow headline stays green while
-  the job is red. Owner decision pending; next engineering priority (§6).
+- **`MOBILE-ASSETS-01` — a clean clone cannot build or test the mobile app.**
+  `mobile/.gitignore` ignores `assets/fonts/*.ttf`, and `flutter analyze` does
+  **not** validate the pubspec `fonts:` section — only `assets:`. So the analyzer
+  is green while a tracked-files-only checkout dies at
+  `unable to locate asset entry in pubspec.yaml: "assets/fonts/ShareTechMono-Regular.ttf"`
+  → `Failed to build asset bundle`. CI only runs `analyze`, so **a green `mobile`
+  job is not evidence that the app builds anywhere.** Owner decided 2026-08-06
+  not to commit the font binaries; the fonts are SIL OFL (Share Tech Mono 1.003,
+  Orbitron 2.001, read from the files' own name tables) so licensing is not the
+  blocker — the decision is about binaries in the repo. See
+  `mobile/assets/ASSETS_SETUP.md`.
+- **`MOBILE-TEST-01` — `mobile/test/widget_test.dart` fails**, and did so before
+  the CI-MOBILE-01 work: verified by running it against an unmodified
+  `git archive` of the same HEAD. `_SplashRouterState.initState`
+  (`mobile/lib/app.dart:67`) starts an uncancelled
+  `Future.delayed(Duration(seconds: 2))`, so the test trips `'!timersPending'`.
+  CI does not run `flutter test` for mobile.
+- **Mobile `flutter analyze` runs with the DEFAULT analyzer rule set.**
+  `flutter_lints` is a dev_dependency but is never included — there is no
+  `analysis_options.yaml` anywhere in the repo. "0 findings" means 0 against the
+  defaults, not against the `flutter_lints` ruleset.
+- **CI's Flutter version is unpinned** (`subosito/flutter-action@v2`,
+  `channel: stable`, no version). A new stable release can reintroduce
+  deprecations and redden `mobile` with no code change — the same drift that
+  broke the `python` job when ruff was unpinned. `ci.yml` was deliberately left
+  untouched; pinning is an open option, not a decision.
 - **`CI-FLAKE-CHROMA-01` — transient suspected, root cause unproven.** Runs have
   shown first-run failures with `chromadb ... no such table: acquire_write`
   across files a commit never touched; `chromadb>=0.6` is unpinned in
@@ -160,29 +214,31 @@ gh run view <id> --json jobs
 - Faz 5 (mail → calendar) is green on fixtures but **has never run against the
   real mailbox**; background ingestion stays off until it does.
 - Electron HUD confirmation is compile/parser-verified only — **no live E2E**.
-  The Flutter app renders **nothing** for confirmations.
+  The Flutter app renders **nothing** for confirmations; the server-side gate
+  still holds, but an L3 flow is unusable from the phone.
 - `python_run` is access-controlled, **not sandboxed** (no resource/network limit).
 - Proactive turns gate **L3 only**; an unwatched L2 write is mitigated by prompt
   instruction, not structurally closed.
 - Four `claude/*` scratch branches (the `.claude/worktrees/*` sessions) hold
-  commits unreachable from this branch — verified 2026-08-06 as 5, 1, 7 and 1
-  commits. Two may be worth recovering. Do not delete without an explicit
-  go-ahead.
+  commits unreachable from this branch — re-derived 2026-08-06 as 5, 1, 7 and 1
+  commits (`eager-noether-46af01`, `gifted-wilbur-e021ea`,
+  `stoic-spence-2c5246`, `thirsty-mclean-f67665`). Two may be worth recovering.
+  Do not delete without an explicit go-ahead.
 
 ## 6. Next engineering priority
 
-**`CI-MOBILE-01`.** It is the only permanently-red job on the branch, and
-`continue-on-error` currently hides it behind a green headline — the same "an
-unfinished check reads as passed" shape the reporting standard exists to
-prevent. Either clear the ~71 `flutter analyze` findings, or make the
-suppression an explicit reviewed decision rather than an accident of
-configuration.
-
-**After that: completion-contract streaming / TTFB architecture.** The latency
-clause is the one pre-registered gate clause still failing (§5). Either make a
+**Completion-contract streaming / TTFB architecture.** With `CI-MOBILE-01`
+closed, the latency clause is the one pre-registered gate clause still failing
+(§5): treatment first-visible p90 ≈ 99.8 s against a 60 s ceiling. Either make a
 contracted turn emit before the graph finishes, or accept the TTFB cost and
 revise the ceiling *for a future gate* — never retroactively for the pilot
 already run.
+
+Second, and much smaller: `MOBILE-TEST-01`. It is one uncancelled timer, and it
+is the only thing standing between `mobile` having a lint gate and `mobile`
+having a lint gate plus a smoke test. Decide whether the fix belongs in the test
+or in `app.dart` — a splash timer that outlives its widget is arguably the
+product bug, not the test's.
 
 Do not start either — or any product work — inside a session that is closing.
 
@@ -192,8 +248,11 @@ Do not start either — or any product work — inside a session that is closing
   Faz 5 live measurement and the Faz 2 entity resolver. The mail→Excel→chart
   chain is 10/10 on fixture data and has still never run against the real
   mailbox; the Gmail live test cannot start until this is done.
-- **`CI-MOBILE-01` decision**: clear the ~71 analyzer findings, or keep
-  `continue-on-error` and accept that the job stays red.
+- **Mobile font binaries**: owner deferred on 2026-08-06 ("not now, separate
+  decision"). Until it is made, `MOBILE-ASSETS-01` stays open and a fresh clone
+  cannot build the app. Licensing is not the obstacle (SIL OFL, verified from the
+  files themselves); the question is whether ~77 KB of binaries belong in the
+  repository or the manual-setup workflow stands.
 
 Push approval is per-session and per-action: it is requested in chat at the time
 of the push, never recorded here.
@@ -218,9 +277,11 @@ of the push, never recorded here.
 - A next session whose preflight says the previous one did **not** close, or
   whose SessionEnd identity was **UNVERIFIED**, should reconcile before starting
   new work.
-- **Migration note (2026-08-06):** the session that built the machine-authored
-  identity chain started *before* `current.json` existed, so it deliberately
-  produced no marker for itself and invented no session id. The first fully
-  machine-authored lifecycle begins with the next session opened after this work
-  is pushed — its preflight will legitimately report the previous session as
-  unclosed.
+- **The 2026-08-06 migration gap is closed and was reconciled, not ignored.** The
+  session that built the machine-authored identity chain started before
+  `current.json` existed, so it deliberately produced no marker for itself; this
+  session's preflight therefore reported the previous session as unclosed, which
+  was the documented expectation rather than a fault. `claude_session_state.py
+  show` confirmed it: marker `closed` for session `772fdf77` at head `29f6995`,
+  and the intervening session (`0e49f657`, `identity_status: matched`) exited
+  without one. No recovery file was hand-written to paper over the gap.

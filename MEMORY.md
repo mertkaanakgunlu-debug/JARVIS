@@ -110,7 +110,31 @@
   user PATH. `flutter doctor`: SDK itself fine; Android toolchain and Visual Studio both absent (no
   Android Studio/SDK, no VS Desktop-C++ workload) — either is a separate multi-GB install, not done
   as part of this. `flutter analyze`/`flutter pub get` work today; `flutter build apk` does not
-  (needs the Android SDK).
+  (needs the Android SDK). Re-confirmed 2026-08-06: `flutter build apk --debug` → `No Android SDK
+  found`, and `flutter build bundle` hits the same wall, so there is **no** local way to build the
+  mobile app or inspect a produced APK.
+- **A local check that reads file existence does NOT reproduce CI — gitignored files and empty
+  directories diverge silently.** Measured 2026-08-06 on `CI-MOBILE-01`: `flutter analyze` reported
+  **69** findings locally and **71** in CI, and the two extra were `asset_directory_does_not_exist`
+  warnings for `mobile/assets/fonts/` and `assets/wake/` — both present on this machine (the fonts
+  as gitignored `.ttf` files, `wake/` as an empty directory), neither carried by git. Trusting the
+  local baseline would have missed the only two `warning`-class findings in the set. Reproduce
+  CI's tree instead of guessing at it: copy exactly what `git ls-files <path>` lists into a scratch
+  directory and run the check there — that is what `actions/checkout` hands the job. The companion
+  move for "did I break this or was it already broken": `git archive HEAD <path> | tar -x -C <tmp>`
+  gives the untouched tree, and the same failure appearing there is proof of pre-existence.
+- **`flutter analyze` validates the pubspec `assets:` list but NOT the `fonts:` section.** So a
+  missing font file is invisible to the analyzer and still fatal to everything that builds the
+  asset bundle. On a tracked-files-only checkout of `mobile/`, `flutter test` and `flutter build`
+  die with `unable to locate asset entry in pubspec.yaml: "assets/fonts/ShareTechMono-Regular.ttf"`
+  → `Failed to build asset bundle`, because `mobile/.gitignore` ignores `assets/fonts/*.ttf`. CI
+  only runs `analyze`, so a green `mobile` job is **not** evidence that the app builds anywhere.
+  Owner decided 2026-08-06 not to commit the font binaries; see `mobile/assets/ASSETS_SETUP.md`.
+- **Flutter assets never reach the Android AssetManager root.** The gradle plugin packages them
+  with `include("flutter_assets/**")` (`FlutterTaskHelper.kt:18`), so Kotlin code doing
+  `assets.open("wake/…")` — as `WakeWordService.kt` does for the wake-word ONNX model — is reading
+  `android/app/src/main/assets/wake/`, which a `pubspec.yaml` declaration can never populate. The
+  old `assets/wake/` declaration was dead from the day it was written.
 
 ## Direction: LOCAL-FIRST pivot (owner decision, 2026-07-14)
 
