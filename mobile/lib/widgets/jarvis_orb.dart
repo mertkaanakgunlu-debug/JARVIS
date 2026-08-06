@@ -123,14 +123,14 @@ class _OrbPainter extends CustomPainter {
       final front = (p.z3d + 1) / 2;
       final alpha = p.z3d > 0 ? 0.5 * front : 0.12 * front;
       final dotSize = p.z3d > 0 ? 1.0 + front * 0.8 : 0.6;
-      dotPaint.color = accent.withOpacity(alpha.clamp(0.0, 1.0));
+      dotPaint.color = accent.withValues(alpha: alpha.clamp(0.0, 1.0));
       canvas.drawCircle(Offset(p.x2d, p.y2d), dotSize, dotPaint);
     }
 
     // Core glow
     final coreR = R * 0.28;
     final coreGradient = RadialGradient(
-      colors: [accent.withOpacity(0.9), accent.withOpacity(0)],
+      colors: [accent.withValues(alpha: 0.9), accent.withValues(alpha: 0)],
       stops: const [0, 1],
     );
     final corePaint = Paint()
@@ -141,7 +141,7 @@ class _OrbPainter extends CustomPainter {
     // Speaking: equator scan ellipse
     if (state == ConversationState.speaking || state == ConversationState.thinking) {
       final scanPaint = Paint()
-        ..color = accent.withOpacity(0.25)
+        ..color = accent.withValues(alpha: 0.25)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1;
       canvas.drawOval(

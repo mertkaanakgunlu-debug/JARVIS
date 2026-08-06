@@ -72,6 +72,16 @@ flutter:
         - asset: assets/fonts/Orbitron-Black.ttf
           weight: 800
 
-  assets:
-    - assets/fonts/
-    - assets/wake/
+  # No `assets:` block on purpose -- nothing in lib/ reads the Flutter asset
+  # bundle (no rootBundle / DefaultAssetBundle / AssetManifest use anywhere).
+  #  * The .ttf files above are bundled by the `fonts:` section; listing
+  #    assets/fonts/ again under `assets:` only duplicated them as generic
+  #    assets nobody loads.
+  #  * assets/wake/ was declared for the wake-word ONNX model, but that model
+  #    is read by the Android side -- WakeWordService.kt does
+  #    assets.open("wake/hey_jarvis_v0.1.onnx"), which resolves against the
+  #    Android AssetManager root (android/app/src/main/assets/wake/), not
+  #    against flutter_assets/. A pubspec declaration can never satisfy it.
+  #    See assets/ASSETS_SETUP.md.
+  # Both entries were also permanently red in CI (asset_directory_does_not_exist)
+  # because neither directory is tracked in git.

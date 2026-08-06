@@ -95,7 +95,7 @@ class _BarsPainter extends CustomPainter {
       ..color = accent
       ..style = PaintingStyle.fill;
     final glowPaint = Paint()
-      ..color = accent.withOpacity(0.35)
+      ..color = accent.withValues(alpha: 0.35)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3)
       ..style = PaintingStyle.fill;
 

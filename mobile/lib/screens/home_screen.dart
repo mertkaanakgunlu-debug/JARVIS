@@ -400,7 +400,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   style: JarvisText.sectionHeader.copyWith(
                     color: accent,
                     shadows: [
-                      Shadow(color: accent.withOpacity(0.6), blurRadius: 6)
+                      Shadow(color: accent.withValues(alpha: 0.6), blurRadius: 6)
                     ],
                   ),
                 ),
@@ -677,12 +677,12 @@ class _UserBubble extends StatelessWidget {
       padding:
           const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: JarvisColors.cyan.withOpacity(0.12),
+        color: JarvisColors.cyan.withValues(alpha: 0.12),
         border: Border.all(color: JarvisColors.cyan, width: 1),
         borderRadius: BorderRadius.circular(14),
         boxShadow: [
           BoxShadow(
-              color: JarvisColors.cyan.withOpacity(0.12),
+              color: JarvisColors.cyan.withValues(alpha: 0.12),
               blurRadius: 12)
         ],
       ),
@@ -730,7 +730,7 @@ class _JarvisBubble extends StatelessWidget {
           padding:
               const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.5),
+            color: Colors.black.withValues(alpha: 0.5),
             border:
                 Border.all(color: JarvisColors.lineDim, width: 1),
             borderRadius: BorderRadius.circular(14),
@@ -783,7 +783,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
         padding:
             const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.5),
+          color: Colors.black.withValues(alpha: 0.5),
           border: Border.all(color: JarvisColors.lineDim),
           borderRadius: BorderRadius.circular(14),
         ),
@@ -805,7 +805,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
                       height: 6,
                       margin: const EdgeInsets.only(right: 4),
                       decoration: BoxDecoration(
-                        color: JarvisColors.cyan.withOpacity(0.3 +
+                        color: JarvisColors.cyan.withValues(alpha: 0.3 +
                             0.7 *
                                 (phase < 0.5
                                     ? phase * 2
@@ -937,9 +937,9 @@ class _ComposerState extends State<_Composer> {
         widget.onChanged(corrected);
       },
       localeId: 'tr_TR',
-      partialResults: true,
       listenFor: const Duration(seconds: 60),
       pauseFor: const Duration(seconds: 30), // Hold modunda otomatik durdurma yok
+      listenOptions: SpeechListenOptions(partialResults: true),
     );
   }
 
@@ -970,8 +970,8 @@ class _ComposerState extends State<_Composer> {
           begin: Alignment.bottomCenter,
           end: Alignment.topCenter,
           colors: [
-            Colors.black.withOpacity(0.97),
-            Colors.black.withOpacity(0.65),
+            Colors.black.withValues(alpha: 0.97),
+            Colors.black.withValues(alpha: 0.65),
           ],
         ),
       ),
@@ -990,9 +990,9 @@ class _ComposerState extends State<_Composer> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
-                        color: JarvisColors.cyan.withOpacity(0.08),
+                        color: JarvisColors.cyan.withValues(alpha: 0.08),
                         border: Border.all(
-                            color: JarvisColors.cyan.withOpacity(0.4)),
+                            color: JarvisColors.cyan.withValues(alpha: 0.4)),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Row(
@@ -1037,7 +1037,7 @@ class _ComposerState extends State<_Composer> {
                   margin: const EdgeInsets.only(right: 8),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.black.withOpacity(0.5),
+                    color: Colors.black.withValues(alpha: 0.5),
                     border: Border.all(
                       color: _pendingFile != null
                           ? JarvisColors.cyan
@@ -1060,7 +1060,7 @@ class _ComposerState extends State<_Composer> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 16, vertical: 8),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.6),
+                    color: Colors.black.withValues(alpha: 0.6),
                     border: Border.all(color: JarvisColors.lineDim),
                     borderRadius: BorderRadius.circular(22),
                   ),
@@ -1157,7 +1157,7 @@ class _CircleBtn extends StatelessWidget {
         shape: BoxShape.circle,
         gradient: RadialGradient(
           colors: [
-            glowColor.withOpacity(isActive ? 0.35 : 0.18),
+            glowColor.withValues(alpha: isActive ? 0.35 : 0.18),
             Colors.black,
           ],
           radius: 0.85,
@@ -1168,7 +1168,7 @@ class _CircleBtn extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: glowColor.withOpacity(isActive ? 0.55 : 0.3),
+            color: glowColor.withValues(alpha: isActive ? 0.55 : 0.3),
             blurRadius: isActive ? 18 : 10,
           ),
         ],

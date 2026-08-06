@@ -24,14 +24,14 @@ class HudPanelCard extends StatelessWidget {
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [
-              const Color(0xFF0891B2).withOpacity(0.06),
-              Colors.black.withOpacity(0.55),
+              const Color(0xFF0891B2).withValues(alpha: 0.06),
+              Colors.black.withValues(alpha: 0.55),
             ],
           ),
-          border: Border.all(color: accent.withOpacity(0.55), width: 1),
+          border: Border.all(color: accent.withValues(alpha: 0.55), width: 1),
           boxShadow: [
-            BoxShadow(color: accent.withOpacity(0.12), blurRadius: 12),
-            BoxShadow(color: accent.withOpacity(0.08), blurRadius: 32),
+            BoxShadow(color: accent.withValues(alpha: 0.12), blurRadius: 12),
+            BoxShadow(color: accent.withValues(alpha: 0.08), blurRadius: 32),
           ],
         ),
         child: Stack(
@@ -47,7 +47,7 @@ class HudPanelCard extends StatelessWidget {
   List<Widget> _cornerBrackets(Color accent) {
     const s = 12.0;
     const t = 1.5;
-    final color = accent.withOpacity(0.8);
+    final color = accent.withValues(alpha: 0.8);
     return [
       _bracket(top: 0, left: 0, color: color, s: s, t: t),
       _bracket(top: 0, right: 0, color: color, s: s, t: t, flipH: true),
@@ -66,7 +66,10 @@ class HudPanelCard extends StatelessWidget {
       child: Transform(
         alignment: Alignment.center,
         transform: Matrix4.identity()
-          ..scale(flipH ? -1.0 : 1.0, flipV ? -1.0 : 1.0, 1.0),
+          // scaleByDouble takes the homogeneous w factor as its 4th argument;
+          // 1.0 leaves it untouched, matching what the deprecated
+          // scale(x, y, z) did (vector_math: scaleByDouble(x, y, z, 1.0)).
+          ..scaleByDouble(flipH ? -1.0 : 1.0, flipV ? -1.0 : 1.0, 1.0, 1.0),
         child: SizedBox(
           width: s,
           height: s,

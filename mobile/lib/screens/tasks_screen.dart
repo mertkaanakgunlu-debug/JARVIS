@@ -181,13 +181,13 @@ class _TodoCard extends StatelessWidget {
     return Dismissible(
       key: Key(todo['id'] as String),
       background: Container(
-        color: JarvisColors.green.withOpacity(0.2),
+        color: JarvisColors.green.withValues(alpha: 0.2),
         alignment: Alignment.centerLeft,
         padding: const EdgeInsets.only(left: 16),
         child: const Icon(Icons.check, color: JarvisColors.green),
       ),
       secondaryBackground: Container(
-        color: JarvisColors.red.withOpacity(0.2),
+        color: JarvisColors.red.withValues(alpha: 0.2),
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 16),
         child: const Icon(Icons.delete_outline, color: JarvisColors.red),
@@ -270,7 +270,7 @@ class _AddTodoSheetState extends ConsumerState<_AddTodoSheet> {
             if (context.mounted) Navigator.pop(context);
           },
           style: ElevatedButton.styleFrom(
-            backgroundColor: JarvisColors.cyan.withOpacity(0.15),
+            backgroundColor: JarvisColors.cyan.withValues(alpha: 0.15),
             foregroundColor: JarvisColors.cyanSoft,
           ),
           child: const Text('Ekle'),

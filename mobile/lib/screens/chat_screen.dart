@@ -285,10 +285,10 @@ class _UserBubble extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: JarvisColors.cyan.withOpacity(0.12),
+        color: JarvisColors.cyan.withValues(alpha: 0.12),
         border: Border.all(color: JarvisColors.cyan, width: 1),
         borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: JarvisColors.cyan.withOpacity(0.12), blurRadius: 12)],
+        boxShadow: [BoxShadow(color: JarvisColors.cyan.withValues(alpha: 0.12), blurRadius: 12)],
       ),
       child: Text(text, style: JarvisText.chatBody),
     );
@@ -325,7 +325,7 @@ class _JarvisBubble extends StatelessWidget {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.5),
+            color: Colors.black.withValues(alpha: 0.5),
             border: Border.all(color: JarvisColors.lineDim, width: 1),
             borderRadius: BorderRadius.circular(14),
           ),
@@ -365,7 +365,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.5),
+          color: Colors.black.withValues(alpha: 0.5),
           border: Border.all(color: JarvisColors.lineDim),
           borderRadius: BorderRadius.circular(14),
         ),
@@ -383,8 +383,9 @@ class _TypingIndicatorState extends State<_TypingIndicator>
                     width: 6, height: 6,
                     margin: const EdgeInsets.only(right: 4),
                     decoration: BoxDecoration(
-                      color: JarvisColors.cyan.withOpacity(
-                          0.3 + 0.7 * (phase < 0.5 ? phase * 2 : (1 - phase) * 2)),
+                      color: JarvisColors.cyan.withValues(
+                          alpha: 0.3 +
+                              0.7 * (phase < 0.5 ? phase * 2 : (1 - phase) * 2)),
                       shape: BoxShape.circle,
                     ),
                   );
@@ -491,9 +492,9 @@ class _ComposerState extends State<_Composer> {
         widget.onChanged(corrected);
       },
       localeId: 'tr_TR',   // alt çizgi: bazı Android sürümlerinde zorunlu
-      partialResults: true,
       listenFor: const Duration(seconds: 45),
       pauseFor: const Duration(seconds: 2), // 3→2: daha hızlı sonuç
+      listenOptions: SpeechListenOptions(partialResults: true),
     );
   }
 
@@ -514,7 +515,7 @@ class _ComposerState extends State<_Composer> {
         gradient: LinearGradient(
           begin: Alignment.bottomCenter,
           end: Alignment.topCenter,
-          colors: [Colors.black.withOpacity(0.95), Colors.transparent],
+          colors: [Colors.black.withValues(alpha: 0.95), Colors.transparent],
         ),
       ),
       child: SafeArea(
@@ -525,9 +526,9 @@ class _ComposerState extends State<_Composer> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.6),
+                  color: Colors.black.withValues(alpha: 0.6),
                   border: Border.all(
-                    color: listening ? JarvisColors.red.withOpacity(0.6) : JarvisColors.lineDim),
+                    color: listening ? JarvisColors.red.withValues(alpha: 0.6) : JarvisColors.lineDim),
                   borderRadius: BorderRadius.circular(22),
                 ),
                 child: TextField(
@@ -543,7 +544,7 @@ class _ComposerState extends State<_Composer> {
                         : 'Type or hold to speak…',
                     hintStyle: JarvisText.chatBody.copyWith(
                       color: listening
-                          ? JarvisColors.red.withOpacity(0.7)
+                          ? JarvisColors.red.withValues(alpha: 0.7)
                           : JarvisColors.inkFaint,
                     ),
                     border: InputBorder.none,
@@ -562,10 +563,10 @@ class _ComposerState extends State<_Composer> {
                       width: 48, height: 48,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: JarvisColors.cyan.withOpacity(0.2),
+                        color: JarvisColors.cyan.withValues(alpha: 0.2),
                         border: Border.all(color: JarvisColors.cyan),
                         boxShadow: [BoxShadow(
-                            color: JarvisColors.cyan.withOpacity(0.3), blurRadius: 12)],
+                            color: JarvisColors.cyan.withValues(alpha: 0.3), blurRadius: 12)],
                       ),
                       child: const Icon(Icons.send_rounded,
                           color: JarvisColors.cyanSoft, size: 20),
@@ -579,12 +580,12 @@ class _ComposerState extends State<_Composer> {
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         gradient: RadialGradient(colors: [
-                          micColor.withOpacity(0.35),
-                          micColor.withOpacity(0.08),
+                          micColor.withValues(alpha: 0.35),
+                          micColor.withValues(alpha: 0.08),
                         ]),
                         border: Border.all(color: micColor, width: listening ? 2 : 1),
                         boxShadow: [BoxShadow(
-                            color: micColor.withOpacity(listening ? 0.5 : 0.3),
+                            color: micColor.withValues(alpha: listening ? 0.5 : 0.3),
                             blurRadius: listening ? 18 : 12)],
                       ),
                       child: Icon(

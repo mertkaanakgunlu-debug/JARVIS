@@ -261,7 +261,7 @@ class _Field extends StatelessWidget {
         ),
         isDense: true,
         filled: true,
-        fillColor: Colors.black.withOpacity(0.3),
+        fillColor: Colors.black.withValues(alpha: 0.3),
       ),
     ),
   );
@@ -282,10 +282,10 @@ class _Switch extends StatelessWidget {
         Switch(
           value: value,
           onChanged: onChanged,
-          activeColor: JarvisColors.cyan,
+          activeThumbColor: JarvisColors.cyan,
           trackColor: WidgetStateProperty.resolveWith(
               (s) => s.contains(WidgetState.selected)
-                  ? JarvisColors.cyan.withOpacity(0.3)
+                  ? JarvisColors.cyan.withValues(alpha: 0.3)
                   : JarvisColors.lineDim),
         ),
       ],

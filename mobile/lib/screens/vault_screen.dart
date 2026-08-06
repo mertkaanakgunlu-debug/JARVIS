@@ -61,7 +61,7 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
                               horizontal: 8, vertical: 3),
                           decoration: BoxDecoration(
                             color: active
-                                ? JarvisColors.cyan.withOpacity(0.2)
+                                ? JarvisColors.cyan.withValues(alpha: 0.2)
                                 : Colors.transparent,
                             border: Border.all(
                               color: active
@@ -113,7 +113,7 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
                       horizontal: 12, vertical: 8),
                   isDense: true,
                   filled: true,
-                  fillColor: Colors.black.withOpacity(0.4),
+                  fillColor: Colors.black.withValues(alpha: 0.4),
                 ),
               ),
             ),

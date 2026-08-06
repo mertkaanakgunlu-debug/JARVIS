@@ -73,8 +73,8 @@ class _TaskBody extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: statusColor.withOpacity(0.08),
-            border: Border.all(color: statusColor.withOpacity(0.4)),
+            color: statusColor.withValues(alpha: 0.08),
+            border: Border.all(color: statusColor.withValues(alpha: 0.4)),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Column(
@@ -111,7 +111,7 @@ class _TaskBody extends StatelessWidget {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.4),
+              color: Colors.black.withValues(alpha: 0.4),
               border: Border.all(color: JarvisColors.lineDim),
               borderRadius: BorderRadius.circular(8),
             ),
@@ -200,7 +200,7 @@ class _ArtifactCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: JarvisColors.cyan.withOpacity(0.06),
+        color: JarvisColors.cyan.withValues(alpha: 0.06),
         border: Border.all(color: JarvisColors.lineDim),
         borderRadius: BorderRadius.circular(6),
       ),

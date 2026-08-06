@@ -51,7 +51,7 @@ class _GridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = JarvisColors.cyan.withOpacity(alpha)
+      ..color = JarvisColors.cyan.withValues(alpha: alpha)
       ..strokeWidth = 0.5;
 
     const step = 24.0;

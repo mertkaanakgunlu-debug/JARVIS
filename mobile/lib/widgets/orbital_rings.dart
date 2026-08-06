@@ -59,7 +59,7 @@ class _RingsPainter extends CustomPainter {
     final base = size.width / 2;
 
     final paint = Paint()
-      ..color = color.withOpacity(0.4)
+      ..color = color.withValues(alpha: 0.4)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.8;
 
@@ -137,7 +137,7 @@ class _RingsPainter extends CustomPainter {
         style: TextStyle(
           fontFamily: 'ShareTechMono',
           fontSize: 7,
-          color: p.color.withOpacity(0.7),
+          color: p.color.withValues(alpha: 0.7),
         ),
       );
       final tp2 = TextPainter(text: span, textDirection: TextDirection.ltr)..layout();

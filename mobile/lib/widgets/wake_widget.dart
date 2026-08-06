@@ -200,7 +200,7 @@ class _OrbHalo extends StatelessWidget {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(color: JarvisColors.lineDim, width: 1),
-        boxShadow: [BoxShadow(color: JarvisColors.cyan.withOpacity(0.2), blurRadius: 18)],
+        boxShadow: [BoxShadow(color: JarvisColors.cyan.withValues(alpha: 0.2), blurRadius: 18)],
       ),
       child: Stack(
         alignment: Alignment.center,
@@ -227,7 +227,7 @@ class _SpinArcPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = JarvisColors.cyan.withOpacity(0.7)
+      ..color = JarvisColors.cyan.withValues(alpha: 0.7)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5
       ..strokeCap = StrokeCap.round;

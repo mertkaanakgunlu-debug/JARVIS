@@ -24,7 +24,7 @@ class HudMeter extends StatelessWidget {
           decoration: BoxDecoration(
             color: accent,
             borderRadius: BorderRadius.circular(2),
-            boxShadow: [BoxShadow(color: accent.withOpacity(0.5), blurRadius: 6)],
+            boxShadow: [BoxShadow(color: accent.withValues(alpha: 0.5), blurRadius: 6)],
           ),
         ),
       ),
