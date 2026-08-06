@@ -6,6 +6,65 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [CI-MOBILE-01 cleared] — 2026-08-06
+
+The `mobile` job had been red since long before any current work: 71
+`flutter analyze` findings, all `info`/`warning`, behind `continue-on-error: true`
+so the workflow headline stayed green. That is the exact shape the reporting
+standard exists to prevent — an unfinished check that reads as passed. Cleared at
+the source: **no `analysis_options.yaml` added, no `ignore_for_file` added, no
+`ignore:` comment added, and `continue-on-error` left exactly as it was.**
+(`mobile/` already carried one `// ignore: unawaited_futures` in
+`lib/core/ws_client.dart:46` from `acf64d1`; it is untouched and unrelated.)
+
+The 71 split into two very different problems.
+
+**69 × `deprecated_member_use`** — mechanical, and each replacement was checked
+against the SDK/package source rather than assumed:
+
+- 65 × `Color.withOpacity(x)` → `withValues(alpha: x)`. The deprecated method is
+  literally `withAlpha((255.0 * opacity).round())`, so the only change is that
+  alpha no longer round-trips through 8 bits.
+- 1 × `Matrix4.scale(x, y, 1.0)` → `scaleByDouble(x, y, 1.0, 1.0)`. The fourth
+  argument is the homogeneous `w` factor; vector_math's own deprecated `scale`
+  forwards `1.0` there, so anything else would have silently deformed the corner
+  brackets in `hud_panel_card.dart`.
+- 1 × `Switch.activeColor` → `activeThumbColor`. For a material `Switch` the SDK
+  resolves `activeThumbColor ?? activeColor`, so this is a rename. The `Slider`
+  in the same file also has an `activeColor` — **not** deprecated, left alone.
+- 2 × `SpeechToText.listen(partialResults:)` →
+  `listenOptions: SpeechListenOptions(partialResults: true)`. Verified
+  field-by-field that the options object built implicitly from the deprecated
+  parameters is identical to the explicit one.
+
+**2 × `asset_directory_does_not_exist`** — not cosmetic at all, and the more
+interesting half. `pubspec.yaml` declared `assets/fonts/` and `assets/wake/`,
+neither tracked in git. The `assets:` block was dead in both directions: nothing
+in `lib/` touches `rootBundle`/`DefaultAssetBundle`/`AssetManifest` at all, the
+`.ttf` files reach the app through the `fonts:` section instead, and the wake-word
+model is read by `WakeWordService.kt` via `assets.open("wake/…")` — the Android
+AssetManager root, which a Flutter asset declaration can never populate (Flutter
+bundles under `assets/flutter_assets/…`). The block was removed.
+
+**What this did not fix.** Running the analyzer on a tracked-files-only checkout
+of HEAD showed the missing assets were never only an analyzer complaint:
+`flutter test`/`flutter build` die at `Failed to build asset bundle` because
+`assets/fonts/*.ttf` is gitignored. Removing the two directory entries fixes two
+of the three errors; the missing `.ttf` files remain, so **a clean clone still
+cannot build the app**. `flutter analyze` does not read the `fonts:` section, so
+CI does not see it. Also still open, and verified pre-existing by running it
+against an unmodified `git archive` of the same HEAD: the single
+`test/widget_test.dart` smoke test fails on an uncancelled 2-second
+`Future.delayed` in `_SplashRouterState.initState` (CI does not run
+`flutter test` for mobile).
+
+Two caveats that keep "0 findings" honest: `flutter_lints` is a dev_dependency
+but is never included (no `analysis_options.yaml` exists anywhere), so the clean
+result is against the analyzer's **default** rules; and CI pins
+`subosito/flutter-action@v2` to `channel: stable` with no version, so a new
+stable release can reintroduce deprecations with no code change — the same drift
+that broke the `python` job when ruff was unpinned.
+
 ## [Post-MVP Faz 5: mail → calendar, staged] — 2026-08-02
 
 The first feature where a **background trigger** can lead to a **real external write**. So the

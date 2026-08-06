@@ -1329,7 +1329,11 @@ def test_the_skill_forbids_closing_while_a_blocking_ci_failure_remains():
         "the skill must define how a blocked session is recorded"
     assert "CI_BLOCKING_FAILURE" in text
     assert "no blocking CI failure remains" in text
-    assert "CI-MOBILE-01" in text, "mobile's non-blocking signature must be named"
+    # CI-MOBILE-01 was cleared at the source on 2026-08-06, so mobile no longer
+    # has a wave-through signature. The skill must still NAME it -- a reader who
+    # meets a red `mobile` job needs to be told the old exemption is gone rather
+    # than left to rediscover it as "the known cosmetic one".
+    assert "CI-MOBILE-01" in text, "mobile's classification must name CI-MOBILE-01"
     assert "never rerun it" in text, "diff-explained failures must not be rerun"
 
 

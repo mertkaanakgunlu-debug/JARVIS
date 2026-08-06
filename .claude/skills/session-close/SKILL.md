@@ -237,7 +237,7 @@ Classify **every** failed job explicitly before going near the marker:
 |---|---|
 | `python` | **blocking** |
 | `electron` | **blocking** |
-| `mobile` | **blocking** if the diff touches `mobile/**`. Otherwise, if the failure matches the existing `CI-MOBILE-01` signature (`flutter analyze`, `info`/`warning` findings only — `deprecated_member_use`, missing declared asset dirs), it may be reported **non-blocking**. **A different signature is blocking.** |
+| `mobile` | **blocking.** `CI-MOBILE-01` was cleared at the source on 2026-08-06, so the old "known cosmetic signature" exemption is **gone** — there is no `mobile` failure that may be waved through any more. It is still `continue-on-error: true`, so the workflow headline stays green while the job is red: read the job. If the failure is new `deprecated_member_use` findings that the diff cannot explain, suspect the unpinned `channel: stable` Flutter version (`.claude/rules/mobile.md`) — that is a diagnosis, not an exemption. |
 
 Rerun rules:
 
