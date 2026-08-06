@@ -115,16 +115,51 @@ git diff --check
 
 Report to the owner **without pushing**: starting and final SHA, the commit
 chain and parents, files changed, evidence collected, what is still open, and
-that nothing was pushed. Then mark the recovery marker `prepared`:
+that nothing was pushed. Then mark the recovery marker `prepared` — by running
+the helper, never by writing the JSON yourself:
 
-Write `.claude/session-recovery/close-marker.json` (gitignored):
-
-```json
-{"state": "prepared", "session_id": "<id>", "prepared_at": "<iso8601>",
- "head": "<sha>", "branch": "<branch>"}
+```powershell
+.venv\Scripts\python.exe scripts\claude_session_state.py prepare
 ```
 
+It reads the session identity from `.claude/session-recovery/current.json` (which
+the SessionStart hook wrote from the real hook payload) and derives branch and
+HEAD itself. It takes **no session-id argument** — see the identity rules below.
+
 Stop here. Do not push. Do not start new product work.
+
+---
+
+## Session identity — never authored by hand
+
+The marker used to be JSON the model typed, which meant its `session_id` was
+whatever the model *believed* the session was called. A model cannot observe its
+own session id; it can only infer one from a transcript filename, from "the
+newest file in the directory", or from a guess — and a marker carrying a guessed
+id certifies the wrong session. That is why every transition now goes through
+`scripts/claude_session_state.py`:
+
+```powershell
+.venv\Scripts\python.exe scripts\claude_session_state.py prepare
+.venv\Scripts\python.exe scripts\claude_session_state.py close
+.venv\Scripts\python.exe scripts\claude_session_state.py block --run-id <id> --blocking-jobs python
+.venv\Scripts\python.exe scripts\claude_session_state.py show
+```
+
+**Forbidden, without exception:**
+
+- deriving a session id from a transcript filename or path;
+- treating the newest transcript as "the current session";
+- copying, retyping, or otherwise supplying a session id by hand;
+- creating `current.json` yourself, or writing a marker when it does not exist;
+- writing `close-marker.json` (or any recovery JSON) directly with an editor;
+- working around a refusal from the helper by hand-writing the JSON it declined.
+
+If the helper refuses — no `current.json`, an identity mismatch, a moved HEAD —
+**report the refusal verbatim to the owner and stop.** A refusal is a real
+finding about the session's state, not an obstacle to route around. A session
+whose identity cannot be established simply does not get a marker; say so in the
+report rather than manufacturing one.
 
 ---
 
@@ -192,23 +227,26 @@ Rerun rules:
 
 ### 5. Close out — `closed` has to be earned
 
-Write `state: "closed"` **only** when all three hold:
+Run `close` **only** when all three hold:
 
 1. push and every post-push remote verification succeeded;
 2. **no blocking CI failure remains** (per the table above);
 3. any permitted rerun has completed **and passed**.
 
-```json
-{"state": "closed", "session_id": "<id>", "prepared_at": "<iso8601>",
- "closed_at": "<iso8601>", "head": "<sha>", "branch": "<branch>"}
+```powershell
+.venv\Scripts\python.exe scripts\claude_session_state.py close
 ```
 
-If a blocking failure remains, the session is **not closed**. Write instead:
+The helper enforces the *identity* half of this (same session, same HEAD, same
+branch, previous state `prepared`) and refuses otherwise. The **CI
+classification above is yours** — the helper cannot tell a blocking failure from
+a known non-blocking one, and it will not stop you writing `closed` over a red
+tip. Judge the table first, then run the command.
 
-```json
-{"state": "blocked", "session_id": "<id>", "blocked_at": "<iso8601>",
- "reason_code": "CI_BLOCKING_FAILURE", "run_id": "<run>",
- "blocking_jobs": ["python"], "head": "<sha>", "branch": "<branch>"}
+If a blocking failure remains, the session is **not closed**:
+
+```powershell
+.venv\Scripts\python.exe scripts\claude_session_state.py block --reason-code CI_BLOCKING_FAILURE --run-id <run> --blocking-jobs python
 ```
 
 …and **do not close the session**. Report the failure, its classification, and

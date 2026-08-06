@@ -20,8 +20,12 @@ What it deliberately does NOT do:
     stale-by-minutes origin ref is not worth a hang. The block SAYS the ref is
     the local cached one. Opt in with JARVIS_SESSION_START_FETCH=1 (bounded by
     the same short timeout as every other git call here).
-  * no writes of any kind -- no commit, no push, no source edit, not even to the
-    recovery directory. Reading is the entire job.
+  * SessionStart modifies no tracked file and writes only the local,
+    gitignored authoritative current-session record. That one write exists
+    because this hook is the ONLY component that ever sees an authoritative
+    session id: Claude Code puts it in the payload, and nothing downstream can
+    observe it. Recording it here is what lets /session-close refuse to guess
+    (see scripts/claude_session_state.py). No commit, no push, no source edit.
   * no file CONTENTS and no secrets -- dirty files are reported by NAME and
     count only. `git status --porcelain` never prints contents, and nothing here
     opens a working-tree file except HANDOFF.md, which is read for one SHA.
@@ -35,6 +39,7 @@ would be silently dropped, so diagnostics go nowhere at all.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -137,6 +142,51 @@ def _short(sha: str | None) -> str:
     return (sha or "")[:7] or "?"
 
 
+def _load_state_module():
+    """Import the session-state helper by path -- `scripts/` is not a package.
+
+    Loaded lazily and defensively: if the helper is missing or broken, the
+    preflight still runs and says the identity was not recorded. A hook that
+    could not start a session because a sibling file failed to import would be
+    exactly the fail-closed behaviour this design forbids.
+    """
+    path = Path(__file__).resolve().parent / "claude_session_state.py"
+    spec = importlib.util.spec_from_file_location("claude_session_state", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _record_current_session(payload: dict, cwd: str) -> str:
+    """Record the authoritative session identity. Returns a degraded note, or "".
+
+    This is the hook's ONLY write, and the reason the whole identity chain can
+    be machine-authored: the SessionStart payload is the single place an
+    authoritative session id is ever visible, and it is visible only here.
+
+    Every failure is reported rather than swallowed. A silently-missing identity
+    record would surface later as "/session-close refuses to run" with no
+    explanation, and the fix (re-open the session) is only obvious if the
+    preflight said so at the start.
+    """
+    source = str(payload.get("source") or "unknown")
+    session_id = str(payload.get("session_id") or "").strip()
+    try:
+        state = _load_state_module()
+        if state is None:
+            return "session identity NOT recorded (state helper unavailable)"
+        if source not in state.KNOWN_SOURCES:
+            return f"session identity NOT recorded (unrecognised source {source!r})"
+        if not session_id:
+            return "session identity NOT recorded (hook payload carried no session_id)"
+        ok, detail = state.write_current(cwd, session_id, source)
+        return "" if ok else f"session identity NOT recorded ({detail})"
+    except Exception as exc:  # noqa: BLE001 -- bookkeeping never blocks a start
+        return f"session identity NOT recorded ({type(exc).__name__})"
+
+
 def _handoff_verified_sha(root: Path, git: _Git) -> tuple[str | None, str]:
     """The first real commit SHA named by HANDOFF.md, and how it relates to HEAD.
 
@@ -201,6 +251,14 @@ def _recovery_state(root: Path) -> str:
     a session whose push succeeded but whose CI came back red must NOT read as
     closed. It was written as `closed` once, which is exactly the "report an
     unfinished check as passed" failure the protocol exists to prevent.
+
+    **A clean close additionally requires a VERIFIED identity.** Matching ids
+    between `latest.json` and the marker proves only that two records agree; if
+    the SessionEnd hook could not check its payload id against the authoritative
+    `current.json`, both could agree on the same wrong id. So `closed cleanly`
+    is emitted only when SessionEnd recorded `identity_status: "matched"`. A
+    record written before that field existed has no such proof and is reported
+    unverified -- which is the honest answer, not a regression.
     """
     directory = root / RECOVERY_DIRNAME
     latest_path = directory / LATEST_NAME
@@ -225,13 +283,17 @@ def _recovery_state(root: Path) -> str:
 
     prev_session = str(latest.get("session_id") or "")
     reason = str(latest.get("reason") or "unknown")
+    identity = str(latest.get("identity_status") or "")
     same = marker_session and prev_session and marker_session == prev_session
 
     if marker_state == "blocked" and same:
         return (f"previous session FINALIZE BLOCKED by CI ({_blocked_detail(marker)}) "
                 "-- reconcile before new work")
     if marker_state == "closed" and same:
-        return f"previous session closed cleanly (exit: {reason})"
+        if identity == "matched":
+            return f"previous session closed cleanly (exit: {reason})"
+        return (f"previous SessionEnd identity UNVERIFIED "
+                f"({identity or 'not recorded'}) -- reconcile before new work")
     if marker_state == "prepared" and same:
         return (f"previous session PREPARED but NOT finalized (exit: {reason}) "
                 "-- a close commit may be waiting for push approval")
@@ -292,14 +354,21 @@ def build_context(payload: dict, cwd: str) -> str:
     head = git("rev-parse", "HEAD")
     head_subject = git("log", "-1", "--format=%s") or ""
 
+    # `clear` is recorded like any other source: it can carry a NEW session id,
+    # and skipping it would leave the identity record pointing at a session that
+    # no longer exists. `resume`/`compact` re-record the same id idempotently.
+    identity_note = _record_current_session(payload, cwd)
+
     if source in SHORT_SOURCES:
         lines = [
             f"=== SESSION STATE ({source}) ===",
             f"branch {branch} @ {_short(head)}  |  {_dirty_summary(git)}",
             "Repo state is unchanged by this event; earlier session context still applies.",
         ]
-        if git.unavailable:
-            lines.insert(1, "SESSION PREFLIGHT DEGRADED: " + "; ".join(git.notes))
+        degraded = "; ".join(n for n in (("; ".join(git.notes) if git.unavailable else ""),
+                                         identity_note) if n)
+        if degraded:
+            lines.insert(1, "SESSION PREFLIGHT DEGRADED: " + degraded)
         return "\n".join(lines[:MAX_CONTEXT_LINES])
 
     fetched = "no fetch; local cached ref"
@@ -323,6 +392,8 @@ def build_context(payload: dict, cwd: str) -> str:
     lines = [f"=== JARVIS SESSION PREFLIGHT (source: {source}) ==="]
     if git.unavailable:
         lines.append("SESSION PREFLIGHT DEGRADED: " + "; ".join(git.notes))
+    if identity_note:
+        lines.append("SESSION PREFLIGHT DEGRADED: " + identity_note)
     lines += [
         f"branch        {branch}",
         f"HEAD          {_short(head)}  {head_subject[:60]}",

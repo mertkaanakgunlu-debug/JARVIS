@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,28 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 START_SCRIPT = REPO_ROOT / "scripts" / "claude_session_start.py"
 END_SCRIPT = REPO_ROOT / "scripts" / "claude_session_end.py"
+STATE_SCRIPT = REPO_ROOT / "scripts" / "claude_session_state.py"
+
+RECOVERY = Path(".claude") / "session-recovery"
+
+
+def _isolated_env(**overrides: str) -> dict:
+    """`os.environ` with the developer's global and system git config removed.
+
+    A fixture repository must behave identically on every machine. This one's
+    owner has a GLOBAL ignore rule for `.claude/`, which silently changed what
+    `git add` and `git status` did inside these fixtures; `core.autocrlf`,
+    `init.defaultBranch` and global aliases can do the same. Git 2.32+ honours
+    these variables, so pointing them at paths that do not exist gives every
+    test the same empty configuration rather than the machine's.
+    """
+    nowhere = Path(tempfile.gettempdir()) / "jarvis-tests-no-such-gitconfig"
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = str(nowhere)
+    env["GIT_CONFIG_SYSTEM"] = str(nowhere)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env.update(overrides)
+    return env
 
 #: The project's runtime interpreter, as referenced by the hook commands. It
 #: lives under the gitignored `.venv/`, so it is expected to be ABSENT from a
@@ -63,7 +86,7 @@ def _load(path: Path, name: str):
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(("git", *args), cwd=repo, capture_output=True,
-                          text=True, check=True)
+                          text=True, check=True, env=_isolated_env())
     return proc.stdout.strip()
 
 
@@ -81,7 +104,11 @@ def repo(tmp_path: Path) -> Path:
     # the fixture's behaviour comes from the fixture alone.
     _git(root, "config", "core.excludesFile", str(root / ".no-global-excludes"))
     (root / "README.md").write_text("hello\n", encoding="utf-8")
-    _git(root, "add", "README.md")
+    # The real repository gitignores the recovery directory, and the fixture has
+    # to model that: SessionStart writes the identity record there, so without
+    # the rule every preflight would report its OWN write as a dirty file.
+    (root / ".gitignore").write_text(".claude/session-recovery/\n", encoding="utf-8")
+    _git(root, "add", "README.md", ".gitignore")
     _git(root, "commit", "-q", "-m", "initial")
     head = _git(root, "rev-parse", "HEAD")
     (root / "HANDOFF.md").write_text(
@@ -98,7 +125,7 @@ def run_hook(script: Path, payload: dict, cwd: Path, env: dict | None = None):
     proc = subprocess.run(
         (sys.executable, str(script)),
         input=json.dumps(payload), cwd=str(cwd),
-        capture_output=True, text=True, timeout=60, env=env,
+        capture_output=True, text=True, timeout=60, env=env or _isolated_env(),
     )
     return proc
 
@@ -109,6 +136,30 @@ def start_context(repo: Path, source: str = "startup", **extra) -> str:
     proc = run_hook(START_SCRIPT, payload, repo)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def run_state(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """Drive the session-state helper as the skill does: a plain CLI call."""
+    return subprocess.run(
+        (sys.executable, str(STATE_SCRIPT), *args), cwd=str(repo),
+        capture_output=True, text=True, timeout=60, env=_isolated_env(),
+    )
+
+
+def current_file(repo: Path) -> Path:
+    return repo / RECOVERY / "current.json"
+
+
+def marker_file(repo: Path) -> Path:
+    return repo / RECOVERY / "close-marker.json"
+
+
+def read_current(repo: Path) -> dict:
+    return json.loads(current_file(repo).read_text(encoding="utf-8"))
+
+
+def read_marker(repo: Path) -> dict:
+    return json.loads(marker_file(repo).read_text(encoding="utf-8"))
 
 
 # ── the ordinary cases ──────────────────────────────────────────────────────
@@ -252,8 +303,13 @@ def test_an_unclosed_previous_session_is_flagged(repo):
 
 
 def test_a_cleanly_closed_previous_session_is_reported_clean(repo):
+    """Note `identity_status`: matching ids between two records proves only that
+    the two records agree. `matched` is SessionEnd's answer to "does the payload
+    id equal the AUTHORITATIVE one", and it is what makes the agreement mean
+    something -- see test_an_unverified_identity_never_reads_as_a_clean_close."""
     _write_recovery(repo,
-                    {"session_id": "prev", "reason": "prompt_input_exit"},
+                    {"session_id": "prev", "reason": "prompt_input_exit",
+                     "identity_status": "matched"},
                     {"session_id": "prev", "state": "closed"})
 
     context = start_context(repo)
@@ -379,8 +435,7 @@ def test_a_non_repo_directory_degrades_instead_of_failing(tmp_path):
 def test_git_being_unavailable_degrades_and_still_exits_zero(repo):
     """The failure the whole fail-open design exists for. PATH is emptied so the
     `git` binary cannot be resolved at all."""
-    env = dict(os.environ)
-    env["PATH"] = str(repo / "no-such-bin")
+    env = _isolated_env(PATH=str(repo / "no-such-bin"))
 
     proc = run_hook(START_SCRIPT, {"cwd": str(repo), "source": "startup"}, repo, env=env)
 
@@ -402,14 +457,400 @@ def test_malformed_hook_input_still_produces_valid_hook_json(repo, raw):
     assert isinstance(payload["hookSpecificOutput"]["additionalContext"], str)
 
 
-def test_the_start_hook_writes_nothing_at_all(repo):
-    """SessionStart is read-only: it must not even create the recovery dir."""
+def test_the_start_hook_writes_only_the_gitignored_identity_record(repo):
+    """The invariant NARROWED, it did not loosen.
+
+    SessionStart used to write nothing at all. It now writes exactly one file:
+    the authoritative session-identity record. That write exists because this
+    hook is the only component that ever sees an authoritative session id, and
+    everything downstream previously had to guess one. What still holds — and is
+    what this asserts — is that it modifies no tracked file and writes nothing
+    outside the gitignored recovery directory.
+    """
     before = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*"))
 
-    start_context(repo)
+    start_context(repo, session_id="sess-W")
 
     after = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*"))
-    assert before == after
+    assert [p for p in after if p not in before] == [
+        ".claude", ".claude/session-recovery", ".claude/session-recovery/current.json",
+    ]
+    assert [p for p in before if p not in after] == []
+    modified = [ln for ln in _git(repo, "status", "--porcelain").splitlines()
+                if not ln.startswith("??")]
+    assert modified == [], f"tracked files were touched: {modified}"
+
+
+# ── authoritative session identity ──────────────────────────────────────────
+# The hole this closes: the close marker used to be JSON the MODEL typed, so its
+# `session_id` was whatever the model believed the session was called -- and a
+# model can only infer that from a transcript filename, from "the newest file",
+# or from a guess. A guessed id that happens to look right certifies the wrong
+# session. The id now travels one way only: Claude Code's SessionStart payload ->
+# current.json -> every later transition, with no argument that could carry
+# another value.
+
+def test_startup_records_the_authoritative_session_identity(repo):
+    start_context(repo, source="startup", session_id="sess-startup-1")
+
+    current = read_current(repo)
+
+    assert current["schema"] == 1
+    assert current["session_id"] == "sess-startup-1"
+    assert current["source"] == "startup"
+    assert current["branch"] == "langgraph-migration"
+    assert current["head"] == _git(repo, "rev-parse", "HEAD")
+    assert current["updated_at"]
+
+
+def test_resume_updates_the_same_identity_idempotently(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    first = read_current(repo)
+
+    start_context(repo, source="resume", session_id="sess-A")
+    second = read_current(repo)
+
+    assert second["session_id"] == first["session_id"] == "sess-A"
+    assert second["head"] == first["head"]
+    assert second["source"] == "resume"
+
+
+def test_clear_replaces_the_identity_because_it_can_carry_a_new_session(repo):
+    """`clear` is the source it would be most tempting to skip -- the repo state
+    is unchanged, so the preflight only prints a short summary. But it can begin
+    a NEW session id, and an identity record left pointing at the old one would
+    make every later transition certify a session that no longer exists."""
+    start_context(repo, source="startup", session_id="sess-old")
+
+    start_context(repo, source="clear", session_id="sess-new")
+
+    assert read_current(repo)["session_id"] == "sess-new"
+
+
+def test_compact_keeps_the_identity_recorded(repo):
+    start_context(repo, source="startup", session_id="sess-C")
+
+    start_context(repo, source="compact", session_id="sess-C")
+
+    current = read_current(repo)
+    assert current["session_id"] == "sess-C"
+    assert current["source"] == "compact"
+
+
+def test_a_payload_without_a_session_id_leaves_the_identity_untouched(repo):
+    """Fail-open, but never destructive: a degraded start must not overwrite a
+    good identity record with an empty one."""
+    start_context(repo, source="startup", session_id="sess-good")
+    before = read_current(repo)
+
+    context = start_context(repo, source="startup", session_id="")
+
+    assert read_current(repo) == before
+    assert "SESSION PREFLIGHT DEGRADED" in context
+    assert "no session_id" in context
+
+
+def test_an_unrecognised_source_is_not_recorded_but_never_blocks(repo):
+    """Writing an unknown source string into the identity record would make the
+    record's own provenance unverifiable, so the write is skipped -- loudly."""
+    context = start_context(repo, source="telepathy", session_id="sess-X")
+
+    assert not current_file(repo).exists()
+    assert "SESSION PREFLIGHT DEGRADED" in context
+    assert "unrecognised source" in context
+
+
+def test_an_unwritable_recovery_path_degrades_instead_of_blocking_the_start(repo):
+    """The recovery directory replaced by a FILE, so `mkdir` cannot succeed and
+    the atomic write fails. A session must still start: bookkeeping that can
+    lock the owner out of their own repository is worse than no bookkeeping."""
+    (repo / ".claude").mkdir(exist_ok=True)
+    (repo / ".claude" / "session-recovery").write_text("not a directory\n", encoding="utf-8")
+
+    proc = run_hook(START_SCRIPT, {"session_id": "sess-B", "cwd": str(repo),
+                                   "source": "startup"}, repo)
+
+    assert proc.returncode == 0
+    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "SESSION PREFLIGHT DEGRADED" in context
+    assert "session identity NOT recorded" in context
+
+
+def test_the_identity_record_carries_no_path_and_no_transcript(repo):
+    """It is a local file, but it is also the input to every later transition;
+    keeping it to a fixed, derived set of fields means there is no slot a path
+    or a secret could occupy."""
+    transcript = repo / "transcript.jsonl"
+    transcript.write_text('{"secret":"TRANSCRIPT_BODY_MUST_NOT_LEAK"}\n', encoding="utf-8")
+
+    start_context(repo, source="startup", session_id="sess-P",
+                  transcript_path=str(transcript))
+
+    raw = current_file(repo).read_text(encoding="utf-8")
+    assert "transcript" not in raw.lower()
+    assert "TRANSCRIPT_BODY_MUST_NOT_LEAK" not in raw
+    assert os.path.expanduser("~") not in raw
+    assert str(repo) not in raw
+    assert set(json.loads(raw)) == {
+        "schema", "session_id", "source", "updated_at", "branch", "head"}
+
+
+@pytest.mark.parametrize("flag", ["--session-id", "--session_id"])
+def test_prepare_refuses_a_session_id_argument(repo, flag):
+    """An identity that can be passed in is an identity that can be guessed, so
+    the transitions expose no such argument at all."""
+    start_context(repo, source="startup", session_id="sess-A")
+
+    proc = run_state(repo, "prepare", flag, "sess-forged")
+
+    assert proc.returncode != 0
+    assert "unrecognized arguments" in proc.stderr
+    assert not marker_file(repo).exists()
+
+
+def test_prepare_refuses_without_an_authoritative_identity(repo):
+    proc = run_state(repo, "prepare")
+
+    assert proc.returncode != 0
+    assert "current.json" in proc.stderr
+    assert "do not create one by hand" in proc.stderr
+    assert not marker_file(repo).exists()
+
+
+def test_prepare_takes_its_identity_only_from_the_current_record(repo):
+    start_context(repo, source="startup", session_id="sess-authoritative")
+
+    proc = run_state(repo, "prepare")
+
+    assert proc.returncode == 0, proc.stderr
+    marker = read_marker(repo)
+    assert marker["state"] == "prepared"
+    assert marker["session_id"] == "sess-authoritative"
+    assert marker["head"] == _git(repo, "rev-parse", "HEAD")
+    assert marker["branch"] == "langgraph-migration"
+
+
+def test_prepare_survives_the_work_commits_a_real_session_makes(repo):
+    """HEAD is compared by ancestry, not equality: a session that committed
+    something is the only kind of session that has anything to close."""
+    start_context(repo, source="startup", session_id="sess-A")
+    (repo / "work.md").write_text("work\n", encoding="utf-8")
+    _git(repo, "add", "work.md")
+    _git(repo, "commit", "-q", "-m", "work commit")
+
+    proc = run_state(repo, "prepare")
+
+    assert proc.returncode == 0, proc.stderr
+    assert read_marker(repo)["head"] == _git(repo, "rev-parse", "HEAD")
+
+
+def test_prepare_refuses_when_the_recorded_history_was_rewritten(repo):
+    """A reset/rebase under the session means the recorded head is no longer
+    ancestral, so the identity record can no longer vouch for this tree."""
+    start_context(repo, source="startup", session_id="sess-A")
+    _git(repo, "checkout", "-q", "--orphan", "rewritten")
+    _git(repo, "commit", "-q", "-m", "unrelated root", "--allow-empty")
+    _git(repo, "branch", "-q", "-D", "langgraph-migration")
+    _git(repo, "checkout", "-q", "-b", "langgraph-migration")
+
+    proc = run_state(repo, "prepare")
+
+    assert proc.returncode != 0
+    assert "no longer an ancestor" in proc.stderr
+
+
+def test_close_refuses_a_marker_from_another_session(repo):
+    """The exact failure the whole change exists for: a marker left by an
+    earlier session must not certify a later one."""
+    start_context(repo, source="startup", session_id="sess-A")
+    assert run_state(repo, "prepare").returncode == 0
+    start_context(repo, source="clear", session_id="sess-B")
+
+    proc = run_state(repo, "close")
+
+    assert proc.returncode != 0
+    assert "different session" in proc.stderr
+    assert read_marker(repo)["state"] == "prepared", "the refused transition changed nothing"
+
+
+def test_close_refuses_when_head_moved_since_prepare(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    assert run_state(repo, "prepare").returncode == 0
+    (repo / "later.md").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "later.md")
+    _git(repo, "commit", "-q", "-m", "work after prepare")
+
+    proc = run_state(repo, "close")
+
+    assert proc.returncode != 0
+    assert "re-run prepare" in proc.stderr
+    assert read_marker(repo)["state"] == "prepared"
+
+
+def test_close_refuses_when_the_branch_changed_since_prepare(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    assert run_state(repo, "prepare").returncode == 0
+    _git(repo, "checkout", "-q", "-b", "somewhere-else")
+
+    proc = run_state(repo, "close")
+
+    assert proc.returncode != 0
+    assert "branch" in proc.stderr
+    assert read_marker(repo)["state"] == "prepared"
+
+
+def test_close_promotes_a_matching_prepared_marker(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    assert run_state(repo, "prepare").returncode == 0
+    prepared_at = read_marker(repo)["prepared_at"]
+
+    assert run_state(repo, "close").returncode == 0
+
+    marker = read_marker(repo)
+    assert marker["state"] == "closed"
+    assert marker["session_id"] == "sess-A"
+    assert marker["prepared_at"] == prepared_at
+    assert marker["closed_at"]
+
+
+def test_close_is_idempotent_and_keeps_the_first_close_time(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    run_state(repo, "prepare")
+    assert run_state(repo, "close").returncode == 0
+    first = read_marker(repo)
+
+    assert run_state(repo, "close").returncode == 0
+
+    assert read_marker(repo)["closed_at"] == first["closed_at"]
+
+
+def test_block_applies_the_same_identity_guards(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    assert run_state(repo, "prepare").returncode == 0
+    start_context(repo, source="clear", session_id="sess-B")
+
+    proc = run_state(repo, "block", "--run-id", "31046333431", "--blocking-jobs", "python")
+
+    assert proc.returncode != 0
+    assert "different session" in proc.stderr
+    assert read_marker(repo)["state"] == "prepared"
+
+
+def test_block_refuses_when_head_moved_since_prepare(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    assert run_state(repo, "prepare").returncode == 0
+    (repo / "later.md").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "later.md")
+    _git(repo, "commit", "-q", "-m", "work after prepare")
+
+    proc = run_state(repo, "block", "--run-id", "1", "--blocking-jobs", "python")
+
+    assert proc.returncode != 0
+    assert "re-run prepare" in proc.stderr
+
+
+def test_block_records_only_its_validated_vocabulary(repo):
+    start_context(repo, source="startup", session_id="sess-A")
+    run_state(repo, "prepare")
+
+    proc = run_state(repo, "block", "--run-id", "31046333431",
+                     "--blocking-jobs", "python,electron")
+
+    assert proc.returncode == 0, proc.stderr
+    marker = read_marker(repo)
+    assert marker["state"] == "blocked"
+    assert marker["reason_code"] == "CI_BLOCKING_FAILURE"
+    assert marker["run_id"] == "31046333431"
+    assert marker["blocking_jobs"] == ["python", "electron"]
+
+
+@pytest.mark.parametrize("args", [
+    ("--run-id", "C:/Users/someone/transcript.jsonl"),
+    ("--blocking-jobs", "C:/Users/someone/secret.jsonl"),
+    ("--reason-code", "../../etc/passwd"),
+    ("--reason-code", "free form prose with a secret"),
+])
+def test_block_refuses_path_like_or_free_form_metadata(repo, args):
+    """`block` is the only transition that takes metadata at all, so it is the
+    only place a path or a secret could enter the recovery files."""
+    start_context(repo, source="startup", session_id="sess-A")
+    run_state(repo, "prepare")
+
+    proc = run_state(repo, "block", *args)
+
+    assert proc.returncode != 0
+    assert read_marker(repo)["state"] == "prepared"
+
+
+def test_block_cannot_be_relabelled_as_a_clean_close(repo):
+    """A blocked session's honest next step is to fix the failure and prepare
+    again -- not to promote the marker it already has."""
+    start_context(repo, source="startup", session_id="sess-A")
+    run_state(repo, "prepare")
+    assert run_state(repo, "block", "--blocking-jobs", "python").returncode == 0
+
+    proc = run_state(repo, "close")
+
+    assert proc.returncode != 0
+    assert read_marker(repo)["state"] == "blocked"
+
+
+def test_show_redacts_the_session_id_and_prints_no_path(repo):
+    start_context(repo, source="startup", session_id="sess-abcdefghijklmnop")
+    run_state(repo, "prepare")
+
+    proc = run_state(repo, "show")
+
+    assert proc.returncode == 0, proc.stderr
+    assert "sess-abc..." in proc.stdout
+    assert "sess-abcdefghijklmnop" not in proc.stdout
+    assert "langgraph-migration" in proc.stdout
+    assert "prepared" in proc.stdout
+    assert str(repo) not in proc.stdout
+    assert os.path.expanduser("~") not in proc.stdout
+
+
+def test_no_test_writes_into_the_real_repository_recovery_directory(repo):
+    """The hooks and the helper must resolve their paths from the repository
+    they are pointed at, never from a constant. Running a whole lifecycle
+    against a throwaway repo while pytest's own cwd IS the real repository is
+    the faithful check -- a hardcoded path would show up here immediately."""
+    real = REPO_ROOT / RECOVERY
+    before = {p.name: p.read_bytes() for p in real.glob("*")} if real.exists() else {}
+
+    start_context(repo, source="startup", session_id="sess-Z")
+    assert run_state(repo, "prepare").returncode == 0
+    assert run_state(repo, "close").returncode == 0
+    _run_end(repo, session_id="sess-Z")
+
+    after = {p.name: p.read_bytes() for p in real.glob("*")} if real.exists() else {}
+    assert after == before, "a test wrote into the owner's real recovery directory"
+
+
+def test_the_skill_forbids_hand_authored_session_identity():
+    """The prohibition has to live in the skill text, because the skill is what
+    the model reads. The helper can refuse a bad transition; only the skill can
+    stop the model routing around the refusal with an editor."""
+    text = (REPO_ROOT / ".claude" / "skills" / "session-close" / "SKILL.md").read_text(
+        encoding="utf-8")
+
+    assert "claude_session_state.py prepare" in text
+    assert "claude_session_state.py close" in text
+    assert "claude_session_state.py block" in text
+
+    for forbidden in (
+        "deriving a session id from a transcript filename or path",
+        "treating the newest transcript as",
+        "copying, retyping, or otherwise supplying a session id by hand",
+        "creating `current.json` yourself",
+        "writing `close-marker.json` (or any recovery JSON) directly with an editor",
+        "working around a refusal from the helper by hand-writing the JSON it declined",
+    ):
+        assert forbidden in text, f"the skill does not forbid: {forbidden}"
+
+    assert '{"state": "prepared", "session_id"' not in text, \
+        "the hand-authored marker template is what made the identity guessable"
+    assert '{"state": "closed", "session_id"' not in text
 
 
 # ── redaction ───────────────────────────────────────────────────────────────
@@ -477,6 +918,49 @@ def test_session_end_reports_the_close_marker_when_one_exists(repo):
     record = _run_end(repo)
 
     assert record["session_close_marker"]["state"] == "prepared"
+
+
+def test_session_end_records_a_matched_identity(repo):
+    start_context(repo, source="startup", session_id="s-1")
+
+    record = _run_end(repo, session_id="s-1")
+
+    assert record["identity_status"] == "matched"
+
+
+def test_session_end_reports_a_missing_current_record_as_unverified(repo):
+    """A session that pre-dates the mechanism, or one whose SessionStart write
+    failed. There is nothing to check against, so nothing is claimed."""
+    record = _run_end(repo, session_id="s-1")
+
+    assert record["identity_status"] == "current_missing"
+
+
+def test_session_end_reports_a_mismatched_identity_without_substituting_it(repo):
+    """Writing the recorded id into `latest.json` when the payload disagrees
+    would manufacture the very agreement the field exists to measure."""
+    start_context(repo, source="startup", session_id="s-authoritative")
+
+    record = _run_end(repo, session_id="s-guessed")
+
+    assert record["identity_status"] == "mismatch"
+    assert record["session_id"] == "s-guessed"
+
+
+@pytest.mark.parametrize("identity", ["mismatch", "current_missing", None])
+def test_an_unverified_identity_never_reads_as_a_clean_close(repo, identity):
+    """Even with a perfectly formed `closed` marker whose id matches. `None` is
+    the record shape written before this field existed: absence is not proof."""
+    latest = {"session_id": "prev", "reason": "prompt_input_exit"}
+    if identity is not None:
+        latest["identity_status"] = identity
+    _write_recovery(repo, latest, {"session_id": "prev", "state": "closed"})
+
+    context = start_context(repo)
+
+    assert "closed cleanly" not in context
+    assert "identity UNVERIFIED" in context
+    assert "reconcile before new work" in context
 
 
 def test_session_end_never_copies_transcript_contents(repo):
@@ -648,7 +1132,11 @@ def test_the_skill_forbids_closing_while_a_blocking_ci_failure_remains():
     text = (REPO_ROOT / ".claude" / "skills" / "session-close" / "SKILL.md").read_text(
         encoding="utf-8")
 
-    assert '"blocked"' in text, "the skill must define the blocked marker state"
+    # The marker JSON itself moved into the helper (identity must not be
+    # hand-authored), so what the skill must still carry is the TRANSITION and
+    # its trigger -- the rule, not the file format.
+    assert "claude_session_state.py block" in text, \
+        "the skill must define how a blocked session is recorded"
     assert "CI_BLOCKING_FAILURE" in text
     assert "no blocking CI failure remains" in text
     assert "CI-MOBILE-01" in text, "mobile's non-blocking signature must be named"

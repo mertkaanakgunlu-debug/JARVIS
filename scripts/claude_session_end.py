@@ -5,6 +5,11 @@ terminal leaves nothing behind: the next session cannot tell "finished and close
 properly" from "died mid-edit with uncommitted work". This writes the few facts
 needed to tell those apart, and nothing else.
 
+It also **verifies** rather than assumes whose exit this is: the payload session
+id is compared against the authoritative `current.json` written by SessionStart,
+and the answer is recorded as `identity_status`. Without it, two records agreeing
+on the same guessed id looked exactly like two records agreeing on the truth.
+
 **It is deliberately the least-privileged hook in the system.** It writes exactly
 one local, gitignored file. It does NOT:
 
@@ -42,6 +47,7 @@ MAX_DIRTY_NAMES = 20
 RECOVERY_DIRNAME = Path(".claude") / "session-recovery"
 LATEST_NAME = "latest.json"
 MARKER_NAME = "close-marker.json"
+CURRENT_NAME = "current.json"
 
 
 def _git(cwd: str, *args: str) -> str | None:
@@ -95,12 +101,49 @@ def _marker_state(root: Path) -> dict:
     }
 
 
+def _identity_status(root: Path, payload_session_id: str) -> str:
+    """Does this exit belong to the session SessionStart authoritatively recorded?
+
+    Three values, and only one of them may ever support a clean-close claim:
+
+      * `matched`        -- the payload id equals `current.json`'s id.
+      * `current_missing`-- there is no authoritative record to check against
+                            (a session that pre-dates the mechanism, or a
+                            SessionStart whose write failed).
+      * `mismatch`       -- an id is present and is NOT the recorded one.
+
+    The last two are deliberately not collapsed into one: "nobody wrote a
+    record" and "the record disagrees" call for different reconciliation, and
+    flattening them would hide the second behind the first. Neither is ever
+    treated as evidence -- see the SessionStart preflight, which refuses to
+    print `closed cleanly` on anything but `matched`.
+    """
+    path = root / RECOVERY_DIRNAME / CURRENT_NAME
+    if not path.exists():
+        return "current_missing"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return "current_missing"
+    if not isinstance(data, dict):
+        return "current_missing"
+    recorded = str(data.get("session_id") or "")
+    if not recorded:
+        return "current_missing"
+    # NOTE: the payload id is compared, never substituted. Writing the recorded
+    # id into `latest.json` when the payload disagrees would manufacture the
+    # very agreement this field exists to measure.
+    return "matched" if payload_session_id and payload_session_id == recorded else "mismatch"
+
+
 def build_record(payload: dict, cwd: str) -> dict:
     root_raw = _git(cwd, "rev-parse", "--show-toplevel")
     root = Path(root_raw) if root_raw else Path(cwd)
     marker = _marker_state(root)
+    session_id = str(payload.get("session_id") or "")
     return {
-        "session_id": str(payload.get("session_id") or ""),
+        "session_id": session_id,
+        "identity_status": _identity_status(root, session_id),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "reason": str(payload.get("reason") or "unknown"),
         # The PATH is the recovery handle. Contents are never read -- see the
@@ -112,7 +155,8 @@ def build_record(payload: dict, cwd: str) -> dict:
         "session_close_marker": marker,
         # Stated in the artifact itself so a reader who finds this file without
         # the docs knows it is not a close record.
-        "note": "written by the SessionEnd hook on every exit; not proof of a clean close",
+        "note": ("written by the SessionEnd hook on every exit; not proof of a clean "
+                 "close. Only identity_status == 'matched' can support one."),
     }
 
 
