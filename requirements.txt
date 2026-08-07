@@ -118,4 +118,9 @@ pywin32>=306             # SetThreadExecutionState (prevent PC sleep during task
 # Testing (Faz 8): minimal suite under tests/ -- run with `pytest`
 pytest>=8.0
 pytest-asyncio>=0.24
+# Parallel test execution. CI pins `-n 4 --dist load`; that job's comment
+# carries the measurements the worker count and mode were chosen from. Pick a
+# count deliberately rather than reaching for `-n auto`: this suite's hard
+# subprocess timeouts are sensitive to machine load, not to test logic.
+pytest-xdist>=3.6
 hypothesis>=6.100        # Agent Runtime rev.2 Faz 8: property-based schema/redaction fuzzing

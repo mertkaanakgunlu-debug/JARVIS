@@ -49,8 +49,34 @@ jobs:
       - name: Lint (ruff)
         run: ruff check jarvis/ tests/ scripts/eval_oracle.py scripts/manual_test_driver.py scripts/ab_analyze.py scripts/ab_launch_server.py scripts/alpha_gate.py
 
+      # Parallelised 2026-08-08 (pytest-xdist). Worker count is PINNED at 4
+      # rather than `-n auto`: windows-latest is a 4-vCPU runner today, 4 is
+      # what was actually measured, and `auto` would silently change meaning if
+      # GitHub ever resizes the runner -- the same unpinned-drift problem that
+      # broke this job once with ruff and once with vitest.
+      #
+      # Measured locally (32 cores), all on one frozen tree, 3446 tests and
+      # exit 0 in every row:
+      #   serial                -- 796.96s
+      #   -n 4 --dist loadfile  -- 367.08s
+      #   -n 4 --dist load      -- 234.31s   <- chosen: green and the faster
+      #
+      # The caveat that matters when this job goes red. This suite makes 21 hard
+      # `subprocess(..., timeout=N)` calls across 9 test files, and those are
+      # sensitive to machine LOAD rather than to test logic: a 32-worker
+      # `--dist load` run on this 32-core machine produced exactly one such
+      # failure (a 30s subprocess timeout). That is one worker per core -- the
+      # same ratio 4 workers have on a 4-vCPU runner -- and the local 4-worker
+      # runs above do NOT reproduce it, because 4 workers on 32 cores is a
+      # quarter of the load. So CI-side contention is genuinely unmeasured
+      # until this lands.
+      #
+      # If the python job starts failing on subprocess timeouts with no diff
+      # that explains it, that is this: drop to `-n 2 --dist load`, or revert to
+      # a bare `pytest`. Either rollback costs coverage nothing -- the test
+      # selection is identical in every mode.
       - name: Test (pytest)
-        run: pytest
+        run: pytest -n 4 --dist load
 
   # Best-effort companion client -- not this project's Python core, and not
   # gated on by the python job above. continue-on-error so a mobile break

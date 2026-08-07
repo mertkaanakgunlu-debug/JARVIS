@@ -62,13 +62,23 @@ def test_sign_is_deterministic_for_the_same_request():
 
 # ── tamper detection: any bound field changing breaks the signature ──────
 
+# A FIXED expiry, not `approval.new_expiry(9999)`. The clock-derived value was
+# evaluated at collection time and landed in the test ID, so the id changed on
+# every run and differed between processes -- which pytest-xdist reports as
+# "Different tests were collected between gw0 and gwN" and refuses to run.
+# What the case asserts is unchanged: an expiry that differs from `_req()`'s
+# breaks the signature. A far-future constant can never coincide with
+# `now + 300s`, so it differs by construction rather than by timing.
+_DIFFERENT_EXPIRY = "2099-01-01T00:00:00+00:00"
+
+
 @pytest.mark.parametrize("field,value", [
     ("execution_id", "call_0-DIFFERENT"),
     ("capability", "shell_run"),
     ("normalized_args_digest", "digest-b"),
     ("target_resource", "file_write:b.txt"),
     ("risk_level", 3),
-    ("expiry", approval.new_expiry(9999)),
+    ("expiry", _DIFFERENT_EXPIRY),
     ("single_use_nonce", "different-nonce"),
 ])
 def test_verify_rejects_signature_after_any_bound_field_changes(field, value):
