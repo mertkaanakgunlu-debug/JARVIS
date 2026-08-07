@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: a6cb10efb4cb91b61c6215214c0212abb5ab9f3e
+covered_through_sha: e20065822f10d7df7a98e2b8a32b21d988af5d48
 ---
 
 # HANDOFF — current state
@@ -11,7 +11,7 @@ and `CHANGELOG.md` own that. **If anything here contradicts the repository, the
 repository is right and this file is the bug** — re-derive rather than trust.
 
 Imported automatically by `CLAUDE.md`, so it is read every session. The
-frontmatter above is a contract, not decoration: the SessionStart preflight
+frontmatter above is a contract, not decoration — the SessionStart preflight
 classifies this file from it. `covered_through_sha` names the last **work**
 commit this snapshot describes — never this file's own closing commit.
 
@@ -19,122 +19,144 @@ commit this snapshot describes — never this file's own closing commit.
 
 - Branch: **`langgraph-migration`** (the active branch; `main` is a strict
   ancestor and behind).
-- The branch tip at the start of this session was **`08b15e0`**
-  (`docs: refresh handoff after clearing CI-MOBILE-01`), already pushed. The
-  **previous** session pushed it, then blocked: CI run **`31117623901`** never
-  reached a verdict — `python` was cancelled mid-run (`Test (pytest)` logged
-  `2704 passed, 5 deselected` then `KeyboardInterrupt` / `##[error]The
-  operation was canceled.`) and `electron` died in `Set up job`
-  (`Failed to resolve action download info. Error: Service Unavailable`) — a
-  GitHub Actions provider outage, not a code failure. That session recorded
-  `.claude/session-recovery/close-marker.json` as `state: blocked, reason_code:
-  CI_INFRA_UNAVAILABLE, run_id: 31117623901, blocking_jobs: [python, electron]`
-  under its own session id and stopped, per protocol.
-- This session added one work commit (§2), `a6cb10e`, on top of `08b15e0`. It
-  is **NOT pushed** — derive live, never trust a stored number:
+- This session started at **`9421b3c`** (`docs: refresh handoff after CI
+  recovery lifecycle hardening`), already pushed and clean. The prior
+  session's own SessionEnd (`a85108b2…`) had not run `/session-close`, but
+  its `identity_status` was `matched`, `head` equaled `9421b3c`, and
+  `dirty_files` was empty — zero uncommitted work and zero unrecorded
+  commits, i.e. a benign housekeeping gap, not a data-loss risk. Reconciled
+  at this session's start; no action was needed beyond noting it.
+- This session added **one work commit**, `e20065822f10d7df7a98e2b8a32b21d988af5d48`
+  (`feat(streaming): give contracted+enforce turns a progress control
+  frame`), on top of `9421b3c`. It is **NOT pushed** — derive live, never
+  trust a stored number:
 
 ```bash
 git rev-list --left-right --count origin/langgraph-migration...HEAD
 gh run list --branch langgraph-migration     # then: gh run view <id> --json jobs
 ```
 
-- **The inherited `blocked` marker from `08b15e0` is untouched by this
-  session and was never relabelled `closed`.** It is history now, not a
-  verdict on this session's own work — see §8. This session's own commit has
-  no CI evidence yet, because nothing from this session has been pushed.
-- On top of `a6cb10e` sits this closing HANDOFF commit. **Its push state and CI
-  outcome are not asserted here** — both change after this file is written.
-  Derive them with the same two commands above, against `HEAD` at the time of
-  asking.
+- **This session did not run `/session-close`.** The owner directed a manual
+  flow instead: static diff review, quick checks, one work commit, this
+  HANDOFF/CHANGELOG/eval-doc update, one closing documentation commit —
+  explicitly **without** invoking `scripts/claude_session_state.py`. No
+  `prepared`/`closed` marker was written for this session's identity by this
+  work. A future preflight seeing no matching marker for this session is
+  expected, not a bug — see §8.
+- On top of the work commit sits this closing HANDOFF/CHANGELOG/eval-doc
+  commit. **Its own SHA, push state and CI outcome are not asserted here** —
+  all three are unknowable at the moment this file is written. Derive them
+  with the same two commands above, against `HEAD` at the time of asking.
+- **Neither commit has been pushed as of this writing.** Push needs the
+  owner's explicit go-ahead, per standing protocol — not requested or given
+  in this session yet.
 - Never quote how far `main` is behind. Derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
 
 ## 2. Last completed work
 
-**CI/session-lifecycle recovery hardened — three GPT-lead review rounds,
-2026-08-07, one commit (`a6cb10e`, `fix(session): harden CI recovery
-lifecycle`).** Follow-on to the `CI_INFRA_UNAVAILABLE` block the previous
-session recorded on `08b15e0`: that block is a real, permanent capability gap
-(a pushed tip can lose its only CI verdict to a provider outage, with no way to
-re-judge the exact same tip), and this session closed the gap in the recovery
-*protocol* without touching CI infrastructure, `main`, or any product code.
+**Completion-contract streaming/TTFB — a progress control frame for
+contracted+`enforce` turns, live-validated, 2026-08-07, one work commit
+(`e200658`, `feat(streaming): give contracted+enforce turns a progress
+control frame`).**
 
-**Round 1 — the recovery mechanism and the reason-code vocabulary.**
+**Root cause.** A buffered turn (`required_outputs_mode="enforce"` with a
+resolved requirement) streamed nothing until the graph finished, by design —
+a completion repair can replace an already-streamed draft, and voice cannot
+un-speak a sentence. `chat_stream()`/`resume_and_stream()` accumulated every
+delta into `chunks` but yielded none of them while buffered; the pilot's own
+Finding 3 (`completion_contract_pilot_2026-08-05.md`) had already measured
+the cost: treatment first-visible p90 99.78s, converging on total latency.
 
-- The prior session's own working tree had added a `workflow_dispatch` trigger
-  to `.github/workflows/ci.yml` as a manual re-run mechanism. Verified against
-  the live repository and **removed**: GitHub resolves `workflow_dispatch` from
-  the repository's **default branch**, which is `main`
-  (`gh repo view --json defaultBranchRef` → `main`), and `main` carries **no**
-  `.github/` directory at all (`git ls-tree -r --name-only origin/main --
-  .github` → empty). A trigger that only exists on `langgraph-migration` is
-  unreachable — worse than no mechanism, because it reads as a recovery path
-  while being a dead end. `.github/workflows/ci.yml` is now byte-identical to
-  its state before that session's edit.
-- `scripts/claude_session_state.py`'s `block --reason-code` used to be a shape
-  check (`^[A-Z][A-Z0-9_]{0,63}$`) while its own comment claimed a fixed
-  vocabulary — the two disagreed, so any UPPER_SNAKE string was accepted.
-  `KNOWN_REASON_CODES` is now a real closed set, enforced on write only:
-  `CI_BLOCKING_FAILURE` (a blocking job actually failed — fix the code) and
-  `CI_INFRA_UNAVAILABLE` (the provider never reached a verdict — nothing about
-  the tree is known, in either direction; terminal for the session that hits
-  it). Reading stays open — a marker written before the vocabulary closed, or
-  naming a future code, still renders.
-- The SessionStart preflight used to render both reason codes identically
-  (verified false against the pre-fix code: two markers differing only in
-  `reason_code` produced byte-identical context blocks). It now leads with the
-  code and a code-specific instruction — `CI_BLOCKING_FAILURE` says fix it
-  before closing anything on top; `CI_INFRA_UNAVAILABLE` says the tip is
-  unproven rather than failing, and does not by itself block this session's own
-  work.
-- `scripts/claude_session_state.py prepare` used to allow `blocked → prepared →
-  closed` for the **same** session that earned the block — one extra step past
-  the already-forbidden `blocked → closed`, reaching the identical place.
-  Measured against the pre-fix helper: `prepare` returned 0 and walked a
-  `blocked` marker back to `prepared` with no new CI evidence of any kind.
-  `prepare` now refuses outright when the CURRENT session already holds its own
-  `blocked` marker, scoped by identity so a **later** session inheriting the
-  same marker can still `prepare` — that inherited route is the only honest way
-  out of a block.
-- `.claude/skills/session-close/SKILL.md` rewritten: `CI_INFRA_UNAVAILABLE` is
-  now documented as **terminal** for the session (one rerun, then blocked, then
-  stop — no empty commit, no repeated rerun, no `workflow_dispatch`, no
-  touching `main`), and the old "known cosmetic mobile signature" wave-through
-  language (already retired the prior session) does not return.
+**Protocol.** One new internal marker, `__jarvis_progress__`
+(`jarvis/voice/session.py`'s `parse_progress_marker()`/`describe_progress()`,
+shaped like the existing `__jarvis_confirm__`/`__jarvis_final__` markers),
+yielded exactly once — from inside the same
+`try/except (asyncio.CancelledError, GeneratorExit)` block the streaming
+loop already used, so a cancellation landing at that yield is covered by the
+pre-existing bookkeeping — immediately before the buffered graph call in
+both `chat_stream()` (`phase="preparing_required_output"`) and
+`resume_and_stream()` (`phase="resuming_required_output"`). Carries only
+`phase` and, when known, the requirement's `kind` (`required_outputs[0].get
+("kind")` only — never the requirement dict as a whole, which can carry a
+`source` sub-dict). Never joins `chunks`/`streamed_response`, so it cannot
+reach history, memory, the run manifest or the output-contract classifier.
+Reframed to a structured `{"type":"progress",...}` SSE frame in
+`jarvis/api.py::_sse_frames()`; recognized and kept out of the visible
+answer/TTS/history in Electron (`chatStream.js`'s `onProgress`, driving the
+existing busy-surface labels — no new UI), the mobile app (new
+`chat_sse.dart` classifier → the existing `_loadingNote` surface), and all
+three voice call sites (`cli.py --voice`, `voice_api.py`, `voice/
+session.py`'s `resolve_confirmation` — spoken as a short, deterministic,
+non-success-claiming acknowledgement, kept out of persisted response text).
 
-**Round 2 — an existing-but-unreadable marker must fail closed.** `prepare`'s
-new identity guard read `_read_json(marker)` and treated `None` — which
-`_read_json` returns for both "no file" and "file exists but will not parse" —
-as "nothing to lose." Measured against the pre-fix worktree: six corruption
-shapes (truncated JSON, non-JSON text, an empty file, a JSON list/string/null)
-all returned `prepare` exit 0 and **silently overwrote** the marker, including
-a truncated one whose surviving bytes still read `"state": "blocked"`. Fixed
-with `_read_marker_or_refuse`, which keeps "absent" apart from "exists but
-cannot be trusted" and raises rather than returns for the latter — `prepare`
-never repairs, renames, regenerates, or guesses at a marker it cannot read; it
-stops and reports. `close`/`block` route through the same reader now too, so
-their error message stopped claiming `no close marker exists` for a file that
-plainly exists.
+**Four pre-existing `__jarvis_final__` gaps found and fixed in the same
+pass** (a correction marker — independent of buffering, fires on any turn a
+critic/verification repair changes the answer — falling through unrecognized
+and reaching the user as literal JSON): Electron's SSE parser had no
+`final_answer` case at all (now **replaces** `out.text`, never appends);
+`voice_api.py`'s `run_one_response()` and `voice/session.py`'s
+`resolve_confirmation()` had no `__jarvis_final__` handling on their streams
+(now swallowed, mirroring the one call site that already did this
+correctly); `cli.py`'s text-mode confirmation resume printed it raw (now
+replaces the accumulated draft — text can redraw, voice cannot). Mobile's
+`chat_screen.dart` had the equivalent gap for both markers, closed by the
+new classifier plus `TranscriptNotifier.replaceLast()`.
 
-**Round 3 — parseable JSON is not automatically a genuine marker.** Round 2's
-fix checked parse success and dict-type, which `{}` and an incomplete
-`{"state": "blocked"}` (missing `session_id`) both pass — and passing let them
-straight through: an empty object has no `state`, so the identity guard read
-"not blocked"; an incomplete `blocked` entry with no `session_id` read as
-"blocked, but not this session's," which is exactly the shape of a legitimate
-inherited marker. Measured against the pre-round-3 worktree: five such objects
-all returned `prepare` exit 0 and got overwritten. `_marker_structural_defect`
-now checks the full shape each write path actually produces — schema version,
-a recognised state, a usable `session_id`, a full 40-character `head` SHA, a
-non-empty `branch`, and that state's own required fields (`reason_code`'s
-*presence*, never revalidated against the vocabulary, so historical codes stay
-readable) — before a marker is trusted enough to overwrite.
+**Harness (`scripts/completion_contract_ab.py`), two rounds.** Round 1 added
+`first_visible_kind`/`time_to_first_answer_token_s` — additive, reusing the
+same marker parsers every real consumer uses, never replacing the
+pre-registered `time_to_first_visible_s`. Round 2 followed a live run that
+hit one trial resolving at `elapsed_s=4224.29` against a nominal 300s
+`asyncio.wait_for` timeout: the underlying tool work had genuinely
+succeeded (`object_created=true`), no answer token ever arrived, and the
+pre-fix harness could not tell whether the excess ~3924s was the foreground
+call's own slow cancellation or an **unbounded** `asyncio.gather()`
+background-task drain. Fixed: `drain_background_tasks()` is now bounded
+(`asyncio.wait(..., timeout=30.0)`, cancels and reports rather than waiting
+forever, returns telemetry instead of `None`) and the row gained
+`foreground_elapsed_s`/`cancellation_cleanup_s`/`background_drain_s`/
+`background_drain_task_count`/`background_drain_timed_out` — all additive;
+`elapsed_s`'s own formula/position is untouched. `report()` now prints three
+per-arm views (`[all, incl. timeouts]` / `[completed only]` / `[timed-out]`)
+so a stalled trial is never silently merged into, or silently dropped from,
+the latency numbers. **`_gate_verdict()` itself: zero lines changed**,
+pinned by a source-level test that asserts none of the new field names
+appear in its body. The anomalous run (29/60 rows) was preserved, not
+deleted or pooled — see the aborted-run section of the follow-up doc below.
+**This is documented as a known eval-harness observability gap, not a
+production blocker**: no file under `jarvis/` was touched by either harness
+round, and the anomaly occurred after tool execution had already succeeded,
+in a code path this work did not modify.
 
-All three rounds: no product code touched (`jarvis/` untouched), no new
-dependency, `.github/workflows/ci.yml` unchanged from `08b15e0`. Falsifiability
-was measured directly against the pre-fix code for every round, not asserted —
-see `a6cb10e`'s test additions (167 new/changed cases across the three rounds
-in `tests/test_claude_session_hooks.py`, lifecycle file: **122 → 179**).
+**Live validation** (staged: `--runs 1` → 6 trials clean → `--runs 3` → 18
+trials clean; `--runs 10` deliberately not run — see the follow-up doc's
+recommendation). Pooled, n=12/arm (matching the 2026-08-05 pilot's own
+sample size): **0 timeouts, 0 errors, 0 background-drain events** across all
+24 trials. Treatment first-visible p50/p90 **2.54s/2.57s** (`first_visible_
+kind` = `progress`, 12/12) vs first-answer-token p50/p90 **53.36s/72.64s** —
+the separation this work exists to produce, with zero exceptions across both
+independent runs. `object_created` delta +1.7/10 against the pre-registered
++2/10 (consistent with the original pilot's +0.8/10 at this sample size).
+Full numbers, the aborted run's exact anomaly-row fields, and proven-facts-
+vs-hypotheses on the 4224s stall:
+[`docs/eval/completion_contract_ttfb_followup_2026-08-07.md`](docs/eval/completion_contract_ttfb_followup_2026-08-07.md).
+**Not a gate re-run**: the pre-registered gate
+(`completion_contract_gate.md`) was not re-evaluated as an acceptance
+decision, and the 2026-08-05 pilot document was not revised.
+
+**Verification, run once, on the tree of `e200658`:**
+
+```
+ruff check jarvis scripts tests    -> All checks passed!
+pytest -q                          -> 3375 passed, 5 deselected, 362 warnings, 619.19s
+git diff --check                   -> clean
+npm test (electron, vitest)        -> 32/32 passed (chatStream.test.js 13 -> 18)
+npm run build (electron)           -> succeeds
+flutter analyze                    -> No issues found!
+flutter test (mobile)              -> +14 -1 (14 new pure-Dart tests; the 1 failure is
+                                       the pre-existing MOBILE-TEST-01, unchanged)
+```
 
 ## 3. Operational modes and rollout decisions
 
@@ -143,7 +165,7 @@ here) — **unchanged this session**:
 
 | setting | default | note |
 |---|---|---|
-| `required_outputs_mode` | `off` | Completion-contract pilot decision was **NO PROMOTION**; `off` is both the pre-pilot and current mode. There is no pre-registered `off → shadow` gate. |
+| `required_outputs_mode` | `off` | **Explicitly not promoted by this session's work.** The pre-registered gate was not re-run; corpus B/C were not measured; the 2026-08-05 pilot's failed clauses (Findings 1–2) are untouched. |
 | `execution_contract_mode` | `shadow` | Honesty kernel. `enforce` gated on 100 real artifact operations with 0 reported false blocks. |
 | `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface. |
 | `external_writes_enabled` | `True` | `--profile test` flips it off. |
@@ -151,10 +173,16 @@ here) — **unchanged this session**:
 | `calendar_from_mail_enabled` | `False` | Faz 5; never run against a real mailbox. |
 | `cloud_policy` / `local_model` | `off` / `qwen3:8b` | Local-only by default. |
 
-The completion-contract gate is **pre-registered and still unpassed**: the
-`object_created` delta clause and the absolute 60 s first-visible latency clause
-both failed. Nothing in this session touched it. Do not change a pre-registered
-threshold, corpus or metric after seeing a result.
+The completion-contract gate is **pre-registered and still unpassed** for
+promotion purposes: `object_created` delta and the false-positive/
+`unexpected_chart_created` clauses (corpus B, not re-run this session)
+remain the blockers. This session's live measurement (§2) narrowly
+re-confirmed `object_created` delta (+1.7/10 at n=12, informational only —
+not a gate re-run) and resolved the first-visible-latency ABSOLUTE clause
+(now trivially passes, since a progress marker legitimately arrives fast) —
+but a clause passing on a redefined-by-design measurement is not the same
+as the promotion decision changing, and it has not changed. Do not change a
+pre-registered threshold, corpus or metric after seeing a result.
 
 **Mobile font binaries stay out of the repository** (owner decision,
 2026-08-06, untouched this session). `mobile/.gitignore` keeps ignoring
@@ -162,35 +190,48 @@ threshold, corpus or metric after seeing a result.
 
 ## 4. Tests and CI
 
-Run on **2026-08-07**, on the tree of `a6cb10e` (the last work commit,
-committed but not pushed):
+Run on **2026-08-07**, on the tree of `e200658` (the last work commit,
+committed but not pushed) — commands and results reproduced verbatim from
+§2 above:
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests
 #   -> All checks passed!
 .venv\Scripts\python.exe -m pytest -q
-#   -> 3326 passed, 5 deselected, 362 warnings (560.64s)
+#   -> 3375 passed, 5 deselected, 362 warnings (619.19s)
 git diff --check
 #   -> clean
 ```
 
-The full-suite figure is the **first** run on this exact tree: no failures, so
-nothing was rerun and nothing is being reported behind a rerun. The lifecycle
-file specifically (`tests/test_claude_session_hooks.py`) accounts for **179**
-of those, run standalone as well: `179 passed in 275.69s`.
+3375 is up from the previous snapshot's 3326 by +49: +40 from the streaming/
+progress-marker feature work (agent/API/voice/harness marker tests) and +9
+from the harness round-2 phase-timing tests
+(`tests/test_completion_contract_ttfb_metrics.py`). First run on this exact
+tree — nothing was rerun, nothing is reported behind a rerun.
 
-**No CI run exists yet for `a6cb10e`** — it has not been pushed, so `push`
+Electron (`electron/`): `npm test` (vitest) → **32/32 passed**
+(`chatStream.test.js` 13 → 18 cases); `npm run build` → succeeds, no errors.
+
+Mobile (`mobile/`): `flutter analyze` → **No issues found!** (CI-MOBILE-01
+stays cleared — no new finding). `flutter test` (full directory) →
+**+14 −1**: the 14 are new, isolated pure-Dart unit tests
+(`chat_sse_test.dart`, `transcript_provider_test.dart` — neither pumps a
+widget, so neither touches the pre-existing timer bug); the 1 failure is
+`MOBILE-TEST-01`, confirmed byte-for-byte the same signature as before this
+session (`!timersPending` at `binding.dart:2542`), unrelated and unchanged.
+
+**No CI run exists yet for `e200658`** — it has not been pushed, so `push`
 never fired for it. This is stated as an honest gap, not an unrun check
 reported as passed:
 
 ```bash
 gh run list --branch langgraph-migration
-#   -> newest run is still 31117623901, against 08b15e0
+#   -> newest run is still 31117623901, against 08b15e0 (INCOMPLETE, see
+#      the previous snapshot's §8 for its exact per-job signature — a
+#      provider outage, not a code failure; untouched by this session)
 ```
 
-The last CI evidence that exists is still the previous session's, for
-`08b15e0`, run `31117623901` — **incomplete**, see §1 and §8 for its exact
-per-job signature. Read this closing commit's own CI live, once it is pushed:
+Read this closing commit's own CI live, once it is pushed:
 
 ```bash
 gh run list --branch langgraph-migration
@@ -199,6 +240,28 @@ gh run view <id> --json jobs
 
 ## 5. Known open issues
 
+- **Completion-contract TTFB — narrowed, not closed.** This session gave a
+  contracted+`enforce` turn a fast progress signal (first-visible p50 2.54s,
+  live-validated, §2) and separated it from real answer latency in the
+  harness's own metrics. It did **not** address the pilot's other two
+  findings: Finding 1 (a completion repair can satisfy the contract from a
+  *different* file than the one requested — the strongest argument against
+  promotion) and Finding 2 (`honest_failure_retried`'s blind spot for a
+  repair that "succeeds" via substitution). Both remain exactly as
+  documented in `completion_contract_pilot_2026-08-05.md`.
+- **`completion_contract_ab.py`'s 4224s anomaly — instrumented, not fully
+  explained.** Proven: the underlying tool work succeeded
+  (`object_created=true`) before ~3924s were spent somewhere between that
+  success and the (never-reached) output-contract verification, and the
+  pre-fix harness's background-task drain was unbounded. NOT proven: the
+  exact mechanism (slow `asyncio` cancellation inside `graph.astream()` vs.
+  a "thinking"-model generation that never goes idle long enough to trip a
+  read timeout are both plausible, neither confirmed). Did not recur across
+  24 further live trials in two independent clean runs. Known eval-harness
+  observability gap, explicitly not a production blocker — no file under
+  `jarvis/` was touched by the fix, and the stall occurred in a code path
+  this session's product work did not modify. See the follow-up doc's §4
+  for the full fact/hypothesis split.
 - **`MOBILE-ASSETS-01` — a clean clone cannot build or test the mobile app.**
   `mobile/.gitignore` ignores `assets/fonts/*.ttf`, and `flutter analyze` does
   **not** validate the pubspec `fonts:` section — only `assets:`. So the analyzer
@@ -206,106 +269,80 @@ gh run view <id> --json jobs
   `unable to locate asset entry in pubspec.yaml: "assets/fonts/ShareTechMono-Regular.ttf"`
   → `Failed to build asset bundle`. CI only runs `analyze`, so **a green `mobile`
   job is not evidence that the app builds anywhere.** Owner decided 2026-08-06
-  not to commit the font binaries; the fonts are SIL OFL (Share Tech Mono 1.003,
-  Orbitron 2.001, read from the files' own name tables) so licensing is not the
+  not to commit the font binaries; the fonts are SIL OFL so licensing is not the
   blocker — the decision is about binaries in the repo. See
   `mobile/assets/ASSETS_SETUP.md`.
-- **`MOBILE-TEST-01` — `mobile/test/widget_test.dart` fails**, and did so before
-  the CI-MOBILE-01 work: verified by running it against an unmodified
-  `git archive` of the same HEAD. `_SplashRouterState.initState`
-  (`mobile/lib/app.dart:67`) starts an uncancelled
-  `Future.delayed(Duration(seconds: 2))`, so the test trips `'!timersPending'`.
-  CI does not run `flutter test` for mobile.
-- **Mobile `flutter analyze` runs with the DEFAULT analyzer rule set.**
-  `flutter_lints` is a dev_dependency but is never included — there is no
-  `analysis_options.yaml` anywhere in the repo. "0 findings" means 0 against the
-  defaults, not against the `flutter_lints` ruleset.
+- **`MOBILE-TEST-01` — `mobile/test/widget_test.dart` fails**, unchanged by
+  this session (confirmed byte-for-byte same signature, §4).
+  `_SplashRouterState.initState` (`mobile/lib/app.dart:67`) starts an
+  uncancelled `Future.delayed(Duration(seconds: 2))`. CI does not run
+  `flutter test` for mobile.
+- **Mobile L3 confirmation: still no approve/deny UI.** `chat_screen.dart`'s
+  new `classifyChatChunk()` (this session) recognizes a
+  `confirmation_required` frame well enough to show a neutral "not yet
+  supported" note instead of raw JSON — but nothing resolves it; the graph
+  stays interrupted server-side exactly as before. Building the UI was
+  explicitly out of scope this session.
+- **Mobile `flutter analyze` runs with the DEFAULT analyzer rule set** — no
+  `analysis_options.yaml` anywhere in the repo, so `flutter_lints` (a
+  dev_dependency) is never actually applied.
 - **CI's Flutter version is unpinned** (`subosito/flutter-action@v2`,
-  `channel: stable`, no version). A new stable release can reintroduce
-  deprecations and redden `mobile` with no code change — the same drift that
-  broke the `python` job when ruff was unpinned. `ci.yml` was deliberately left
-  untouched (again, this session); pinning is an open option, not a decision.
-- **`CI-FLAKE-CHROMA-01` — transient suspected, root cause unproven.** Runs have
-  shown first-run failures with `chromadb ... no such table: acquire_write`
-  across files a commit never touched; `chromadb>=0.6` is unpinned in
-  `requirements.txt` (1.5.9 installed locally). Rerun a failed job **once** only
-  when the failure is not explainable by the diff, never claim the rerun proved
-  a root cause, and never classify a failure as this flake without reading its
-  actual signature. Distinct from `CI_INFRA_UNAVAILABLE` (§8): this is a
-  suspected code/dependency-timing issue with a specific log signature, the
-  other is the provider never running the job at all.
+  `channel: stable`, no version) — a new stable release can redden `mobile`
+  with no code change.
+- **`CI-FLAKE-CHROMA-01` — transient suspected, root cause unproven.**
+  `chromadb>=0.6` is unpinned in `requirements.txt`. Rerun a failed job
+  **once** only when unexplainable by the diff; never claim the rerun proved
+  a root cause.
 - **A lost CI verdict (`CI_INFRA_UNAVAILABLE`) has no recovery mechanism
-  beyond "the next push judges the next tip."** This is now a documented,
-  deliberate limit rather than an oversight (§8) — `workflow_dispatch` was
-  tried and removed this session because it cannot work on this repository's
-  default-branch layout (§2). If a pushed tip needs to be re-judged on its
-  *exact* SHA without a new commit, that still has no mechanism; the owner
-  would need to either fix the default-branch/`.github/` layout or accept the
-  gap.
+  beyond "the next push judges the next tip."** Documented, deliberate limit
+  (`workflow_dispatch` cannot work on this repo's default-branch layout).
 - **`scripts/claude_session_state.py`'s marker structural check does not
-  validate field CONTENT, only presence and coarse type** (e.g. `prepared_at`
-  just needs to be a non-empty string, not a valid timestamp; `blocking_jobs`
-  just needs to be a list). Deliberate scope limit from this session's round 3
-  — depth belongs to the write-time validators, this only decides whether an
-  object is safe to read as a marker at all. If a future state is added to the
-  three the module writes (`prepared`/`closed`/`blocked`), `_STATE_REQUIRED_FIELDS`
-  and `_LIFECYCLE_STATES` need updating alongside it, or markers of the new
-  state will be structurally rejected.
-- **Source Binding scope limits** (documented, deliberate): a *bare*-filename
-  request cannot disambiguate two same-named files in different directories;
-  plain Unicode casefold does not equate Turkish `İ`/`i` across case; the
-  pre-execution guard has **deterministic evidence only** — no live run has yet
-  made the model attempt a wrong source, so it has never fired live.
-- **Completion-contract latency**: treatment first-visible p90 ≈ 99.8 s against a
-  60 s ceiling. Untouched by this session.
-- Faz 5 (mail → calendar) is green on fixtures but **has never run against the
-  real mailbox**; background ingestion stays off until it does.
-- Electron HUD confirmation is compile/parser-verified only — **no live E2E**.
-  The Flutter app renders **nothing** for confirmations; the server-side gate
-  still holds, but an L3 flow is unusable from the phone.
-- `python_run` is access-controlled, **not sandboxed** (no resource/network limit).
-- Proactive turns gate **L3 only**; an unwatched L2 write is mitigated by prompt
-  instruction, not structurally closed.
-- Four `claude/*` scratch branches (the `.claude/worktrees/*` sessions) hold
-  commits unreachable from this branch — last re-derived 2026-08-06 as 5, 1, 7
-  and 1 commits (`eager-noether-46af01`, `gifted-wilbur-e021ea`,
-  `stoic-spence-2c5246`, `thirsty-mclean-f67665`). Two may be worth recovering.
-  Do not delete without an explicit go-ahead.
+  validate field CONTENT, only presence/coarse type.** Deliberate scope
+  limit from a prior session's round 3.
+- **Source Binding scope limits** (documented, deliberate): bare-filename
+  ambiguity across directories; plain Unicode casefold on Turkish İ/i;
+  pre-execution guard has deterministic evidence only.
+- Faz 5 (mail → calendar) is green on fixtures but **has never run against
+  the real mailbox**; background ingestion stays off until it does.
+- Electron HUD confirmation is compile/parser-verified only — **no live
+  E2E**. The Flutter app renders **nothing** for confirmations (see above).
+- `python_run` is access-controlled, **not sandboxed**.
+- Proactive turns gate **L3 only**; an unwatched L2 write is mitigated by
+  prompt instruction, not structurally closed.
+- Four `claude/*` scratch branches hold commits unreachable from this
+  branch — last re-derived 2026-08-06 as 5, 1, 7 and 1 commits
+  (`eager-noether-46af01`, `gifted-wilbur-e021ea`, `stoic-spence-2c5246`,
+  `thirsty-mclean-f67665`). Do not delete without an explicit go-ahead.
 
 ## 6. Next engineering priority
 
-**Completion-contract streaming / TTFB architecture.** Unchanged by this
-session, which was entirely session-lifecycle/CI-recovery protocol work: the
-latency clause is the one pre-registered gate clause still failing (§5):
-treatment first-visible p90 ≈ 99.8 s against a 60 s ceiling. Either make a
-contracted turn emit before the graph finishes, or accept the TTFB cost and
-revise the ceiling *for a future gate* — never retroactively for the pilot
-already run.
-
-Second, and much smaller: `MOBILE-TEST-01`. It is one uncancelled timer, and it
-is the only thing standing between `mobile` having a lint gate and `mobile`
-having a lint gate plus a smoke test. Decide whether the fix belongs in the test
-or in `app.dart` — a splash timer that outlives its widget is arguably the
+**`MOBILE-TEST-01`.** One uncancelled timer
+(`_SplashRouterState.initState`, `mobile/lib/app.dart:67`), and it is the
+only thing standing between `mobile` having a lint gate and `mobile` having
+a lint gate plus a smoke test. Decide whether the fix belongs in the test or
+in `app.dart` — a splash timer that outlives its widget is arguably the
 product bug, not the test's.
 
-Do not start either — or any product work — inside a session that is closing.
+**If the completion-contract line of work is picked back up**, the pilot's
+Finding 1 (source-substitution repair) is the higher-value next step over
+further TTFB polish: it is the strongest documented argument against ever
+promoting `required_outputs_mode` past `off`, and this session's work did
+not touch it. Binding the repair's success criterion to the requested
+source (not just "a chart artifact exists somewhere") is the pilot's own
+recommended next single step.
+
+Do not start either — or any product work — inside a session that is
+closing.
 
 ## 7. Human-required actions
 
 - **Google OAuth re-consent** (Gmail read, Calendar write, Contacts) — blocks the
-  Faz 5 live measurement and the Faz 2 entity resolver. The mail→Excel→chart
-  chain is 10/10 on fixture data and has still never run against the real
-  mailbox; the Gmail live test cannot start until this is done.
-- **Mobile font binaries**: owner deferred on 2026-08-06 ("not now, separate
-  decision"). Until it is made, `MOBILE-ASSETS-01` stays open and a fresh clone
-  cannot build the app. Licensing is not the obstacle (SIL OFL, verified from the
-  files themselves); the question is whether ~77 KB of binaries belong in the
-  repository or the manual-setup workflow stands.
-- **Default-branch / `.github/` layout** (surfaced this session, §5): the repo's
-  default branch (`main`) carries no `.github/` directory, which is why
-  `workflow_dispatch` cannot work as a manual CI-recovery mechanism on
-  `langgraph-migration`. Not acted on — flagged as a fact for the owner to
-  decide whether it is worth changing, not a decision made on their behalf.
+  Faz 5 live measurement and the Faz 2 entity resolver. Unchanged.
+- **Mobile font binaries**: owner deferred on 2026-08-06. Until decided,
+  `MOBILE-ASSETS-01` stays open.
+- **Default-branch / `.github/` layout**: the repo's default branch (`main`)
+  carries no `.github/` directory. Flagged for the owner to decide whether
+  it is worth changing, not decided on their behalf. Unchanged.
 
 Push approval is per-session and per-action: it is requested in chat at the time
 of the push, never recorded here.
@@ -313,38 +350,30 @@ of the push, never recorded here.
 ## 8. Session recovery notes
 
 - A **SessionStart** hook (`scripts/claude_session_start.py`) injects the
-  repository preflight, so no orientation prompt needs pasting. It is fail-open:
-  if it reports `SESSION PREFLIGHT DEGRADED`, re-derive state manually. Its
-  **only** write is the gitignored `current.json` session-identity record.
-- A **SessionEnd** hook writes `.claude/session-recovery/latest.json` (local,
-  gitignored) on every exit, including `identity_status`. It never commits,
-  pushes, or edits a tracked file.
-- **Session identity is machine-authored.** Never infer a session id from a
-  transcript filename, from "the newest file", or from memory, and never
-  hand-write a recovery JSON file. Every transition goes through
-  `scripts/claude_session_state.py` (`prepare` / `close` / `block` / `show`),
-  which takes no id argument. If it refuses, report the refusal — do not route
-  around it.
-- `/session-close` owns closing: `prepare` verifies and commits without pushing;
-  `finalize` pushes only on explicit approval and marks the state `closed`.
-- **`CI_INFRA_UNAVAILABLE` is a terminal, non-code-failure blocked state, and
-  it is now enforced by the state machine, not just documented.** As of this
-  session: `prepare` refuses outright for the SAME session that holds its own
-  `blocked` marker (no `blocked → prepared → closed` detour), but a LATER
-  session inheriting that marker under a different identity may `prepare`
-  normally — the marker is history, not a verdict on the new session's work.
-  `close`/`block` refuse just as before on a marker they cannot trust, and now
-  say so accurately (`close marker exists but ...`) instead of claiming one
-  does not exist. See §2 for the three-round fix and `.claude/skills/
-  session-close/SKILL.md` §4/§5 for the enforced policy text.
-- **This session's own marker is exactly what it should be at this point in
-  the protocol: `prepared`, under the CURRENT authoritative session id,
-  written by this step (§ below) — not written by hand.** The inherited
-  `blocked` marker from the previous session (identity `18b03d4e...`, reason
-  `CI_INFRA_UNAVAILABLE`, run `31117623901`) was read, reported, and left
-  exactly as it was; this session's identity was confirmed different from it
-  before any work began, per the session-boundary check the SessionStart
-  preflight and `claude_session_state.py show` both support.
-- A next session whose preflight says the previous one did **not** close, or
-  whose SessionEnd identity was **UNVERIFIED**, should reconcile before starting
-  new work.
+  repository preflight; fail-open (`SESSION PREFLIGHT DEGRADED` → re-derive
+  manually). Its **only** write is the gitignored `current.json` identity
+  record.
+- A **SessionEnd** hook writes `.claude/session-recovery/latest.json` on
+  every exit, including `identity_status`. Never commits, pushes, or edits a
+  tracked file.
+- Session identity is machine-authored; every lifecycle transition normally
+  goes through `scripts/claude_session_state.py` (`prepare`/`close`/
+  `block`/`show`), which takes no id argument and refuses rather than being
+  routed around.
+- **This session deliberately did not call that script.** The owner directed
+  a manual close-out (this HANDOFF update + one closing documentation
+  commit) instead of `/session-close`, explicitly withholding push approval
+  pending review of this report. Consequence for the next preflight: there
+  is **no fresh `prepared`/`closed` marker for this session's identity** —
+  the most recent marker on disk is still the one from the session that
+  produced `9421b3c` (state `closed`, matching `9421b3c`, not this
+  session's `e200658`/closing-commit tip). This is an intentional deviation
+  from the standard protocol, not a dropped step — if a normal
+  `/session-close` is wanted for this work, it has not run yet.
+- A next session (or a continuation of this one) whose preflight reports the
+  previous session did **not** close, or whose SessionEnd identity was
+  **UNVERIFIED**, should reconcile before starting new work — for this
+  specific gap, reconciliation is simply reading this note: no work was
+  lost, nothing is uncommitted beyond what this closing commit is about to
+  capture, and the marker mismatch is expected until/unless `/session-close`
+  is actually run.

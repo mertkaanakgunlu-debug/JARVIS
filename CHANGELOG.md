@@ -6,6 +6,55 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Completion contract TTFB — progress control frame] — 2026-08-07
+
+A contracted+`enforce` turn (`required_outputs_mode="enforce"` with a
+resolved requirement) buffers its stream until the graph finishes, by
+design — a completion repair can replace an already-streamed draft, and a
+spoken sentence cannot be unsaid. The pilot (`completion_contract_pilot_2026-
+08-05.md`, Finding 3) measured the cost of that design honestly: treatment
+`time_to_first_visible_output` p90 was 99.78s, converging on total latency,
+because nothing at all crossed the wire until the answer did.
+
+Added one new internal control frame, `__jarvis_progress__`
+(`jarvis/voice/session.py`'s `parse_progress_marker()`/`describe_progress()`,
+shaped like the existing `__jarvis_confirm__`/`__jarvis_final__` markers),
+yielded exactly once from `JarvisAgent.chat_stream()`/`resume_and_stream()`
+immediately before the buffered graph call. Carries only a `phase` and,
+when known, the requirement's `kind` — never a source path, filename, tool
+argument, or model prose. Reframed to a structured SSE `type:"progress"`
+frame in `jarvis/api.py`; recognized and kept out of the visible
+answer/TTS/history in the API SSE client, Electron HUD, mobile app, and all
+three voice call sites (`cli.py --voice`, `voice_api.py`, `voice/
+session.py`'s `resolve_confirmation`). `off`/`shadow` behavior is
+unchanged; `required_outputs_mode` default stays `off`.
+
+Four pre-existing `__jarvis_final__` gaps were found and fixed in the same
+pass (a correction marker — independent of buffering, fires on any turn a
+critic/verification repair changes the answer — falling through unrecognized
+and reaching the user as literal JSON): Electron's SSE parser had no
+`final_answer` case at all; `voice_api.py`'s `run_one_response()` and
+`voice/session.py`'s `resolve_confirmation()` had no `__jarvis_final__`
+handling on their streams; `cli.py`'s text-mode confirmation resume printed
+it raw. Mobile's `chat_screen.dart` had the equivalent gap for both markers
+(new `chat_sse.dart` classifier + `TranscriptNotifier.replaceLast()` fix
+it). See `docs/eval/completion_contract_ttfb_followup_2026-08-07.md` for the
+full protocol, an aborted first live run (a genuine but unrelated harness
+gap it surfaced — unbounded background-task drain in the eval script itself,
+since fixed with bounded drain + foreground/cancellation/drain phase-timing
+fields; no file under `jarvis/` was touched by that fix), and the clean
+re-validation: 24 live trials (two independent runs, staged `--runs 1` then
+`--runs 3`), **0 timeouts**, pooled n=12/arm. Treatment first-visible
+p50/p90 **2.54s/2.57s** (`first_visible_kind="progress"`, 12/12) vs
+first-answer-token p50/p90 **53.36s/72.64s** — the separation this work
+exists to produce, with no exceptions across either run.
+
+Not a rollout change: the pre-registered gate was not re-run, and its other
+failed clauses (object_created delta, unexpected_chart_created) are
+untouched by this work.
+
+---
+
 ## [CI-MOBILE-01 cleared] — 2026-08-06
 
 The `mobile` job had been red since long before any current work: 71
