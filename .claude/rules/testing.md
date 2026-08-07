@@ -17,6 +17,65 @@ Run from the repo root with the venv interpreter:
 option. Re-derive the suite's size from the run you actually did; never quote a
 count from a document.
 
+## Development verification hierarchy
+
+Three levels, and the level is chosen by *where you are in the work*, not by how
+confident you feel. The full suite costs minutes, not seconds — time it on the
+run you actually did rather than quoting a figure from here. Running it after
+every edit is the largest avoidable cost in a development loop; running it
+*less* than once before a commit is the largest avoidable risk.
+
+| level | when | what |
+|---|---|---|
+| **Iteration** | after each edit | targeted deterministic checks — `scripts/dev_verify.py --base <TASK_BASE_SHA> --run` |
+| **Work completion** | once, when the change is stable | full verification of each **touched** component |
+| **Session close / CI** | at `/session-close` and on push | the canonical full verification, unchanged |
+
+`TASK_BASE_SHA` is `git rev-parse HEAD` at the start of the task — recorded then,
+not re-derived later, so the selector sees the task's real diff (committed work
+since the base, plus staged, unstaged and untracked changes) rather than only
+what is uncommitted right now.
+
+Without `--run` the selector prints its plan and executes nothing. Read the plan:
+it names every selected check and why, so a wrong mapping is visible rather than
+silent.
+
+**A targeted plan is not automatically a cheap one.** `CLAUDE.md`, `.gitignore`,
+`.claude/settings.json`, `.claude/rules/*.md`,
+`.claude/skills/session-close/SKILL.md` and `.github/workflows/ci.yml` look like
+documentation, but their content is asserted by
+`tests/test_claude_session_hooks.py`, which drives the real hook scripts as
+subprocesses and is among the slowest files in the suite. Editing one of them
+selects it — correctly — and the saving over a full run is modest rather than
+dramatic. No figure is written down here on purpose: two runs of the *same*
+selection on this machine differed by roughly 3x between a cold and a warm run,
+so time your own run instead of trusting a remembered number. The large saving
+is on ordinary module changes.
+
+**`FULL PYTHON FALLBACK` is an instruction, not a warning.** The selector emits
+it when a change's impact is not derivable — an unmapped module, a `conftest.py`
+edit, a dependency bump, an unclassifiable file. Run the full suite then; do not
+hand-pick a subset the tool declined to pick.
+
+Work completion means the components the change actually touched:
+
+```powershell
+.venv\Scripts\python.exe -m ruff check jarvis scripts tests   # Python changed
+.venv\Scripts\python.exe -m pytest -q
+git diff --check
+```
+
+…plus `npm test` (in `electron/`) only if Electron changed, and `flutter
+analyze` / `flutter test` (in `mobile/`) only if mobile changed. **An untouched
+component's suite is not run out of habit** — a green run over code the diff
+never reached is not evidence about the diff, and it is often mistaken for some.
+
+Nothing here relaxes the rules below it. `dev_verify.py` never selects a live
+workload — no Ollama run, no A/B harness, no completion-contract evaluation, no
+real mailbox, no manual acceptance driver — in any mode. Those stay explicit,
+pre-registered, and run alone. A pre-registered eval gate is still decided by
+its own full protocol, never by a targeted development run.
+
 ## Isolation
 
 **Before writing a test that constructs `SessionStore`, `UsageTracker`,

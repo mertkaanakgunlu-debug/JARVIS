@@ -127,6 +127,40 @@ Rules the file must obey (see `.claude/rules/documentation.md`):
 - Every test claim carries its command and date.
 - If it ever contradicts the repository, the repository wins — say so in the file.
 
+#### Keep it a snapshot, not an account of the session
+
+HANDOFF is imported by `CLAUDE.md` and therefore read in full at the start of
+every session, so every line it carries is paid for on every future turn. Its
+job is to leave the next session **oriented**, not **informed about this one**.
+
+- **No investigation chronology.** What was tried, in what order, and which
+  branches turned out to be dead ends is the session's story; `git log` and
+  `CHANGELOG.md` own it.
+- **No re-narrated root cause or diff.** Name the behaviour that changed and the
+  one or two technical decisions a future reader would otherwise re-litigate.
+  The mechanism is in the code and the commit that introduced it.
+- **Never re-copy evidence that already has a canonical home.** A/B tables,
+  per-trial numbers, harness internals and gate arithmetic live in
+  `docs/eval/**`, `CHANGELOG.md` and the relevant technical document — link to
+  the file, quote only the single number the decision actually turned on.
+- **Summarise §2 at behaviour + decision + verification level**: what now
+  behaves differently, why it was built that way, and what was genuinely run to
+  check it.
+
+**Compaction removes retelling, never state.** Anything the next session needs in
+order to recover stays in full, however long it is: a lifecycle step that was
+skipped or deliberately not run, a refusal from `claude_session_state.py`, an
+inherited blocked marker and its reason code, an open issue with its identifier,
+a human-required action, a decision the owner made that the code does not show.
+If you are unsure whether a line is retelling or state, ask whether a session
+starting cold would *act differently* without it — if yes, it is state.
+
+The honesty rules above are unchanged and are not traded against brevity: every
+test and CI claim still carries its command and date, an unrun check is still
+written as unrun, and no number is quoted from a document instead of a run. The
+eight sections and the frontmatter contract are unchanged too — this governs
+what goes *inside* them.
+
 ### 5. Update the other documents only if they actually changed
 
 - **MEMORY.md** — only when a *durable, reusable* technical lesson was learned.

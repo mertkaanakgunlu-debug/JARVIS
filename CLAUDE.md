@@ -32,6 +32,14 @@ specification. Three consequences, all binding:
 - **A spec is not a permission grant.** Push, external writes and destructive
   operations need the owner's own go-ahead in chat, every time.
 
+**A spec carries the delta only.** Repo root, branch, environment, safety and
+push rules, and HANDOFF's contents already arrive with this file; a spec that
+restates them pays twice for the same context. A complex job may split into a
+separate engineering plan, and then the execution prompt *references* the plan
+instead of repeating it. Hold the same line in your own replies: don't restate
+the spec, don't summarise documents you just read, and open the large ones
+(`MEMORY.md`, `ProjectState.md`, `docs/**`) only when a decision needs them.
+
 Reply to the owner in **Turkish**. Code, comments, commit messages and documents
 stay **English**.
 
@@ -96,8 +104,21 @@ than `git add -A`, and review what is staged before committing.
 ```
 
 `pytest-timeout` is not installed — `--timeout=` is a usage error. Test counts
-are **derived from the run you did**, never quoted from a document. Details on
-isolation fixtures and measurement discipline: `.claude/rules/testing.md`.
+are **derived from the run you did**, never quoted from a document.
+
+That pair is the **work-completion and session-close** standard — run once per
+touched component, not after every edit; the full suite costs minutes, not
+seconds. While iterating, plan the targeted subset from the task's own diff:
+
+```powershell
+.venv\Scripts\python.exe scripts\dev_verify.py --base <TASK_BASE_SHA>        # plan only
+.venv\Scripts\python.exe scripts\dev_verify.py --base <TASK_BASE_SHA> --run  # execute
+```
+
+`TASK_BASE_SHA` is `git rev-parse HEAD` at the start of the task. A
+`FULL PYTHON FALLBACK` verdict means run the full suite — it is the safety
+fallback, not a suggestion. Hierarchy, limits, isolation fixtures and
+measurement discipline: `.claude/rules/testing.md`.
 
 Honest reporting is not optional here:
 
