@@ -479,6 +479,65 @@ def test_15_output_source_mismatch_is_never_repairable():
     assert "OUTPUT_SOURCE_MISMATCH" not in REPAIRABLE
 
 
+# ── the pilot's own finding-1 trajectory, not just its legs ────────────────
+# 9-15 pin each leg of the source check in isolation. These pin the SHAPE the
+# 2026-08-05 pilot actually observed, because that shape reaches classify()
+# as an ordinary multi-round turn -- and the pre-Source-Binding rule for
+# exactly that shape (a later success outranks an earlier failure,
+# test_a_second_attempt_that_succeeds_outranks_a_first_that_failed above)
+# still answers SATISFIED for its unbound twin. Without these, the two
+# behaviours are only kept apart by a `source` key nothing asserts the
+# consequence of.
+
+def test_16_a_repair_that_substitutes_another_file_is_not_a_second_chance():
+    """The pilot's finding 1, end to end: the requested source failed
+    honestly, the repair round drew from a file it found nearby, and the
+    working set kept that chart. Every ingredient of the old SATISFIED is
+    present -- a successful producer call, a declared artifact, a registered
+    object -- and the verdict must still refuse, because none of them is
+    about the file the user named."""
+    messages = [
+        _ai_args(("plot_data", "a", {"path": "satis.csv"})),
+        _result("a", "[ERROR] No such file or directory: satis.csv"),
+        HumanMessage(content=repair_directive_for(
+            {"type": "file", "raw": "satis.csv", "basename": "satis.csv"},
+        )),
+        _ai_args(("plot_data", "b", {"path": "baska.csv"})),
+        _result("b", artifact=_chart_artifact(PNG)),
+    ]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG],
+        artifact_sources={canonical(PNG): "baska.csv"},
+    )
+    assert verdict.status == "OUTPUT_SOURCE_MISMATCH"
+    assert verdict.satisfied is False
+    assert verdict.repairable is False, "a substituted repair must not buy another round"
+
+
+def test_17_inline_data_cannot_launder_a_substitution_past_the_classifier():
+    """A substitution can also arrive with no wrong PATH to point at: read
+    the other file, then call plot_data(data_json=...). The pre-execution
+    guard already refuses this (tests/test_prepare_execution_node.py), but
+    that guard only runs in `enforce` -- in `shadow`, which is where a pilot
+    observes, classify() is the only thing standing.
+
+    Distinct from test 12 on purpose: inline is EVIDENCE, and it says "not
+    that file". Missing evidence degrades to EVIDENCE_UNAVAILABLE; evidence
+    that positively disagrees is a mismatch."""
+    messages = [_ai_args(("plot_data", "c1", {"data_json": '[{"ay": "Ocak", "satis": 100}]'})),
+                _result("c1", artifact=_chart_artifact(PNG))]
+    verdict = classify(
+        required=_chart_with_source("satis.csv"), capabilities=CREATE,
+        messages=messages, registered_artifacts=[PNG],
+        # register_chart() stores no `source` for an inline draw, and
+        # _read_evidence drops sourceless objects -- so this really is empty.
+        artifact_sources={},
+    )
+    assert verdict.status == "OUTPUT_SOURCE_MISMATCH"
+    assert verdict.satisfied is False
+
+
 # ── source-mismatch pre-execution blocks reclassify (Pr_2 section 6) ───────
 
 def test_a_source_mismatch_block_reclassifies_from_the_generic_class():
