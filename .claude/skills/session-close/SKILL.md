@@ -171,14 +171,68 @@ what goes *inside* them.
 
 ### 6. Run what the closing docs need
 
-Re-run the checks whose results the handoff asserts, so the file is true at the
-moment it is written:
+The handoff's claims must be true at the moment it is written. *Which* checks
+that takes depends on what the closing commit actually contains — and that is a
+question for git and the selector, never for judgement.
+
+**The full pair is the default.** Run it whenever the closing commit carries
+anything but documents, or whenever the work commits do not already have a full
+run on their exact tree:
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests
 .venv\Scripts\python.exe -m pytest -q
 git diff --check
 ```
+
+**The targeted branch is permitted only when the machine can verify both of
+these** — neither is ever taken from a document, and HANDOFF.md saying "3424
+passed" is worth exactly nothing here:
+
+1. a full run **that actually happened** covers the work tree. That means the
+   work-completion run went through the recorder, which is the only thing that
+   writes the evidence:
+
+```powershell
+.venv\Scripts\python.exe scripts\dev_verify.py --full     # ruff + the full suite, recorded
+.venv\Scripts\python.exe scripts\claude_session_state.py verification   # REUSABLE / NOT REUSABLE
+```
+
+Run it **after committing the work**, not before: evidence is keyed by commit,
+and `--full` refuses a dirty tree rather than record a SHA that names something
+other than what ran.
+
+2. the closing commit changes documents only — established by looking:
+
+```powershell
+git status --porcelain=v1     # what the closing commit will actually contain
+.venv\Scripts\python.exe scripts\dev_verify.py --base <LAST WORK SHA> --run
+```
+
+The selector decides, not the model, and it re-derives the change set **from the
+evidence's own SHA** rather than from `--base`, so a mistyped base cannot narrow
+what has to be accounted for. A closing set of `HANDOFF.md` + `CHANGELOG.md`
+with reusable evidence selects `tests/test_handoff_contract.py`, which checks
+the closing artefact itself: the frontmatter parses with the preflight's own
+parser, `covered_through_sha` is a full 40-character SHA that is a real commit
+and an ancestor of `HEAD`, and all eight sections are present and in order.
+
+**Everything else forfeits the targeted branch and is reported as
+`FULL PYTHON FALLBACK`** — which is an instruction, not a warning. That includes
+every way of not having evidence: none recorded, a run that exited non-zero, a
+record from a different session or branch, a tree whose history was rewritten
+under it, and any non-document change since the verified tree. A
+`.claude/rules/*.md` or skill edit is *not* a closing document either; it pulls
+in the session-protocol suite.
+
+This is not a hole. The tree that ships is the verified work tree plus
+documents, the full suite demonstrably ran on that work tree, and the one thing
+that run could not cover is the closing document itself — which is exactly what
+the targeted selection checks and what re-running the whole suite never did.
+
+**Whichever branch ran, §4 records it as it happened** — the command, the date,
+and the tree it ran on. Describing a targeted run as "the full suite passed" is
+the reporting failure this entire file exists to prevent.
 
 ### 7. Stage and commit
 

@@ -204,6 +204,104 @@ def test_governed_documents_are_not_treated_as_docs_only(rel):
     assert plan.ignored == [], f"{rel} was written off as documentation"
 
 
+VERIFIED = dv.Evidence(True, "full suite verified at deadbee0", "d" * 40)
+
+
+def test_handoff_selects_its_own_contract_test_not_the_slow_session_suite():
+    """HANDOFF.md is asserted by `tests/test_handoff_contract.py` (file reads and
+    one git call, well under a second). Routing it to the session-protocol suite
+    would be defensible and useless: that suite drives subprocesses, is among the
+    slowest in the repo, and never reads the real HANDOFF.md."""
+    plan = dv.build_plan(["HANDOFF.md"], evidence=VERIFIED)
+
+    assert plan.selected_tests == ["tests/test_handoff_contract.py"]
+    assert plan.ignored == [], "HANDOFF.md was written off as documentation"
+    assert not plan.full_python_fallback
+
+
+def test_a_closing_docs_change_set_reuses_a_verified_full_run():
+    """The change set `/session-close` produces when the work commit already had
+    its own full run: the closing commit is documentation, and the only thing in
+    it a test can check is HANDOFF's own contract."""
+    plan = dv.build_plan(["HANDOFF.md", "CHANGELOG.md"], evidence=VERIFIED)
+
+    assert plan.closing_docs_only
+    assert plan.selected_tests == ["tests/test_handoff_contract.py"]
+    assert not plan.full_python_fallback
+    assert [s.source for s in plan.ignored] == ["CHANGELOG.md"]
+    assert not plan.py_sources_changed
+
+
+@pytest.mark.parametrize("evidence,label", [
+    (None, "never consulted"),
+    (dv.Evidence(False, "no full-suite verification has been recorded"), "absent"),
+    (dv.Evidence(False, "the recorded run exited 1 -- a failed suite is not evidence"),
+     "failed run"),
+    (dv.Evidence(False, "recorded by a different session"), "foreign session"),
+    (dv.Evidence(False, "the verified tree is not an ancestor of HEAD"), "stale"),
+])
+def test_closing_docs_without_usable_evidence_falls_back_to_the_full_suite(
+        evidence, label):
+    """The fail-safe half, and the reason the optimisation is not a hole: the
+    documents themselves prove nothing about the code, so skipping the suite is
+    sound only when a real run covered this tree. Every way of NOT having that
+    -- including never asking -- runs the suite."""
+    plan = dv.build_plan(["HANDOFF.md", "CHANGELOG.md"], evidence=evidence)
+
+    assert plan.closing_docs_only
+    assert plan.full_python_fallback, f"{label} evidence must force the full suite"
+    argvs = [c.argv for c in plan.commands()]
+    assert (dv._python(), "-m", "pytest", "-q") in argvs
+
+
+def test_full_verification_refuses_to_record_from_a_dirty_tree(repo: Path, capsys):
+    """Evidence is keyed by commit, so it may only describe a tree a commit
+    describes. On a dirty tree the suite tests HEAD-plus-edits while the record
+    would say `HEAD` -- a SHA naming something other than what ran.
+
+    Refused UP FRONT: being told after ten minutes that the result cannot be
+    kept is the version of this check nobody would keep using.
+    """
+    (repo / "uncommitted.py").write_text("x = 1\n", encoding="utf-8")
+
+    code = dv.run_full_verification(repo)
+
+    assert code == 2
+    assert "dirty" in capsys.readouterr().err
+
+
+def test_full_verification_records_nothing_when_it_stops_early(repo: Path, capsys):
+    """A clean fixture repo has no `jarvis/` to lint, so the preface fails and
+    pytest never runs. Nothing may be recorded from that."""
+    code = dv.run_full_verification(repo)
+
+    assert code != 0
+    assert "nothing was recorded" in capsys.readouterr().out
+
+
+def test_a_source_file_in_the_set_is_not_a_closing_commit_at_all():
+    """Evidence is irrelevant once the set stops being documents: the ordinary
+    mapping applies, and a good record cannot wave a code change through."""
+    plan = dv.build_plan(["HANDOFF.md", "jarvis/clock.py"], evidence=VERIFIED)
+
+    assert not plan.closing_docs_only
+    assert "tests/test_clock.py" in plan.selected_tests
+
+
+@pytest.mark.parametrize("rel", [
+    "CLAUDE.md", ".claude/rules/testing.md", ".claude/skills/session-close/SKILL.md",
+])
+def test_a_governed_document_is_not_a_closing_document(rel):
+    """These are markdown whose content a real test asserts, so they must never
+    ride the closing-docs path -- they select the session-protocol suite."""
+    assert not dv.is_closing_doc(rel)
+
+    plan = dv.build_plan(["HANDOFF.md", rel], evidence=VERIFIED)
+
+    assert not plan.closing_docs_only
+    assert "tests/test_claude_session_hooks.py" in plan.selected_tests
+
+
 def test_electron_and_mobile_changes_plan_component_checks_only():
     plan = dv.build_plan([
         "electron/src/renderer/src/lib/chatStream.js",

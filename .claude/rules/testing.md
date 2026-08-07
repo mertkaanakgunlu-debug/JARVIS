@@ -29,7 +29,33 @@ every edit is the largest avoidable cost in a development loop; running it
 |---|---|---|
 | **Iteration** | after each edit | targeted deterministic checks — `scripts/dev_verify.py --base <TASK_BASE_SHA> --run` |
 | **Work completion** | once, when the change is stable | full verification of each **touched** component |
-| **Session close / CI** | at `/session-close` and on push | the canonical full verification, unchanged |
+| **Session close / CI** | at `/session-close` and on push | the canonical full verification — with one narrow, checkable exception below |
+
+**The session-close exception.** A closing commit that carries *documents only*,
+on top of a work tree with a **recorded** green full run, runs the selector
+instead of the full suite a second time
+(`.claude/skills/session-close/SKILL.md` §6). Re-running the whole suite over an
+unchanged work tree tested the documents not at all; this tests them.
+
+Run the work-completion suite through the recorder — after committing the work —
+or the exception is simply unavailable:
+
+```powershell
+.venv\Scripts\python.exe scripts\dev_verify.py --full
+```
+
+It refuses a dirty tree instead of recording a SHA that names something other
+than what ran, so "commit, then verify" is the order.
+
+Three things keep it honest. The evidence is **machine-authored** — head,
+branch, session and timestamps are derived by
+`scripts/claude_session_state.py`, the exit status and pytest's own summary line
+come from the process that ran it, and there is deliberately no subcommand
+through which a count or a verdict can be typed. The *selector* decides whether
+the set really is documents-only, recomputing it from the evidence's own SHA. And
+every failure mode — no record, a failed run, another session's record, a
+rewritten history, a non-document change — resolves to `FULL PYTHON FALLBACK`,
+which is an instruction rather than a warning.
 
 `TASK_BASE_SHA` is `git rev-parse HEAD` at the start of the task — recorded then,
 not re-derived later, so the selector sees the task's real diff (committed work

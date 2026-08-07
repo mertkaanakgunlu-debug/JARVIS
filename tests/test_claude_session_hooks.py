@@ -2202,3 +2202,186 @@ def test_claude_md_imports_the_handoff_and_stays_small():
 
     assert "@HANDOFF.md" in text, "current state must arrive by import, not by hand"
     assert len(text.splitlines()) < 200
+
+
+# ── full-suite verification evidence ────────────────────────────────────────
+# `/session-close` may reuse an earlier full pytest run instead of starting a
+# second one, but only against a record that survives every check below. The
+# thing being prevented is a closing commit that skips the suite on the strength
+# of a SENTENCE -- "3424 passed" in HANDOFF.md is prose, and a model can write it
+# without a suite ever having run. Same failure the marker's session_id had.
+
+PASSING_SUMMARY = "3424 passed, 5 deselected, 362 warnings in 646.98s (0:10:46)"
+PYTEST_ARGV = ["python", "-m", "pytest", "-q"]
+
+
+def _state():
+    from scripts import claude_session_state as state
+    return state
+
+
+def _identified(repo: Path, session_id: str = "session-a"):
+    """A repo whose authoritative identity has been recorded, as SessionStart does."""
+    assert run_state(repo, "current", "--session-id", session_id,
+                     "--source", "startup").returncode == 0
+    return _state()
+
+
+def _record(repo: Path, state, **overrides):
+    kwargs = {"command": PYTEST_ARGV, "exit_status": 0, "summary": PASSING_SUMMARY}
+    kwargs.update(overrides)
+    return state.record_full_verification(str(repo), **kwargs)
+
+
+def test_a_recorded_full_run_is_reusable_on_the_tree_it_covered(repo: Path):
+    state = _identified(repo)
+    record = _record(repo, state)
+
+    ok, detail, head = state.full_verification_status(str(repo))
+
+    assert ok, detail
+    assert head == _git(repo, "rev-parse", "HEAD")
+    assert record["passed"] == 3424
+    assert record["exit_status"] == 0
+
+
+def test_a_failed_run_is_recorded_but_never_reusable(repo: Path):
+    """Recorded rather than dropped: "no evidence" and "it ran and failed" are
+    different states, and only one of them is honest here."""
+    state = _identified(repo)
+    _record(repo, state, exit_status=1)
+
+    ok, detail, _ = state.full_verification_status(str(repo))
+
+    assert not ok
+    assert "exited 1" in detail
+
+
+def test_evidence_from_another_session_is_not_transferable(repo: Path):
+    """The marker rule, applied to evidence: a previous session's green run says
+    nothing about whether THIS session's work was verified."""
+    state = _identified(repo, "session-a")
+    _record(repo, state)
+
+    _identified(repo, "session-b")  # a new session starts over the same tree
+
+    ok, detail, _ = state.full_verification_status(str(repo))
+
+    assert not ok
+    assert "different session" in detail
+
+
+def test_evidence_for_a_rewritten_history_is_refused(repo: Path):
+    """The wrong-SHA case. A record whose tree is no longer reachable cannot
+    vouch for anything: rebase, reset or amend and the evidence is void."""
+    state = _identified(repo)
+    (repo / "work.txt").write_text("work\n", encoding="utf-8")
+    _git(repo, "add", "work.txt")
+    _git(repo, "commit", "-q", "-m", "work")
+    _record(repo, state)
+    verified_head = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "reset", "-q", "--hard", "HEAD~1")
+    (repo / "other.txt").write_text("other\n", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-q", "-m", "divergent")
+
+    ok, detail, head = state.full_verification_status(str(repo))
+
+    assert not ok
+    assert "not an ancestor" in detail
+    assert head == verified_head
+
+
+def test_evidence_recorded_on_another_branch_is_refused(repo: Path):
+    state = _identified(repo)
+    _record(repo, state)
+    _git(repo, "checkout", "-q", "-b", "somewhere-else")
+
+    ok, detail, _ = state.full_verification_status(str(repo))
+
+    assert not ok
+    assert "different branch" in detail
+
+
+@pytest.mark.parametrize("payload,label", [
+    ({}, "empty object"),
+    ({"schema": 1, "session_id": "session-a", "branch": "langgraph-migration",
+      "head": "a" * 40, "exit_status": 0, "command": "pytest",
+      "recorded_at": "2026-08-08T00:00:00+00:00",
+      "summary": "the full suite passed"}, "prose instead of a pytest summary"),
+    ({"schema": 1, "session_id": "session-a", "branch": "langgraph-migration",
+      "head": "abc", "exit_status": 0, "command": "pytest", "summary": "1 passed",
+      "recorded_at": "2026-08-08T00:00:00+00:00"}, "short SHA"),
+    ({"schema": 1, "session_id": "session-a", "branch": "langgraph-migration",
+      "head": "a" * 40, "exit_status": "0", "command": "pytest",
+      "summary": "1 passed", "recorded_at": "2026-08-08T00:00:00+00:00"},
+     "exit status as a string"),
+])
+def test_hand_written_evidence_is_refused(repo: Path, payload: dict, label: str):
+    """A JSON object is not evidence just because `json.loads` accepted it. The
+    forged record most worth catching is the plausible one: correct fields, a
+    real-looking SHA, and a summary that says the suite passed in prose."""
+    state = _identified(repo)
+    path = state.verification_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    ok, detail, _ = state.full_verification_status(str(repo))
+
+    assert not ok, f"{label} was accepted as evidence"
+    assert "not usable" in detail
+
+
+def test_recording_refuses_a_summary_that_is_not_pytest_output(repo: Path):
+    """The write side of the same rule: evidence is pytest's own line, not a
+    description of what it would have said."""
+    state = _identified(repo)
+
+    with pytest.raises(state.StateError, match="not a pytest summary"):
+        _record(repo, state, summary="everything passed, trust me")
+
+
+def test_recording_refuses_a_command_that_never_ran_pytest(repo: Path):
+    state = _identified(repo)
+
+    with pytest.raises(state.StateError, match="not a pytest invocation"):
+        _record(repo, state, command=["echo", "3424", "passed"])
+
+
+def test_no_cli_subcommand_can_write_evidence():
+    """Structural, not a promise: the helper exposes evidence read-only.
+
+    Checked against the PARSER rather than the help text -- "record" appears
+    legitimately in `current`'s help prose, so a substring scan would fail on
+    wording instead of on capability. What must not exist is a subcommand or an
+    option through which a count, a SHA or a verdict could be typed.
+    """
+    import argparse
+
+    state = _state()
+    parser = state._build_parser()
+    subparsers = [a for a in parser._actions
+                  if isinstance(a, argparse._SubParsersAction)][0]
+
+    assert "verification" in subparsers.choices
+    assert not [name for name in subparsers.choices if name.startswith("record")], \
+        "a record subcommand would be a prompt where evidence could be typed"
+
+    forbidden = {"--summary", "--exit-status", "--passed", "--head", "--count"}
+    for name, sub in subparsers.choices.items():
+        options = {opt for action in sub._actions for opt in action.option_strings}
+        assert not (forbidden & options), \
+            f"subcommand {name!r} accepts {sorted(forbidden & options)}"
+
+
+def test_the_verification_subcommand_reports_reusability(repo: Path):
+    state = _identified(repo)
+
+    assert run_state(repo, "verification").returncode == 1  # nothing recorded yet
+
+    _record(repo, state)
+    done = run_state(repo, "verification")
+
+    assert done.returncode == 0
+    assert "REUSABLE" in done.stdout

@@ -67,6 +67,19 @@ SCHEMA_VERSION = 1
 RECOVERY_DIRNAME = Path(".claude") / "session-recovery"
 CURRENT_NAME = "current.json"
 MARKER_NAME = "close-marker.json"
+VERIFICATION_NAME = "full-verification.json"
+
+#: A pytest summary line, as pytest itself prints it. Recorded evidence must
+#: match this: it is the one field that comes from outside this module, and a
+#: free-text field would let "the suite passed" be an assertion rather than an
+#: observation. `scripts/dev_verify.py --full --run` is the only intended
+#: producer, and it passes through what pytest actually wrote.
+_PYTEST_SUMMARY_RE = re.compile(
+    r"^\d+ passed(?:, \d+ (?:deselected|skipped|xfailed|xpassed|warnings?))*"
+    r"(?: in [\d.]+s.*)?$"
+)
+
+_PASSED_RE = re.compile(r"(\d+) passed")
 
 #: Bounded like every other git call in this system: a hung git must cost a few
 #: seconds, never the session.
@@ -560,6 +573,144 @@ def cmd_block(cwd: str, reason_code: str, run_id: str | None,
     return blocked
 
 
+# ── full-suite verification evidence ────────────────────────────────────────
+#
+# `/session-close` may skip re-running the whole Python suite for a
+# documentation-only closing commit -- but only against EVIDENCE that the suite
+# really ran, not against a sentence in HANDOFF.md saying so. Prose is exactly
+# the thing this module exists to stop being trusted: a model can write "3424
+# passed" without a suite having run, the same way it could once write a session
+# id it had guessed.
+#
+# So the record is machine-authored on the same terms as the marker. Every field
+# except two is DERIVED here (head, branch, session identity, timestamps); the
+# two that cannot be -- the process exit status and pytest's own summary line --
+# are validated against a narrow shape, and the producer is the process that
+# actually ran the suite (`scripts/dev_verify.py --full --run`). Nothing accepts
+# a claimed SHA, a claimed count, or a claimed "it passed".
+
+def verification_path(root: Path) -> Path:
+    return root / RECOVERY_DIRNAME / VERIFICATION_NAME
+
+
+def _validated_command(command: list[str]) -> str:
+    """The command as run, reduced to plain tokens.
+
+    Narrow on purpose: this is the only free-ish field in the record, so it is
+    checked for shape rather than trusted, and it must actually be a pytest
+    invocation. An absolute path or a shell fragment has nowhere to land.
+    """
+    tokens = [str(part) for part in command]
+    if not tokens:
+        raise StateError("no command was recorded for the verification run")
+    if not any("pytest" in token for token in tokens):
+        raise StateError("the recorded command is not a pytest invocation")
+    for token in tokens:
+        if not re.match(r"^[A-Za-z0-9._/\\=-]{1,64}$", token):
+            raise StateError(f"command token {token!r} is not a plain token")
+    return " ".join(tokens)
+
+
+def record_full_verification(cwd: str, *, command: list[str], exit_status: int,
+                             summary: str) -> dict:
+    """Record that the full suite ran on THIS tree, with what result.
+
+    A failing run is recorded too. Hiding it would leave "no evidence", which
+    reads as "not run yet" -- and the honest state after a red suite is "it ran
+    and it failed", which `full_verification_status` then refuses to reuse.
+    """
+    root = repo_root(cwd)
+    current = load_current(root)
+    branch, head = _consistency_check(cwd, current)
+    summary = " ".join(str(summary).split())
+    if not _PYTEST_SUMMARY_RE.match(summary):
+        raise StateError(
+            "the recorded summary is not a pytest summary line; evidence must be "
+            "pytest's own output, not a description of it"
+        )
+    passed = _PASSED_RE.search(summary)
+    record = {
+        "schema": SCHEMA_VERSION,
+        "session_id": current["session_id"],
+        "branch": branch,
+        "head": head,
+        "command": _validated_command(command),
+        "exit_status": int(exit_status),
+        "summary": summary,
+        "passed": int(passed.group(1)) if passed else 0,
+        "recorded_at": _now(),
+    }
+    _atomic_write_json(verification_path(root), record)
+    return record
+
+
+def _verification_structural_defect(record: dict) -> str | None:
+    """`None` if `record` has the shape this module's own writer produces."""
+    if record.get("schema") != SCHEMA_VERSION:
+        return f"schema is {record.get('schema')!r}, expected {SCHEMA_VERSION}"
+    if not _SESSION_ID_RE.match(str(record.get("session_id") or "")):
+        return "session_id is missing or not a usable identifier"
+    if not _FULL_SHA_RE.match(str(record.get("head") or "")):
+        return "head is missing or not a full 40-character SHA"
+    if not str(record.get("branch") or ""):
+        return "branch is missing"
+    if not isinstance(record.get("exit_status"), int):
+        return "exit_status is missing or not an integer"
+    if not _PYTEST_SUMMARY_RE.match(" ".join(str(record.get("summary") or "").split())):
+        return "summary is not a pytest summary line"
+    if not str(record.get("command") or "").strip():
+        return "command is missing"
+    if not str(record.get("recorded_at") or "").strip():
+        return "recorded_at is missing"
+    return None
+
+
+def full_verification_status(cwd: str) -> tuple[bool, str, str]:
+    """May a closing commit reuse the recorded full run? `(ok, detail, head)`.
+
+    FAIL-SAFE in every branch: anything missing, malformed, failed, foreign or
+    unreachable answers `False`, and the caller's job is then to run the suite.
+    `head` is returned so the caller derives the "what changed since" question
+    from the EVIDENCE's own SHA rather than from an argument someone passed --
+    a `--base` that pointed somewhere else could otherwise narrow the change set
+    the evidence is supposed to cover.
+    """
+    try:
+        root = repo_root(cwd)
+    except StateError as exc:
+        return False, str(exc), ""
+    record = _read_json(verification_path(root))
+    if record is None:
+        return False, "no full-suite verification has been recorded for this tree", ""
+    defect = _verification_structural_defect(record)
+    if defect is not None:
+        return False, f"the verification record is not usable ({defect})", ""
+
+    head_of_record = str(record["head"])
+    if record["exit_status"] != 0:
+        return False, (f"the recorded run exited {record['exit_status']} -- a failed "
+                       "suite is not evidence"), head_of_record
+    try:
+        current = load_current(root)
+    except StateError as exc:
+        return False, f"session identity unavailable: {exc}", head_of_record
+    if str(record["session_id"]) != str(current.get("session_id") or ""):
+        return False, ("the verification was recorded by a different session; "
+                       "evidence is not transferable"), head_of_record
+    try:
+        branch, head = derive_branch_and_head(cwd)
+    except StateError as exc:
+        return False, str(exc), head_of_record
+    if str(record["branch"]) != branch:
+        return False, "the verification was recorded on a different branch", head_of_record
+    if head_of_record != head and not _is_ancestor(cwd, head_of_record, head):
+        return False, (f"the verified tree {head_of_record[:8]} is not an ancestor of "
+                       "HEAD -- history was rewritten, or the evidence is stale"), \
+            head_of_record
+    return True, (f"full suite verified at {head_of_record[:8]}: {record['summary']}"), \
+        head_of_record
+
+
 # ── show ────────────────────────────────────────────────────────────────────
 
 def _short_id(value: str) -> str:
@@ -596,6 +747,15 @@ def render_show(root: Path) -> str:
             names = ", ".join(str(j) for j in jobs) if isinstance(jobs, list) else "?"
             lines.append(f"          reason {marker.get('reason_code') or '?'}  "
                          f"run {marker.get('run_id') or '-'}  jobs {names}")
+    verification = _read_json(verification_path(root))
+    if verification is None:
+        lines.append("full run  none recorded")
+    else:
+        lines.append(f"full run  head {_short_id(verification.get('head'))}  "
+                     f"exit {verification.get('exit_status')}  "
+                     f"recorded {verification.get('recorded_at') or '?'}")
+        lines.append(f"          {verification.get('command') or '?'}  "
+                     f"-> {verification.get('summary') or '?'}")
     return "\n".join(lines)
 
 
@@ -638,6 +798,12 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="comma-separated job names, e.g. python,electron")
 
     sub.add_parser("show", help="print a redacted summary of the session state")
+
+    # Read-only. There is deliberately no `record` subcommand: evidence is
+    # written by the process that RAN the suite (scripts/dev_verify.py --full
+    # --run), never typed at a prompt.
+    sub.add_parser("verification",
+                   help="report whether a closing commit may reuse the recorded full run")
     return parser
 
 
@@ -655,6 +821,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "show":
             sys.stdout.write(render_show(repo_root(cwd)) + "\n")
             return 0
+        if args.command == "verification":
+            ok, detail, _ = full_verification_status(cwd)
+            sys.stdout.write(f"{'REUSABLE' if ok else 'NOT REUSABLE'}: {detail}\n")
+            return 0 if ok else 1
         if args.command == "prepare":
             cmd_prepare(cwd)
         elif args.command == "close":

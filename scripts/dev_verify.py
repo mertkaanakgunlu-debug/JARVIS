@@ -63,6 +63,15 @@ GOVERNED_DOCS = frozenset({
 #: Same, by prefix: every `.claude/rules/*.md` is checked for its path scope.
 GOVERNED_PREFIXES = (".claude/rules/",)
 
+#: Documents whose content is asserted by a NARROW, fast test file rather than
+#: by the slow session-protocol suite. Kept separate from GOVERNED_DOCS on
+#: purpose: routing HANDOFF.md to `test_claude_session_hooks.py` would be
+#: correct-but-useless -- that suite drives subprocesses and is among the
+#: slowest in the repo, and none of it reads the real HANDOFF.md.
+DOC_TESTS: dict[str, tuple[str, ...]] = {
+    "HANDOFF.md": ("tests/test_handoff_contract.py",),
+}
+
 #: The session lifecycle is driven as SUBPROCESSES by its tests, so a filename
 #: mapping finds nothing. This is the spec's "session hook change -> session
 #: regression tests" rule, written out.
@@ -93,6 +102,26 @@ CROSS_CUTTING = (
 )
 
 DOC_SUFFIXES = frozenset({".md", ".txt", ".rst"})
+
+#: What a CLOSING commit is allowed to contain if it wants to reuse an earlier
+#: full-suite run instead of triggering another one. Deliberately narrow, and
+#: deliberately NOT "anything that looks like a document": `CLAUDE.md`,
+#: `.claude/rules/*.md` and the session-close skill are all markdown whose
+#: content is asserted by a real test, so they are excluded here and go down the
+#: ordinary governed-document path instead.
+CLOSING_DOCS = frozenset({
+    "HANDOFF.md",
+    "CHANGELOG.md",
+    "ROADMAP.md",
+    "MEMORY.md",
+    "ProjectState.md",
+})
+
+CLOSING_DOC_PREFIXES = ("docs/",)
+
+
+def is_closing_doc(rel: str) -> bool:
+    return rel in CLOSING_DOCS or rel.startswith(CLOSING_DOC_PREFIXES)
 
 #: Named only so the plan can say out loud that it did not pick them. Nothing
 #: in this script can select one; the assertion is structural, not a promise.
@@ -131,6 +160,19 @@ class Fallback:
 
 
 @dataclass(frozen=True)
+class Evidence:
+    """Whether an earlier full-suite run may stand in for another one.
+
+    Produced by `scripts/claude_session_state.py`, never by this module's own
+    judgement, and never by reading a claim out of HANDOFF.md.
+    """
+
+    ok: bool
+    detail: str
+    head: str = ""
+
+
+@dataclass(frozen=True)
 class Command:
     argv: tuple[str, ...]
     cwd: str
@@ -150,10 +192,23 @@ class Plan:
     components: list[Selection] = field(default_factory=list)
     ignored: list[Selection] = field(default_factory=list)
     py_sources_changed: bool = False
+    closing_docs_only: bool = False
+    evidence: Evidence | None = None
+
+    @property
+    def evidence_blocks_reuse(self) -> bool:
+        """A closing-docs-only set with no usable full-run evidence behind it.
+
+        This is the fail-safe half of the session-close optimisation. Skipping
+        the suite is only sound when an earlier run covered this very tree, so
+        an absent, malformed, failed, foreign or stale record does not mean
+        "probably fine" -- it means run the suite.
+        """
+        return self.closing_docs_only and not (self.evidence and self.evidence.ok)
 
     @property
     def full_python_fallback(self) -> bool:
-        return bool(self.fallbacks)
+        return bool(self.fallbacks) or self.evidence_blocks_reuse
 
     @property
     def selected_tests(self) -> list[str]:
@@ -303,6 +358,12 @@ def _classify(rel: str, root: Path, plan: Plan) -> None:
                 target, "session lifecycle regression tests", rel))
         return
 
+    if rel in DOC_TESTS:
+        for target in DOC_TESTS[rel]:
+            plan.tests.append(Selection(
+                target, "closing-document contract asserted by this test", rel))
+        return
+
     if rel in GLOBAL_PYTHON:
         plan.fallbacks.append(Fallback(
             rel, "changes the meaning of the whole suite -- no subset is honest"))
@@ -363,8 +424,10 @@ def _classify_module(rel: str, root: Path, plan: Plan) -> None:
 
 
 def build_plan(changed: list[str], *, root: Path = REPO_ROOT,
-               base: str | None = None) -> Plan:
-    plan = Plan(base=base, changed=sorted(set(changed)))
+               base: str | None = None, evidence: Evidence | None = None) -> Plan:
+    plan = Plan(base=base, changed=sorted(set(changed)), evidence=evidence)
+    plan.closing_docs_only = bool(plan.changed) and all(
+        is_closing_doc(rel) for rel in plan.changed)
     for rel in plan.changed:
         _classify(rel, root, plan)
     plan.tests.sort()
@@ -402,11 +465,22 @@ def format_plan(plan: Plan) -> str:
         out.extend(f"  {rel}" for rel in plan.changed)
     out.append("")
 
+    if plan.closing_docs_only:
+        verdict = plan.evidence.detail if plan.evidence else \
+            "full-suite evidence was not consulted"
+        state = "REUSABLE" if not plan.evidence_blocks_reuse else "NOT REUSABLE"
+        out.append(f"Closing-docs-only change set. Earlier full run: {state}")
+        out.append(f"      {verdict}")
+        out.append("")
+
     if plan.full_python_fallback:
         out.append("FULL PYTHON FALLBACK -- the whole Python suite is required:")
         for fb in plan.fallbacks:
             out.append(f"  {fb.source}")
             out.append(f"      {fb.reason}")
+        if plan.evidence_blocks_reuse:
+            out.append("  (full-suite evidence)")
+            out.append("      no reusable record of a full run covering this tree")
     elif plan.selected_tests:
         out.append(f"Selected Python tests ({len(plan.selected_tests)}):")
         for target in plan.selected_tests:
@@ -488,6 +562,159 @@ def run_commands(commands: list[Command], root: Path = REPO_ROOT) -> int:
     return 0
 
 
+# ── full verification and its evidence ──────────────────────────────────────
+
+def _state_module():
+    """`claude_session_state`, imported either way this file can be loaded.
+
+    Returns None rather than raising: a missing helper must degrade to "no
+    evidence" (and therefore to running the suite), never to a crash.
+    """
+    try:
+        from scripts import claude_session_state as state  # noqa: PLC0415
+    except ImportError:
+        try:
+            import claude_session_state as state  # noqa: PLC0415
+        except ImportError:
+            return None
+    return state
+
+
+def evidence_for(root: Path) -> Evidence:
+    """Whether a recorded full run still covers the working tree.
+
+    Two independent conditions, and both are derived rather than claimed: the
+    helper vouches for the record itself (shape, exit status, session, branch,
+    ancestry), and the change set is recomputed **from the record's own SHA** so
+    that a `--base` pointing elsewhere cannot shrink what has to be accounted
+    for.
+    """
+    state = _state_module()
+    if state is None:
+        return Evidence(False, "the session-state helper could not be imported")
+    try:
+        ok, detail, head = state.full_verification_status(str(root))
+    except Exception as exc:  # noqa: BLE001 -- any failure means "no evidence"
+        return Evidence(False, f"verification status unavailable ({type(exc).__name__})")
+    if not ok:
+        return Evidence(False, detail, head)
+    try:
+        since = collect_changed(root, head)
+    except GitError as exc:
+        return Evidence(False, f"cannot derive changes since the verified tree ({exc})", head)
+    stray = sorted(rel for rel in since if not is_closing_doc(rel))
+    if stray:
+        shown = ", ".join(stray[:5]) + (" ..." if len(stray) > 5 else "")
+        return Evidence(
+            False,
+            f"changes since the verified tree are not closing documents: {shown}",
+            head,
+        )
+    return Evidence(True, detail, head)
+
+
+def _run_streaming(argv: tuple[str, ...], root: Path) -> tuple[int, str]:
+    """Run, echo every line as it arrives, and keep the last non-empty one.
+
+    Streaming matters: the full suite takes minutes, and a silent capture would
+    make it look hung. The kept line is pytest's own summary -- the evidence
+    record refuses anything that is not one.
+    """
+    proc = subprocess.Popen(
+        argv, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    )
+    last = ""
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        stripped = line.strip()
+        if stripped:
+            last = stripped
+    return proc.wait(), last
+
+
+def run_full_verification(root: Path = REPO_ROOT) -> int:
+    """The canonical full pair, recorded as machine-checkable evidence.
+
+    This is the ONLY producer of that evidence. Nothing else may write it and
+    there is no subcommand that accepts a count, a SHA or a verdict as an
+    argument -- the whole point is that `/session-close` can later reuse a run
+    that demonstrably happened rather than one a document claims happened.
+    """
+    # Evidence is keyed by commit, so it may only be recorded for a tree that a
+    # commit actually describes. On a dirty tree the suite would be testing
+    # HEAD-plus-uncommitted-edits while the record said "HEAD" -- a SHA that
+    # names something other than what ran is precisely the kind of
+    # almost-true evidence this whole mechanism exists to refuse. Checked up
+    # front rather than after: nobody should spend ten minutes to be told the
+    # result cannot be kept.
+    try:
+        dirty = _git(root, "status", "--porcelain")
+    except GitError as exc:
+        print(f"dev_verify: {exc}", file=sys.stderr)
+        return 2
+    if dirty.strip():
+        print("dev_verify: --full records evidence for a COMMITTED tree, and this "
+              "working tree is dirty.\n"
+              "  Commit the work first, then run this -- that is the tree "
+              "/session-close would be reusing.\n"
+              "  (To simply run the suite without recording anything, run pytest "
+              "directly.)", file=sys.stderr)
+        return 2
+
+    preface = [
+        Command(("git", "diff", "--check"), ".",
+                "always -- whitespace and conflict markers are free to check"),
+        Command((_python(), "-m", "ruff", "check", "jarvis", "scripts", "tests"), ".",
+                "the canonical lint command, unmodified"),
+    ]
+    if run_commands(preface, root) != 0:
+        print("\ndev_verify: full verification stopped before pytest ran; "
+              "nothing was recorded.")
+        return 1
+
+    # Executed with the ABSOLUTE interpreter, recorded with the repo-relative
+    # one: `_python()` is display form, and Popen would resolve it against this
+    # process's cwd rather than `root`. The recorded token has to stay relative
+    # anyway -- an absolute Windows path carries a colon, which the record's
+    # token validator refuses precisely so no path can be smuggled into it.
+    recorded = (_python(), "-m", "pytest", "-q")
+    print(f"\n$ {' '.join(recorded)}", flush=True)
+    code, summary = _run_streaming((sys.executable, "-m", "pytest", "-q"), root)
+
+    state = _state_module()
+    if state is None:
+        print("\ndev_verify: the session-state helper could not be imported; "
+              "the run is NOT recorded as reusable evidence.")
+        return code
+
+    if code != 0:
+        removed = ""
+        try:
+            path = state.verification_path(state.repo_root(str(root)))
+            if path.exists():
+                path.unlink()
+                removed = " Any earlier evidence was discarded."
+        except Exception:  # noqa: BLE001 -- best effort; the failure below is what matters
+            pass
+        print(f"\ndev_verify: the full suite FAILED (exit {code}); "
+              f"nothing was recorded as evidence.{removed}")
+        return code
+
+    try:
+        record = state.record_full_verification(
+            str(root), command=list(recorded), exit_status=code, summary=summary)
+    except Exception as exc:  # noqa: BLE001 -- recording is best effort, the run still passed
+        print(f"\ndev_verify: the full suite passed, but the evidence could not be "
+              f"recorded ({exc}). /session-close will re-run the suite.")
+        return 0
+    print(f"\ndev_verify: full verification passed and recorded at "
+          f"{record['head'][:8]} -- {record['summary']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="dev_verify",
@@ -502,7 +729,15 @@ def main(argv: list[str] | None = None) -> int:
         "--run", action="store_true",
         help="execute the plan (default: print it and exit 0 without running)",
     )
+    parser.add_argument(
+        "--full", action="store_true",
+        help="ignore the plan: run the canonical full verification and record it "
+             "as the evidence /session-close may later reuse",
+    )
     args = parser.parse_args(argv)
+
+    if args.full:
+        return run_full_verification(REPO_ROOT)
 
     try:
         changed = collect_changed(REPO_ROOT, args.base)
@@ -512,7 +747,8 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
-    plan = build_plan(changed, root=REPO_ROOT, base=args.base)
+    plan = build_plan(changed, root=REPO_ROOT, base=args.base,
+                      evidence=evidence_for(REPO_ROOT))
     print(format_plan(plan))
 
     if not args.run:
