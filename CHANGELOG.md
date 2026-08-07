@@ -6,6 +6,36 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Mobile splash timer lifecycle — MOBILE-TEST-01 closed] — 2026-08-07
+
+`_SplashRouterState` (`mobile/lib/app.dart`) armed an uncancellable
+`Future.delayed(Duration(seconds: 2))` in `initState`, so a widget tree torn
+down inside the splash window left the callback pending with nothing able to
+stop it. `flutter_test` unmounts the tree at the end of every test and then
+asserts no `Timer` is pending, so every test that pumped `JarvisApp` failed
+there — including the existing smoke test. Fixed in the product code: the state
+now holds a cancellable `Timer` and cancels it in `dispose()`. Splash behaviour
+is unchanged — same 2s delay, same `pushReplacementNamed('/home')`, same
+`mounted` guard. It was the only timer leak under `mobile/lib/`.
+
+`test/widget_test.dart` keeps the smoke test and adds two guards: disposal
+mid-splash (which deliberately never elapses fake time past the deadline —
+elapsing lets a leaked timer fire and retire itself, so the invariant would pass
+vacuously) and the 2s navigation itself. Both were falsified before being
+trusted: reverting the fix turns the smoke test and the disposal guard red while
+the navigation test stays green. `.claude/rules/mobile.md` records both
+properties, plus the reason `pumpAndSettle()` can never be used in this tree
+(`JarvisOrb`'s controller `repeat()`s forever).
+
+`scripts/dev_verify.py` justified keeping the mobile iteration loop to the
+analyzer with "`flutter test` still carries the known MOBILE-TEST-01 failure",
+which this commit falsified; the reason now names the real constraint (the
+gitignored font assets, `MOBILE-ASSETS-01`) and the planner's behaviour is
+deliberately unchanged. `MOBILE-ASSETS-01` itself is untouched: no placeholder
+fonts, no `pubspec.yaml` change, and CI still runs `analyze` only. Measured
+2026-08-07 with fonts present locally: `flutter test` → 17 passed,
+`flutter analyze` → no issues.
+
 ## [Completion contract TTFB — progress control frame] — 2026-08-07
 
 A contracted+`enforce` turn (`required_outputs_mode="enforce"` with a

@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 05e28451813d3e0571d515e8d9bc376f6955132b
+covered_through_sha: 71480629a8b098e538d1755cc60e214175c169e6
 ---
 
 # HANDOFF — current state
@@ -22,11 +22,12 @@ file's own closing commit.
 - Branch **`langgraph-migration`**. `main` is `5f6f6ff` and a strict ancestor;
   never quote how far behind it is — derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
-- This session started at **`b7abb5b`** (pushed; CI green, §4) and added **one
-  work commit**, `05e28451813d3e0571d515e8d9bc376f6955132b`, parented directly on
-  it. On top of that sits this closing documentation commit.
-- Push state and CI for anything at or above `05e2845` are **derived live**, never
-  stored here:
+- This session started at **`5576a1d`** (pushed; CI green in all three jobs, §4)
+  and added **one work commit**, `71480629a8b098e538d1755cc60e214175c169e6`,
+  parented directly on it. On top of that sits this closing documentation
+  commit.
+- Push state and CI for anything at or above `7148062` are **derived live**,
+  never stored here:
 
 ```bash
 git rev-list --left-right --count origin/langgraph-migration...HEAD
@@ -37,44 +38,37 @@ gh run list --branch langgraph-migration    # then: gh run view <id> --json jobs
 
 ## 2. Last completed work
 
-**Developer-productivity layer: targeted development verification plus a
-delta-only task-spec contract** — 2026-08-07, one work commit `05e2845`. No file
-under `jarvis/`, `electron/` or `mobile/` was touched, no dependency was added,
-and no runtime behaviour changed.
+**`MOBILE-TEST-01` closed — the splash router's timer no longer outlives the
+widget tree** — 2026-08-07, one work commit `7148062`. Product-code fix, not a
+test workaround. Four files: `mobile/lib/app.dart`,
+`mobile/test/widget_test.dart`, `scripts/dev_verify.py`,
+`.claude/rules/mobile.md`. No dependency added, no `pubspec.yaml` change.
 
-- **`scripts/dev_verify.py`** turns a task's real diff (`<TASK_BASE_SHA>..HEAD`
-  plus staged, unstaged and untracked changes, deduplicated and sorted) into a
-  conservative deterministic verification plan. The default mode prints the plan
-  with a reason per selected check and runs nothing; `--run` executes it, stops
-  at the first failure, and reports everything after it as `NOT RUN` — never as
-  passed.
-- Two decisions a future reader would otherwise re-litigate: **every ambiguity
-  resolves toward running more** (an unmappable module, a `conftest.py` or
-  dependency edit, or an unclassifiable file yields `FULL PYTHON FALLBACK`, and
-  the module-reference scan is a loose substring match on purpose), and **a git
-  failure raises** instead of reading as "no changes" — an empty change set would
-  otherwise produce an empty plan and a green-looking run that tested nothing.
-- **A live workload can never be selected, in any mode.** The planner emits only
-  `git`, `ruff`, `pytest`, `npm` and `flutter`; `tests/test_dev_verify.py` pins
-  that structurally rather than trusting a comment.
-- **Repository finding the mapping had to absorb:** `CLAUDE.md`, `.gitignore`,
-  `.claude/settings.json`, `.claude/rules/*.md`, the session-close skill and
-  `.github/workflows/ci.yml` look like documentation and are not —
-  `tests/test_claude_session_hooks.py` reads each from the real repository root
-  and asserts on its content. They route to that suite; a docs-only
-  classification would have skipped a test that can genuinely fail.
-- **Policy documents.** `CLAUDE.md`: task specs carry the delta only, and the
-  canonical `ruff` + `pytest` pair is the work-completion / session-close
-  standard rather than an iteration loop. `.claude/rules/testing.md`: the
-  iteration / work-completion / session-close hierarchy is now canonical, and
-  `FULL PYTHON FALLBACK` is an instruction rather than a warning.
-  `.claude/skills/session-close/SKILL.md`: future HANDOFF rewrites must be state
-  snapshots — the eight sections, the frontmatter contract, session identity,
-  prepare/finalize, blocked state and push semantics are all unchanged.
-- **No wall-clock figure was written into any of those documents, deliberately.**
-  Two runs of the identical targeted selection on this machine differed by
-  roughly 3× cold vs. warm (758.77s vs. 256.20s, same command, 2026-08-07), so a
-  recorded number would mislead more than it helps.
+- `_SplashRouterState` armed an uncancellable `Future.delayed(2s)`; it now holds
+  a cancellable `Timer` and cancels it in `dispose()`. **Splash behaviour is
+  unchanged** — same 2s delay, same `pushReplacementNamed('/home')`, same
+  `mounted` guard. It was the only leak in `mobile/lib/`: `lock_screen.dart` and
+  `home_screen.dart`'s `_TopBarState` already cancelled theirs.
+- **The two decisions a future reader would otherwise re-litigate are recorded
+  where mobile work loads them automatically** — `.claude/rules/mobile.md`'s
+  Tests section. In short: the guard test disposes the tree *inside* the 2s
+  window and must never elapse fake time past the deadline (elapsing lets a
+  leaked timer retire itself, so the invariant passes **vacuously**), and
+  `pumpAndSettle()` can never be used in this tree because `JarvisOrb`'s
+  controller `repeat()`s forever.
+- **Both guards were falsified before being trusted**: reverting the fix and
+  re-running turns the smoke test *and* the disposal guard red while the
+  navigation test stays green — so the guard carries the signal and the
+  behaviour test pins what the fix must not change.
+- **Repository finding the fix exposed.** `scripts/dev_verify.py` justified
+  keeping the mobile iteration loop to the analyzer with "`flutter test` still
+  carries the known MOBILE-TEST-01 failure" — false as of this commit. The
+  reason now names the real constraint (`flutter test` needs the gitignored font
+  assets, `MOBILE-ASSETS-01`). **The planner's behaviour is deliberately
+  unchanged**; whether `flutter test` joins the iteration loop is a cost
+  decision for the owner, not a side effect of this fix (§7).
+- **`MOBILE-ASSETS-01` was not touched**: no placeholder fonts, no pubspec
+  change, and `.github/workflows/ci.yml` still runs `analyze` only.
 
 ## 3. Operational modes and rollout decisions
 
@@ -97,38 +91,51 @@ untouched); the consequence is `MOBILE-ASSETS-01` in §5.
 
 ## 4. Tests and CI
 
-Run 2026-08-07 on the tree of `05e2845` — the work commit, and the only later
+Run 2026-08-07 on the tree of `7148062` — the work commit, and the only later
 change is this closing documentation commit:
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests
 #   -> All checks passed!
 .venv\Scripts\python.exe -m pytest -q
-#   -> 3416 passed, 5 deselected, 362 warnings (642.80s)
+#   -> 3416 passed, 5 deselected, 362 warnings (578.57s)
 git diff --check
 #   -> clean
 ```
 
-3416 is up from the previous snapshot's 3375 by **+41** — exactly the new
-`tests/test_dev_verify.py`. Same tree, same date, targeted selection:
+3416 is unchanged from the previous snapshot: this session added Dart tests, not
+Python ones. Targeted selection on the same tree — **the first live run of
+`dev_verify.py`'s mobile branch**, which the previous snapshot listed as never
+executed:
 
 ```powershell
-.venv\Scripts\python.exe scripts\dev_verify.py --base b7abb5be650de0a7ab896ece055d7f93cb190542 --run
-#   -> ruff OK; git diff --check clean;
-#      pytest -q tests/test_claude_session_hooks.py tests/test_dev_verify.py
-#      -> 220 passed (256.20s)
+.venv\Scripts\python.exe scripts\dev_verify.py --base 5576a1d8051517ae162045e1e531f8d51ad2bbe5 --run
+#   -> git diff --check; ruff; pytest -q tests/test_claude_session_hooks.py
+#      tests/test_dev_verify.py; (mobile) flutter analyze  -- all 4 PASSED
 ```
 
+Mobile, run 2026-08-07 in `mobile/` with **Flutter 3.44.6 / Dart 3.12.2** and the
+gitignored font binaries present locally:
+
+```powershell
+C:\flutter\bin\flutter.bat test      # -> 17 passed (widget 3, chat_sse 10, transcript 4)
+C:\flutter\bin\flutter.bat analyze   # -> No issues found!
+```
+
+Before the fix, the same `flutter test` reproduced `MOBILE-TEST-01` live
+(`'!timersPending'`, `flutter_test/src/binding.dart:2542`). **That green result
+depended on local font binaries and is not evidence that a clean clone or CI can
+run `flutter test`** (`MOBILE-ASSETS-01`, §5).
+
 **Not run this session, and not claimed as passed:** Electron (`npm test`,
-`npm run build`) and mobile (`flutter analyze`, `flutter test`) — neither
-component changed. No live workload of any kind: no Ollama run, no A/B harness,
+`npm run build`) — the component did not change. No `flutter build`, no run on a
+device or emulator. No live workload of any kind: no Ollama run, no A/B harness,
 no completion-contract evaluation, no real mailbox.
 
-**CI, read per job** (`gh run view 31191645327 --json jobs`, 2026-08-07): the
-last pushed tip `b7abb5b` is green in **all three** jobs — `python`, `electron`
-and `mobile` all `success`. That closes the previous snapshot's "no CI run exists
-yet" gap for `e200658`/`b7abb5b`. Read this closing commit's own CI live once it
-is pushed; it is not predicted here.
+**CI, read per job** (`gh run view 31205412539 --json jobs`, 2026-08-07): the
+last pushed tip `5576a1d` is green in **all three** jobs — `python`, `electron`
+and `mobile` all `success`. Read this session's own commits' CI live once pushed;
+it is not predicted here.
 
 ## 5. Known open issues
 
@@ -143,21 +150,20 @@ Each keeps its identifier; the detail stays in the linked document.
   A known eval-harness observability gap, explicitly not a production blocker; the
   proven-fact vs. hypothesis split is in
   [`docs/eval/completion_contract_ttfb_followup_2026-08-07.md`](docs/eval/completion_contract_ttfb_followup_2026-08-07.md).
-- **`dev_verify.py` scope limits (new, deliberate).** Its Electron and mobile
-  branches are unit-tested but have **never run live** — neither component
-  changed this session. Cross-cutting widening covers `jarvis/graph/` and
-  `jarvis/execution/` only; every other module relies on the direct filename
-  match, the loose reference scan, or the full fallback.
 - **`MOBILE-ASSETS-01` — a clean clone cannot build or test the mobile app.**
   `mobile/.gitignore` ignores `assets/fonts/*.ttf` and `flutter analyze` does not
   validate the pubspec `fonts:` section, so **a green `mobile` CI job is not
-  evidence that the app builds anywhere.** See `mobile/assets/ASSETS_SETUP.md`.
-- **`MOBILE-TEST-01` — `mobile/test/widget_test.dart` fails**, unchanged.
-  `_SplashRouterState.initState` (`mobile/lib/app.dart:67`) starts an uncancelled
-  `Future.delayed(Duration(seconds: 2))`. CI does not run `flutter test`.
+  evidence that the app builds anywhere.** It is now also the only thing between
+  `flutter test` and CI (§7). See `mobile/assets/ASSETS_SETUP.md`.
+- **`dev_verify.py` scope limits.** Its **Electron branch has still never run
+  live** (the mobile branch has, §4). Cross-cutting widening covers
+  `jarvis/graph/` and `jarvis/execution/` only; every other module relies on the
+  direct filename match, the loose reference scan, or the full fallback. It
+  deliberately does **not** select `flutter test` during iteration (§2, §7).
 - **Mobile L3 confirmation: still no approve/deny UI.** `classifyChatChunk()`
   shows a neutral "not yet supported" note instead of raw JSON, but nothing
-  resolves the interrupt; the graph stays interrupted server-side.
+  resolves the interrupt; the graph stays interrupted server-side. This is now
+  the largest functional gap on mobile.
 - **Mobile `flutter analyze` runs with the DEFAULT analyzer rule set** — no
   `analysis_options.yaml` anywhere, so `flutter_lints` is never applied.
 - **CI's Flutter version is unpinned** (`subosito/flutter-action@v2`,
@@ -176,8 +182,7 @@ Each keeps its identifier; the detail stays in the linked document.
   deterministic evidence only.
 - **Faz 5 (mail → calendar) has never run against the real mailbox** — green on
   fixtures only; background ingestion stays off until it does.
-- **Electron HUD confirmation is compile/parser-verified only — no live E2E**,
-  and the Flutter app renders nothing for confirmations (above).
+- **Electron HUD confirmation is compile/parser-verified only — no live E2E.**
 - **`python_run` is access-controlled, not sandboxed.**
 - **Proactive turns gate L3 only**; an unwatched L2 write is mitigated by prompt
   instruction, not structurally closed.
@@ -188,24 +193,28 @@ Each keeps its identifier; the detail stays in the linked document.
 
 ## 6. Next engineering priority
 
-**`MOBILE-TEST-01`.** One uncancelled timer (`mobile/lib/app.dart:67`) stands
-between `mobile` having a lint gate and having a lint gate plus a smoke test.
-Decide whether the fix belongs in the test or in `app.dart` — a splash timer that
-outlives its widget is arguably the product bug.
+**Completion-contract Finding 1 (source-substitution repair).** Binding the
+repair's success criterion to the *requested* source, rather than "a chart
+artifact exists somewhere", is the pilot's own recommended next single step and
+is higher-value than further TTFB polish.
 
-**If the completion-contract line is picked back up**, Finding 1
-(source-substitution repair) is higher-value than further TTFB polish: binding the
-repair's success criterion to the *requested* source, not "a chart artifact exists
-somewhere", is the pilot's own recommended next single step.
+On mobile, the next real product gap is the **L3 approve/deny UI** (§5) — the
+phone cannot complete any flow that reaches a confirmation. Wiring `flutter test`
+into CI is *not* an engineering task until `MOBILE-ASSETS-01` is decided (§7).
 
-Do not start either — or any product work — inside a session that is closing.
+Do not start any of this — or any product work — inside a session that is
+closing.
 
 ## 7. Human-required actions
 
 - **Google OAuth re-consent** (Gmail read, Calendar write, Contacts) — blocks the
   Faz 5 live measurement and the Faz 2 entity resolver.
-- **Mobile font binaries** — owner deferred 2026-08-06; `MOBILE-ASSETS-01` stays
-  open until decided.
+- **Mobile font binaries** — owner deferred 2026-08-06. With `MOBILE-TEST-01`
+  closed, this is now the *only* blocker to running `flutter test` in CI, so the
+  decision has a concrete payoff it did not have before.
+- **Should `flutter test` join `dev_verify.py`'s iteration loop?** Left
+  unchanged deliberately (§2): the tool would then assume font assets on every
+  checkout. Owner's call, not the fix's side effect.
 - **Default-branch / `.github/` layout** — `main` carries no `.github/`
   directory. Flagged for the owner to decide, not decided on their behalf.
 
@@ -222,17 +231,17 @@ push, never recorded here.
 - Session identity is machine-authored. Every lifecycle transition goes through
   `scripts/claude_session_state.py` (`prepare`/`close`/`block`/`show`), which
   takes no id argument. If it refuses, report the refusal verbatim and stop.
-- **Marker correction, 2026-08-07 — the previous snapshot was wrong here.** At
-  this session's start `claude_session_state.py show` reported the on-disk marker
-  as `state prepared`, session `f38d315b…`, head `b7abb5be…`: the session that
-  produced `b7abb5b` **did** run `prepare`, then pushed, and never ran `close`.
-  The previous §8 claimed the opposite — that the helper was deliberately never
-  called and the newest marker was still `closed` at `9421b3c`. The disk is
-  authoritative and that claim was false. Nothing was lost by it: the tree was
-  clean and 0 ahead / 0 behind at this session's start, and `b7abb5b`'s CI is
-  green in all three jobs (§4).
+- **This session's preflight warned "previous session did NOT run
+  /session-close (exit: other)" — reconciled before any work started, and it was
+  a false alarm.** `claude_session_state.py show` reported the marker as `state
+  closed`, session `a291ca37…`, head `5576a1d8…`: the session that produced
+  `5576a1d` did close cleanly. The breadcrumb belonged to a *later* session
+  (`763bb06b…`, `reason: other`) that exited on the same HEAD with a clean tree
+  and 0 ahead / 0 behind, so it had nothing to lose. Nothing was recovered
+  because nothing was lost.
 - This session ran `/session-close prepare` under its own identity, which
-  overwrites the single marker file. The `f38d315b` prepared-but-never-closed
-  record therefore survives only in this note.
+  overwrites the single marker file. The `a291ca37` closed record therefore
+  survives only in this note.
 - A next session whose preflight reports the previous session did not close, or
-  whose SessionEnd identity was `UNVERIFIED`, reconciles before starting new work.
+  whose SessionEnd identity was `UNVERIFIED`, reconciles before starting new
+  work — and should check the marker itself before believing the warning.
