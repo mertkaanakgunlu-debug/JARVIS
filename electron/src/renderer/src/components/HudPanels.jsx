@@ -476,12 +476,14 @@ export function BottomBar({
   busy = false, onBusy, onPickFile,
 }) {
   const [value, setValue] = useState('')
+  const [preparing, setPreparing] = useState(false)
   const fileInputRef = useRef(null)
 
   const send = useCallback(async () => {
     const msg = value.trim()
     if (!msg || busy || !apiUrl) return
     setValue('')
+    setPreparing(false)
     onBusy?.(true)
     onMessage?.({ who: 'u', text: msg })
 
@@ -504,8 +506,14 @@ export function BottomBar({
           ...(conversationId ? { conversation_id: conversationId } : {}),
         }),
       })
-      const out = await readChatSse(resp)
-      if (out.error) { onMessage?.({ who: 'j', text: '⚠ ' + out.error }); onBusy?.(false); return }
+      // Completion-contract TTFB: a contracted+enforce turn now sends a
+      // progress frame before the graph finishes. This bar already shows
+      // "busy" for the whole round-trip either way (it renders the answer
+      // once, on return — see out.text below — not incrementally), so the
+      // only thing worth doing with it is naming what's happening instead of
+      // a generic "processing" the whole time.
+      const out = await readChatSse(resp, { onProgress: () => setPreparing(true) })
+      if (out.error) { onMessage?.({ who: 'j', text: '⚠ ' + out.error }); setPreparing(false); onBusy?.(false); return }
       if (out.text) onMessage?.({ who: 'j', text: out.text })
       if (out.asyncTask) onMessage?.({ who: 'j', text: `⏳ Arka plana alındı (task ${out.asyncTask.task_id || '?'})` })
       if (out.confirmation) {
@@ -517,6 +525,7 @@ export function BottomBar({
     } catch {
       onMessage?.({ who: 'j', text: '⚠ Connection error' })
     }
+    setPreparing(false)
     onBusy?.(false)
   }, [value, busy, apiUrl, apiKey, conversationId, onMessage, onConfirmation, onBusy])
 
@@ -548,7 +557,7 @@ export function BottomBar({
         value={value}
         onChange={e => setValue(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-        placeholder={busy ? '// PROCESSING…' : '// ENTER COMMAND  ·  SPACE = VOICE PTT'}
+        placeholder={busy ? (preparing ? '// PREPARING OUTPUT…' : '// PROCESSING…') : '// ENTER COMMAND  ·  SPACE = VOICE PTT'}
         disabled={busy}
         style={{
           flex: 1,

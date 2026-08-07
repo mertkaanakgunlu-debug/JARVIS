@@ -88,6 +88,56 @@ describe('readChatSse', () => {
     expect(seen).toEqual(['a', 'b'])
   })
 
+  // ── completion-contract TTFB: progress + final_answer frames ──────────
+
+  it('parses a progress frame into out.progress and fires onProgress, never into out.text', async () => {
+    const frame = JSON.stringify({ type: 'progress', phase: 'preparing_required_output', kind: 'chart' })
+    const seen = []
+    const out = await readChatSse(
+      fakeResponse(sse([frame, 'İşte grafiğiniz.', '[DONE]'])),
+      { onProgress: (p) => seen.push(p) },
+    )
+    expect(out.progress).toEqual({ phase: 'preparing_required_output', kind: 'chart' })
+    expect(out.text).toBe('İşte grafiğiniz.')
+    expect(seen).toEqual([{ phase: 'preparing_required_output', kind: 'chart' }])
+  })
+
+  it('a progress frame with no kind leaves kind undefined, not a crash', async () => {
+    const frame = JSON.stringify({ type: 'progress', phase: 'resuming_required_output' })
+    const out = await readChatSse(fakeResponse(sse([frame, '[DONE]'])))
+    expect(out.progress.phase).toBe('resuming_required_output')
+    expect(out.progress.kind).toBeUndefined()
+  })
+
+  it('a final_answer frame REPLACES out.text instead of appending to the draft', async () => {
+    // The exact regression this closes: before this fix, final_answer had
+    // no case at all and fell through to the plain-text branch, so the
+    // correction was appended as literal JSON onto the draft it corrects.
+    const frame = JSON.stringify({ type: 'final_answer', text: 'gerçek cevap' })
+    const out = await readChatSse(fakeResponse(sse(['taslak cevap', frame, '[DONE]'])))
+    expect(out.text).toBe('gerçek cevap')
+    expect(out.text).not.toContain('taslak')
+    expect(out.text).not.toContain('final_answer')
+  })
+
+  it('fires onFinal with the authoritative text when a final_answer frame arrives', async () => {
+    const frame = JSON.stringify({ type: 'final_answer', text: 'gerçek cevap' })
+    const seen = []
+    await readChatSse(
+      fakeResponse(sse(['taslak', frame, '[DONE]'])),
+      { onFinal: (t) => seen.push(t) },
+    )
+    expect(seen).toEqual(['gerçek cevap'])
+  })
+
+  it('progress and final_answer do not shadow confirmation_required or async', async () => {
+    const progress = JSON.stringify({ type: 'progress', phase: 'preparing_required_output' })
+    const confirm = JSON.stringify({ type: 'confirmation_required', id: 'c-1', payload: { tools: [] } })
+    const out = await readChatSse(fakeResponse(sse([progress, confirm, '[DONE]'])))
+    expect(out.progress).toEqual({ phase: 'preparing_required_output', kind: undefined })
+    expect(out.confirmation).toEqual({ id: 'c-1', payload: { tools: [] } })
+  })
+
   // ── the two review-found robustness gaps ──────────────────────────────
 
   it('reports a non-2xx JSON error body as out.error instead of a silent empty success', async () => {

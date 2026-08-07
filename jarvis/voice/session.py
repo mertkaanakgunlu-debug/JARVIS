@@ -95,6 +95,42 @@ def parse_final_marker(delta: str) -> str | None:
     return None
 
 
+def parse_progress_marker(delta: str) -> dict | None:
+    """If delta is exactly the __jarvis_progress__ JSON marker chat_stream()/
+    resume_and_stream() yield immediately before a contracted turn's expensive
+    graph execution, return the parsed {"phase", "kind"?} dict; else None.
+
+    Completion-contract TTFB. Emitted at most once per turn, always as a
+    single complete delta (one `yield json.dumps(...)` call, exactly like the
+    confirm/final markers above), so no cross-chunk buffering is needed here.
+    Never carries a source path, filename, tool args or model prose -- see
+    JarvisAgent's own marker-construction site for what it is allowed to hold.
+    """
+    s = delta.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(obj, dict) and obj.get("__jarvis_progress__") and obj.get("phase"):
+        return obj
+    return None
+
+
+def describe_progress(marker: dict, lang: str = "en") -> str:
+    """Natural-language, TTS-safe acknowledgement for a progress marker (as
+    returned by parse_progress_marker) -- never the raw phase/kind string, and
+    never phrased as a completed action: the tool this turn is buffering for
+    may not have run yet (may not even succeed) when this is spoken."""
+    kind = (marker or {}).get("kind")
+    if lang == "tr":
+        if kind == "chart":
+            return "Grafiği hazırlıyorum."
+        return "İstenen çıktıyı hazırlıyorum."
+    return "I'm preparing the requested output."
+
+
 def describe_confirmation(marker: dict, lang: str = "en") -> str:
     """Natural-language, TTS-safe question for a pending confirmation marker
     (as returned by parse_confirm_marker) -- no markdown, spoken aloud."""
@@ -233,6 +269,20 @@ async def resolve_confirmation(
             if marker is not None:
                 confirm_marker = marker
                 return
+            progress = parse_progress_marker(token)
+            if progress is not None:
+                yield describe_progress(progress, lang)
+                continue
+            # Completion-contract TTFB (2026-08-07): a resumed turn can also
+            # be contracted+enforce, and the graph's correction marker was
+            # falling through here unrecognized -- the same class of bug
+            # arm_and_speak_confirmation already closes for __jarvis_confirm__,
+            # just missed here for __jarvis_final__, so raw JSON (tool text
+            # included) was read aloud verbatim. Swallowed, not spoken: a
+            # sentence already spoken cannot be unsaid (see
+            # parse_final_marker's own docstring on this exact tradeoff).
+            if parse_final_marker(token) is not None:
+                continue
             chunks.append(token)
             yield token
 

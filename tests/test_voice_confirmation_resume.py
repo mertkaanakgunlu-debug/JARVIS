@@ -86,6 +86,63 @@ async def test_second_interrupt_is_spoken_as_a_question_not_raw_json():
     assert pending_slot[0].conf_id == "conf-2"
 
 
+def _progress_marker(kind=None, phase="resuming_required_output"):
+    payload = {"__jarvis_progress__": True, "phase": phase}
+    if kind:
+        payload["kind"] = kind
+    return json.dumps(payload)
+
+
+def _final_marker(text):
+    return json.dumps({"__jarvis_final__": True, "text": text})
+
+
+@pytest.mark.asyncio
+async def test_progress_marker_is_spoken_as_the_acknowledgement_not_raw_json():
+    """Completion-contract TTFB: a resumed turn can also be contracted+
+    enforce, so resolve_confirmation must now recognize __jarvis_progress__
+    too -- spoken as a short deterministic phrase, never as literal JSON,
+    and never reported as if it were JARVIS's own answer."""
+    agent = _FakeAgent([[_progress_marker("chart"), "İşte grafiğiniz."]])
+    engine = _FakeEngine()
+    messages: list[str] = []
+
+    await resolve_confirmation(
+        agent, engine, PendingConfirmation("conf-1", {"tools": []}), "yes", "tr",
+        on_message=messages.append,
+        set_pending_confirmation=lambda p: None,
+    )
+
+    assert agent.calls == [("conf-1", "approve")]
+    assert engine.spoken == [["Grafiği hazırlıyorum.", "İşte grafiğiniz."]]
+    assert not any("__jarvis_progress__" in "".join(c) for c in engine.spoken)
+    assert messages == ["İşte grafiğiniz."]
+
+
+@pytest.mark.asyncio
+async def test_final_marker_is_swallowed_not_spoken_on_resume():
+    """Review remediation (completion-contract TTFB, 2026-08-07): resume's
+    own _collecting() had NO __jarvis_final__ handling at all -- a critic/
+    verification correction on a resumed turn fell straight through to TTS
+    as raw JSON, the same class of bug the __jarvis_confirm__ fix above
+    already closed. Swallowed, not spoken: a sentence already spoken cannot
+    be unsaid."""
+    agent = _FakeAgent([["Hangi format?", _final_marker("Grafik hazır.")]])
+    engine = _FakeEngine()
+    messages: list[str] = []
+
+    await resolve_confirmation(
+        agent, engine, PendingConfirmation("conf-1", {"tools": []}), "yes", "en",
+        on_message=messages.append,
+        set_pending_confirmation=lambda p: None,
+    )
+
+    assert engine.spoken == [["Hangi format?"]]
+    assert not any("__jarvis_final__" in "".join(c) for c in engine.spoken)
+    assert not any("Grafik hazır." in "".join(c) for c in engine.spoken)
+    assert messages == ["Hangi format?"]
+
+
 @pytest.mark.asyncio
 async def test_no_second_interrupt_speaks_response_normally():
     agent = _FakeAgent([["Email sent."]])

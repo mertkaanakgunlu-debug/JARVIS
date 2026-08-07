@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -7,12 +6,20 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../theme/jarvis_theme.dart';
 import '../theme/typography.dart';
 import '../widgets/grid_background.dart';
+import '../core/chat_sse.dart';
 import '../models/transcript_turn.dart';
 import '../providers/transcript_provider.dart';
 import '../providers/api_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../core/wake_service.dart';
+
+/// User-facing text for a ChatProgress event -- never sourced from the model,
+/// per jarvis/voice/session.py's describe_progress() (same wording, TR side).
+String _progressNote(ChatProgress event) {
+  if (event.kind == 'chart') return 'Grafik hazırlanıyor…';
+  return 'İstenen çıktı hazırlanıyor…';
+}
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
@@ -156,30 +163,53 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       ref.read(transcriptProvider.notifier).add(const TranscriptTurn(who: 'j', text: ''));
 
+      // Labeled so the terminal cases below can end the WHOLE stream from
+      // inside the switch -- a bare `break` in a Dart switch statement only
+      // exits the switch itself, not an enclosing loop.
+      chunkLoop:
       await for (final chunk in api.chatStream(query, language: settings.language)) {
-        if (chunk == '[DONE]') break;
-        if (chunk.startsWith('[ERROR]')) {
-          ref.read(transcriptProvider.notifier).appendToLast(chunk.substring(7));
-          break;
+        final event = classifyChatChunk(chunk);
+        switch (event) {
+          case ChatDone():
+            break chunkLoop;
+          case ChatError():
+            ref.read(transcriptProvider.notifier).appendToLast(event.message);
+            break chunkLoop;
+          case ChatAsyncTask():
+            ref.read(transcriptProvider.notifier).appendToLast(
+              '🕐 Arka planda çalışıyor — task `${event.taskId ?? '?'}`',
+            );
+            ref.read(tasksProvider.notifier).refresh();
+            break chunkLoop;
+          case ChatConfirmationRequired():
+            // Mobile cannot approve/deny an L3 action yet (pre-existing gap,
+            // out of scope here) -- this only stops the raw marker from
+            // being shown as if it were JARVIS's own reply. The graph stays
+            // interrupted server-side exactly as before this classifier
+            // existed; nothing here resolves it.
+            ref.read(transcriptProvider.notifier).appendToLast(
+              '⚠️ Onay gerekiyor — mobil arayüzde henüz desteklenmiyor.',
+            );
+            break chunkLoop;
+          case ChatProgress():
+            setState(() => _loadingNote = _progressNote(event));
+            break;
+          case ChatFinalAnswer():
+            ref.read(transcriptProvider.notifier).replaceLast(event.text);
+            if (_loadingNote != null) setState(() => _loadingNote = null);
+            // Not re-spoken: any prefix that already streamed was already
+            // read aloud via _speakChunk as it arrived (a buffered turn
+            // instead arrives here as a plain ChatToken, handled below, and
+            // IS spoken -- see agent.chat_stream()'s buffered branch).
+            _scrollToBottom();
+            break;
+          case ChatToken():
+            if (_loadingNote != null) setState(() => _loadingNote = null);
+            ref.read(transcriptProvider.notifier).appendToLast(event.text);
+            _speakChunk(event.text);
+            _scrollToBottom();
+            break;
         }
-        // Async task response
-        if (chunk.startsWith('{"async":')) {
-          try {
-            final j = jsonDecode(chunk) as Map<String, dynamic>;
-            if (j['async'] == true) {
-              final taskId = j['task_id'] as String?;
-              ref.read(transcriptProvider.notifier).appendToLast(
-                '🕐 Arka planda çalışıyor — task `$taskId`',
-              );
-              ref.read(tasksProvider.notifier).refresh();
-              break;
-            }
-          } catch (_) {}
-        }
-        final clean = chunk.replaceAll(r'\n', '\n');
-        ref.read(transcriptProvider.notifier).appendToLast(clean);
-        _speakChunk(clean);
-        _scrollToBottom();
       }
       _flushTts();
     } catch (e) {

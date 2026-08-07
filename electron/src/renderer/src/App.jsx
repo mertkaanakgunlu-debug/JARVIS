@@ -156,7 +156,7 @@ function DropOverlay({ file, query, onQueryChange, onSend, onDismiss }) {
 }
 
 // ── Drop response panel (streaming SSE result) ────────────────────────────────
-function DropResponseOverlay({ text, done, onDismiss }) {
+function DropResponseOverlay({ text, done, preparing, onDismiss }) {
   const endRef = useRef(null)
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [text])
   return (
@@ -174,7 +174,7 @@ function DropResponseOverlay({ text, done, onDismiss }) {
         padding: '8px 14px', borderBottom: '1px solid var(--hud-line-dim)',
       }}>
         <span style={{ fontSize: 9, letterSpacing: '.22em', color: 'var(--hud-cyan)' }}>
-          {done ? '// JARVIS' : '// JARVIS · ANALYZING…'}
+          {done ? '// JARVIS' : preparing ? '// JARVIS · PREPARING OUTPUT…' : '// JARVIS · ANALYZING…'}
         </span>
         {done && (
           <button onClick={onDismiss} style={{
@@ -373,6 +373,11 @@ export default function App() {
       const out = await readChatSse(resp)
       if (out.text) addLocalMessage({ who: 'j', text: out.text })
       if (out.error) addLocalMessage({ who: 'j', text: '⚠ ' + out.error })
+      // out.text above is already the corrected/authoritative answer even
+      // when a progress or final_answer frame arrived mid-stream (readChatSse
+      // resolves that, not this call site) — nothing else to do with either
+      // frame kind here; this path only ever reads the final out.text, never
+      // renders incrementally.
       if (out.confirmation) {
         // A SECOND same-turn interrupt (the exact case the backend's
         // resume_and_stream re-emits the structured frame for) — swap the
@@ -473,7 +478,7 @@ export default function App() {
 
     setDropFile(null)
     setDropQuery('')
-    setDropResponse({ text: '', done: false })
+    setDropResponse({ text: '', done: false, preparing: false })
 
     try {
       const resp = await fetch(`${apiUrl}/chat/upload`, {
@@ -482,9 +487,17 @@ export default function App() {
         body: formData,
       })
       const out = await readChatSse(resp, {
-        onToken: (token) => setDropResponse(r => ({ ...r, text: (r?.text || '') + token })),
+        onToken: (token) => setDropResponse(r => ({ ...r, text: (r?.text || '') + token, preparing: false })),
+        // Completion-contract TTFB: this is the one HUD surface that renders
+        // tokens incrementally (onToken above), so it is also the one where
+        // the pre-fix final_answer bug was reachable live — a correction
+        // arriving after some draft had already streamed appended raw JSON
+        // onto the visible text instead of replacing it. onFinal now REPLACES
+        // rather than appends, matching readChatSse's own out.text contract.
+        onProgress: () => setDropResponse(r => ({ ...r, preparing: true })),
+        onFinal: (text) => setDropResponse(r => ({ ...r, text, preparing: false })),
       })
-      if (out.error) { setDropResponse(r => ({ text: (r?.text || '') + out.error, done: true })); return }
+      if (out.error) { setDropResponse(r => ({ text: (r?.text || '') + out.error, done: true, preparing: false })); return }
       if (out.confirmation) {
         // An uploaded-file query can hit the L3 gate too ("read this and
         // email it"). Same overlay; the continuation flows into the
@@ -602,6 +615,7 @@ export default function App() {
         <DropResponseOverlay
           text={dropResponse.text}
           done={dropResponse.done}
+          preparing={dropResponse.preparing}
           onDismiss={() => setDropResponse(null)}
         />
       )}

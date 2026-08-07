@@ -81,11 +81,23 @@ class ApiClient {
   }
 
   /// Stream SSE from /chat/stream — yields raw data strings.
+  ///
+  /// Completion-contract TTFB: the base client's receiveTimeout (60s, see
+  /// BaseOptions above) is fine for a request/response call, but a
+  /// contracted+enforce turn's graph can legitimately run close to 100s
+  /// before its first real answer token -- measured live, see
+  /// docs/eval/completion_contract_pilot_2026-08-05.md's Finding 3. Without
+  /// this override every such turn was dropped by Dio's own timeout well
+  /// before the server had a chance to answer, progress marker or not.
+  /// Mirrors uploadFileStream()'s existing 5-minute override just below.
   Stream<String> chatStream(String message, {String language = 'tr'}) async* {
     final response = await _dio.post<ResponseBody>(
       '/chat/stream',
       data: {'message': message, 'language': language},
-      options: Options(responseType: ResponseType.stream),
+      options: Options(
+        responseType: ResponseType.stream,
+        receiveTimeout: const Duration(minutes: 5),
+      ),
     );
     final stream = response.data!.stream;
     final buffer = StringBuffer();

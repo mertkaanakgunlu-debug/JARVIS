@@ -54,6 +54,9 @@ class _FakeResumeAgent:
         self._record_turn_trace = types.MethodType(JarvisAgent._record_turn_trace, self)
         self.settings = Settings(_env_file=None, required_outputs_mode=mode)
         self._contract_buffered = types.MethodType(JarvisAgent._contract_buffered, self)
+        self._buffered_required_outputs = types.MethodType(
+            JarvisAgent._buffered_required_outputs, self,
+        )
         values = {"tool_execution_ledger": [], **(channel_values or {})}
         self._checkpointer = SimpleNamespace(
             get_tuple=lambda cfg: SimpleNamespace(checkpoint={"channel_values": values})
@@ -95,7 +98,15 @@ async def _resume(agent):
 @pytest.mark.asyncio
 async def test_a_contracted_turn_emits_the_verified_answer_and_nothing_else(monkeypatch):
     """The draft's tokens never reach the wire; the answer that does is the
-    one the graph finished with, exactly once."""
+    one the graph finished with, exactly once.
+
+    Completion-contract TTFB: a buffered turn now also emits ONE leading
+    progress control frame -- see the dedicated tests below for that
+    behaviour in detail. Asserted here too, narrowly, so this test keeps
+    proving its own original claim (nothing BUT the marker precedes the
+    verified answer) rather than silently going stale against the new
+    behaviour.
+    """
     monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
     agent = _FakeResumeAgent(channel_values={
         "required_outputs": CHART, "response": "İşte grafiğiniz: chart.png",
@@ -103,7 +114,9 @@ async def test_a_contracted_turn_emits_the_verified_answer_and_nothing_else(monk
 
     chunks = await _resume(agent)
 
-    assert chunks == ["İşte grafiğiniz: chart.png"]
+    assert chunks[-1] == "İşte grafiğiniz: chart.png"
+    assert len(chunks) == 2
+    assert json.loads(chunks[0]).get("__jarvis_progress__") is True
     assert not any("Hangi formatta" in c for c in chunks), "the discarded draft leaked"
     assert not any("__jarvis_final__" in c for c in chunks), (
         "there is no earlier draft to correct -- a marker would be a correction "
@@ -170,6 +183,124 @@ async def test_a_confirmation_prompt_is_never_held_back(monkeypatch):
     )
 
 
+# ── completion-contract TTFB: the resume-side progress marker ─────────────
+
+@pytest.mark.asyncio
+async def test_a_contracted_resume_emits_progress_before_the_verified_answer(monkeypatch):
+    """The resumed turn must not go silent a SECOND time -- right after the
+    user answered a confirmation prompt, the first thing back out is a
+    progress control frame, not another long wait."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
+    agent = _FakeResumeAgent(channel_values={
+        "required_outputs": CHART, "response": "İşte grafiğiniz: chart.png",
+    })
+
+    chunks = await _resume(agent)
+
+    assert len(chunks) == 2
+    marker = json.loads(chunks[0])
+    assert marker == {
+        "__jarvis_progress__": True, "phase": "resuming_required_output", "kind": "chart",
+    }
+    assert chunks[1] == "İşte grafiğiniz: chart.png"
+
+
+@pytest.mark.asyncio
+async def test_the_resume_progress_marker_never_joins_history_or_memory(monkeypatch):
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
+    agent = _FakeResumeAgent(channel_values={
+        "required_outputs": CHART, "response": "İşte grafiğiniz: chart.png",
+    })
+
+    await _resume(agent)
+
+    assert ("assistant", "İşte grafiğiniz: chart.png") in agent.stored
+    assert not any("__jarvis_progress__" in text for _role, text in agent.stored)
+    _, saved_history, _ = agent.saved_turns[-1]
+    assert all(
+        "__jarvis_progress__" not in getattr(m, "content", "") for m in saved_history
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_uncontracted_resume_never_emits_progress(monkeypatch):
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
+    agent = _FakeResumeAgent(channel_values={"required_outputs": []})
+
+    chunks = await _resume(agent)
+
+    assert chunks == ["Hangi ", "formatta istersiniz?"]
+    assert not any("__jarvis_progress__" in c for c in chunks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "shadow"])
+async def test_shadow_and_off_never_emit_progress_either(monkeypatch, mode):
+    """Buffering and the progress marker share one gate -- an unbuffered turn
+    must not grow a leading control frame either."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
+    agent = _FakeResumeAgent(mode=mode, channel_values={"required_outputs": CHART})
+
+    chunks = await _resume(agent)
+
+    assert chunks == ["Hangi ", "formatta istersiniz?"]
+    assert not any("__jarvis_progress__" in c for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_checkpoint_also_suppresses_progress(monkeypatch):
+    """Failing open (today's streaming behaviour) must not accidentally still
+    emit a progress marker for a turn _contract_buffered decided was NOT
+    buffered."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
+    agent = _FakeResumeAgent()
+    agent._checkpointer = SimpleNamespace(
+        get_tuple=lambda cfg: (_ for _ in ()).throw(RuntimeError("db locked"))
+    )
+
+    chunks = await _resume(agent)
+
+    assert chunks == ["Hangi ", "formatta istersiniz?"]
+    assert not any("__jarvis_progress__" in c for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_resume_progress_marker_omits_kind_when_the_requirement_has_none(monkeypatch):
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
+    agent = _FakeResumeAgent(channel_values={
+        "required_outputs": [{"operation": "create"}],  # no "kind" field
+        "response": "Tamam.",
+    })
+
+    chunks = await _resume(agent)
+
+    marker = json.loads(chunks[0])
+    assert marker["phase"] == "resuming_required_output"
+    assert "kind" not in marker
+
+
+@pytest.mark.asyncio
+async def test_resume_progress_then_confirmation_no_deadlock(monkeypatch):
+    """Completion-contract TTFB must not create a NEW way to swallow a
+    confirmation: progress goes out first, then the confirmation prompt --
+    never blocked behind it, never omitted, and nothing else in between."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _draft_stream)
+    agent = _FakeResumeAgent(channel_values={
+        "required_outputs": CHART, "response": "unreachable",
+    })
+    agent._graph = SimpleNamespace(aget_state=AsyncMock(
+        return_value=SimpleNamespace(interrupts=(SimpleNamespace(value={"tool": "plot_data"}),))
+    ))
+
+    chunks = await _resume(agent)
+
+    assert len(chunks) == 2
+    progress = json.loads(chunks[0])
+    confirm = json.loads(chunks[1])
+    assert progress.get("__jarvis_progress__") is True
+    assert confirm.get("__jarvis_confirm__") is True
+
+
 # ── the one canonical sanitiser ────────────────────────────────────────────
 
 def test_an_echoed_repair_directive_is_stripped_from_the_answer():
@@ -232,7 +363,7 @@ async def test_the_persisted_answer_is_sanitised_too(monkeypatch):
 
     chunks = await _resume(agent)
 
-    assert chunks == ["Grafik hazır."]
+    assert chunks[-1] == "Grafik hazır."
     assert ("assistant", "Grafik hazır.") in agent.stored
     _, saved_history, _ = agent.saved_turns[-1]
     assert all(

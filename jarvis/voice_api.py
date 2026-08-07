@@ -111,7 +111,10 @@ async def run_one_response(
         (--api mode; see jarvis/api.py's _wire_routers()) -- the standalone
         CLI --voice loop has no such executor and is unaffected.
     """
-    from jarvis.voice.session import parse_confirm_marker, arm_and_speak_confirmation
+    from jarvis.voice.session import (
+        arm_and_speak_confirmation, describe_progress, parse_confirm_marker,
+        parse_final_marker, parse_progress_marker,
+    )
 
     event_bus.message("u", text)
     _set_response(state, "thinking")
@@ -147,6 +150,23 @@ async def run_one_response(
             marker = parse_confirm_marker(token)
             if marker is not None:
                 confirm_marker = marker
+                return
+            # Completion-contract TTFB: a short, deterministic acknowledgement
+            # instead of the silence a contracted+enforce turn used to leave
+            # until the whole graph finished. Spoken but kept OUT of
+            # response_chunks, same reasoning as cli.py's _run_voice_response.
+            progress = parse_progress_marker(token)
+            if progress is not None:
+                yield describe_progress(progress, lang)
+                continue
+            # Review remediation (completion-contract TTFB, 2026-08-07): this
+            # loop had no __jarvis_final__ handling at all -- a critic
+            # revision or verification-repair correction on an uncontracted
+            # turn fell straight through to response_chunks/TTS as raw JSON.
+            # Swallowed, not spoken, mirroring cli.py's _run_voice_response:
+            # TTS has already said the superseded sentences and there is no
+            # un-saying them.
+            if parse_final_marker(token) is not None:
                 return
             response_chunks.append(token)
             yield token

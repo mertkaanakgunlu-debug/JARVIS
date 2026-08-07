@@ -25,6 +25,22 @@ class TranscriptNotifier extends StateNotifier<List<TranscriptTurn>> {
     ];
   }
 
+  /// REPLACES the last JARVIS turn's text instead of appending to it.
+  ///
+  /// Completion-contract TTFB: the server can send a `final_answer` frame
+  /// that supersedes whatever draft already streamed (a critic revision or
+  /// verification repair) -- appendToLast would glue the correction onto the
+  /// end of the text it corrects, producing a duplicated/garbled message.
+  void replaceLast(String text) {
+    if (state.isEmpty) return;
+    final last = state.last;
+    if (last.who != 'j') return;
+    state = [
+      ...state.sublist(0, state.length - 1),
+      TranscriptTurn(who: 'j', text: text),
+    ];
+  }
+
   void clear() => state = [];
 }
 

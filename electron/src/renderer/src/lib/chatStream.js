@@ -5,6 +5,8 @@
  * Server frame vocabulary (jarvis/api.py's _sse_frames):
  *   data: <token>                                   plain text, \n escaped as \\n
  *   data: {"type":"confirmation_required",id,payload}   structured approval prompt
+ *   data: {"type":"progress",phase,kind?}            contracted turn is buffering
+ *   data: {"type":"final_answer",text}               authoritative replacement for a draft
  *   data: {"async":true,"task_id":...}              query diverted to a background task
  *   data: [ERROR] <message>
  *   data: [DONE]
@@ -16,11 +18,21 @@
  * "_sse_frames is shared by every endpoint so the next omission is
  * structurally impossible" remediation, client-side.
  *
- * Returns { text, confirmation, asyncTask, error } — exactly one of
+ * Returns { text, confirmation, asyncTask, error, progress } — exactly one of
  * confirmation/asyncTask/error may be set; text is whatever streamed before
  * the stream ended (may be non-empty alongside a confirmation: the model can
- * talk before hitting the gate). onToken (optional) fires per token for
- * incremental rendering.
+ * talk before hitting the gate). onToken/onProgress/onFinal (all optional)
+ * fire live as each kind of frame arrives, for incremental rendering.
+ *
+ * Completion-contract TTFB (2026-08-07): `final_answer` had NO case here at
+ * all -- a critic revision or verification-repair correction (Paket A,
+ * unrelated to buffering; can fire on any turn) fell through to the plain-text
+ * branch below and was appended to `out.text` as literal JSON, duplicating
+ * whatever draft had already streamed. It now REPLACES out.text (the graph's
+ * terminal answer supersedes the draft, it does not follow it) and fires
+ * onFinal so a caller that was rendering tokens incrementally (App.jsx's
+ * sendDroppedFile) can replace its own accumulated text the same way instead
+ * of gluing the correction onto the end of what it already showed.
  *
  * Two robustness gaps closed here (external review, 2026-07-23), both of
  * which previously made a real failure look like a silent, empty success:
@@ -35,8 +47,8 @@
  *     frame with \n\n in normal operation, so this only bit on the abnormal
  *     paths above -- exactly when the caller most needs to see what arrived.
  */
-export async function readChatSse(resp, { onToken } = {}) {
-  const out = { text: '', confirmation: null, asyncTask: null, error: null }
+export async function readChatSse(resp, { onToken, onProgress, onFinal } = {}) {
+  const out = { text: '', confirmation: null, asyncTask: null, error: null, progress: null }
   if (!resp || !resp.ok) {
     out.error = await _describeErrorResponse(resp)
     return out
@@ -60,6 +72,17 @@ export async function readChatSse(resp, { onToken } = {}) {
         return false // [DONE] still follows; keep reading
       }
       if (obj && obj.async) { out.asyncTask = obj; return false }
+      if (obj && obj.type === 'progress') {
+        out.progress = { phase: obj.phase, kind: obj.kind }
+        onProgress?.(out.progress)
+        return false
+      }
+      if (obj && obj.type === 'final_answer') {
+        const text = typeof obj.text === 'string' ? obj.text : ''
+        out.text = text // REPLACES, never appends -- see module docstring
+        onFinal?.(text)
+        return false
+      }
     }
     const token = data.replace(/\\n/g, '\n')
     out.text += token

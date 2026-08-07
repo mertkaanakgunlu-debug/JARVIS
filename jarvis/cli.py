@@ -362,8 +362,18 @@ async def _handle_confirmation_cli(agent: JarvisAgent, conf_id: str, payload: di
     reply instead of a new approval prompt, leaving the graph interrupted
     with no path left to resume it. Loops instead of returning: each
     iteration prompts once and resumes once; if the resume yields a fresh
-    marker, the loop continues with that marker's conf_id/payload."""
-    from jarvis.voice.session import parse_confirm_marker
+    marker, the loop continues with that marker's conf_id/payload.
+
+    Completion-contract TTFB (2026-08-07): a resumed turn can also be
+    contracted+enforce, so this loop can now also see a __jarvis_progress__
+    marker (silently skipped -- the "Thinking…" status spinner already covers
+    it, and text mode has no separate progress surface to update) and a
+    __jarvis_final__ correction marker, which was previously unhandled here
+    and printed as raw JSON. Unlike voice, text output CAN redraw, so the
+    fix is to REPLACE the accumulated chunks with the authoritative text --
+    mirrors parse_final_marker's own docstring on why voice swallows the
+    same marker instead."""
+    from jarvis.voice.session import parse_confirm_marker, parse_final_marker, parse_progress_marker
 
     while True:
         tools = payload.get("tools", [])
@@ -394,6 +404,12 @@ async def _handle_confirmation_cli(agent: JarvisAgent, conf_id: str, payload: di
                 if marker is not None:
                     next_marker = marker
                     break
+                if parse_progress_marker(token) is not None:
+                    continue
+                final_text = parse_final_marker(token)
+                if final_text is not None:
+                    chunks = [final_text]
+                    continue
                 chunks.append(token)
         if chunks:
             _print_jarvis("".join(chunks), agent.current_model_label)
@@ -1091,7 +1107,8 @@ async def _run_voice_response(
     around its own speak_stream() call.
     """
     from jarvis.voice.session import (
-        arm_and_speak_confirmation, parse_confirm_marker, parse_final_marker,
+        arm_and_speak_confirmation, describe_progress, parse_confirm_marker,
+        parse_final_marker, parse_progress_marker,
     )
 
     response_chunks: list[str] = []
@@ -1106,6 +1123,16 @@ async def _run_voice_response(
                 if marker is not None:
                     confirm_marker = marker
                     return
+                # Completion-contract TTFB: a short, deterministic
+                # acknowledgement instead of the silence a contracted+enforce
+                # turn used to leave until the whole graph finished. Spoken
+                # (yielded into the same TTS stream) but kept OUT of
+                # response_chunks -- it must not be printed as if it were
+                # part of JARVIS's answer, nor mistaken for one later.
+                progress = parse_progress_marker(delta)
+                if progress is not None:
+                    yield describe_progress(progress, lang)
+                    continue
                 # Paket A: the terminal-answer correction. Swallowed here
                 # rather than spoken: TTS has already said the superseded
                 # sentences and there is no un-saying them, so reading the

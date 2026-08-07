@@ -34,6 +34,17 @@ def _marker(conf_id: str, tool: str) -> str:
     })
 
 
+def _progress_marker(kind=None) -> str:
+    payload = {"__jarvis_progress__": True, "phase": "resuming_required_output"}
+    if kind:
+        payload["kind"] = kind
+    return json.dumps(payload)
+
+
+def _final_marker(text: str) -> str:
+    return json.dumps({"__jarvis_final__": True, "text": text})
+
+
 @pytest.mark.asyncio
 async def test_second_interrupt_reprompts_instead_of_printing_raw_marker(monkeypatch):
     agent = _FakeAgent([
@@ -68,6 +79,47 @@ async def test_single_interrupt_still_prints_response_normally(monkeypatch):
 
     assert agent.calls == [("conf-1", "approve")]
     assert printed == ["Sent."]
+
+
+@pytest.mark.asyncio
+async def test_progress_marker_is_skipped_not_printed(monkeypatch):
+    """Completion-contract TTFB: a resumed turn can also be contracted+
+    enforce. Text mode has no separate progress surface (the "Thinking…"
+    spinner already covers the wait), so the marker is just skipped -- never
+    printed as literal JSON."""
+    agent = _FakeAgent([[_progress_marker("chart"), "Grafik hazır efendim."]])
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: "y")
+    printed: list[str] = []
+    monkeypatch.setattr(cli, "_print_jarvis", lambda text, label: printed.append(text))
+
+    await cli._handle_confirmation_cli(
+        agent, "conf-1", {"tools": [{"name": "plot_data", "description": "chart"}]}
+    )
+
+    assert printed == ["Grafik hazır efendim."]
+    assert not any("__jarvis_progress__" in p for p in printed)
+
+
+@pytest.mark.asyncio
+async def test_final_marker_replaces_the_draft_instead_of_printing_raw_json(monkeypatch):
+    """Review remediation (completion-contract TTFB, 2026-08-07): this loop
+    had NO __jarvis_final__ handling at all -- a critic/verification
+    correction on a resumed turn fell straight through and printed as
+    literal JSON. Unlike voice, text output CAN redraw, so the fix REPLACES
+    the accumulated draft with the authoritative text instead of swallowing
+    it."""
+    agent = _FakeAgent([["Hangi format?", _final_marker("Grafik hazır efendim.")]])
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *a, **k: "y")
+    printed: list[str] = []
+    monkeypatch.setattr(cli, "_print_jarvis", lambda text, label: printed.append(text))
+
+    await cli._handle_confirmation_cli(
+        agent, "conf-1", {"tools": [{"name": "plot_data", "description": "chart"}]}
+    )
+
+    assert printed == ["Grafik hazır efendim."]
+    assert not any("__jarvis_final__" in p for p in printed)
+    assert not any("Hangi format?" in p for p in printed), "the superseded draft must not survive"
 
 
 @pytest.mark.asyncio

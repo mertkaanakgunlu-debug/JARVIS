@@ -566,6 +566,27 @@ def finalize_terminal_response(response: str) -> str:
     return strip_completion_contract_marker(strip_internal_markers(response))
 
 
+def _progress_marker_json(phase: str, required_outputs: list[dict] | None) -> str:
+    """The __jarvis_progress__ control frame chat_stream()/resume_and_stream()
+    yield exactly once, immediately before a contracted+enforce turn's
+    buffered graph execution -- completion-contract TTFB.
+
+    Kept as one small shared function (unlike the inline json.dumps() at each
+    __jarvis_confirm__/__jarvis_final__ call site) because it is the ONLY
+    marker built from two call sites that must derive the same `kind` the
+    same way; duplicating that derivation would risk the two silently
+    drifting apart. Never carries a source path, filename, tool args,
+    credential or model prose -- only a phase name and, when known, the
+    output kind already resolved by jarvis.nlu.output_intent.
+    """
+    marker: dict[str, Any] = {"__jarvis_progress__": True, "phase": phase}
+    if required_outputs:
+        kind = required_outputs[0].get("kind")
+        if kind:
+            marker["kind"] = kind
+    return json.dumps(marker, ensure_ascii=False)
+
+
 def _compact_completed_turn_for_history(
     original_user_message: HumanMessage,
     final_assistant_response: str,
@@ -1065,6 +1086,22 @@ class JarvisAgent:
         except Exception:  # noqa: BLE001 -- see the docstring
             logger.debug("could not read required_outputs for buffering", exc_info=True)
             return False
+
+    def _buffered_required_outputs(self, config: dict) -> list[dict]:
+        """The `required_outputs` list behind _contract_buffered()'s True, or
+        [] -- read separately (not folded into that method's bool return) so
+        its existing narrow contract, and the tests pinned to it, don't
+        change. Only called by resume_and_stream() when already buffered, to
+        label its own progress marker with the same `kind` chat_stream()
+        derives from the state dict it still has in hand. Never raises: a
+        checkpoint read failing here must not be worse than the marker simply
+        carrying no `kind`."""
+        try:
+            tuple_ = self._checkpointer.get_tuple(config)
+            values = tuple_.checkpoint["channel_values"] if tuple_ else {}
+            return list(values.get("required_outputs") or [])
+        except Exception:  # noqa: BLE001 -- see the docstring
+            return []
 
     @property
     def _env_block(self) -> str:
@@ -2139,6 +2176,21 @@ class JarvisAgent:
             )
 
             try:
+                if buffered:
+                    # Completion-contract TTFB: the ONE thing this turn may
+                    # put on the wire before the graph finishes -- a control
+                    # frame, not an answer. Yielded from inside this same
+                    # try/except so a cancellation landing exactly here is
+                    # covered by the identical (asyncio.CancelledError,
+                    # GeneratorExit) handler below, not a new, uncovered
+                    # suspension point. Never joins `chunks`: it must not
+                    # reach streamed_response, history, memory or the
+                    # output-contract classifier, all of which are built from
+                    # chunks/full_response, never from this generator's raw
+                    # yields.
+                    yield _progress_marker_json(
+                        "preparing_required_output", state.get("required_outputs"),
+                    )
                 async for delta in graph_stream_to_text(self._graph, state, config):
                     if _first_chunk and not buffered:
                         event_bus.state("speaking")
@@ -2406,6 +2458,18 @@ class JarvisAgent:
             # draft+revision concatenation bug (both untagged by pass boundary),
             # now fixed once, in one place.
             try:
+                if buffered:
+                    # Completion-contract TTFB: a confirmed action can resume
+                    # into another long buffered stretch (the tool call
+                    # itself, then compose/critic/verify) -- without this the
+                    # user goes silent a SECOND time in the same turn, right
+                    # after having just answered a confirmation prompt. Same
+                    # try/except placement as chat_stream(), for the same
+                    # cancellation-safety reason; never joins `chunks`.
+                    yield _progress_marker_json(
+                        "resuming_required_output",
+                        self._buffered_required_outputs(config),
+                    )
                 async for text in graph_stream_to_text(
                     self._graph, Command(resume=decision), config
                 ):
