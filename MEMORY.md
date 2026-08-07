@@ -886,3 +886,26 @@ grafik olarak") rather than asking for a modification afterwards.
   (`git config core.excludesFile <nonexistent path>`) so fixture behaviour comes from the fixture
   alone. Same class as the `isolated_cwd` lesson: pin the environment or it will quietly decide
   your result.
+- **`json.loads` succeeding does not mean the record is trustworthy — and fixing that once at the
+  parse boundary does not fix it.** Found the hard way, twice in the same file, across GPT-lead
+  review rounds on 2026-08-07: `scripts/claude_session_state.py`'s `prepare` reads
+  `close-marker.json` before overwriting it, and `_read_json()` collapsed "no such file", "will not
+  parse", AND "valid JSON but not the shape a marker has" into the identical `None` — so a
+  `blocked` marker truncated mid-write (still containing `"state": "blocked"` in the surviving
+  bytes) was silently overwritten with `prepared`, exit 0. Round 2 fixed the parse/type boundary
+  (unparsable or non-dict JSON → refuse); that shipped, reviewed, and was STILL wrong, because
+  round 3 found the deeper case: `{}` and `{"state": "blocked"}` (missing `session_id`) are both
+  perfectly valid **dict** JSON, so they sailed straight through the round-2 fix — an empty object
+  has no `state`, so the identity guard read it as "not blocked", and an incomplete `blocked` entry
+  with no `session_id` read as "blocked, but not THIS session's", which is *exactly* the shape of a
+  legitimately inherited marker from a different session. Both were overwritten on that same false
+  premise. The actual fix needed the FULL structural contract checked, not just parseability:
+  schema version, a recognised `state`, a usable `session_id`, a full-length `head` SHA, a
+  non-empty `branch`, and the fields that state's own write path populates (`_marker_structural_defect`
+  in that file). **The lesson generalizes: when a guard reads untrusted state before an
+  overwrite/destructive action, "does it parse" is not "is it real" — enumerate the full shape the
+  writer actually produces, or a narrower malformed input than the one you just fixed will find the
+  next gap.** Same family as [[feedback_make_the_check_falsifiable]]'s "does wrong input pass this
+  by construction" question, but the pointed addendum from this round: ask it again after each fix,
+  not just once, because a partial fix creates a NEW, narrower blind spot rather than closing the
+  class of bug.

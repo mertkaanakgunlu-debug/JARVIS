@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 4806509f6bf11f0c2aafca3ba307994891285894
+covered_through_sha: a6cb10efb4cb91b61c6215214c0212abb5ab9f3e
 ---
 
 # HANDOFF — current state
@@ -19,85 +19,127 @@ commit this snapshot describes — never this file's own closing commit.
 
 - Branch: **`langgraph-migration`** (the active branch; `main` is a strict
   ancestor and behind).
-- The branch tip at the start of this session was **`6bdd846`**
-  (`docs: refresh handoff after lifecycle acceptance`), pushed, and read per job
-  as CI run **`31064218844`**: `python` success, `electron` success, `mobile`
-  **failure** — the `CI-MOBILE-01` signature.
-- This session added two work commits (§2). Both are pushed, and CI run
-  **`31068220833`** was read per job on their tip `4806509`: `python` success,
-  `electron` success, **`mobile` success** — the first run in which `mobile`
-  genuinely passed rather than being hidden by `continue-on-error`.
-- On top of those sits this closing HANDOFF commit. **Its push state and CI
-  outcome are not asserted here** — both change after this file is written.
-  Derive them:
+- The branch tip at the start of this session was **`08b15e0`**
+  (`docs: refresh handoff after clearing CI-MOBILE-01`), already pushed. The
+  **previous** session pushed it, then blocked: CI run **`31117623901`** never
+  reached a verdict — `python` was cancelled mid-run (`Test (pytest)` logged
+  `2704 passed, 5 deselected` then `KeyboardInterrupt` / `##[error]The
+  operation was canceled.`) and `electron` died in `Set up job`
+  (`Failed to resolve action download info. Error: Service Unavailable`) — a
+  GitHub Actions provider outage, not a code failure. That session recorded
+  `.claude/session-recovery/close-marker.json` as `state: blocked, reason_code:
+  CI_INFRA_UNAVAILABLE, run_id: 31117623901, blocking_jobs: [python, electron]`
+  under its own session id and stopped, per protocol.
+- This session added one work commit (§2), `a6cb10e`, on top of `08b15e0`. It
+  is **NOT pushed** — derive live, never trust a stored number:
 
 ```bash
 git rev-list --left-right --count origin/langgraph-migration...HEAD
 gh run list --branch langgraph-migration     # then: gh run view <id> --json jobs
 ```
 
+- **The inherited `blocked` marker from `08b15e0` is untouched by this
+  session and was never relabelled `closed`.** It is history now, not a
+  verdict on this session's own work — see §8. This session's own commit has
+  no CI evidence yet, because nothing from this session has been pushed.
+- On top of `a6cb10e` sits this closing HANDOFF commit. **Its push state and CI
+  outcome are not asserted here** — both change after this file is written.
+  Derive them with the same two commands above, against `HEAD` at the time of
+  asking.
 - Never quote how far `main` is behind. Derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
 
 ## 2. Last completed work
 
-**`CI-MOBILE-01` cleared at the source.** The `mobile` job had been red since
-long before any current work — 71 `flutter analyze` findings behind
-`continue-on-error: true`, so the workflow headline stayed green while the job
-stayed red. Nothing was suppressed to close it: no `analysis_options.yaml`, no
-`ignore_for_file`, no `ignore:` comment added, and `.github/workflows/ci.yml`
-untouched.
+**CI/session-lifecycle recovery hardened — three GPT-lead review rounds,
+2026-08-07, one commit (`a6cb10e`, `fix(session): harden CI recovery
+lifecycle`).** Follow-on to the `CI_INFRA_UNAVAILABLE` block the previous
+session recorded on `08b15e0`: that block is a real, permanent capability gap
+(a pushed tip can lose its only CI verdict to a provider outage, with no way to
+re-judge the exact same tip), and this session closed the gap in the recovery
+*protocol* without touching CI infrastructure, `main`, or any product code.
 
-1. **`fix(mobile): clear the analyzer debt at the source`** (`383cd67`).
-   69 × `deprecated_member_use`, each replacement checked against the
-   SDK/package source: 65 × `withOpacity(x)` → `withValues(alpha: x)` (the
-   deprecated method is literally `withAlpha((255.0 * opacity).round())`);
-   1 × `Matrix4.scale(x, y, 1.0)` → `scaleByDouble(x, y, 1.0, 1.0)` (the fourth
-   argument is the homogeneous `w` factor, and vector_math's own deprecated
-   `scale` forwards `1.0` there); 1 × `Switch.activeColor` → `activeThumbColor`
-   (`switch.dart:623,640` resolves `activeThumbColor ?? activeColor`, and the
-   `Slider` in the same file keeps its own **non-deprecated** `activeColor`);
-   2 × `listen(partialResults:)` → `listenOptions: SpeechListenOptions(...)`,
-   compared field by field against the implicitly-built options object.
+**Round 1 — the recovery mechanism and the reason-code vocabulary.**
 
-   Plus 2 × `asset_directory_does_not_exist`: the `pubspec.yaml` `assets:` block
-   was dead in every direction and was removed. Nothing in `lib/` touches
-   `rootBundle`/`DefaultAssetBundle`/`AssetManifest`; the `.ttf` files reach the
-   app through the `fonts:` section instead; and the wake-word model is read by
-   `WakeWordService.kt` via `assets.open("wake/…")`, the **Android** AssetManager
-   root, which a Flutter declaration can never populate (Flutter packages under
-   `flutter_assets/**`, `FlutterTaskHelper.kt:18`). That declaration never worked.
+- The prior session's own working tree had added a `workflow_dispatch` trigger
+  to `.github/workflows/ci.yml` as a manual re-run mechanism. Verified against
+  the live repository and **removed**: GitHub resolves `workflow_dispatch` from
+  the repository's **default branch**, which is `main`
+  (`gh repo view --json defaultBranchRef` → `main`), and `main` carries **no**
+  `.github/` directory at all (`git ls-tree -r --name-only origin/main --
+  .github` → empty). A trigger that only exists on `langgraph-migration` is
+  unreachable — worse than no mechanism, because it reads as a recovery path
+  while being a dead end. `.github/workflows/ci.yml` is now byte-identical to
+  its state before that session's edit.
+- `scripts/claude_session_state.py`'s `block --reason-code` used to be a shape
+  check (`^[A-Z][A-Z0-9_]{0,63}$`) while its own comment claimed a fixed
+  vocabulary — the two disagreed, so any UPPER_SNAKE string was accepted.
+  `KNOWN_REASON_CODES` is now a real closed set, enforced on write only:
+  `CI_BLOCKING_FAILURE` (a blocking job actually failed — fix the code) and
+  `CI_INFRA_UNAVAILABLE` (the provider never reached a verdict — nothing about
+  the tree is known, in either direction; terminal for the session that hits
+  it). Reading stays open — a marker written before the vocabulary closed, or
+  naming a future code, still renders.
+- The SessionStart preflight used to render both reason codes identically
+  (verified false against the pre-fix code: two markers differing only in
+  `reason_code` produced byte-identical context blocks). It now leads with the
+  code and a code-specific instruction — `CI_BLOCKING_FAILURE` says fix it
+  before closing anything on top; `CI_INFRA_UNAVAILABLE` says the tip is
+  unproven rather than failing, and does not by itself block this session's own
+  work.
+- `scripts/claude_session_state.py prepare` used to allow `blocked → prepared →
+  closed` for the **same** session that earned the block — one extra step past
+  the already-forbidden `blocked → closed`, reaching the identical place.
+  Measured against the pre-fix helper: `prepare` returned 0 and walked a
+  `blocked` marker back to `prepared` with no new CI evidence of any kind.
+  `prepare` now refuses outright when the CURRENT session already holds its own
+  `blocked` marker, scoped by identity so a **later** session inheriting the
+  same marker can still `prepare` — that inherited route is the only honest way
+  out of a block.
+- `.claude/skills/session-close/SKILL.md` rewritten: `CI_INFRA_UNAVAILABLE` is
+  now documented as **terminal** for the session (one rerun, then blocked, then
+  stop — no empty commit, no repeated rerun, no `workflow_dispatch`, no
+  touching `main`), and the old "known cosmetic mobile signature" wave-through
+  language (already retired the prior session) does not return.
 
-2. **`docs: record CI-MOBILE-01 as cleared, and retire its wave-through clause`**
-   (`4806509`). `.claude/rules/mobile.md` inverted: the job is expected clean, so
-   a failure is now a real regression. `.claude/skills/session-close/SKILL.md`
-   lost the clause that let a `mobile` failure be reported non-blocking when it
-   matched the CI-MOBILE-01 signature — an exemption with no referent is how a
-   real failure gets waved through. `mobile/assets/ASSETS_SETUP.md` had two
-   instructions that do not work (wake model in the wrong directory; "copy
-   Orbitron-Regular over Orbitron-Black", which would have collapsed weight 800
-   to Regular — the two files are distinct static instances, `Orbitron` vs
-   `Orbitron ExtraBold`).
+**Round 2 — an existing-but-unreadable marker must fail closed.** `prepare`'s
+new identity guard read `_read_json(marker)` and treated `None` — which
+`_read_json` returns for both "no file" and "file exists but will not parse" —
+as "nothing to lose." Measured against the pre-fix worktree: six corruption
+shapes (truncated JSON, non-JSON text, an empty file, a JSON list/string/null)
+all returned `prepare` exit 0 and **silently overwrote** the marker, including
+a truncated one whose surviving bytes still read `"state": "blocked"`. Fixed
+with `_read_marker_or_refuse`, which keeps "absent" apart from "exists but
+cannot be trusted" and raises rather than returns for the latter — `prepare`
+never repairs, renames, regenerates, or guesses at a marker it cannot read; it
+stops and reports. `close`/`block` route through the same reader now too, so
+their error message stopped claiming `no close marker exists` for a file that
+plainly exists.
 
-`dart format` was deliberately **not** run: this repo is not dart-format
-formatted (4 of 5 untouched sample files would change), and formatting the 15
-touched files would have rewritten 1482 lines around a 64-line change.
+**Round 3 — parseable JSON is not automatically a genuine marker.** Round 2's
+fix checked parse success and dict-type, which `{}` and an incomplete
+`{"state": "blocked"}` (missing `session_id`) both pass — and passing let them
+straight through: an empty object has no `state`, so the identity guard read
+"not blocked"; an incomplete `blocked` entry with no `session_id` read as
+"blocked, but not this session's," which is exactly the shape of a legitimate
+inherited marker. Measured against the pre-round-3 worktree: five such objects
+all returned `prepare` exit 0 and got overwritten. `_marker_structural_defect`
+now checks the full shape each write path actually produces — schema version,
+a recognised state, a usable `session_id`, a full 40-character `head` SHA, a
+non-empty `branch`, and that state's own required fields (`reason_code`'s
+*presence*, never revalidated against the vocabulary, so historical codes stay
+readable) — before a marker is trusted enough to overwrite.
 
-**Session Lifecycle acceptance fixes** (earlier, `dd41678` / `d606987` /
-`1e1116e`): session identity is machine-authored and travels one way only from
-the SessionStart payload; HANDOFF freshness is declared in frontmatter and
-*counted* rather than inferred from the first hex token in the prose; the
-mail→calendar fixture clock is frozen at `2026-08-04 12:00` Europe/Istanbul.
-
-**Completion Contract Source Binding** (earlier, `a02d4be`): a source-bound
-requirement must trace its artifact back to the source the user named, through
-both the producing tool call's arguments and the working-set object's spec.
-Non-repairable verdict `OUTPUT_SOURCE_MISMATCH`; shared identity in
-`jarvis/execution/source_identity.py`.
+All three rounds: no product code touched (`jarvis/` untouched), no new
+dependency, `.github/workflows/ci.yml` unchanged from `08b15e0`. Falsifiability
+was measured directly against the pre-fix code for every round, not asserted —
+see `a6cb10e`'s test additions (167 new/changed cases across the three rounds
+in `tests/test_claude_session_hooks.py`, lifecycle file: **122 → 179**).
 
 ## 3. Operational modes and rollout decisions
 
-Defaults re-read from `jarvis/config.py` on 2026-08-06 (verify there, not here):
+Defaults re-read from `jarvis/config.py` on 2026-08-07 (verify there, not
+here) — **unchanged this session**:
 
 | setting | default | note |
 |---|---|---|
@@ -111,58 +153,44 @@ Defaults re-read from `jarvis/config.py` on 2026-08-06 (verify there, not here):
 
 The completion-contract gate is **pre-registered and still unpassed**: the
 `object_created` delta clause and the absolute 60 s first-visible latency clause
-both failed. Nothing in this session re-ran or re-opened it. Do not change a
-pre-registered threshold, corpus or metric after seeing a result.
+both failed. Nothing in this session touched it. Do not change a pre-registered
+threshold, corpus or metric after seeing a result.
 
 **Mobile font binaries stay out of the repository** (owner decision,
-2026-08-06). `mobile/.gitignore` keeps ignoring `assets/fonts/*.ttf`; the
-consequence is recorded as an open issue in §5 rather than hidden.
+2026-08-06, untouched this session). `mobile/.gitignore` keeps ignoring
+`assets/fonts/*.ttf`; the consequence is recorded as an open issue in §5.
 
 ## 4. Tests and CI
 
-Run on **2026-08-06**, on the tree of `4806509` (the last work commit):
+Run on **2026-08-07**, on the tree of `a6cb10e` (the last work commit,
+committed but not pushed):
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests
 #   -> All checks passed!
 .venv\Scripts\python.exe -m pytest -q
-#   -> 3269 passed, 5 deselected (474.76s)
+#   -> 3326 passed, 5 deselected, 362 warnings (560.64s)
 git diff --check
 #   -> clean
 ```
 
-The full-suite figure is the **first** run on this tree: no failures, so nothing
-was rerun and nothing is being reported behind a rerun.
+The full-suite figure is the **first** run on this exact tree: no failures, so
+nothing was rerun and nothing is being reported behind a rerun. The lifecycle
+file specifically (`tests/test_claude_session_hooks.py`) accounts for **179**
+of those, run standalone as well: `179 passed in 275.69s`.
 
-Flutter, same date, same tree — the analyzer result is reported for **two**
-layouts because they genuinely differ:
+**No CI run exists yet for `a6cb10e`** — it has not been pushed, so `push`
+never fired for it. This is stated as an honest gap, not an unrun check
+reported as passed:
 
-```powershell
-flutter analyze          # local tree, Flutter 3.44.6
-#   -> No issues found! (29.9s)
-flutter analyze          # copy of exactly `git ls-files mobile` (76 files)
-#   -> No issues found! (16.1s), exit code 0
-flutter test
-#   -> FAILS: "A Timer is still pending ..." -- pre-existing, see §5
-flutter build apk --debug
-#   -> COULD NOT RUN: "No Android SDK found" (flutter doctor: [X] Android toolchain)
+```bash
+gh run list --branch langgraph-migration
+#   -> newest run is still 31117623901, against 08b15e0
 ```
 
-The tracked-files-only copy exists because the local baseline is **not** CI's:
-`flutter analyze` reported 69 findings here and 71 in CI, the two extra being
-`asset_directory_does_not_exist` for directories that exist on this machine but
-are not carried by git.
-
-CI for `4806509`, read per job — run **`31068220833`**:
-
-| job | id | conclusion |
-|---|---|---|
-| `python` | 92510446960 | success |
-| `electron` | 92510446997 | success |
-| `mobile` | 92510446998 | **success** — `No issues found! (ran in 9.6s)`, Flutter `stable-3.44.8` |
-
-**CI for this closing commit is deliberately not predicted here.** Read it live
-per job — a green workflow headline hides failing `continue-on-error` jobs:
+The last CI evidence that exists is still the previous session's, for
+`08b15e0`, run `31117623901` — **incomplete**, see §1 and §8 for its exact
+per-job signature. Read this closing commit's own CI live, once it is pushed:
 
 ```bash
 gh run list --branch langgraph-migration
@@ -196,14 +224,33 @@ gh run view <id> --json jobs
   `channel: stable`, no version). A new stable release can reintroduce
   deprecations and redden `mobile` with no code change — the same drift that
   broke the `python` job when ruff was unpinned. `ci.yml` was deliberately left
-  untouched; pinning is an open option, not a decision.
+  untouched (again, this session); pinning is an open option, not a decision.
 - **`CI-FLAKE-CHROMA-01` — transient suspected, root cause unproven.** Runs have
   shown first-run failures with `chromadb ... no such table: acquire_write`
   across files a commit never touched; `chromadb>=0.6` is unpinned in
   `requirements.txt` (1.5.9 installed locally). Rerun a failed job **once** only
   when the failure is not explainable by the diff, never claim the rerun proved
   a root cause, and never classify a failure as this flake without reading its
-  actual signature.
+  actual signature. Distinct from `CI_INFRA_UNAVAILABLE` (§8): this is a
+  suspected code/dependency-timing issue with a specific log signature, the
+  other is the provider never running the job at all.
+- **A lost CI verdict (`CI_INFRA_UNAVAILABLE`) has no recovery mechanism
+  beyond "the next push judges the next tip."** This is now a documented,
+  deliberate limit rather than an oversight (§8) — `workflow_dispatch` was
+  tried and removed this session because it cannot work on this repository's
+  default-branch layout (§2). If a pushed tip needs to be re-judged on its
+  *exact* SHA without a new commit, that still has no mechanism; the owner
+  would need to either fix the default-branch/`.github/` layout or accept the
+  gap.
+- **`scripts/claude_session_state.py`'s marker structural check does not
+  validate field CONTENT, only presence and coarse type** (e.g. `prepared_at`
+  just needs to be a non-empty string, not a valid timestamp; `blocking_jobs`
+  just needs to be a list). Deliberate scope limit from this session's round 3
+  — depth belongs to the write-time validators, this only decides whether an
+  object is safe to read as a marker at all. If a future state is added to the
+  three the module writes (`prepared`/`closed`/`blocked`), `_STATE_REQUIRED_FIELDS`
+  and `_LIFECYCLE_STATES` need updating alongside it, or markers of the new
+  state will be structurally rejected.
 - **Source Binding scope limits** (documented, deliberate): a *bare*-filename
   request cannot disambiguate two same-named files in different directories;
   plain Unicode casefold does not equate Turkish `İ`/`i` across case; the
@@ -220,16 +267,17 @@ gh run view <id> --json jobs
 - Proactive turns gate **L3 only**; an unwatched L2 write is mitigated by prompt
   instruction, not structurally closed.
 - Four `claude/*` scratch branches (the `.claude/worktrees/*` sessions) hold
-  commits unreachable from this branch — re-derived 2026-08-06 as 5, 1, 7 and 1
-  commits (`eager-noether-46af01`, `gifted-wilbur-e021ea`,
+  commits unreachable from this branch — last re-derived 2026-08-06 as 5, 1, 7
+  and 1 commits (`eager-noether-46af01`, `gifted-wilbur-e021ea`,
   `stoic-spence-2c5246`, `thirsty-mclean-f67665`). Two may be worth recovering.
   Do not delete without an explicit go-ahead.
 
 ## 6. Next engineering priority
 
-**Completion-contract streaming / TTFB architecture.** With `CI-MOBILE-01`
-closed, the latency clause is the one pre-registered gate clause still failing
-(§5): treatment first-visible p90 ≈ 99.8 s against a 60 s ceiling. Either make a
+**Completion-contract streaming / TTFB architecture.** Unchanged by this
+session, which was entirely session-lifecycle/CI-recovery protocol work: the
+latency clause is the one pre-registered gate clause still failing (§5):
+treatment first-visible p90 ≈ 99.8 s against a 60 s ceiling. Either make a
 contracted turn emit before the graph finishes, or accept the TTFB cost and
 revise the ceiling *for a future gate* — never retroactively for the pilot
 already run.
@@ -253,6 +301,11 @@ Do not start either — or any product work — inside a session that is closing
   cannot build the app. Licensing is not the obstacle (SIL OFL, verified from the
   files themselves); the question is whether ~77 KB of binaries belong in the
   repository or the manual-setup workflow stands.
+- **Default-branch / `.github/` layout** (surfaced this session, §5): the repo's
+  default branch (`main`) carries no `.github/` directory, which is why
+  `workflow_dispatch` cannot work as a manual CI-recovery mechanism on
+  `langgraph-migration`. Not acted on — flagged as a fact for the owner to
+  decide whether it is worth changing, not a decision made on their behalf.
 
 Push approval is per-session and per-action: it is requested in chat at the time
 of the push, never recorded here.
@@ -274,14 +327,24 @@ of the push, never recorded here.
   around it.
 - `/session-close` owns closing: `prepare` verifies and commits without pushing;
   `finalize` pushes only on explicit approval and marks the state `closed`.
+- **`CI_INFRA_UNAVAILABLE` is a terminal, non-code-failure blocked state, and
+  it is now enforced by the state machine, not just documented.** As of this
+  session: `prepare` refuses outright for the SAME session that holds its own
+  `blocked` marker (no `blocked → prepared → closed` detour), but a LATER
+  session inheriting that marker under a different identity may `prepare`
+  normally — the marker is history, not a verdict on the new session's work.
+  `close`/`block` refuse just as before on a marker they cannot trust, and now
+  say so accurately (`close marker exists but ...`) instead of claiming one
+  does not exist. See §2 for the three-round fix and `.claude/skills/
+  session-close/SKILL.md` §4/§5 for the enforced policy text.
+- **This session's own marker is exactly what it should be at this point in
+  the protocol: `prepared`, under the CURRENT authoritative session id,
+  written by this step (§ below) — not written by hand.** The inherited
+  `blocked` marker from the previous session (identity `18b03d4e...`, reason
+  `CI_INFRA_UNAVAILABLE`, run `31117623901`) was read, reported, and left
+  exactly as it was; this session's identity was confirmed different from it
+  before any work began, per the session-boundary check the SessionStart
+  preflight and `claude_session_state.py show` both support.
 - A next session whose preflight says the previous one did **not** close, or
   whose SessionEnd identity was **UNVERIFIED**, should reconcile before starting
   new work.
-- **The 2026-08-06 migration gap is closed and was reconciled, not ignored.** The
-  session that built the machine-authored identity chain started before
-  `current.json` existed, so it deliberately produced no marker for itself; this
-  session's preflight therefore reported the previous session as unclosed, which
-  was the documented expectation rather than a fault. `claude_session_state.py
-  show` confirmed it: marker `closed` for session `772fdf77` at head `29f6995`,
-  and the intervening session (`0e49f657`, `identity_status: matched`) exited
-  without one. No recovery file was hand-written to paper over the gap.
