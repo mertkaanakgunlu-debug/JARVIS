@@ -60,4 +60,38 @@ void main() {
       expect(notifier.state[3].text, 'gerçek cevap');
     });
   });
+
+  group('TranscriptNotifier.removeLastIfEmpty', () {
+    test('drops a JARVIS bubble that never received a token', () {
+      // The L3 case: a turn opens an empty bubble for tokens to land in, the
+      // graph interrupts for approval without saying anything, and the
+      // stream ends. Without this the approval card sits under a blank
+      // bubble.
+      final notifier = TranscriptNotifier();
+      notifier.add(const TranscriptTurn(who: 'u', text: 'mail at'));
+      notifier.add(const TranscriptTurn(who: 'j', text: ''));
+
+      notifier.removeLastIfEmpty();
+
+      expect(notifier.state.length, 1);
+      expect(notifier.state.single.who, 'u');
+    });
+
+    test('keeps a bubble that did receive text', () {
+      final notifier = TranscriptNotifier();
+      notifier.add(const TranscriptTurn(who: 'j', text: 'kısmi cevap'));
+      notifier.removeLastIfEmpty();
+      expect(notifier.state.single.text, 'kısmi cevap');
+    });
+
+    test('never touches the user turn or an empty transcript', () {
+      final notifier = TranscriptNotifier();
+      notifier.removeLastIfEmpty();
+      expect(notifier.state, isEmpty);
+
+      notifier.add(const TranscriptTurn(who: 'u', text: ''));
+      notifier.removeLastIfEmpty();
+      expect(notifier.state.length, 1, reason: "an empty 'u' turn is not ours to drop");
+    });
+  });
 }

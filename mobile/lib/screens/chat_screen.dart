@@ -7,7 +7,9 @@ import '../theme/jarvis_theme.dart';
 import '../theme/typography.dart';
 import '../widgets/grid_background.dart';
 import '../core/chat_sse.dart';
+import '../models/pending_confirmation.dart';
 import '../models/transcript_turn.dart';
+import '../providers/confirmation_provider.dart';
 import '../providers/transcript_provider.dart';
 import '../providers/api_provider.dart';
 import '../providers/settings_provider.dart';
@@ -161,42 +163,82 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     setState(() => _loadingNote = null);
 
     try {
-      ref.read(transcriptProvider.notifier).add(const TranscriptTurn(who: 'j', text: ''));
+      await _consume(api.chatStream(query, language: settings.language));
+    } catch (e) {
+      // add(), not appendToLast(): _consume() has already dropped the empty
+      // bubble it opened, so there is no JARVIS turn left to append to and
+      // appendToLast would silently drop the message on the user's own turn.
+      ref.read(transcriptProvider.notifier).add(
+        TranscriptTurn(who: 'j', text: 'Bağlantı hatası: $e'),
+      );
+    } finally {
+      if (mounted) setState(() { _isSending = false; _loadingNote = null; });
+      _scrollToBottom();
+    }
+  }
 
+  // ── One SSE stream, one reader ───────────────────────────────────────────────
+
+  /// Drive one SSE stream into the transcript.
+  ///
+  /// Shared by a new turn (/chat/stream) and a confirmation continuation
+  /// (/chat/confirm/{id}) because they are the same stream: the server wraps
+  /// both through jarvis/api.py's _sse_frames(), so a resumed turn can carry
+  /// tokens, a final_answer, a progress marker -- and a SECOND
+  /// confirmation_required. Reading the continuation with a narrower loop is
+  /// exactly the omission that docstring records on the server side.
+  ///
+  /// Opens the empty JARVIS bubble itself, and removes it again if the stream
+  /// produced no text at all (the L3 case: the graph interrupts for approval
+  /// without saying anything).
+  Future<void> _consume(Stream<String> chunks) async {
+    final transcript = ref.read(transcriptProvider.notifier);
+    transcript.add(const TranscriptTurn(who: 'j', text: ''));
+    try {
       // Labeled so the terminal cases below can end the WHOLE stream from
       // inside the switch -- a bare `break` in a Dart switch statement only
       // exits the switch itself, not an enclosing loop.
       chunkLoop:
-      await for (final chunk in api.chatStream(query, language: settings.language)) {
+      await for (final chunk in chunks) {
         final event = classifyChatChunk(chunk);
         switch (event) {
           case ChatDone():
             break chunkLoop;
           case ChatError():
-            ref.read(transcriptProvider.notifier).appendToLast(event.message);
+            transcript.appendToLast(event.message);
             break chunkLoop;
           case ChatAsyncTask():
-            ref.read(transcriptProvider.notifier).appendToLast(
+            transcript.appendToLast(
               '🕐 Arka planda çalışıyor — task `${event.taskId ?? '?'}`',
             );
             ref.read(tasksProvider.notifier).refresh();
             break chunkLoop;
           case ChatConfirmationRequired():
-            // Mobile cannot approve/deny an L3 action yet (pre-existing gap,
-            // out of scope here) -- this only stops the raw marker from
-            // being shown as if it were JARVIS's own reply. The graph stays
-            // interrupted server-side exactly as before this classifier
-            // existed; nothing here resolves it.
-            ref.read(transcriptProvider.notifier).appendToLast(
-              '⚠️ Onay gerekiyor — mobil arayüzde henüz desteklenmiyor.',
-            );
+            // An L3 tool call needs the user. The graph is now interrupted
+            // server-side and this stream ends here; the prompt goes to the
+            // app-wide provider (not local state) so it survives the stream
+            // that delivered it -- see confirmation_provider.dart.
+            final pending =
+                PendingConfirmation.fromPayload(event.id, event.payload);
+            if (pending != null) {
+              ref.read(confirmationProvider.notifier).raise(pending);
+            } else {
+              // Unanswerable prompt (no id, or no tool we can name). Say so
+              // plainly rather than rendering an approve button over a blank
+              // description -- and never fall back to dumping the payload.
+              transcript.appendToLast(
+                '⚠️ Onay gerekiyor ama istek okunamadı. PC üzerinden yanıtlayın.',
+              );
+            }
             break chunkLoop;
           case ChatProgress():
-            setState(() => _loadingNote = _progressNote(event));
+            if (mounted) setState(() => _loadingNote = _progressNote(event));
             break;
           case ChatFinalAnswer():
-            ref.read(transcriptProvider.notifier).replaceLast(event.text);
-            if (_loadingNote != null) setState(() => _loadingNote = null);
+            transcript.replaceLast(event.text);
+            if (_loadingNote != null && mounted) {
+              setState(() => _loadingNote = null);
+            }
             // Not re-spoken: any prefix that already streamed was already
             // read aloud via _speakChunk as it arrived (a buffered turn
             // instead arrives here as a plain ChatToken, handled below, and
@@ -204,18 +246,62 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             _scrollToBottom();
             break;
           case ChatToken():
-            if (_loadingNote != null) setState(() => _loadingNote = null);
-            ref.read(transcriptProvider.notifier).appendToLast(event.text);
+            if (_loadingNote != null && mounted) {
+              setState(() => _loadingNote = null);
+            }
+            transcript.appendToLast(event.text);
             _speakChunk(event.text);
             _scrollToBottom();
             break;
         }
       }
       _flushTts();
-    } catch (e) {
-      ref.read(transcriptProvider.notifier).appendToLast('Bağlantı hatası: $e');
     } finally {
-      setState(() { _isSending = false; _loadingNote = null; });
+      transcript.removeLastIfEmpty();
+    }
+  }
+
+  // ── L3 confirmation ─────────────────────────────────────────────────────────
+
+  /// Answer the pending confirmation and stream the graph's continuation back
+  /// into the transcript.
+  ///
+  /// [decision] is the server's vocabulary ("approve" / "deny"), passed
+  /// through untranslated -- confirmation_node validates it fail-closed.
+  Future<void> _resolveConfirmation(String decision) async {
+    final notifier = ref.read(confirmationProvider.notifier);
+    final pending = ref.read(confirmationProvider).pending;
+    if (pending == null) return;
+    // The double-submit / stale-tap gate. Owned by the notifier, not by the
+    // buttons' `onTap: null`, because both legs feed this prompt and a POST
+    // that already claimed the interrupt server-side cannot be repeated.
+    if (!notifier.beginSubmit(pending.id)) return;
+
+    final api = ref.read(apiClientProvider);
+    if (api == null) { notifier.failed(); return; }
+
+    setState(() { _isSending = true; _loadingNote = null; });
+    _tts.stop();
+    _ttsBuffer.clear();
+    _scrollToBottom();
+
+    try {
+      await _consume(api.confirmStream(pending.id, decision));
+      // Clears the card -- unless the continuation raised a SECOND interrupt,
+      // which resolved() leaves alone because it is id-checked. A server that
+      // answers "expired or not found" lands here too, and correctly: that
+      // confirmation is dead, so the card must go.
+      notifier.resolved(pending.id);
+    } catch (e) {
+      // Transport failure, not a verdict. The interrupt may still be alive
+      // server-side until its TTL, so the card STAYS and the user can retry
+      // or deny.
+      ref.read(transcriptProvider.notifier).add(
+        TranscriptTurn(who: 'j', text: 'Onay iletilemedi: $e'),
+      );
+      notifier.failed();
+    } finally {
+      if (mounted) setState(() { _isSending = false; _loadingNote = null; });
       _scrollToBottom();
     }
   }
@@ -237,6 +323,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final transcript = ref.watch(transcriptProvider);
+    final confirmation = ref.watch(confirmationProvider);
 
     return GridBackground(
       child: SafeArea(
@@ -272,13 +359,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
             Positioned(
               bottom: 0, left: 0, right: 0,
-              child: _Composer(
-                controller: _textCtrl,
-                isComposing: _isComposing,
-                onChanged: (v) => setState(() => _isComposing = v.isNotEmpty),
-                onSubmit: _send,
-                onStopTts: () { _tts.stop(); _ttsBuffer.clear(); },
-              ),
+              // The approval card REPLACES the composer while an interrupt is
+              // open. Structural, not cosmetic: it is what stops a new turn
+              // being started on top of a graph that is still paused waiting
+              // for this answer, without needing a disabled-state flag
+              // threaded through the composer.
+              child: confirmation.pending != null
+                  ? _ConfirmationCard(
+                      confirmation: confirmation.pending!,
+                      submitting: confirmation.submitting,
+                      onDecision: _resolveConfirmation,
+                    )
+                  : _Composer(
+                      controller: _textCtrl,
+                      isComposing: _isComposing,
+                      onChanged: (v) => setState(() => _isComposing = v.isNotEmpty),
+                      onSubmit: _send,
+                      onStopTts: () { _tts.stop(); _ttsBuffer.clear(); },
+                    ),
             ),
           ],
         ),
@@ -362,6 +460,129 @@ class _JarvisBubble extends StatelessWidget {
           child: Text(text, style: JarvisText.chatBody.copyWith(color: JarvisColors.cyanSoft)),
         ),
       ],
+    );
+  }
+}
+
+// ── L3 confirmation card ─────────────────────────────────────────────────────
+
+/// The approve/deny prompt. Shows the server's own plain-language
+/// description of each pending call (PendingConfirmation's `label`) -- never
+/// the raw payload, never tool arguments.
+class _ConfirmationCard extends StatelessWidget {
+  final PendingConfirmation confirmation;
+  final bool submitting;
+  final ValueChanged<String> onDecision;
+
+  const _ConfirmationCard({
+    required this.confirmation,
+    required this.submitting,
+    required this.onDecision,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 12),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.bottomCenter,
+          end: Alignment.topCenter,
+          colors: [Colors.black.withValues(alpha: 0.95), Colors.transparent],
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            border: Border.all(color: JarvisColors.amber, width: 1),
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(color: JarvisColors.amber.withValues(alpha: 0.18), blurRadius: 14),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.shield_outlined,
+                      size: 14, color: JarvisColors.amber),
+                  const SizedBox(width: 6),
+                  Text('ONAY GEREKİYOR',
+                      style: JarvisText.chip.copyWith(
+                        color: JarvisColors.amber,
+                        letterSpacing: 8 * 0.24,
+                      )),
+                ],
+              ),
+              const SizedBox(height: 8),
+              for (final tool in confirmation.tools)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text('• ${tool.label}',
+                      style: JarvisText.chatBody
+                          .copyWith(color: JarvisColors.cyanSoft)),
+                ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: _DecisionButton(
+                      label: submitting ? 'GÖNDERİLİYOR…' : 'ONAYLA',
+                      color: JarvisColors.cyan,
+                      // Null disables the tap. The real guard is
+                      // ConfirmationNotifier.beginSubmit(); this only keeps
+                      // the button from looking live while a POST is open.
+                      onTap: submitting ? null : () => onDecision('approve'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _DecisionButton(
+                      label: 'REDDET',
+                      color: JarvisColors.red,
+                      onTap: submitting ? null : () => onDecision('deny'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DecisionButton extends StatelessWidget {
+  final String label;
+  final Color color;
+  final VoidCallback? onTap;
+
+  const _DecisionButton({required this.label, required this.color, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: enabled ? 0.16 : 0.05),
+          border: Border.all(color: color.withValues(alpha: enabled ? 1 : 0.35)),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(label,
+            style: JarvisText.chip.copyWith(
+              color: color.withValues(alpha: enabled ? 1 : 0.45),
+            )),
+      ),
     );
   }
 }

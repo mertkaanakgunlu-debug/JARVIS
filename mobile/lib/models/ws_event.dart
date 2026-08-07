@@ -51,6 +51,16 @@ sealed class WsEvent {
           id: j['id'] as String? ?? '',
           topic: j['topic'] as String?,
         );
+      // An L3 tool call is waiting for approval. Broadcast by jarvis/ws.py's
+      // confirmation_required() for EVERY transport, so this leg also
+      // delivers confirmations the phone did not initiate (a voice turn on
+      // the PC), and delivers the ones it did if their own SSE stream was
+      // interrupted before the frame arrived.
+      case 'confirmation_required':
+        return ConfirmationRequiredEvent(
+          id: j['id'] as String? ?? '',
+          payload: (j['payload'] as Map<String, dynamic>?) ?? const {},
+        );
       case 'task_status':
         return TaskStatusEvent(
           taskId: j['task_id'] as String? ?? '',
@@ -74,4 +84,5 @@ class VaultEvent      extends WsEvent { final List<Map<String,dynamic>> entries;
 class ProgressEvent   extends WsEvent { final int jobsDone, jobsTotal, tokensIn, tokensOut; final String runtime; ProgressEvent({required this.jobsDone, required this.jobsTotal, required this.runtime, required this.tokensIn, required this.tokensOut}); }
 class SessionEvent    extends WsEvent { final String id; final String? topic; SessionEvent({required this.id, this.topic}); }
 class TaskStatusEvent extends WsEvent { final String taskId, status, progressNote; final int elapsedSec; TaskStatusEvent({required this.taskId, required this.status, required this.progressNote, required this.elapsedSec}); }
+class ConfirmationRequiredEvent extends WsEvent { final String id; final Map<String,dynamic> payload; ConfirmationRequiredEvent({required this.id, required this.payload}); }
 class UnknownEvent    extends WsEvent { final Map<String,dynamic> raw; UnknownEvent({required this.raw}); }

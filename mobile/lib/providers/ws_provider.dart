@@ -1,7 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/ws_client.dart';
+import '../models/pending_confirmation.dart';
 import '../models/ws_event.dart';
 import 'api_provider.dart';
+import 'confirmation_provider.dart';
 import 'settings_provider.dart';
 
 final wsClientProvider = Provider<WsClient>((ref) {
@@ -57,6 +59,17 @@ final wsDispatcherProvider = Provider<void>((ref) {
         ref.read(vaultCountProvider.notifier).state = event.count;
       } else if (event is ProgressEvent) {
         ref.read(progressProvider.notifier).state = event;
+      } else if (event is ConfirmationRequiredEvent) {
+        // Second leg of the approval prompt (chat_screen.dart's own SSE
+        // stream is the first). Dispatched here rather than in the chat
+        // screen because this dispatcher is alive app-wide -- a confirmation
+        // raised while the user is on another tab must still be answerable
+        // when they come back. raise() is idempotent on id, so the frequent
+        // case of both legs delivering the same prompt costs nothing.
+        final pending = PendingConfirmation.fromPayload(event.id, event.payload);
+        if (pending != null) {
+          ref.read(confirmationProvider.notifier).raise(pending);
+        }
       }
     });
   });

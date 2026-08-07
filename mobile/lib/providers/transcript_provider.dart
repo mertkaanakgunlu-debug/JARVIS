@@ -41,6 +41,19 @@ class TranscriptNotifier extends StateNotifier<List<TranscriptTurn>> {
     ];
   }
 
+  /// Drop the trailing JARVIS turn if nothing was ever streamed into it.
+  ///
+  /// A turn opens an empty 'j' bubble before the stream starts, so tokens
+  /// have somewhere to land. A stream that ends without producing any text
+  /// -- the L3 case: the graph interrupts for approval and says nothing --
+  /// would otherwise leave a blank bubble sitting above the approval card.
+  void removeLastIfEmpty() {
+    if (state.isEmpty) return;
+    final last = state.last;
+    if (last.who != 'j' || last.text.isNotEmpty) return;
+    state = state.sublist(0, state.length - 1);
+  }
+
   void clear() => state = [];
 }
 
