@@ -6,6 +6,41 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Developer workflow — parallel CI pytest, and SHA-bound full-run reuse] — 2026-08-08
+
+Two commits, neither touching `jarvis/`, `electron/` or `mobile/`.
+
+`f3b6a55` parallelises CI's pytest step as `pytest -n 4 --dist load`. The suite
+could not run in parallel at all before it: `tests/test_execution_approval.py`
+built a parametrize id from `approval.new_expiry(9999)`, evaluated at collection
+time, so the id carried a wall-clock timestamp, differed between processes and
+made pytest-xdist refuse to start — and made test ids unstable from run to run
+generally. A fixed far-future constant asserts the same thing. The worker count
+is pinned rather than `-n auto` because `auto` would silently change meaning if
+the runner is resized. Measured locally on one frozen tree (fingerprint checked
+before and after), 3446 tests and exit 0 each: serial 796.96s, `-n 4 --dist
+loadfile` 367.08s, `-n 4 --dist load` 234.31s, the chosen mode green twice more
+at 240.80s and 241.13s. The caveat is in the job comment: one 30s subprocess
+timeout was observed at one worker per core — the ratio a 4-vCPU runner has — so
+CI-side contention is unmeasured until it lands, and the rollback is one line.
+
+`3e6304c` stops `/session-close` re-running the whole suite for a
+documentation-only closing commit. That second run cost ten minutes and tested
+nothing new, while the one artefact the closing commit introduces had no test at
+all. Reuse is now gated on machine-authored evidence in the gitignored
+`.claude/session-recovery/full-verification.json`, written through the same
+single write API as the session marker: head, branch, session and timestamp are
+derived, and only the exit status and pytest's own summary line come from
+outside — prose like "the full suite passed" is refused at write time. There is
+deliberately no `record` subcommand, since one taking a count would be a prompt
+where evidence could be typed. `scripts/dev_verify.py --full` is the only
+producer and refuses a dirty tree, because evidence is keyed by commit. The
+selector recomputes the change set from the evidence's own SHA rather than from
+`--base`, and every way of lacking usable evidence — none, failed, another
+session's, a rewritten history, any non-document change, or never asking —
+produces `FULL PYTHON FALLBACK`. New `tests/test_handoff_contract.py` checks the
+closing artefact itself using the preflight's imported parser.
+
 ## [Mobile splash timer lifecycle — MOBILE-TEST-01 closed] — 2026-08-07
 
 `_SplashRouterState` (`mobile/lib/app.dart`) armed an uncancellable
