@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -61,14 +63,29 @@ class _SplashRouter extends ConsumerStatefulWidget {
 }
 
 class _SplashRouterState extends ConsumerState<_SplashRouter> {
+  // MOBILE-TEST-01: this used to be an uncancellable
+  // `Future.delayed(Duration(seconds: 2))`. The splash timing is unchanged --
+  // the timer still fires at 2s and still replaces the route with /home -- but
+  // a Timer can be cancelled, so nothing outlives the widget. A tree torn down
+  // inside the splash window left the delayed callback armed with no way to
+  // stop it, which is what made test/widget_test.dart fail with "A Timer is
+  // still pending even after the widget tree was disposed."
+  late final Timer _splashTimer;
+
   @override
   void initState() {
     super.initState();
-    Future.delayed(const Duration(seconds: 2), () {
+    _splashTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) {
         Navigator.pushReplacementNamed(context, '/home');
       }
     });
+  }
+
+  @override
+  void dispose() {
+    _splashTimer.cancel();
+    super.dispose();
   }
 
   @override

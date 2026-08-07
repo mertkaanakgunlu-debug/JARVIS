@@ -194,8 +194,10 @@ class Plan:
             out.append(Command(
                 ("flutter", "analyze"), "mobile",
                 "Mobile sources changed -- analyzer only during iteration; "
-                "`flutter test` still carries the known MOBILE-TEST-01 failure "
-                "and belongs to work-completion verification, not this loop",
+                "`flutter test` needs the gitignored font assets "
+                "(MOBILE-ASSETS-01), so it cannot be assumed runnable on every "
+                "checkout and belongs to work-completion verification, not this "
+                "loop",
             ))
         return out
 

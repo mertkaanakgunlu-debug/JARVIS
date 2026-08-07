@@ -71,18 +71,41 @@ job — but do not report "CI is green" as "the app builds anywhere".
 
 ## Tests
 
-`test/widget_test.dart` (the single smoke test) **fails, and did so before the
-CI-MOBILE-01 work** — verified by running it against an unmodified `git archive`
-of the same HEAD:
+**`MOBILE-TEST-01` is closed (2026-08-07)** — fixed in the product code, not
+worked around in the test. `test/widget_test.dart` used to fail with:
 
 ```
 A Timer is still pending even after the widget tree was disposed.
 'package:flutter_test/src/binding.dart': Failed assertion: line 2542 pos 12: '!timersPending'
 ```
 
-Source: `lib/app.dart` — `_SplashRouterState.initState` starts an uncancelled
-`Future.delayed(Duration(seconds: 2))`. CI does not run `flutter test` for
-mobile, so this is separate from the analyzer debt and still open.
+`_SplashRouterState` (`lib/app.dart`) armed an uncancellable
+`Future.delayed(Duration(seconds: 2))`; it now holds a cancellable `Timer` and
+cancels it in `dispose()`. **The splash behaviour is unchanged** — same 2s
+delay, same `pushReplacementNamed('/home')`. The other two timers in `lib/`
+(`lock_screen.dart`, `home_screen.dart`'s `_TopBarState`) already cancelled
+theirs; this was the only leak.
+
+Two properties of the regression guard, so a later edit does not silently
+neuter it:
+
+- The guard disposes the tree **inside** the 2s window and then ends the test.
+  It must NOT elapse fake time past the deadline afterwards — elapsing lets a
+  leaked timer fire and retire itself, so `_verifyInvariants` would find nothing
+  pending and the check would pass **vacuously**. Confirmed by reverting the fix
+  and re-running: the smoke test and the guard both fail, the navigation test
+  still passes.
+- `pumpAndSettle()` can never be used in this tree — `JarvisOrb`'s
+  `AnimationController` calls `repeat()`, so it never settles. Pump explicit
+  durations instead.
+
+Measured 2026-08-07 on `mobile/` with the font assets present locally:
+`flutter test` → **17 passed** (`widget_test.dart`, `chat_sse_test.dart`,
+`transcript_provider_test.dart`); `flutter analyze` → `No issues found`.
+
+CI still runs `analyze` only. Adding `flutter test` to CI is now blocked by
+`MOBILE-ASSETS-01` (the gitignored fonts, above) rather than by this bug — and
+that is an owner decision, not a leftover.
 
 ## Functional gap to keep in mind
 
