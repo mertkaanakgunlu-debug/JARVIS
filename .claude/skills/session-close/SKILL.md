@@ -33,6 +33,24 @@ Stop and report at the **first** blocking condition rather than pushing through.
   wait.
 - No unanswered question is pending with the owner.
 
+**If the preflight reports the PREVIOUS session as `FINALIZE BLOCKED by CI`,**
+that is inherited state, not this session's. Read its `reason_code` first
+(`claude_session_state.py show`):
+
+- `CI_BLOCKING_FAILURE` — a real red job on the tip. Fix it before closing
+  anything on top of it.
+- `CI_INFRA_UNAVAILABLE` — the tip was never judged. That is the *absence* of a
+  result, so treat it as neither a verdict about the code nor evidence the code
+  is fine. An inherited infrastructure block does not by itself stop this
+  session working: the old marker stays exactly as it is, and this session's own
+  commit and push produce the next real CI evidence.
+
+**An inherited blocked marker is never relabelled, and never reopened.**
+`CI_INFRA_UNAVAILABLE` was that session's honest terminal outcome and stays on
+the record — do not go back and turn it into `closed`. This session prepares
+under its **own** identity (the helper refuses if the identity has not actually
+changed) and earns its own verdict.
+
 ### 2. Verify state from the repository, never from memory
 
 Re-derive all of it, this turn:
@@ -150,6 +168,37 @@ It reads the session identity from `.claude/session-recovery/current.json` (whic
 the SessionStart hook wrote from the real hook payload) and derives branch and
 HEAD itself. It takes **no session-id argument** — see the identity rules below.
 
+`prepare` **refuses rather than overwrites** in two cases. Both are findings to
+report, not obstacles to route around:
+
+- **This session already holds a `blocked` marker.** Blocking ends the session
+  (*finalize §4*); re-preparing would walk the block back to `prepared`.
+- **A marker file exists but is not trustworthy as a marker.** *Missing* and
+  *unreadable* are different states. Missing means there is nothing to lose —
+  that is the ordinary path and it still works. Unreadable covers two things,
+  and both stop `prepare`: the file will not parse at all, **or** it parses fine
+  but is not the shape a genuine marker has — `{}`, or a `blocked` entry missing
+  its own `session_id`. Neither is proof of nothing: it could be a `blocked`
+  marker truncated mid-write, with its own evidence still legible in it, or with
+  just enough missing that reading it as "not blocked" or "someone else's block"
+  would be a guess. `prepare`'s very next act is to overwrite that file, so it
+  stops instead.
+
+  **Do not delete, repair, rename, regenerate or hand-write the marker**, and do
+  not guess which session it belonged to. Report the refusal verbatim, leave the
+  bytes exactly as they are, and stop — it is recovery evidence, and what happens
+  to it is the owner's call. There is deliberately no repair command.
+
+  Note the asymmetry with the SessionStart hook, which stays fail-**open** on the
+  same file: a session must always be able to *start*. Certifying a close is a
+  *claim*, and a claim made over unreadable evidence is exactly what this refuses
+  to make.
+
+  `close` and `block` recognise the same distinction and say so accurately: no
+  marker at all still reads `no close marker exists -- run \`prepare\` first`,
+  but a marker that exists and cannot be trusted says so explicitly rather than
+  claiming there is nothing there.
+
 Stop here. Do not push. Do not start new product work.
 
 ---
@@ -239,15 +288,92 @@ Classify **every** failed job explicitly before going near the marker:
 | `electron` | **blocking** |
 | `mobile` | **blocking.** `CI-MOBILE-01` was cleared at the source on 2026-08-06, so the old "known cosmetic signature" exemption is **gone** — there is no `mobile` failure that may be waved through any more. It is still `continue-on-error: true`, so the workflow headline stays green while the job is red: read the job. If the failure is new `deprecated_member_use` findings that the diff cannot explain, suspect the unpinned `channel: stable` Flutter version (`.claude/rules/mobile.md`) — that is a diagnosis, not an exemption. |
 
-Rerun rules:
+#### Classify the FAILURE, not the conclusion
 
-- A failure **explained by the commit diff is deterministic — never rerun it.**
-  Fix it instead. (A rerun cannot make a wrong assertion right, and re-running
-  it reads as hoping rather than diagnosing.)
-- The known ChromaDB `no such table: acquire_write` flake may be rerun **once**.
-- If the rerun also fails, the job stays **blocking**.
-- Never hide the first run behind a rerun — report both.
+`failure` and `cancelled` both appear in all three classes below, so **a job's
+conclusion never classifies it on its own.** Open the log before you decide:
+
+```bash
+gh run view --job <job-id> --log
+```
+
+| class | what the log shows | what to do |
+|---|---|---|
+| **Diff-explained** | the job reached its real step (`Test (pytest)`, `Lint (ruff)`, `flutter analyze`, `npm test`, `build`) and *that step* failed on repository content | **never rerun it.** Fix it. A rerun cannot make a wrong assertion right, and re-running it reads as hoping rather than diagnosing. |
+| **`CI-FLAKE-CHROMA-01`** | `chromadb … no such table: acquire_write`, in files the commit never touched | one rerun, per the budget below |
+| **`CI_INFRA_UNAVAILABLE`** | the provider never reached a verdict — see the signatures below | one rerun, then the session ends blocked — see the terminal rule below |
+
+A failure is `CI_INFRA_UNAVAILABLE` only if the log actually shows the provider
+failing, not the repository. Signatures, all observed on run `31117623901`
+(2026-08-06):
+
+- `Failed to resolve action download info. Error: Service Unavailable` during
+  `Set up job` — the runner could not even fetch `actions/checkout`, so no repo
+  content was ever read;
+- the runner dying or being reclaimed before checkout completes;
+- a job or workflow **cancelled from outside** so its tests could not finish —
+  e.g. `Test (pytest)` logging `KeyboardInterrupt` then
+  `##[error]The operation was canceled.` after 2704 passing tests.
+
+**Never assign `CI_INFRA_UNAVAILABLE` from a conclusion alone.** `cancelled`
+also happens when a human cancels a run, and `failure` is what a genuinely
+broken build looks like. Quote the log line you classified from, in the report
+and in the marker's `run_id`. If the log does not show a provider failure, the
+job is `CI_BLOCKING_FAILURE` — the honest default when you cannot prove
+otherwise.
+
+An infrastructure failure means **the tree has no verdict**, not that it passed.
+Never let one stand in for a green run.
+
+#### Rerun budget — bounded, and spendable once
+
+- The **first run is always reported**, whatever the rerun does. Never hide it.
+- At most **one** rerun of a given run, and only for a failure that is *not*
+  diff-explained.
+- **Never rerun the same run repeatedly.** Re-running until it goes green is the
+  same error as reporting an unrun check as passed.
+- If the rerun still produces no full verdict, the jobs stay **blocking** and
+  the session is blocked. That budget is spent, and there is no third attempt —
+  see the terminal rule below.
 - A passing rerun does **not** prove a root cause.
+
+#### `CI_INFRA_UNAVAILABLE` is TERMINAL for the session
+
+Once the one rerun is spent and the provider still returned no verdict, the
+session ends blocked. There is no honest way to conjure a verdict for a tip that
+was never judged, and every route that looks like one is worse than the block:
+
+- **Do not manufacture an empty commit** to re-fire `push`. That fabricates
+  history to buy a green check.
+- **Do not keep re-running the exhausted run.** The budget above is one.
+  Re-running until it goes green is the same error as reporting an unrun check
+  as passed.
+- **Do not add a `workflow_dispatch` trigger** to get a manual re-run. GitHub
+  resolves `workflow_dispatch` from the repository's **default branch**, which
+  here is `main` — and `main` carries no `.github/` directory at all, so a
+  trigger added only on `langgraph-migration` is not a mechanism anyone can rely
+  on. Making it real would mean writing to `main` or changing the default
+  branch: both need the owner, and neither belongs inside a close.
+- **Do not touch `main`**, move the workflow, or change the default branch to
+  work around this.
+
+So report it and stop:
+
+1. Report the first run **and** its one rerun, per job, quoting the log line you
+   classified from. Neither is hidden behind the other.
+2. `block --reason-code CI_INFRA_UNAVAILABLE --run-id <run> --blocking-jobs …`.
+3. Do **not** `close`, and do **not** re-`prepare`. `prepare` is refused for a
+   session that already holds its own `blocked` marker
+   (`scripts/claude_session_state.py`) — `blocked → prepared → closed` is
+   `blocked → closed` with one extra step, and the helper now enforces that
+   rather than trusting this paragraph.
+
+**That marker is not a debt the next session has to pay off.** A later session
+sees it, reads `CI_INFRA_UNAVAILABLE`, knows no code failure was ever
+demonstrated, and works normally under its own identity — the inherited marker
+does not block it. Its commits push, and *that* push produces the next run to
+read per job. Nothing has to retroactively become `closed` for the protocol to
+be whole: an honest terminal state is a finished session, not a stuck one.
 
 ### 5. Close out — `closed` has to be earned
 
@@ -267,10 +393,16 @@ classification above is yours** — the helper cannot tell a blocking failure fr
 a known non-blocking one, and it will not stop you writing `closed` over a red
 tip. Judge the table first, then run the command.
 
-If a blocking failure remains, the session is **not closed**:
+If a blocking failure remains, the session is **not closed**. The reason code is
+a **fixed vocabulary** of exactly two values — the helper refuses anything else —
+and which one you pick is the classification from §4, recorded:
 
 ```powershell
+# the repository is at fault: a failing test, a lint error, a broken build
 .venv\Scripts\python.exe scripts\claude_session_state.py block --reason-code CI_BLOCKING_FAILURE --run-id <run> --blocking-jobs python
+
+# the provider never reached a verdict -- only after reading the job log
+.venv\Scripts\python.exe scripts\claude_session_state.py block --reason-code CI_INFRA_UNAVAILABLE --run-id <run> --blocking-jobs python,electron
 ```
 
 …and **do not close the session**. Report the failure, its classification, and
@@ -278,6 +410,18 @@ the fix — do not soften a red tip into a clean close. This rule exists because
 it was broken: a session once wrote `closed` while the branch tip's `python`
 job was failing, which is the same "report an unfinished check as passed" error
 the whole reporting standard forbids.
+
+`CI_INFRA_UNAVAILABLE` is **not a softer `CI_BLOCKING_FAILURE`.** It says
+something narrower and checkable: the jobs did not run, so the tree is unproven
+in both directions. Do not reach for it because a red job is inconvenient — if
+the log does not show the provider failing, the code is what failed.
+
+**A blocked marker is never relabelled, and never re-prepared.** The helper
+refuses `blocked → closed` *and* `blocked → prepare` for the session that owns
+the marker, so there is no one-step and no two-step route out. Blocking ends the
+session; the honest next step belongs to the NEXT session, under a different
+identity. If the helper refuses, report the refusal verbatim and stop — do not
+hand-write the JSON it declined.
 
 **Do not** write the closing commit's own SHA or its CI outcome back into
 HANDOFF.md — that is the self-reference rule, and retro-editing the file after

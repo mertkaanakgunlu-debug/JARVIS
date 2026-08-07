@@ -335,8 +335,18 @@ def _blocked_detail(marker: dict) -> str:
     produces a correct, actionable sentence. The one thing that must never
     happen is a blocked session reading as a clean one, so an unparsable
     detail degrades the DETAIL, never the verdict.
+
+    The reason code leads, and it used to be a last-resort fallback shown only
+    when there was no run id and no job list -- which meant a well-formed marker
+    never showed it at all. The two codes describe different situations:
+    `CI_BLOCKING_FAILURE` names a defect on that tip, `CI_INFRA_UNAVAILABLE`
+    says the jobs never ran, so that tip is simply unjudged. A preflight that
+    renders them identically hands the next session a coin flip.
     """
     bits = []
+    reason_code = str(marker.get("reason_code") or "").strip()
+    if reason_code:
+        bits.append(reason_code)
     run_id = str(marker.get("run_id") or "").strip()
     if run_id:
         bits.append(f"run {run_id}")
@@ -346,9 +356,42 @@ def _blocked_detail(marker: dict) -> str:
         if names:
             bits.append(f"jobs: {names}")
     if not bits:
-        reason_code = str(marker.get("reason_code") or "").strip()
-        bits.append(reason_code or "no detail recorded")
+        bits.append("no detail recorded")
     return "; ".join(bits)
+
+
+#: Every blocked marker carries the same instruction, because every one of them
+#: means the previous session did not close and this one must account for that
+#: before starting work (CLAUDE.md, session protocol).
+_BLOCKED_INSTRUCTION = "reconcile before new work"
+
+#: ...and each reason code says what "reconcile" actually costs here. The two are
+#: not degrees of one thing: `CI_BLOCKING_FAILURE` names a defect in the
+#: repository, while `CI_INFRA_UNAVAILABLE` names the ABSENCE of a result.
+#: Rendering them identically -- which is what happened before, byte for byte,
+#: since neither the code nor any guidance reached this line -- handed the next
+#: session a coin flip between "there is a bug on that tip" and "nothing at all
+#: is known about it".
+#:
+#: This reader is deliberately OPEN where the writer is closed. `block` validates
+#: reason codes against a fixed vocabulary on WRITE; a marker written before that
+#: vocabulary existed, or by a later version that adds a code, must still render
+#: as blocked and still carry _BLOCKED_INSTRUCTION. It loses the detail sentence
+#: and nothing else -- the one outcome that must never occur is a blocked session
+#: reading as a clean one, and no branch here can produce that.
+_BLOCKED_GUIDANCE = {
+    "CI_BLOCKING_FAILURE":
+        "a blocking job FAILED on that tip -- fix it before closing anything on top",
+    "CI_INFRA_UNAVAILABLE":
+        "CI returned NO verdict, so that tip is unproven rather than failing "
+        "-- not evidence of a code failure, and not by itself a bar to working "
+        "in this session",
+}
+
+
+def _blocked_guidance(marker: dict) -> str:
+    detail = _BLOCKED_GUIDANCE.get(str(marker.get("reason_code") or "").strip(), "")
+    return f"{_BLOCKED_INSTRUCTION}: {detail}" if detail else _BLOCKED_INSTRUCTION
 
 
 def _recovery_state(root: Path) -> str:
@@ -362,6 +405,11 @@ def _recovery_state(root: Path) -> str:
     a session whose push succeeded but whose CI came back red must NOT read as
     closed. It was written as `closed` once, which is exactly the "report an
     unfinished check as passed" failure the protocol exists to prevent.
+
+    A blocked marker is reported with its reason code AND the work that code
+    calls for (see _BLOCKED_GUIDANCE). Both codes keep the same `FINALIZE
+    BLOCKED by CI` verdict -- the distinction is what to do next, never whether
+    the previous session closed.
 
     **A clean close additionally requires a VERIFIED identity.** Matching ids
     between `latest.json` and the marker proves only that two records agree; if
@@ -399,7 +447,7 @@ def _recovery_state(root: Path) -> str:
 
     if marker_state == "blocked" and same:
         return (f"previous session FINALIZE BLOCKED by CI ({_blocked_detail(marker)}) "
-                "-- reconcile before new work")
+                f"-- {_blocked_guidance(marker)}")
     if marker_state == "closed" and same:
         if identity == "matched":
             return f"previous session closed cleanly (exit: {reason})"

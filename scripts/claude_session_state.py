@@ -20,7 +20,9 @@ a directory listing, a transcript, or a command-line flag.
 Commands::
 
     current   record the authoritative session identity (SessionStart's job)
-    prepare   mark the session prepared-to-close  (reads identity from current)
+    prepare   mark the session prepared-to-close  (reads identity from current;
+              refused once THIS session is blocked, and refused outright when a
+              marker exists that cannot be read -- see cmd_prepare)
     close     mark it closed                      (only from `prepared`)
     block     mark it blocked by CI               (only from `prepared`/`blocked`)
     show      print a redacted summary of both files
@@ -30,12 +32,14 @@ What it deliberately does NOT do:
   * **no session-id inference, ever** -- see above. `prepare`/`close`/`block`
     take no id argument at all, so "type the id by hand" is not a mistake that
     can be made.
-  * **no CI judgement.** Whether a red job is blocking is a classification with
-    real context behind it (does the diff touch `mobile/**`? is it the known
-    ChromaDB flake?) and belongs to the `/session-close` skill with a human
-    reading the result. This module's whole responsibility is identity and
-    state-transition integrity: it will happily record a `blocked` marker, and
-    it will never decide that one is warranted.
+  * **no CI judgement.** Why a job is red is a classification with real context
+    behind it -- does the commit diff explain it? is it the known ChromaDB
+    flake? did the provider fail before checkout, so nothing ran at all? -- and
+    it belongs to the `/session-close` skill with a human reading the job log.
+    This module's whole responsibility is identity and state-transition
+    integrity: it will happily record a `blocked` marker with whichever reason
+    code it is handed from the fixed vocabulary, and it will never decide that
+    one is warranted, nor which one fits.
   * **no network, no push, no tracked-file write.** It writes exactly two local,
     gitignored files.
   * **no absolute user paths, no transcript path, no free-form text.** Everything
@@ -82,7 +86,32 @@ _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 #: `block` metadata is a fixed, validated vocabulary rather than free text, so
 #: there is no field an absolute path or a secret could be smuggled through.
-_REASON_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+#:
+#: This used to be a SHAPE check (`^[A-Z][A-Z0-9_]{0,63}$`) while the comment
+#: above claimed a vocabulary, so any UPPER_SNAKE string was accepted and the
+#: two disagreed. The set below is what the comment always described. It is
+#: closed on purpose: a reason code is read by the next session's preflight to
+#: decide what to DO, and a code it has never heard of is indistinguishable
+#: from a typo -- which is how a blocked session gets misread.
+#:
+#: * ``CI_BLOCKING_FAILURE`` -- a blocking job genuinely failed and the cause is
+#:   in the repository: a failing test, a lint error, a broken build. The fix is
+#:   a code change.
+#: * ``CI_INFRA_UNAVAILABLE`` -- the CI provider never reached a verdict. The
+#:   jobs did not fail; they did not run, so nothing about the tree is known in
+#:   either direction. It is a TERMINAL outcome for the session, not a softer
+#:   failure and not a pending one: the session stays blocked, and the NEXT
+#:   session's own push is what earns the next verdict. Only assign it after
+#:   READING the job log -- a `failure` or `cancelled` conclusion does not
+#:   distinguish the two on its own.
+#:
+#: Validation is on WRITE only. `render_show` and the SessionStart preflight
+#: print whatever a marker already carries, so a marker written before this set
+#: existed still reads correctly.
+KNOWN_REASON_CODES = frozenset({"CI_BLOCKING_FAILURE", "CI_INFRA_UNAVAILABLE"})
+
+DEFAULT_REASON_CODE = "CI_BLOCKING_FAILURE"
+
 _RUN_ID_RE = re.compile(r"^[0-9]{1,32}$")
 _JOB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 
@@ -272,18 +301,183 @@ def _require_marker_identity(marker: dict, current: dict, branch: str, head: str
         raise StateError("the marker was written on a different branch")
 
 
+#: Marker states this module itself ever writes. A marker's `state` field is
+#: untrusted input until checked against this, exactly like every other field
+#: below -- this is a STRUCTURE check, and a different, narrower thing from the
+#: reason-code vocabulary (KNOWN_REASON_CODES), which governs one field's
+#: content and only on write.
+_LIFECYCLE_STATES = frozenset({"prepared", "closed", "blocked"})
+
+#: The fields each state's own write path (cmd_prepare/cmd_close/cmd_block)
+#: actually populates, beyond the common ones checked unconditionally in
+#: _marker_structural_defect (schema, state, session_id, head, branch). Used
+#: only to recognise a GENUINE marker of that state -- not to validate a
+#: field's exact content beyond "present and roughly the right shape".
+#:
+#: `reason_code`'s CONTENT is deliberately not checked against a vocabulary
+#: here: a historical `blocked` marker written before KNOWN_REASON_CODES
+#: closed, or naming a code this version has not learned yet, must stay usable
+#: as history. Only its presence is required.
+_STATE_REQUIRED_FIELDS = {
+    "prepared": ("prepared_at",),
+    "closed": ("prepared_at", "closed_at"),
+    "blocked": ("prepared_at", "blocked_at", "reason_code", "blocking_jobs"),
+}
+
+
+def _marker_structural_defect(marker: dict) -> str | None:
+    """`None` if `marker` has the shape its own state's write path produces;
+    otherwise a short, human-readable description of what is wrong.
+
+    This is the gap a parseable-but-empty object slipped through. `{}` is
+    valid JSON, so it survived the parse/type check that fixed the truncated-
+    JSON case (a prior round of this same bug); and an empty object has no
+    `state` at all, so the identity guard read it as "not blocked" and let
+    `prepare` overwrite it. Worse, `{"state": "blocked"}` with no `session_id`
+    read as "blocked, but not THIS session's block" -- exactly the shape of a
+    legitimately inherited marker -- and was overwritten on that basis too. A
+    JSON object is not a marker just because `json.loads` accepted it; a
+    marker is what one of this module's own three write paths produces, and
+    this is the shape check for that claim.
+
+    Deliberately shallow beyond that: a timestamp field is checked for
+    presence, not format, and `blocking_jobs` for being a list, not for its
+    elements. Depth belongs to the write-time validators
+    (_validated_block_metadata and friends); this only decides whether reading
+    the object as a real marker at all is safe.
+    """
+    if marker.get("schema") != SCHEMA_VERSION:
+        return f"schema is {marker.get('schema')!r}, expected {SCHEMA_VERSION}"
+    state = str(marker.get("state") or "")
+    if state not in _LIFECYCLE_STATES:
+        return f"state {state!r} is not a recognised marker state"
+    if not _SESSION_ID_RE.match(str(marker.get("session_id") or "")):
+        return "session_id is missing or not a usable identifier"
+    if not _FULL_SHA_RE.match(str(marker.get("head") or "")):
+        return "head is missing or not a full 40-character SHA"
+    if not str(marker.get("branch") or ""):
+        return "branch is missing"
+    for field in _STATE_REQUIRED_FIELDS[state]:
+        if field == "blocking_jobs":
+            if not isinstance(marker.get("blocking_jobs"), list):
+                return "blocking_jobs is missing or not a list"
+        elif not str(marker.get(field) or "").strip():
+            return f"{field} is missing, required for state {state!r}"
+    return None
+
+
+def _read_marker_or_refuse(root: Path) -> dict | None:
+    """The marker, `None` when there is genuinely no file -- or a refusal.
+
+    `_read_json` answers `None` for "no such file", "will not parse", AND "is
+    valid JSON but not the object shape a marker has", and for most readers
+    that three-way collapse is harmless. For `prepare` it is not: absent means
+    "nothing to lose", while any of the other two means "there is a record
+    here and I cannot trust what it says". `prepare`'s next act is to
+    overwrite that file, so treating any of them like "absent" destroys
+    exactly the evidence that mattered -- see _marker_structural_defect for the
+    parseable-but-fake-marker case, which is the one that survived the previous
+    round of this fix.
+
+    So this one reader keeps "absent" apart from everything else and FAILS
+    CLOSED on the ambiguous cases. It does not repair, rename, regenerate or
+    guess at the file: a marker whose contents cannot be trusted cannot have an
+    identity inferred for it, and inventing one is the original sin this whole
+    module exists to prevent. The state is rare, deliberate, and meant to need
+    a human.
+
+    Note the trust boundary. The SessionStart hook stays fail-OPEN on the same
+    file -- an unreadable or malformed marker must never stop a session from
+    starting. This is the other side: certifying a close is a claim, and a
+    claim made over untrustworthy evidence is the thing being prevented.
+    """
+    path = marker_path(root)
+    if not path.exists():
+        return None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 -- every parse failure is the same refusal
+        raise StateError(
+            f"close marker exists but is unreadable ({type(exc).__name__}); "
+            "refusing to overwrite recovery evidence"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise StateError(
+            "close marker exists but is not a marker object; "
+            "refusing to overwrite recovery evidence"
+        )
+    defect = _marker_structural_defect(loaded)
+    if defect is not None:
+        raise StateError(
+            f"close marker exists but is not a valid recovery marker ({defect}); "
+            "refusing to overwrite recovery evidence"
+        )
+    return loaded
+
+
 def _load_marker(root: Path) -> dict:
-    marker = _read_json(marker_path(root))
+    """The marker for `close`/`block`, refusing with a reason that matches reality.
+
+    Delegates to _read_marker_or_refuse, the same reader `prepare` uses, so all
+    three transitions agree on what counts as a genuine marker. Before this,
+    `close`/`block` used the plain `_read_json`, which collapses "no file" and
+    "a file that will not read as a marker" into the same `None` -- so an
+    existing-but-corrupt marker produced `no close marker exists -- run
+    \\`prepare\\` first`, which is false (a marker file is right there) and
+    points at a command that would, correctly, also refuse.
+    """
+    marker = _read_marker_or_refuse(root)
     if marker is None:
         raise StateError("no close marker exists -- run `prepare` first")
     return marker
 
 
+def _guard_prepare_against_the_existing_marker(root: Path, current: dict) -> None:
+    """Two ways `prepare` must refuse rather than overwrite what is already there.
+
+    **Unreadable** -- delegated to _read_marker_or_refuse, which raises. See
+    there for why absent and unparsable are not the same state.
+
+    **This session's own `blocked` marker.** `blocked -> closed` was refused
+    from the start, but `blocked -> prepared -> closed` was not, and those are
+    the same transition with one extra step: a session whose tip was never
+    proven green could re-`prepare` on the identical head, with no new evidence
+    of any kind, and close. The gate was a sentence in the skill, which is to
+    say it was enforced by whoever remembered it.
+
+    That second refusal is scoped by IDENTITY, not by state alone. A later
+    session inherits the marker as history rather than as a verdict on its own
+    work, and must be able to prepare over it -- that inherited path is the only
+    honest route out of a block, and closing it would strand the repository
+    behind an outage that is already over.
+    """
+    marker = _read_marker_or_refuse(root)
+    if marker is None:
+        return
+    if str(marker.get("state") or "") != "blocked":
+        return
+    if str(marker.get("session_id") or "") != str(current.get("session_id") or ""):
+        return
+    raise StateError(
+        "this session is already blocked, and a blocked session is terminal: "
+        "start a new session before preparing again. Re-preparing here would walk "
+        "the block back to 'prepared' and close it with no new CI evidence"
+    )
+
+
 def cmd_prepare(cwd: str) -> dict:
-    """Mark the session prepared-to-close. Identity comes only from current.json."""
+    """Mark the session prepared-to-close. Identity comes only from current.json.
+
+    Refused when THIS session already holds a `blocked` marker, and refused when
+    a marker file exists that cannot be read -- see
+    _guard_prepare_against_the_existing_marker. Both are state-machine rules
+    here rather than rules in the close protocol's prose, because a rule that
+    lives only in prose is enforced by whoever remembers it.
+    """
     root = repo_root(cwd)
     current = load_current(root)
     branch, head = _consistency_check(cwd, current)
+    _guard_prepare_against_the_existing_marker(root, current)
     marker = {
         "schema": SCHEMA_VERSION,
         "state": "prepared",
@@ -299,8 +493,12 @@ def cmd_prepare(cwd: str) -> dict:
 def cmd_close(cwd: str) -> dict:
     """`prepared` -> `closed`. Re-running on an already-closed marker is a no-op.
 
-    Deliberately NOT reachable from `blocked`: a blocked session's next honest
-    step is to fix the failure and prepare again, not to relabel the marker.
+    Deliberately NOT reachable from `blocked` -- and `prepare` now refuses to
+    offer a detour around that (see
+    _guard_prepare_against_the_existing_marker), because
+    `blocked -> prepared -> closed` reached the same place one step later. A
+    blocked session is over. The next honest step belongs to a NEW session,
+    which inherits the marker as history and earns its own CI evidence.
     """
     root = repo_root(cwd)
     current = load_current(root)
@@ -323,8 +521,11 @@ def cmd_close(cwd: str) -> dict:
 
 def _validated_block_metadata(reason_code: str, run_id: str | None,
                               blocking_jobs: list[str]) -> dict:
-    if not _REASON_CODE_RE.match(reason_code or ""):
-        raise StateError("reason_code must be an UPPER_SNAKE code, e.g. CI_BLOCKING_FAILURE")
+    if reason_code not in KNOWN_REASON_CODES:
+        raise StateError(
+            f"reason_code {reason_code!r} is not in the fixed vocabulary; "
+            f"expected one of {', '.join(sorted(KNOWN_REASON_CODES))}"
+        )
     if run_id is not None and not _RUN_ID_RE.match(run_id):
         raise StateError("run_id must be the numeric CI run id")
     for job in blocking_jobs:
@@ -424,7 +625,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("close", help="mark the prepared session closed")
 
     p_block = sub.add_parser("block", help="mark the prepared session blocked")
-    p_block.add_argument("--reason-code", default="CI_BLOCKING_FAILURE")
+    # Not argparse `choices=`: the vocabulary is enforced in the module so a
+    # direct API caller gets the same refusal, and so the message arrives as a
+    # StateError like every other refusal here rather than an argparse usage dump.
+    p_block.add_argument("--reason-code", default=DEFAULT_REASON_CODE,
+                         help="one of: " + ", ".join(sorted(KNOWN_REASON_CODES))
+                              + f" (default: {DEFAULT_REASON_CODE}). "
+                              "CI_INFRA_UNAVAILABLE means the provider never "
+                              "reached a verdict -- read the job log first.")
     p_block.add_argument("--run-id", default=None)
     p_block.add_argument("--blocking-jobs", default="",
                          help="comma-separated job names, e.g. python,electron")
