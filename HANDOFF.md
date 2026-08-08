@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 77b33d6eef930c9dbaa54063a396c57a6cf2d15a
+covered_through_sha: eb598ce6e693859d1553b8bdb663d5fd9c43b035
 ---
 
 # HANDOFF — current state
@@ -22,9 +22,8 @@ file's own closing commit.
 - Branch **`langgraph-migration`**. `main` is `5f6f6ff` and a strict ancestor;
   never quote how far behind it is — derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
-- This session started at `0356120` and built **three work commits**, plus this
-  closing documentation commit on top of them. The chain, which does not change,
-  is `77b33d6 ← baf9f8b ← 7d83d27 ← 0356120`.
+- This session started at `6596335` and built **one work commit**, `eb598ce`,
+  plus this closing documentation commit on top of it.
 - Push state and CI for this session's own commits are **derived live**, never
   stored here:
 
@@ -35,50 +34,40 @@ gh run list --branch langgraph-migration    # then: gh run view <id> --json jobs
 
 - Push requires the owner's explicit in-chat approval, every session, every time.
 
-**Two documents were wrong and are now corrected — believe the code, not an
-older copy of this file.** `HANDOFF.md` claimed completion-contract Finding 1
-was open; `a02d4be` (2026-08-05) closed it. `ROADMAP.md` claimed two
-`tool_router.py` pattern gaps were found-but-unfixed; `00ba15c` (2026-08-01)
-closed both. Neither was re-implemented. Historical eval documents were left
-exactly as written — they were accurate on their own dates.
-
 ## 2. Last completed work
 
-Three commits, 2026-08-08.
+**`eb598ce` — the L3 confirmation now lives on the screen the user can reach,
+and the round-trip has run live on real hardware.**
 
-**`7d83d27` — the completion contract's finding-1 *shapes* are now pinned.**
-Source Binding already refuses a chart drawn from a file other than the one the
-user named, and its tests cover each leg of that check in isolation. What had no
-test was either shape the 2026-08-05 pilot actually produced, both of which
-reach `classify()` as an ordinary turn: a repair round that substitutes another
-file after the requested source failed honestly, and a substitution laundered
-through `plot_data(data_json=...)`, which carries no wrong path to point at. The
-second matters because the pre-execution guard that already refuses it runs in
-`enforce` only — in `shadow`, where a pilot observes, `classify()` is the sole
-defence. Both are falsifiable: dropping the requirement's `source` flips each to
-`SATISFIED`, the pre-fix behaviour. Tests only.
+`baf9f8b` wired the approve/deny card into `ChatScreen`. Nothing routes to
+`ChatScreen`: `HomeShell`'s tabs are CORE/TASKS/SCHED/VAULT and CORE is
+`HomeScreen`. So the feature passed its own tests while the shipped app could
+not answer a prompt. `HomeScreen` also carried a **second, unmigrated SSE
+reader** that only special-cased `[DONE]`, `[ERROR]` and a literal `{"async":`
+prefix, so a `confirmation_required` frame fell through to `appendToLast()` —
+rendered as raw JSON in the transcript, spoken aloud by TTS, and the interrupt
+left stranded server-side until TTL. The server was never at fault: the frame on
+the wire was well-formed and the gate held.
 
-**`baf9f8b` — an L3 confirmation can be answered from the phone.** The gate
-always held server-side, but mobile rendered no approve/deny UI, so any flow
-reaching a gated action was unusable there. `POST /chat/confirm/{id}` now joins
-the two SSE endpoints the client had, and its continuation is driven through the
-**same** reader as a new turn (`_consume()`): the server wraps both through
-`_sse_frames()`, so the continuation can carry tokens, a `final_answer`, a
-progress marker and a *second* `confirmation_required`. Three decisions a future
-reader would otherwise re-litigate: the prompt lives in an app-scoped provider
-because the stream delivering it ends immediately and a widget-local copy would
-not survive a rebuild; the WS `confirmation_required` broadcast feeds the same
-provider as a second leg, which is what recovers a prompt whose SSE stream died
-and the only leg that delivers one raised on another transport; and the card
-shows `policy_guard.describe_call`'s plain-language line, degrading to the tool
-NAME and never to `args` — an args fallback would put raw JSON back on screen.
-Double-submit, stale-tap and transport-failure handling live in
-`ConfirmationNotifier`, not in the buttons. Details:
-[`.claude/rules/mobile.md`](.claude/rules/mobile.md).
+Three things a future reader would otherwise re-litigate:
 
-**`77b33d6` — `.claude/rules/mobile.md` no longer contradicts the code.** It
-auto-loads for anything under `mobile/` and still said the app renders nothing
-for a confirmation prompt.
+- **One reader, or the bug returns.** `chat_sse.dart` exists precisely to stop
+  ad-hoc prefix loops; it was written once and defeated by a *duplicate*. Chat,
+  upload and confirmation continuation all go through `HomeScreen._consume()`
+  now. A new surface routes here rather than adding a third loop.
+- **`ChatScreen` was deleted, not kept as a reference** (854 lines). A second
+  chat implementation is what made the first one's tests meaningless.
+- **`HomeShell.screens` and `HomeScreenState` are public deliberately** — test
+  seams for the two facts that had no coverage: that the chat surface is
+  reachable, and that the upload leg uses the same reader (file_picker cannot be
+  driven from a widget test). Production calls neither.
+
+The `android.builtInKotlin` / `android.newDsl` lines in
+`mobile/android/gradle.properties` are **not hand-authored**: they were reverted,
+a full `flutter build apk --debug` was run, and Flutter's migrator re-added both.
+Committed as required build metadata.
+
+Details: [`.claude/rules/mobile.md`](.claude/rules/mobile.md).
 
 ## 3. Operational modes and rollout decisions
 
@@ -87,9 +76,9 @@ Defaults re-read from `jarvis/config.py` on 2026-08-08 (verify there, not here).
 
 | setting | default | note |
 |---|---|---|
-| `required_outputs_mode` | `off` | Gate pre-registered and still unpassed; `object_created` delta and the corpus-B false-positive clauses remain the blockers. Finding 1 being closed does not retry the gate. |
+| `required_outputs_mode` | `off` | Gate pre-registered and still unpassed; `object_created` delta and the corpus-B false-positive clauses remain the blockers. |
 | `execution_contract_mode` | `shadow` | Honesty kernel. `enforce` gated on 100 real artifact operations with 0 reported false blocks. |
-| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface, and **mobile can now answer it** (§2). |
+| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface, and mobile approve **and** deny are now live-verified on real hardware (§4). |
 | `external_writes_enabled` | `True` | `--profile test` flips it off. |
 | `monitor_proactive_enabled` | `False` | Proactive turns off by default. |
 | `calendar_from_mail_enabled` | `False` | Faz 5; never run against a real mailbox. |
@@ -99,81 +88,134 @@ Do not change a pre-registered threshold, corpus or metric after seeing a result
 **Mobile font binaries stay out of the repository** (owner decision 2026-08-06,
 untouched); the consequence is `MOBILE-ASSETS-01` in §5.
 
+**Local environment, not repository state:** the gitignored `.env` now sets both
+`JARVIS_API_KEY` and `API_HOST=127.0.0.1`. These belong together —
+`resolve_api_bind_host()` defaults to `0.0.0.0` as soon as a key is set, so the
+explicit `API_HOST` is what keeps the API on loopback. The phone reaches it over
+an `adb reverse tcp:8000 tcp:8000` USB tunnel, never the LAN. Exposing it is a
+deliberate edit, not a side effect of having auth configured.
+
 ## 4. Tests and CI
 
-Full verification of the tree of `77b33d6` — the last work commit, and the only
+Full verification of the tree of `eb598ce` — the last work commit, and the only
 later change is this closing documentation commit — run through the recorder,
 2026-08-08:
 
 ```powershell
 .venv\Scripts\python.exe scripts\dev_verify.py --full
 #   -> git diff --check clean; ruff All checks passed!
-#      pytest -q -> 3450 passed, 5 deselected, 362 warnings (563.28s)
-#      recorded at 77b33d6e
+#      pytest -q -> 3450 passed, 5 deselected, 362 warnings (551.39s)
+#      recorded at eb598ce6
 ```
 
-3450 is up from the previous snapshot's 3448 by **+2**: three
-`tests/test_output_contract.py` cases were added and one removed (a
-characterization test that asserted a known scope limit as `SATISFIED` — the
-owner's call not to pin a gap as expected behaviour).
+3450 is **unchanged** from the previous snapshot: this session's work commit
+touched `mobile/**` only, and `dev_verify.py`'s selector independently agreed —
+"no changed file implies Python behaviour". The suite was run in full anyway
+because the previous session's recorded evidence is `NOT REUSABLE` across
+sessions, so nothing could be inherited.
 
 Mobile, 2026-08-08, with the font assets present locally (`MOBILE-ASSETS-01`
 means this is not reproducible on a clean clone):
 
 ```powershell
 cd mobile; flutter analyze   # -> No issues found!
-cd mobile; flutter test      # -> 37 passed  (was 17)
+cd mobile; flutter test      # -> 47 passed  (was 37)
+cd mobile; flutter build apk --debug   # -> built; installed with adb install -r
 ```
 
-`tests/test_claude_session_hooks.py` was run on its own for the
-`.claude/rules/mobile.md` edit, which it asserts the content of: **192 passed**,
-2026-08-08.
+The 10 new tests are in `test/home_screen_confirmation_test.dart` and drive the
+real `HomeScreen`. They are **falsifiable**: reinstating the pre-fix behaviour
+turns 7 of the 10 red and leaves green exactly the three that probe unrelated
+frame kinds (tab wiring, progress/final_answer, async-task).
+
+**Live E2E, 2026-08-08 — real Galaxy S26 Ultra (`SM-S948B`), real server, real
+model, `shell_run` (L3) as the probe.** Server on `127.0.0.1:8000` reached over
+`adb reverse`; evidence is `data/audit_log.jsonl`:
+
+| | approve | deny |
+|---|---|---|
+| before the tap | `confirm_required`, 0 executions, no file | `confirm_required`, 0 executions, no file |
+| decision recorded | `user_approved` | `user_denied` |
+| executions | **exactly 1** start + 1 end, `ok=True` | **0** |
+| filesystem | probe file created | no file anywhere on disk |
+
+The approve probe's contents were `APPROVED` plus the CRLF `Set-Content` itself
+appends — reproduced byte-identically with a bare `Set-Content`, so nothing was
+added by JARVIS. On both runs the card rendered the server's plain-language
+description and **no frame internals** (`"type"`, `execution_id`, `args`,
+`payload`) appeared on screen, verified by `uiautomator dump`.
+
+**Correction kept visible:** `eb598ce`'s own commit message calls the device a
+Galaxy S24 Ultra. That was wrong — the marketing name was inferred from the
+`SM-S948B` model code and the inference was bad. The device is a **Galaxy S26
+Ultra**. The message was left as written rather than amended, because the
+recorded full-run evidence is keyed to that exact SHA.
+
+A second `confirm_required` row appears one millisecond before each decision row.
+That is the confirmation node re-recording its ruling on the resume pass
+([`nodes.py:1805`](jarvis/graph/nodes.py:1805) writes a decision for every
+risk ≥ 2 call each time the node runs), **not** a second prompt: no second card
+appeared and the execution count is unchanged.
 
 **Not run this session, and not claimed as passed:** Electron (`npm test`,
-`npm run build`) — untouched. No live workload of any kind: no Ollama run, no
-A/B harness, no completion-contract evaluation, no real mailbox. **No live E2E
-of the mobile confirmation round-trip against a real server + model** (§5).
+`npm run build`) — untouched. No Ollama A/B harness, no completion-contract
+evaluation, no real mailbox.
 
-**CI, read per job** (`gh run view 31225122022 --json jobs`, 2026-08-08): the
-tip that is on origin, `0356120`, is green in **all three** jobs — `python`,
-`electron`, `mobile` all `success`. This is **the first CI run that executed
-`pytest -n 4 --dist load`**, which was the previous snapshot's own next
-priority: the `Test (pytest)` step took **418s**, against 630s for the last
-serial run (`31213026002`), with no subprocess timeout. That measurement closes
-the open item the parallel switch carried. This session's own commits are not
-on origin yet; read their CI live rather than predicting it here.
+**CI:** this session's commit is **not on origin**, so it has no CI result —
+read it live after any push rather than predicting it here. The last judged tip
+(`6596335`, run `31234178265`, 2026-08-08) was `success`; read it per job
+(`gh run view <id> --json jobs`) rather than trusting the headline.
 
 ## 5. Known open issues
 
 Each keeps its identifier; the detail stays in the linked document.
 
-- **Completion-contract Finding 2 — open.** `honest_failure_retried` counts
-  eligible rows that carry `repair_attempted`, so a repair that fires on an
-  honest failure and then produces *something* leaves the eligible set and is
-  never counted. The metric was left exactly as pre-registered — this is a note
-  for the next revision of the gate, not a change to this one. Finding 1 is
-  **closed** (`a02d4be`); Finding 3 (TTFB) was narrowed by `e200658`, not closed.
-  See
-  [`docs/eval/completion_contract_pilot_2026-08-05.md`](docs/eval/completion_contract_pilot_2026-08-05.md).
-- **Mobile L3 confirmation has never run live.** Verified by `flutter analyze`
-  and `flutter test` only — no E2E against a real server + model from the phone.
-  This is the same limit `docs/SAFETY.md` records for the Electron HUD's
-  confirmation round-trip, and both are now open at once.
+- **`MOBILE-16KB-01` — the app fails Android's 16 KB page-size ELF compatibility
+  check. Observed live on the device, 2026-08-08.** The debug APK's first launch
+  on the Galaxy S26 Ultra raised an Android system dialog stating the app is not
+  16 KB page-size compatible and that the ELF compatibility check failed:
+  **LOAD-segment alignment errors** for `libonnxruntime.so` and
+  `libonnxruntime4j_jni.so`, plus compatibility warnings for `libflutter.so`,
+  `libdartjni.so`, `libdatastore_shared_counter.so` and
+  `libVkLayer_khronos_validation.so`.
+  **Not a runtime blocker as things stand** — the app launched anyway and the
+  mobile L3 E2E completed on that same launch — but it is a real, device-verified
+  Android compatibility/hardening gap, and the alignment errors sit in native
+  libraries this project does not build itself. Deliberately out of scope for
+  `eb598ce`.
+  Two honest limits on this entry: the evidence is the **owner's reading of the
+  on-device dialog**, not a captured log — the warning appears in nothing this
+  session's build or `adb install` output recorded, so a future session should
+  expect to re-trigger it on-device rather than grep a build log. And it is
+  unmeasured against a device that actually *uses* 16 KB pages; the phone was
+  disconnected before `getconf PAGE_SIZE` could be read.
 - **Mobile confirmation: no cross-tab indicator, and no `conversation_id`.** A
   prompt raised while the user is on another tab is answerable when they return
-  (the provider is app-scoped) but nothing signals it from elsewhere in the app.
+  (the provider is app-scoped) but nothing signals it from elsewhere. Now that
+  the card lives on the CORE tab this is narrower than it was, but not closed.
   `confirmStream()` sends no `conversation_id`, matching `chatStream()`; if
   mobile ever pins a conversation, both must change together or the resume is
   refused server-side.
+- **Completion-contract Finding 2 — open.** `honest_failure_retried` counts
+  eligible rows that carry `repair_attempted`, so a repair that fires on an
+  honest failure and then produces *something* leaves the eligible set and is
+  never counted. Left exactly as pre-registered — a note for the next revision of
+  the gate, not a change to this one. Finding 1 is **closed** (`a02d4be`);
+  Finding 3 (TTFB) was narrowed by `e200658`, not closed. See
+  [`docs/eval/completion_contract_pilot_2026-08-05.md`](docs/eval/completion_contract_pilot_2026-08-05.md).
 - **`completion_contract_ab.py`'s 4224s anomaly — instrumented, not explained.**
-  A known eval-harness observability gap, explicitly not a production blocker; the
-  proven-fact vs. hypothesis split is in
+  A known eval-harness observability gap, explicitly not a production blocker;
+  the proven-fact vs. hypothesis split is in
   [`docs/eval/completion_contract_ttfb_followup_2026-08-07.md`](docs/eval/completion_contract_ttfb_followup_2026-08-07.md).
 - **`MOBILE-ASSETS-01` — a clean clone cannot build or test the mobile app.**
   `mobile/.gitignore` ignores `assets/fonts/*.ttf` and `flutter analyze` does not
   validate the pubspec `fonts:` section, so **a green `mobile` CI job is not
   evidence that the app builds anywhere.** It is also the only thing between
   `flutter test` and CI (§7). See `mobile/assets/ASSETS_SETUP.md`.
+- **Wake-word asset is absent from this checkout.**
+  `android/app/src/main/assets/wake/hey_jarvis_v0.1.onnx` is gitignored and not
+  on disk. It does not block a build (wake-word defaults off) but the feature
+  fails at runtime if enabled.
 - **`dev_verify.py` scope limits.** Its **Electron branch has still never run
   live**. Cross-cutting widening covers `jarvis/graph/` and `jarvis/execution/`
   only. It deliberately does **not** select `flutter test` during iteration (§7).
@@ -189,16 +231,14 @@ Each keeps its identifier; the detail stays in the linked document.
   "the next push judges the next tip" — a documented, deliberate limit
   (`workflow_dispatch` cannot work on this repo's default-branch layout).
 - **`claude_session_state.py`'s marker structural check validates presence and
-  coarse type, not field CONTENT** — a deliberate scope limit. The verification
-  record is checked the same way, plus a pattern on the summary.
+  coarse type, not field CONTENT** — a deliberate scope limit.
 - **Source Binding scope limits** (deliberate): a bare-filename request is
-  satisfied by a same-named file in a different directory — closing that needs
-  disambiguation, and the alternative rule was reverted once because a live
-  smoke caught it rejecting the model's own correct answer; plain Unicode
+  satisfied by a same-named file in a different directory; plain Unicode
   casefold on Turkish İ/i; pre-execution guard has deterministic evidence only.
 - **Faz 5 (mail → calendar) has never run against the real mailbox** — green on
   fixtures only; background ingestion stays off until it does.
 - **Electron HUD confirmation is compile/parser-verified only — no live E2E.**
+  Mobile's equivalent gap is now closed (§4); Electron's is not.
 - **`python_run` is access-controlled, not sandboxed.**
 - **Proactive turns gate L3 only**; an unwatched L2 write is mitigated by prompt
   instruction, not structurally closed.
@@ -209,17 +249,24 @@ Each keeps its identifier; the detail stays in the linked document.
 
 ## 6. Next engineering priority
 
-**Give the mobile L3 round-trip one live run** — a real server, a real model, a
-real gated action approved and denied from the phone. It is the only thing
-standing between `baf9f8b` and a claim anyone can rely on, and this repository
-has been burned specifically here before: a gate once passed 2235 tests and
-38/38 mutations, then failed 10/10 live.
+**`MOBILE-16KB-01`** is the owner's nominated next item, and §5 already names the
+offending libraries, so the work starts at *fixing*, not finding. The two hard
+errors (`libonnxruntime.so`, `libonnxruntime4j_jni.so`) come from a dependency
+rather than from this project's own code, so the first question is whether a
+newer 16 KB-aligned ONNX Runtime exists — not how to re-link it here. Scope the
+`libflutter.so` / `libdartjni.so` warnings against the Flutter version too
+(CI's Flutter is unpinned, §5), and re-trigger the dialog on-device to confirm
+any fix, since the check does not surface in build output.
 
 After that, **completion-contract Finding 2** is the pilot's remaining open
 finding, and its fix belongs to the next revision of the gate rather than to the
 current one — do not redefine a pre-registered metric in place. `ROADMAP.md`'s
-own next unstarted phase is **Faz 5 (proaktif mail → takvim)**, which is blocked
-on the OAuth re-consent in §7.
+own next unstarted phase is **Faz 5 (proaktif mail → takvim)**, blocked on the
+OAuth re-consent in §7.
+
+The **Electron HUD confirmation round-trip is now the only interface whose gate
+has never run live** — mobile's just did, and the same "2235 tests and 38/38
+mutations, then 10/10 live failures" precedent applies to it.
 
 Do not start any of this — or any product work — inside a session that is
 closing.
@@ -229,11 +276,16 @@ closing.
 - **Google OAuth re-consent** (Gmail read, Calendar write, Contacts) — blocks the
   Faz 5 live measurement and the Faz 2 entity resolver.
 - **Mobile font binaries** — owner deferred 2026-08-06. This is the only blocker
-  to running `flutter test` in CI, and it now guards 37 tests rather than 17.
+  to running `flutter test` in CI, and it now guards 47 tests rather than 37.
 - **Should `flutter test` join `dev_verify.py`'s iteration loop?** Left unchanged
   deliberately: the tool would then assume font assets on every checkout.
 - **Default-branch / `.github/` layout** — `main` carries no `.github/`
   directory. Flagged for the owner to decide, not decided on their behalf.
+- **Android SDK is now installed on this machine** (Temurin JDK 21, cmdline-tools,
+  platform 36, build-tools 36.0.0, at `%LOCALAPPDATA%\Android\sdk`). It was absent
+  before 2026-08-08, and `mobile/android/local.properties` — gitignored — had
+  stale `sdk.dir`/`java.home` paths pointing at software that was never installed
+  here. A different machine will hit the same wall.
 
 Push approval is per-session and per-action: requested in chat at the time of the
 push, never recorded here.
@@ -248,17 +300,10 @@ push, never recorded here.
 - Session identity is machine-authored. Every lifecycle transition goes through
   `scripts/claude_session_state.py` (`prepare`/`close`/`block`/`show`), which
   takes no id argument. If it refuses, report the refusal verbatim and stop.
-- **The identity in `current.json` changed mid-session** (an earlier id was
-  recorded at session start, a later one partway through). Nothing was
-  hand-authored in response: the helper reads whatever `current.json` holds and
-  derives branch and HEAD itself. Worth knowing only because a marker written
-  late in a session may not name the id its preflight announced.
-- **This session's preflight again warned that the previous session did not
-  close, and again it was a false alarm** — the marker on disk read `closed` at
-  `0356120`, which was HEAD. Check the marker itself (`claude_session_state.py
-  show`) before believing that warning; this is now the second consecutive
-  session it has fired wrongly.
+- **The previous session closed cleanly** (marker `closed` at `6596335`), and
+  this session's preflight said so — the false "did not close" warning that fired
+  in the two sessions before this one did not recur.
 - The gitignored `full-verification.json` holds this session's own reusable
-  evidence, recorded at `77b33d6`. It is bound to a session id and a commit and
+  evidence, recorded at `eb598ce`. It is bound to a session id and a commit and
   is **not transferable** — this session correctly found the previous session's
   record `NOT REUSABLE` and re-ran the suite rather than inheriting it.

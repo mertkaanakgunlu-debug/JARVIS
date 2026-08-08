@@ -909,3 +909,39 @@ grafik olarak") rather than asking for a modification afterwards.
   by construction" question, but the pointed addendum from this round: ask it again after each fix,
   not just once, because a partial fix creates a NEW, narrower blind spot rather than closing the
   class of bug.
+
+## A canonical helper does not help if a second copy of the path exists (2026-08-08)
+
+Mobile's L3 approve/deny card was wired into `ChatScreen`. Nothing routes to
+`ChatScreen`: `HomeShell`'s tabs are CORE/TASKS/SCHED/VAULT and CORE is
+`HomeScreen`. The feature passed every one of its own tests and was **dead in
+the shipped app** — the first live run from the phone was what found it.
+
+Two distinct failure modes, both worth carrying forward:
+
+- **A feature attached to an unreachable surface tests perfectly.** Same family
+  as "verify the guard is on the path", one level out: there, a guard sat on a
+  node the router bypassed; here, a whole screen had no route. Before believing a
+  UI feature works, assert the surface is reachable — `HomeShell.screens` is now
+  public purely so a test can pin that, and `test/home_screen_confirmation_test.dart`
+  asserts `HomeShell.screens.first is HomeScreen`.
+- **`chat_sse.dart` already existed to prevent exactly this bug, and lost anyway,
+  because a SECOND reader existed.** `HomeScreen` kept a hand-rolled SSE loop
+  handling only `[DONE]`, `[ERROR]` and a literal `{"async":` prefix, so a
+  `confirmation_required` frame fell through to `appendToLast()` — raw JSON in the
+  transcript, spoken aloud by TTS, and an L3 interrupt stranded server-side.
+  **When you fix something in "the one canonical place", grep for a second
+  implementation of the same path before believing it is fixed.** A classifier,
+  parser or guard that exists is not a classifier that is *used*.
+
+The server was never at fault: the frame on the wire was well-formed, the gate
+recorded `confirm_required`, and `shell_run` did not run. Debugging cost a full
+wire-level capture before the duplicate reader was found — a `grep -rn` for the
+canonical function's name across `lib/` would have found it in one step.
+
+Also from this session, mechanical but real: **the phone's `Backend Host` field
+takes `host:port`, and a typo'd `127.0.0.1.8000` (dot, not colon) fails as an
+unresolvable hostname** with only a generic "connection failed" in the UI — the
+app does not validate the field. And **`flutter analyze`'s "no issues" says
+nothing about whether a screen is reachable**; dead code with no references
+analyzes clean.
