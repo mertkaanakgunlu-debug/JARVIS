@@ -61,7 +61,7 @@ dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.0"
     implementation platform("com.google.firebase:firebase-bom:32.7.0")
     implementation "com.google.firebase:firebase-messaging-ktx"
-    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.17.1"
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.23.2"
     implementation "androidx.multidex:multidex:2.0.1"
     implementation "androidx.core:core-ktx:1.12.0"
 }
