@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: eb598ce6e693859d1553b8bdb663d5fd9c43b035
+covered_through_sha: 2d4392a8bd23182a3080cceae1b2847b92da5403
 ---
 
 # HANDOFF — current state
@@ -22,8 +22,10 @@ file's own closing commit.
 - Branch **`langgraph-migration`**. `main` is `5f6f6ff` and a strict ancestor;
   never quote how far behind it is — derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
-- This session started at `6596335` and built **one work commit**, `eb598ce`,
-  plus this closing documentation commit on top of it.
+- This session started at `54851cb` and built **one work commit**, `feda49b`
+  (the `MOBILE-16KB-01` ONNX Runtime bump, §5), plus `2d4392a` (an interim
+  documentation commit narrowing that issue) and this closing documentation
+  commit on top of both.
 - Push state and CI for this session's own commits are **derived live**, never
   stored here:
 
@@ -97,31 +99,41 @@ deliberate edit, not a side effect of having auth configured.
 
 ## 4. Tests and CI
 
-Full verification of the tree of `eb598ce` — the last work commit, and the only
-later change is this closing documentation commit — run through the recorder,
+Full verification of the tree of `2d4392a` — this session's work commit
+(`feda49b`) plus its own interim documentation commit, and the only later
+change is this closing documentation commit — run through the recorder,
 2026-08-08:
 
 ```powershell
 .venv\Scripts\python.exe scripts\dev_verify.py --full
 #   -> git diff --check clean; ruff All checks passed!
-#      pytest -q -> 3450 passed, 5 deselected, 362 warnings (551.39s)
-#      recorded at eb598ce6
+#      pytest -q -> 3450 passed, 5 deselected, 0 failed, 362 warnings (522.73s)
+#      recorded at 2d4392a8
 ```
 
-3450 is **unchanged** from the previous snapshot: this session's work commit
-touched `mobile/**` only, and `dev_verify.py`'s selector independently agreed —
-"no changed file implies Python behaviour". The suite was run in full anyway
-because the previous session's recorded evidence is `NOT REUSABLE` across
-sessions, so nothing could be inherited.
+3450/5/0 is **unchanged** from the previous snapshot: this session's work
+commit touched `mobile/android/app/build.gradle` only (the ONNX Runtime version
+bump, `MOBILE-16KB-01`, §5), and `dev_verify.py`'s targeted selector
+independently agreed during iteration — "no changed file implies Python
+behaviour". The full pair was still run through the recorder rather than
+inherited, per `.claude/skills/session-close/SKILL.md` §6: a closing commit may
+skip a second full run only once a full run has actually gone through the
+recorder on the exact tree it closes over.
 
-Mobile, 2026-08-08, with the font assets present locally (`MOBILE-ASSETS-01`
-means this is not reproducible on a clean clone):
+Mobile, 2026-08-08, run against `feda49b`'s tree (after the onnxruntime-android
+`1.17.1` → `1.23.2` bump) with the font assets present locally
+(`MOBILE-ASSETS-01` means this is not reproducible on a clean clone) — same
+outcome as the prior snapshot, confirming no regression from the bump:
 
 ```powershell
 cd mobile; flutter analyze   # -> No issues found!
-cd mobile; flutter test      # -> 47 passed  (was 37)
-cd mobile; flutter build apk --debug   # -> built; installed with adb install -r
+cd mobile; flutter test      # -> 47 passed  (unchanged)
+cd mobile; flutter build apk --debug   # -> built, before and after the bump
 ```
+
+The native-library 16 KB ELF alignment evidence (`llvm-readelf`, `zipalign -c
+-P 16`) for `libonnxruntime.so` / `libonnxruntime4j_jni.so` is in §5,
+`MOBILE-16KB-01` — not duplicated here.
 
 The 10 new tests are in `test/home_screen_confirmation_test.dart` and drive the
 real `HomeScreen`. They are **falsifiable**: reinstating the pre-fix behaviour
@@ -316,6 +328,9 @@ push, never recorded here.
   this session's preflight said so — the false "did not close" warning that fired
   in the two sessions before this one did not recur.
 - The gitignored `full-verification.json` holds this session's own reusable
-  evidence, recorded at `eb598ce`. It is bound to a session id and a commit and
-  is **not transferable** — this session correctly found the previous session's
-  record `NOT REUSABLE` and re-ran the suite rather than inheriting it.
+  evidence, recorded at `2d4392a8` (superseding the prior snapshot's `eb598ce`
+  record — same session, later HEAD after `feda49b` and an interim docs
+  commit). It is bound to a session id and a commit and is **not
+  transferable** — `claude_session_state.py verification` confirms `REUSABLE`
+  for this session's own record; a future session must re-run rather than
+  inherit it.
