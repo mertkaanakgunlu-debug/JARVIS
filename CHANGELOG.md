@@ -6,6 +6,80 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [Mobile can answer an L3 confirmation; the pilot's finding-1 shapes are pinned] — 2026-08-08
+
+Three commits. The session began by verifying a claim rather than acting on it:
+`HANDOFF.md` listed completion-contract **Finding 1** as open and named it the
+next priority, but `a02d4be` (2026-08-05) had closed it 21 commits earlier —
+Source Binding already refuses a chart drawn from a file other than the one the
+user named. `ROADMAP.md` was stale the same way about two `tool_router.py`
+pattern gaps that `00ba15c` (2026-08-01) had closed. Nothing was
+re-implemented; both documents are corrected here. The historical eval
+documents were deliberately left alone — they were accurate on their own dates.
+
+`7d83d27` adds what Source Binding's own tests did not cover. They pin each
+**leg** of the source check in isolation; neither **shape** the 2026-08-05 pilot
+actually produced had a test, and both reach `classify()` as an ordinary turn.
+The first is a repair round that substitutes another file after the requested
+source failed honestly — its unbound twin
+(`test_a_second_attempt_that_succeeds_outranks_a_first_that_failed`) still
+answers `SATISFIED`, so only the requirement's `source` key separated the two
+behaviours and nothing asserted the consequence. The second is a substitution
+laundered through `plot_data(data_json=...)`, which carries no wrong path to
+point at: already refused by the pre-execution guard, but that guard runs in
+`enforce` only, and in `shadow` — where a pilot observes — `classify()` is the
+sole defence. Both are falsifiable rather than tautological: dropping the
+`source` binding flips each to `SATISFIED`, the pre-fix behaviour. A third test
+that pinned the documented bare-filename/different-directory scope limit as
+expected `SATISFIED` behaviour was written and then removed on the owner's call
+— a known gap is not something to lock in as correct.
+
+`baf9f8b` closes the largest functional gap on mobile: an L3 confirmation can
+now be approved or denied from the phone. The safety gate always held
+server-side, but the app rendered no UI for it, so any flow reaching a gated
+action was unusable there. `POST /chat/confirm/{id}` joins the two SSE endpoints
+the client already had, and its continuation runs through the **same** reader as
+a new turn — the server wraps `chat_stream()` and `resume_and_stream()` through
+one `_sse_frames()`, so the continuation can carry tokens, a `final_answer`, a
+progress marker and a *second* `confirmation_required`. Reading it with a
+narrower loop is precisely the omission that wrapper's own docstring records on
+the server side. The three SSE endpoints also stopped keeping private copies of
+the line parser.
+
+Three decisions in that commit are load-bearing. The prompt lives in an
+app-scoped provider, not in `_ChatScreenState`: the stream carrying it ends
+immediately (the graph is interrupted, TTL-bound), so a rebuild or a tab switch
+would strand it. That also lets the WS `confirmation_required` broadcast feed
+the same prompt as a second leg — the only leg that delivers a confirmation
+raised on another transport, and what recovers one whose SSE stream died before
+the frame arrived; `raise()` is idempotent on id so both legs firing costs
+nothing. And the card shows `policy_guard.describe_call`'s plain-language line,
+degrading to the tool **name** when there is none — never to `args`, which would
+put raw JSON back on screen and leak message bodies onto a lock screen. A
+payload with no answerable id or no nameable tool draws no card at all. The
+double-submit, stale-tap and transport-failure rules live in
+`ConfirmationNotifier` rather than in the buttons, because approving twice is
+not idempotent: the first POST pops the confirmation server-side, so a second
+would resume nothing and overwrite the real continuation with "expired or not
+found". A transport failure keeps the card up — a dropped connection is not a
+verdict.
+
+`77b33d6` rewrites `.claude/rules/mobile.md`, which auto-loads for anything
+under `mobile/` and still instructed future sessions that the app renders
+nothing for a confirmation prompt.
+
+Verified 2026-08-08: `dev_verify.py --full` recorded at `77b33d6e` → ruff clean,
+`3450 passed, 5 deselected` in 563.28s; `flutter analyze` → no issues;
+`flutter test` → 37 passed (was 17); `tests/test_claude_session_hooks.py` → 192
+passed for the rules edit it asserts. Electron was untouched and not run. **The
+mobile confirmation round-trip has had no live E2E against a real server and
+model** — the same limit `docs/SAFETY.md` records for the Electron HUD.
+
+Separately measured, not built here: CI run `31225122022` (tip `0356120`) is the
+first to execute `pytest -n 4 --dist load`, green in all three jobs, with the
+pytest step at **418s** against 630s for the last serial run — the open question
+`f3b6a55` shipped with.
+
 ## [Developer workflow — parallel CI pytest, and SHA-bound full-run reuse] — 2026-08-08
 
 Two commits, neither touching `jarvis/`, `electron/` or `mobile/`.

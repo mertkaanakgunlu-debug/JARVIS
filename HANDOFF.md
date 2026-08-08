@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 3e6304c8e695ef1495a515482d78c5303f4d2b85
+covered_through_sha: 77b33d6eef930c9dbaa54063a396c57a6cf2d15a
 ---
 
 # HANDOFF — current state
@@ -22,15 +22,10 @@ file's own closing commit.
 - Branch **`langgraph-migration`**. `main` is `5f6f6ff` and a strict ancestor;
   never quote how far behind it is — derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
-- This session started at `5576a1d` and is unusual: it closed **once**, mid-way.
-  The chain, which does not change, is
-  `3e6304c ← f3b6a55 ← b8cb4bd ← 7148062 ← 5576a1d`, and this closing
-  documentation commit sits on top of `3e6304c`.
-  - `7148062` — mobile splash-timer fix; its closing doc commit **`b8cb4bd` was
-    pushed and is CI-green in all three jobs** (§4).
-  - `f3b6a55`, `3e6304c` — the developer-productivity pair described in §2,
-    added after that close under the owner's explicit instruction.
-- Push state and CI for anything above `b8cb4bd` are **derived live**, never
+- This session started at `0356120` and built **three work commits**, plus this
+  closing documentation commit on top of them. The chain, which does not change,
+  is `77b33d6 ← baf9f8b ← 7d83d27 ← 0356120`.
+- Push state and CI for this session's own commits are **derived live**, never
   stored here:
 
 ```bash
@@ -40,53 +35,61 @@ gh run list --branch langgraph-migration    # then: gh run view <id> --json jobs
 
 - Push requires the owner's explicit in-chat approval, every session, every time.
 
+**Two documents were wrong and are now corrected — believe the code, not an
+older copy of this file.** `HANDOFF.md` claimed completion-contract Finding 1
+was open; `a02d4be` (2026-08-05) closed it. `ROADMAP.md` claimed two
+`tool_router.py` pattern gaps were found-but-unfixed; `00ba15c` (2026-08-01)
+closed both. Neither was re-implemented. Historical eval documents were left
+exactly as written — they were accurate on their own dates.
+
 ## 2. Last completed work
 
-Two work commits, 2026-08-07/08. No file under `jarvis/`, `electron/` or
-`mobile/` was touched by either; no runtime behaviour changed.
+Three commits, 2026-08-08.
 
-**`f3b6a55` — CI's pytest step runs in parallel.** `pytest -n 4 --dist load`,
-with the worker count **pinned** rather than `-n auto`: 4 is what was measured,
-and `auto` silently changes meaning if the runner is resized. The suite could
-not run in parallel at all before this — `tests/test_execution_approval.py` built
-a parametrize id from the wall clock, so collection differed between processes
-and xdist refused to start; a fixed constant asserts the same thing. Two
-decisions a future reader would otherwise re-litigate are in the job's own
-comment: why `load` beat `loadfile`, and the one 30s subprocess timeout observed
-at one worker per core — **the same ratio a 4-vCPU runner has, so CI-side
-contention is genuinely unmeasured until this lands** (§5). Rollback is `-n 2
---dist load` or a bare `pytest`; coverage is identical in every mode.
+**`7d83d27` — the completion contract's finding-1 *shapes* are now pinned.**
+Source Binding already refuses a chart drawn from a file other than the one the
+user named, and its tests cover each leg of that check in isolation. What had no
+test was either shape the 2026-08-05 pilot actually produced, both of which
+reach `classify()` as an ordinary turn: a repair round that substitutes another
+file after the requested source failed honestly, and a substitution laundered
+through `plot_data(data_json=...)`, which carries no wrong path to point at. The
+second matters because the pre-execution guard that already refuses it runs in
+`enforce` only — in `shadow`, where a pilot observes, `classify()` is the sole
+defence. Both are falsifiable: dropping the requirement's `source` flips each to
+`SATISFIED`, the pre-fix behaviour. Tests only.
 
-**`3e6304c` — `/session-close` reuses a full run instead of repeating it.** A
-closing commit that only touches `HANDOFF.md`/`CHANGELOG.md` used to re-run the
-whole suite: ten minutes that tested nothing new, while the one artefact it
-*does* introduce had no test. Now the earlier run is reused — but only against
-machine-authored evidence in the gitignored
-`.claude/session-recovery/full-verification.json`, written through the same
-single write API as the marker. Head, branch, session and timestamp are derived;
-only the exit status and pytest's own summary line come from outside, and prose
-is refused at write time. **There is deliberately no `record` subcommand** — a
-subcommand taking a count would be a prompt where evidence could be typed.
-`scripts/dev_verify.py --full` is the only producer and refuses a dirty tree,
-because evidence is keyed by commit. Every way of not having usable evidence
-(none, failed, foreign session, rewritten history, any non-document change since
-the verified tree, or never asking) yields `FULL PYTHON FALLBACK`. New
-`tests/test_handoff_contract.py` checks the closing artefact itself against the
-preflight's **imported** parser.
+**`baf9f8b` — an L3 confirmation can be answered from the phone.** The gate
+always held server-side, but mobile rendered no approve/deny UI, so any flow
+reaching a gated action was unusable there. `POST /chat/confirm/{id}` now joins
+the two SSE endpoints the client had, and its continuation is driven through the
+**same** reader as a new turn (`_consume()`): the server wraps both through
+`_sse_frames()`, so the continuation can carry tokens, a `final_answer`, a
+progress marker and a *second* `confirmation_required`. Three decisions a future
+reader would otherwise re-litigate: the prompt lives in an app-scoped provider
+because the stream delivering it ends immediately and a widget-local copy would
+not survive a rebuild; the WS `confirmation_required` broadcast feeds the same
+provider as a second leg, which is what recovers a prompt whose SSE stream died
+and the only leg that delivers one raised on another transport; and the card
+shows `policy_guard.describe_call`'s plain-language line, degrading to the tool
+NAME and never to `args` — an args fallback would put raw JSON back on screen.
+Double-submit, stale-tap and transport-failure handling live in
+`ConfirmationNotifier`, not in the buttons. Details:
+[`.claude/rules/mobile.md`](.claude/rules/mobile.md).
 
-Also this session, and already documented where it belongs: `MOBILE-TEST-01` was
-closed in `7148062` (`.claude/rules/mobile.md`, `CHANGELOG.md`).
+**`77b33d6` — `.claude/rules/mobile.md` no longer contradicts the code.** It
+auto-loads for anything under `mobile/` and still said the app renders nothing
+for a confirmation prompt.
 
 ## 3. Operational modes and rollout decisions
 
-Defaults re-read from `jarvis/config.py` on 2026-08-07 (verify there, not here).
+Defaults re-read from `jarvis/config.py` on 2026-08-08 (verify there, not here).
 **This session changed no default and made no rollout decision.**
 
 | setting | default | note |
 |---|---|---|
-| `required_outputs_mode` | `off` | Gate pre-registered and still unpassed; `object_created` delta and the corpus-B false-positive clauses remain the blockers. |
+| `required_outputs_mode` | `off` | Gate pre-registered and still unpassed; `object_created` delta and the corpus-B false-positive clauses remain the blockers. Finding 1 being closed does not retry the gate. |
 | `execution_contract_mode` | `shadow` | Honesty kernel. `enforce` gated on 100 real artifact operations with 0 reported false blocks. |
-| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface. |
+| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface, and **mobile can now answer it** (§2). |
 | `external_writes_enabled` | `True` | `--profile test` flips it off. |
 | `monitor_proactive_enabled` | `False` | Proactive turns off by default. |
 | `calendar_from_mail_enabled` | `False` | Faz 5; never run against a real mailbox. |
@@ -98,56 +101,70 @@ untouched); the consequence is `MOBILE-ASSETS-01` in §5.
 
 ## 4. Tests and CI
 
-Full verification of the tree of `3e6304c` — the second work commit, and the
-only later change is this closing documentation commit — run through the
-recorder, which is why §6's targeted branch was available at all:
+Full verification of the tree of `77b33d6` — the last work commit, and the only
+later change is this closing documentation commit — run through the recorder,
+2026-08-08:
 
 ```powershell
 .venv\Scripts\python.exe scripts\dev_verify.py --full
 #   -> git diff --check clean; ruff All checks passed!
-#      pytest -q -> 3448 passed, 5 deselected, 362 warnings (622.80s)
-#      recorded at 3e6304c8
+#      pytest -q -> 3450 passed, 5 deselected, 362 warnings (563.28s)
+#      recorded at 77b33d6e
 ```
 
-3448 is up from the previous snapshot's 3416 by **+32**: `test_handoff_contract`
-6, `test_dev_verify` 13, `test_claude_session_hooks` 13.
+3450 is up from the previous snapshot's 3448 by **+2**: three
+`tests/test_output_contract.py` cases were added and one removed (a
+characterization test that asserted a known scope limit as `SATISFIED` — the
+owner's call not to pin a gap as expected behaviour).
 
-Parallel-mode measurements, 2026-08-08, all on one tree whose fingerprint was
-taken before and after the batch and matched, 3446 tests and exit 0 in each row:
-serial `796.96s`; `-n 4 --dist loadfile` `367.08s`; `-n 4 --dist load`
-`234.31s`. The chosen mode was then re-run twice more, green both times
-(`240.80s`, `241.13s`). One `-n auto --dist load` run at 32 workers on 32 cores
-failed with a single 30s subprocess timeout — the observation §5's open item is
-about.
+Mobile, 2026-08-08, with the font assets present locally (`MOBILE-ASSETS-01`
+means this is not reproducible on a clean clone):
+
+```powershell
+cd mobile; flutter analyze   # -> No issues found!
+cd mobile; flutter test      # -> 37 passed  (was 17)
+```
+
+`tests/test_claude_session_hooks.py` was run on its own for the
+`.claude/rules/mobile.md` edit, which it asserts the content of: **192 passed**,
+2026-08-08.
 
 **Not run this session, and not claimed as passed:** Electron (`npm test`,
-`npm run build`) — untouched. Mobile `flutter test` / `flutter analyze` were run
-for `7148062` (see `.claude/rules/mobile.md`) and not re-run for these two
-commits, which change no mobile file. No live workload of any kind: no Ollama
-run, no A/B harness, no completion-contract evaluation, no real mailbox.
+`npm run build`) — untouched. No live workload of any kind: no Ollama run, no
+A/B harness, no completion-contract evaluation, no real mailbox. **No live E2E
+of the mobile confirmation round-trip against a real server + model** (§5).
 
-**CI, read per job** (`gh run view 31213026002 --json jobs`, 2026-08-07):
-`b8cb4bd` is green in **all three** jobs — `python`, `electron`, `mobile` all
-`success`; the `python` job took 13m34s, of which the pytest step was 630s. That
-run used the OLD serial command. **No CI run has ever executed `pytest -n 4
---dist load`** — read this session's own commits' CI live once pushed; it is not
-predicted here.
+**CI, read per job** (`gh run view 31225122022 --json jobs`, 2026-08-08): the
+tip that is on origin, `0356120`, is green in **all three** jobs — `python`,
+`electron`, `mobile` all `success`. This is **the first CI run that executed
+`pytest -n 4 --dist load`**, which was the previous snapshot's own next
+priority: the `Test (pytest)` step took **418s**, against 630s for the last
+serial run (`31213026002`), with no subprocess timeout. That measurement closes
+the open item the parallel switch carried. This session's own commits are not
+on origin yet; read their CI live rather than predicting it here.
 
 ## 5. Known open issues
 
 Each keeps its identifier; the detail stays in the linked document.
 
-- **CI-side contention for the parallel pytest step is unmeasured (new).** The
-  only observed subprocess timeout came at one worker per core, which is the
-  ratio `-n 4` has on a 4-vCPU `windows-latest` runner; the local runs that were
-  green had four times the headroom. If `python` goes red on a subprocess
-  timeout with no diff to explain it, that is this — drop to `-n 2 --dist load`
-  or revert to a bare `pytest` (`.github/workflows/ci.yml` carries the numbers).
-- **Completion-contract Findings 1–2 — open.** A completion repair can satisfy
-  the contract from a *different* file than the one requested, and
-  `honest_failure_retried` is blind to a repair that "succeeds" by substitution.
-  Finding 3 (TTFB) was narrowed by `e200658`, not closed. See
+- **Completion-contract Finding 2 — open.** `honest_failure_retried` counts
+  eligible rows that carry `repair_attempted`, so a repair that fires on an
+  honest failure and then produces *something* leaves the eligible set and is
+  never counted. The metric was left exactly as pre-registered — this is a note
+  for the next revision of the gate, not a change to this one. Finding 1 is
+  **closed** (`a02d4be`); Finding 3 (TTFB) was narrowed by `e200658`, not closed.
+  See
   [`docs/eval/completion_contract_pilot_2026-08-05.md`](docs/eval/completion_contract_pilot_2026-08-05.md).
+- **Mobile L3 confirmation has never run live.** Verified by `flutter analyze`
+  and `flutter test` only — no E2E against a real server + model from the phone.
+  This is the same limit `docs/SAFETY.md` records for the Electron HUD's
+  confirmation round-trip, and both are now open at once.
+- **Mobile confirmation: no cross-tab indicator, and no `conversation_id`.** A
+  prompt raised while the user is on another tab is answerable when they return
+  (the provider is app-scoped) but nothing signals it from elsewhere in the app.
+  `confirmStream()` sends no `conversation_id`, matching `chatStream()`; if
+  mobile ever pins a conversation, both must change together or the resume is
+  refused server-side.
 - **`completion_contract_ab.py`'s 4224s anomaly — instrumented, not explained.**
   A known eval-harness observability gap, explicitly not a production blocker; the
   proven-fact vs. hypothesis split is in
@@ -160,10 +177,6 @@ Each keeps its identifier; the detail stays in the linked document.
 - **`dev_verify.py` scope limits.** Its **Electron branch has still never run
   live**. Cross-cutting widening covers `jarvis/graph/` and `jarvis/execution/`
   only. It deliberately does **not** select `flutter test` during iteration (§7).
-- **Mobile L3 confirmation: still no approve/deny UI.** `classifyChatChunk()`
-  shows a neutral "not yet supported" note instead of raw JSON, but nothing
-  resolves the interrupt; the graph stays interrupted server-side. This is the
-  largest functional gap on mobile.
 - **Mobile `flutter analyze` runs with the DEFAULT analyzer rule set** — no
   `analysis_options.yaml` anywhere, so `flutter_lints` is never applied.
 - **CI's Flutter version is unpinned** (`subosito/flutter-action@v2`,
@@ -176,11 +189,13 @@ Each keeps its identifier; the detail stays in the linked document.
   "the next push judges the next tip" — a documented, deliberate limit
   (`workflow_dispatch` cannot work on this repo's default-branch layout).
 - **`claude_session_state.py`'s marker structural check validates presence and
-  coarse type, not field CONTENT** — a deliberate scope limit. The new
-  verification record is checked the same way, plus a pattern on the summary.
-- **Source Binding scope limits** (deliberate): bare-filename ambiguity across
-  directories; plain Unicode casefold on Turkish İ/i; pre-execution guard has
-  deterministic evidence only.
+  coarse type, not field CONTENT** — a deliberate scope limit. The verification
+  record is checked the same way, plus a pattern on the summary.
+- **Source Binding scope limits** (deliberate): a bare-filename request is
+  satisfied by a same-named file in a different directory — closing that needs
+  disambiguation, and the alternative rule was reverted once because a live
+  smoke caught it rejecting the model's own correct answer; plain Unicode
+  casefold on Turkish İ/i; pre-execution guard has deterministic evidence only.
 - **Faz 5 (mail → calendar) has never run against the real mailbox** — green on
   fixtures only; background ingestion stays off until it does.
 - **Electron HUD confirmation is compile/parser-verified only — no live E2E.**
@@ -194,13 +209,17 @@ Each keeps its identifier; the detail stays in the linked document.
 
 ## 6. Next engineering priority
 
-**Read the first CI run that executes `pytest -n 4 --dist load`, per job.** It is
-the only unmeasured half of `f3b6a55`, and the rollback is one line.
+**Give the mobile L3 round-trip one live run** — a real server, a real model, a
+real gated action approved and denied from the phone. It is the only thing
+standing between `baf9f8b` and a claim anyone can rely on, and this repository
+has been burned specifically here before: a gate once passed 2235 tests and
+38/38 mutations, then failed 10/10 live.
 
-After that, **completion-contract Finding 1 (source-substitution repair)**:
-binding the repair's success criterion to the *requested* source rather than "a
-chart artifact exists somewhere" is the pilot's own recommended next single step.
-On mobile the next real product gap is the **L3 approve/deny UI** (§5).
+After that, **completion-contract Finding 2** is the pilot's remaining open
+finding, and its fix belongs to the next revision of the gate rather than to the
+current one — do not redefine a pre-registered metric in place. `ROADMAP.md`'s
+own next unstarted phase is **Faz 5 (proaktif mail → takvim)**, which is blocked
+on the OAuth re-consent in §7.
 
 Do not start any of this — or any product work — inside a session that is
 closing.
@@ -209,8 +228,8 @@ closing.
 
 - **Google OAuth re-consent** (Gmail read, Calendar write, Contacts) — blocks the
   Faz 5 live measurement and the Faz 2 entity resolver.
-- **Mobile font binaries** — owner deferred 2026-08-06. With `MOBILE-TEST-01`
-  closed, this is now the *only* blocker to running `flutter test` in CI.
+- **Mobile font binaries** — owner deferred 2026-08-06. This is the only blocker
+  to running `flutter test` in CI, and it now guards 37 tests rather than 17.
 - **Should `flutter test` join `dev_verify.py`'s iteration loop?** Left unchanged
   deliberately: the tool would then assume font assets on every checkout.
 - **Default-branch / `.github/` layout** — `main` carries no `.github/`
@@ -229,17 +248,17 @@ push, never recorded here.
 - Session identity is machine-authored. Every lifecycle transition goes through
   `scripts/claude_session_state.py` (`prepare`/`close`/`block`/`show`), which
   takes no id argument. If it refuses, report the refusal verbatim and stop.
-- **This session ran the lifecycle twice, deliberately.** It prepared, pushed and
-  `closed` at `b8cb4bd` after CI came back green in all three jobs; the owner
-  then authorised further work, so `f3b6a55` and `3e6304c` were built and the
-  session prepared again over its own `closed` marker. That transition is
-  allowed (only `blocked` is terminal), and the earlier `closed` record survives
-  only in this note.
-- **A third gitignored file now exists**: `full-verification.json`, the
-  reusable-full-run evidence. It is written only by `dev_verify.py --full`, is
-  bound to a session id and a commit, and is not transferable — a next session
-  reading it will correctly find it unusable and run the suite.
-- This session's preflight warned that the previous session had not closed. It
-  was a false alarm: the marker on disk read `closed` at `5576a1d`, and the
-  breadcrumb belonged to a later session that exited on a clean tree with nothing
-  to lose. Check the marker itself before believing that warning.
+- **The identity in `current.json` changed mid-session** (an earlier id was
+  recorded at session start, a later one partway through). Nothing was
+  hand-authored in response: the helper reads whatever `current.json` holds and
+  derives branch and HEAD itself. Worth knowing only because a marker written
+  late in a session may not name the id its preflight announced.
+- **This session's preflight again warned that the previous session did not
+  close, and again it was a false alarm** — the marker on disk read `closed` at
+  `0356120`, which was HEAD. Check the marker itself (`claude_session_state.py
+  show`) before believing that warning; this is now the second consecutive
+  session it has fired wrongly.
+- The gitignored `full-verification.json` holds this session's own reusable
+  evidence, recorded at `77b33d6`. It is bound to a session id and a commit and
+  is **not transferable** — this session correctly found the previous session's
+  record `NOT REUSABLE` and re-ran the suite rather than inheriting it.

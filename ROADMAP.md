@@ -72,16 +72,14 @@
 
 **Faz 2.5'ten taşınan, bilinçli olarak yapılmayanlar:**
 
-- **`tool_router.py`'de iki örüntü boşluğu bulundu, düzeltilmedi.** (1) Jenerik bir fiil belirli
-  bir alana ait olduğunda hayalî ikinci bir alan doğuruyor: `\blistele` bir *files* örüntüsü, yani
-  *"Son 3 mailimi listele"* → `['mail','files']` ve tek çağrılık bir istek `multi_domain`
-  kuralıyla reasoning'e gidiyor (16 gerçekçi istekte 4 kez). (2) `\bpdf\b` Türkçe ekle yazılmış
-  *"PDFteki"*'yi kaçırıyor, bu yüzden model **PDF okuyabilen hiçbir araç görmüyor** — bu ikincisi
-  rol seçiminden bağımsız, daha ciddi bir araç-görünürlüğü hatası. İkisi tek bir ölçümlü
-  `tool_router` turunda birlikte düzeltilmeli; planın kendi risk tablosu model-görünürlüğü
-  değişikliklerinin yeniden ölçüm istediğini söylüyor.
-  `tests/test_role_router.py::test_a_generic_verb_can_split_one_request_into_two_domains`
-  bugünkü davranışı sabitliyor ve düzeltildiğinde **kırmızıya dönecek** — kasıtlı.
+- ~~**`tool_router.py`'de iki örüntü boşluğu bulundu, düzeltilmedi.**~~ **İkisi de kapandı —
+  `00ba15c` (2026-08-01), Paket F.** Jenerik fiiller (`\blistele`, `\boku\b`, `\bara\b`) örüntü
+  tablosundan çıkarıldı, çünkü bir yeteneği değil bir işlemi adlandırıyorlardı ve hayalî ikinci
+  bir alan doğuruyorlardı; isim (`\bdosya`, `\bnot`) zaten her gerçek istekte duruyor. `\bpdf\b`
+  → `\bpdf` oldu (`\bcsv`, `\bexcel` ile birlikte), çünkü Türkçe eki doğrudan kısaltmaya
+  ekliyor ve *"PDFteki"* hiçbir örüntüye çarpmıyordu. Bugünkü davranışı sabitleyen
+  `test_a_generic_verb_can_split_one_request_into_two_domains` aynı commit'te kaldırıldı —
+  planlandığı gibi. Gerekçeler `jarvis/graph/tool_router.py`'nin `_DOMAIN_PATTERNS` yorumunda.
 - **`_FAST_DOMAINS` listesinin yalnız iki üyesi canlı ölçüldü** (`calendar`, `files`). `tasks`,
   `media`, `memory`, `mail`, `drive`, `finance`, `math` gerekçeyle eklendi, ölçümle değil. Hepsi
   bugünkü davranışı koruyan yönde yazıldı, yani yanlış olmaları gecikmeye mal olur.
