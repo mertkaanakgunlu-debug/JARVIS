@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 8602a0b75785d8afcd67f6f726e88afe3e4d21cc
+covered_through_sha: 41651b4597c17d38a7ff93357dd2e59a314466a9
 ---
 
 # HANDOFF — current state
@@ -22,11 +22,16 @@ file's own closing commit.
 - Branch **`langgraph-migration`**. `main` is `5f6f6ff` and a strict ancestor;
   never quote how far behind it is — derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
-- This session started at `c081cee` — the previous session's own closing
-  commit — and built **one work commit**, `8602a0b` (`CI-FLAKE-CHROMA-01`,
-  §2), plus this closing documentation commit on top of it.
-- Push state and CI for this session's own commits are **derived live**, never
-  stored here:
+- `8602a0b` (`CI-FLAKE-CHROMA-01`) and `41651b4` (its closing docs) are
+  **pushed and CI-confirmed**: run `31274352271`, `python`/`electron`/`mobile`
+  all `success` at job level, the `python` job's full log carries zero
+  `acquire_write`/`no such table` occurrences (was the previous push's
+  `python`-job failure signature, run `31270921707`).
+- This chapter started at `41651b4` and made **no code change** — only a
+  live-device confirmation (§2) — so it produces one closing documentation
+  commit on top of it.
+- Push state and CI for this document's own closing commit are **derived
+  live**, never stored here:
 
 ```bash
 git rev-list --left-right --count origin/langgraph-migration...HEAD
@@ -95,6 +100,28 @@ where the un-fixed tree failed. `CI-FLAKE-CHROMA-01` is closed as a known
 issue (was in §5 as "transient suspected, root cause unproven" — that framing
 was wrong; the root cause was fully deterministic, not transient).
 
+**`MOBILE-16KB-01` — the live on-device acceptance test finally ran, and
+closes the issue.** No code changed. `feda49b`'s binary fix (onnxruntime
+1.17.1 → 1.23.2) was already alignment-verified statically; what was missing
+was ever re-triggering the actual cold-launch dialog on real hardware. Device:
+the same Galaxy S26 Ultra, `SM-S948B` — `adb devices` needed an on-device USB
+debug re-authorization first (was `unauthorized`, not absent). Newly read this
+chapter, on real hardware, for the first time in this project's history:
+`getconf PAGE_SIZE` → **4096** (this device runs 4 KB pages, not 16 KB — the
+compatibility warning Android showed pre-fix is a static native-library
+alignment check, not evidence the device itself runs 16 KB pages). The debug
+APK was rebuilt from the unchanged `feda49b` tree, `zipalign -c -P 16`
+re-confirmed `Verification successful` on the fresh build, installed with
+`adb install -r` (existing app data untouched), then force-stopped and
+cold-launched. Four independent, multi-modal checks agree: a screenshot shows
+the normal CORE screen with no overlay; `dumpsys activity` reports
+`topResumedActivity=...com.mertkaan.jarvis/.MainActivity` (no system dialog
+activity in front); the full post-launch `logcat` capture (10156 lines) has
+zero `onnxruntime`/`16 ?kb`/`page.?size`/`compat` matches on the app's own
+lines, only a clean launch sequence; and a `uiautomator dump` of the live UI
+tree has exactly one `package` value (`com.mertkaan.jarvis`) and zero
+compatibility-related text anywhere in it. The dialog is gone. Closed.
+
 ## 3. Operational modes and rollout decisions
 
 Defaults re-read from `jarvis/config.py` on 2026-08-08 (verify there, not here).
@@ -157,52 +184,32 @@ the exact 6 files CI's 15 failures came from (`test_alpha_capabilities.py`,
 `test_todo_bg_analysis.py`) — 126/126 every time, no retries, no reruns hiding
 a failure.
 
-**Not run this session, and not claimed as passed:** mobile (`flutter
-analyze`/`flutter test`/`flutter build apk --debug`) and Electron (`npm
-test`/`npm run build`) — neither touched; their last real evidence is the
-prior snapshot's, on `feda49b`'s tree, unchanged since (`git diff
-feda49b..HEAD -- mobile/ electron/` is empty). No Ollama A/B harness, no
+**Mobile, this chapter — live device, no code change:** `flutter build apk
+--debug` on the unchanged `feda49b` tree, `zipalign -c -P 16` re-confirmed
+`Verification successful`, `adb install -r` onto the real Galaxy S26 Ultra
+(`SM-S948B`) preserving app data, cold-launch verified dialog-free — full
+evidence and the surprising `getconf PAGE_SIZE=4096` reading are in §2.
+`flutter analyze`/`flutter test` were **not** rerun this chapter (no code
+changed since the prior snapshot's run on this same `feda49b` tree). Electron
+(`npm test`/`npm run build`) untouched. No Ollama A/B harness, no
 completion-contract evaluation, no real mailbox.
 
-**CI:** the last **judged** tip on origin is `c081cee` (still the current
-`origin/langgraph-migration`, since this session's commit is unpushed) — run
-`31270921707`, **`failure`**, the `python` job, exactly the `chromadb`
-flakiness this session fixed. This session's own commit (`8602a0b`) has no CI
-result yet — read it live after any push, per job
+**CI:** the last **judged** tip on origin is now `41651b4` (also the tip when
+this document was written, current `origin/langgraph-migration`) — run
+`31274352271`, **`success`** at job level for `python`, `electron`, and
+`mobile` alike; the `python` job's full log (1048 lines) carries zero
+`acquire_write`/`no such table` occurrences, and its pytest summary line reads
+`3453 passed, 1 skipped` (3454 selected, 0 failed) in `297.94s`, matching the
+local `-n 4 --dist load` evidence above. `CI-FLAKE-CHROMA-01`'s acceptance CI
+is this run. Read future commits' CI live, per job
 (`gh run view <id> --json jobs`), never from the workflow headline.
 
 ## 5. Known open issues
 
 Each keeps its identifier; the detail stays in the linked document.
-`CI-FLAKE-CHROMA-01` is **closed** this session (§2) and removed from this
-list; it is not relabelled here, only dropped, per the doc rule.
+`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are **closed** (§2) and removed from
+this list; neither is relabelled here, only dropped, per the doc rule.
 
-- **`MOBILE-16KB-01` — root cause binary-verified and fixed; live on-device
-  re-confirmation still open.** The 2026-08-08 live E2E's dialog on the Galaxy
-  S26 Ultra named two hard-failure libraries — `libonnxruntime.so` and
-  `libonnxruntime4j_jni.so` — plus four compatibility warnings —
-  `libflutter.so`, `libdartjni.so`, `libdatastore_shared_counter.so`,
-  `libVkLayer_khronos_validation.so`.
-  `feda49b` bumped `com.microsoft.onnxruntime:onnxruntime-android` `1.17.1` →
-  `1.23.2` in [`mobile/android/app/build.gradle`](mobile/android/app/build.gradle)
-  (upstream's 16 KB JNI linker fix, microsoft/onnxruntime PR #24947 / commit
-  `8484199`, merged 2025-06-04, postdates 1.17.1). `gradlew app:dependencies`
-  confirmed 1.17.1 was the sole resolved artifact before the bump and 1.23.2
-  after, with no version conflict. Measured directly with `llvm-readelf -l`
-  (NDK 28.2.13676358) on the extracted debug APK: both hard-failure libraries
-  went from `Align 0x1000` (4 KB) at baseline to `Align 0x4000` (16 KB) after
-  the bump, on **both** `arm64-v8a` and `x86_64`. `zipalign -c -P 16 -v 4` on
-  the rebuilt APK also reports `Verification successful` for the page-aligned
-  uncompressed `.so` entries.
-  The four warning-only libraries were independently measured (same tool,
-  same APKs) and are **already** `Align 0x4000`/`0x10000` — at baseline and
-  after the bump alike — in this Flutter 3.44.6 / NDK 28.2.13676358 toolchain.
-  Static evidence only; not touched by this change.
-  **Left open, not closed:** no ADB device has been connected in any session
-  since (`adb devices` empty), so the actual acceptance test — the on-device
-  dialog re-triggered against a real 16 KB-page device, or confirmed gone —
-  has never re-run. `getconf PAGE_SIZE` is still unread on any real device.
-  §7 carries the follow-up.
 - **Mobile confirmation: no cross-tab indicator, and no `conversation_id`.** A
   prompt raised while the user is on another tab is answerable when they return
   (the provider is app-scoped) but nothing signals it from elsewhere. Now that
@@ -264,16 +271,10 @@ list; it is not relabelled here, only dropped, per the doc rule.
 
 ## 6. Next engineering priority
 
-`CI-FLAKE-CHROMA-01` was the previous session's own push blocker (§2) and is
-resolved; the branch is ready to push once the owner approves.
+`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are both closed and pushed (§1, §2) —
+nothing left on either.
 
-**`MOBILE-16KB-01`**'s binary-level fix is done (§5): `onnxruntime-android`
-1.17.1 → 1.23.2 (`feda49b`), both previously-4 KB-aligned libraries now measure
-16 KB-aligned on `arm64-v8a` and `x86_64`. What is left is not engineering
-work — it is reconnecting a device and re-triggering the cold-launch dialog to
-confirm it live, tracked in §7.
-
-After that, **completion-contract Finding 2** is the pilot's remaining open
+**Completion-contract Finding 2** is the pilot's remaining open
 finding, and its fix belongs to the next revision of the gate rather than to the
 current one — do not redefine a pre-registered metric in place. `ROADMAP.md`'s
 own next unstarted phase is **Faz 5 (proaktif mail → takvim)**, blocked on the
@@ -288,10 +289,6 @@ closing.
 
 ## 7. Human-required actions
 
-- **Reconnect the phone to confirm `MOBILE-16KB-01` live.** No ADB device has
-  been attached in any session since the fix (`feda49b`, binary-verified, §5);
-  the on-device 16 KB compatibility dialog has not been re-triggered since,
-  and `getconf PAGE_SIZE` is still unread on any real device.
 - **Google OAuth re-consent** (Gmail read, Calendar write, Contacts) — blocks the
   Faz 5 live measurement and the Faz 2 entity resolver.
 - **Mobile font binaries** — owner deferred 2026-08-06. This is the only blocker
@@ -334,3 +331,15 @@ push, never recorded here.
   is bound to a session id and a commit and is **not transferable** —
   `claude_session_state.py verification` confirms `REUSABLE` for this
   session's own record; a future session must re-run rather than inherit it.
+  Still current: this chapter made no code change, so no new full run was
+  needed or recorded.
+- **Session `0e05d735` closed once already** (marker `closed` at `41651b45`,
+  after `8602a0b`/`CI-FLAKE-CHROMA-01` pushed and CI-confirmed) and then did
+  one more chapter of work — the `MOBILE-16KB-01` live confirmation this
+  document describes — under the **same** session identity, per the owner's
+  own follow-up prompt in the same conversation rather than a fresh
+  `SessionStart`. `prepare`/`close` do not forbid re-preparing a session whose
+  marker is `closed` (only a `blocked` marker is refused), so this is a
+  legitimate second `prepare → close` cycle, not a protocol violation — but a
+  future preflight seeing a `closed` marker whose `head` is behind the actual
+  tip should read this bullet before assuming something is wrong.
