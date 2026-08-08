@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 2d4392a8bd23182a3080cceae1b2847b92da5403
+covered_through_sha: 8602a0b75785d8afcd67f6f726e88afe3e4d21cc
 ---
 
 # HANDOFF — current state
@@ -22,10 +22,9 @@ file's own closing commit.
 - Branch **`langgraph-migration`**. `main` is `5f6f6ff` and a strict ancestor;
   never quote how far behind it is — derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
-- This session started at `54851cb` and built **one work commit**, `feda49b`
-  (the `MOBILE-16KB-01` ONNX Runtime bump, §5), plus `2d4392a` (an interim
-  documentation commit narrowing that issue) and this closing documentation
-  commit on top of both.
+- This session started at `c081cee` — the previous session's own closing
+  commit — and built **one work commit**, `8602a0b` (`CI-FLAKE-CHROMA-01`,
+  §2), plus this closing documentation commit on top of it.
 - Push state and CI for this session's own commits are **derived live**, never
   stored here:
 
@@ -38,38 +37,63 @@ gh run list --branch langgraph-migration    # then: gh run view <id> --json jobs
 
 ## 2. Last completed work
 
-**`eb598ce` — the L3 confirmation now lives on the screen the user can reach,
-and the round-trip has run live on real hardware.**
+**`8602a0b` — `CI-FLAKE-CHROMA-01` root-caused and fixed: chromadb's
+`SharedSystemClient` was caching its process-global `System` on the literal,
+unresolved `persist_directory` string.**
 
-`baf9f8b` wired the approve/deny card into `ChatScreen`. Nothing routes to
-`ChatScreen`: `HomeShell`'s tabs are CORE/TASKS/SCHED/VAULT and CORE is
-`HomeScreen`. So the feature passed its own tests while the shipped app could
-not answer a prompt. `HomeScreen` also carried a **second, unmigrated SSE
-reader** that only special-cased `[DONE]`, `[ERROR]` and a literal `{"async":`
-prefix, so a `confirmation_required` frame fell through to `appendToLast()` —
-rendered as raw JSON in the transcript, spoken aloud by TTS, and the interrupt
-left stranded server-side until TTL. The server was never at fault: the frame on
-the wire was well-formed and the gate held.
+The previous session's push (`c081cee`) came back `CI_BLOCKING_FAILURE`: run
+`31270921707`'s `python` job failed 15 tests, all on one xdist worker (`gw0`),
+each `chromadb.errors.InternalError: ... no such table: acquire_write`, each
+with a different `isolated_cwd`/`tmp_path` directory but the identical
+underlying `chromadb.api.rust.RustBindingsAPI` instance address across
+unrelated tests' tracebacks. That last fact was the actual lead:
+`chromadb/api/shared_system_client.py` keys its cache with
+`identifier = settings.persist_directory` — no `abspath`/`realpath` of its
+own. `jarvis/paths.py`'s `jarvis_home()` defaults to `Path(".")`, so
+`Memory`'s default `chroma_dir` stayed the literal relative string
+`"data/chroma"` — byte-identical across every cwd. Two `Memory()`s built in
+physically distinct directories within the same pytest-xdist worker process
+(exactly what `-n 4 --dist load` does at scale) silently shared one chromadb
+System.
 
-Three things a future reader would otherwise re-litigate:
+Proven, not assumed, before any fix landed: a same-process, two-cwd repro
+(`Memory` A writes a record, `Memory` B — a different physical directory,
+same default settings — reads it back via `.count()`, never having written
+anything itself) reproduced the collision every time pre-fix and never
+post-fix; the two new regression tests built from that repro fail on the
+pre-fix code (verified via a temporary `git stash` of just the fix) and pass
+after it.
 
-- **One reader, or the bug returns.** `chat_sse.dart` exists precisely to stop
-  ad-hoc prefix loops; it was written once and defeated by a *duplicate*. Chat,
-  upload and confirmation continuation all go through `HomeScreen._consume()`
-  now. A new surface routes here rather than adding a third loop.
-- **`ChatScreen` was deleted, not kept as a reference** (854 lines). A second
-  chat implementation is what made the first one's tests meaningless.
-- **`HomeShell.screens` and `HomeScreenState` are public deliberately** — test
-  seams for the two facts that had no coverage: that the chat surface is
-  reachable, and that the upload leg uses the same reader (file_picker cannot be
-  driven from a widget test). Production calls neither.
+Two things a future reader would otherwise re-litigate:
 
-The `android.builtInKotlin` / `android.newDsl` lines in
-`mobile/android/gradle.properties` are **not hand-authored**: they were reverted,
-a full `flutter build apk --debug` was run, and Flutter's migrator re-added both.
-Committed as required build metadata.
+- **This is not the same bug the 2026-07-23 review already fixed.** That
+  review found two `Memory()`s in ONE test sharing an identical (deliberately
+  cwd-relative) `chroma_dir` and fixed it two ways: per-arm workspace-scoped
+  dirs at that call site, and a general `Memory.close()` for the refcount
+  leak. Both were real, but neither touched the *default* path's identity —
+  so the identical mechanism resurfaced across DIFFERENT tests once enough of
+  them (927 → 3450) shared xdist workers. The fix here is scoped to
+  `Memory.__init__`'s one call site (`self._chroma_dir.resolve()` right
+  before `PersistentClient` sees it) — not `paths.resolve()` generally, which
+  vault_dir and other stores also use and which this task deliberately left
+  alone.
+- **`Memory.close()` existed but was called almost nowhere.** Production
+  never called it (the process exiting was assumed to reclaim it — still
+  true), and only ~9 of ~32 Memory-constructing test files called it
+  themselves, leaking hundreds of chromadb Systems across a 3450-test run
+  even with the identity fix in place. Wired into the real CLI (`_run_loop`,
+  the voice loop) and API (`lifespan` shutdown) exit paths for defense in
+  depth, and `tests/conftest.py` gained an autouse `_close_memory_instances`
+  fixture that closes every `Memory` a test builds — directly or via
+  `JarvisAgent` — without editing the individual test files.
 
-Details: [`.claude/rules/mobile.md`](.claude/rules/mobile.md).
+Verification: targeted serial (126 passed) and **7 independent**
+`-n 4 --dist load` runs of the exact 6 files CI's 15 failures came from, all
+green; the canonical `dev_verify.py --full` (§4); and, separately, **two**
+full-suite `pytest -n 4 --dist load` runs — CI's exact command — both green,
+where the un-fixed tree failed. `CI-FLAKE-CHROMA-01` is closed as a known
+issue (was in §5 as "transient suspected, root cause unproven" — that framing
+was wrong; the root cause was fully deterministic, not transient).
 
 ## 3. Operational modes and rollout decisions
 
@@ -80,7 +104,7 @@ Defaults re-read from `jarvis/config.py` on 2026-08-08 (verify there, not here).
 |---|---|---|
 | `required_outputs_mode` | `off` | Gate pre-registered and still unpassed; `object_created` delta and the corpus-B false-positive clauses remain the blockers. |
 | `execution_contract_mode` | `shadow` | Honesty kernel. `enforce` gated on 100 real artifact operations with 0 reported false blocks. |
-| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface, and mobile approve **and** deny are now live-verified on real hardware (§4). |
+| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface; mobile approve **and** deny are live-verified on real hardware (untouched this session — see prior evidence, §4). |
 | `external_writes_enabled` | `True` | `--profile test` flips it off. |
 | `monitor_proactive_enabled` | `False` | Proactive turns off by default. |
 | `calendar_from_mail_enabled` | `False` | Faz 5; never run against a real mailbox. |
@@ -90,7 +114,7 @@ Do not change a pre-registered threshold, corpus or metric after seeing a result
 **Mobile font binaries stay out of the repository** (owner decision 2026-08-06,
 untouched); the consequence is `MOBILE-ASSETS-01` in §5.
 
-**Local environment, not repository state:** the gitignored `.env` now sets both
+**Local environment, not repository state:** the gitignored `.env` sets both
 `JARVIS_API_KEY` and `API_HOST=127.0.0.1`. These belong together —
 `resolve_api_bind_host()` defaults to `0.0.0.0` as soon as a key is set, so the
 explicit `API_HOST` is what keeps the API on loopback. The phone reaches it over
@@ -99,88 +123,59 @@ deliberate edit, not a side effect of having auth configured.
 
 ## 4. Tests and CI
 
-Full verification of the tree of `2d4392a` — this session's work commit
-(`feda49b`) plus its own interim documentation commit, and the only later
-change is this closing documentation commit — run through the recorder,
-2026-08-08:
+**Python, this session, run through the recorder on `8602a0b`** (the only work
+commit; this closing commit changes documents only):
 
 ```powershell
+.venv\Scripts\python.exe -m ruff check jarvis scripts tests    # -> All checks passed!
 .venv\Scripts\python.exe scripts\dev_verify.py --full
-#   -> git diff --check clean; ruff All checks passed!
-#      pytest -q -> 3450 passed, 5 deselected, 0 failed, 362 warnings (522.73s)
-#      recorded at 2d4392a8
+#   -> git diff --check clean
+#      pytest -q -> 3454 passed, 5 deselected, 0 failed, 390 warnings (603.84s)
+#      recorded at 8602a0b7
 ```
 
-3450/5/0 is **unchanged** from the previous snapshot: this session's work
-commit touched `mobile/android/app/build.gradle` only (the ONNX Runtime version
-bump, `MOBILE-16KB-01`, §5), and `dev_verify.py`'s targeted selector
-independently agreed during iteration — "no changed file implies Python
-behaviour". The full pair was still run through the recorder rather than
-inherited, per `.claude/skills/session-close/SKILL.md` §6: a closing commit may
-skip a second full run only once a full run has actually gone through the
-recorder on the exact tree it closes over.
+3454 vs. the prior snapshot's 3450 is exactly the **+4** new regression tests
+in `tests/test_memory_lifecycle.py` (distinct-cwd identity, no cross-cwd leak,
+same-path reuse unchanged, the autoclose mechanism itself) — nothing else in
+the diff touches test collection.
 
-Mobile, 2026-08-08, run against `feda49b`'s tree (after the onnxruntime-android
-`1.17.1` → `1.23.2` bump) with the font assets present locally
-(`MOBILE-ASSETS-01` means this is not reproducible on a clean clone) — same
-outcome as the prior snapshot, confirming no regression from the bump:
+**The acceptance bar for this task was CI's own exact command, not the
+serial suite** — the un-fixed tree passed `pytest -q` locally while
+`pytest -n 4 --dist load` failed in CI, so serial-green was never going to be
+convincing on its own. Run twice, full suite, both green:
 
 ```powershell
-cd mobile; flutter analyze   # -> No issues found!
-cd mobile; flutter test      # -> 47 passed  (unchanged)
-cd mobile; flutter build apk --debug   # -> built, before and after the bump
+.venv\Scripts\python.exe -m pytest -n 4 --dist load
+#   run 1 -> 3454 passed, 395 warnings in 216.09s (0:03:36)
+#   run 2 -> 3454 passed, 395 warnings in 242.60s (0:04:02)
 ```
 
-The native-library 16 KB ELF alignment evidence (`llvm-readelf`, `zipalign -c
--P 16`) for `libonnxruntime.so` / `libonnxruntime4j_jni.so` is in §5,
-`MOBILE-16KB-01` — not duplicated here.
+Plus **7 independent** `-n 4 --dist load` runs (26.71s–30.94s each) scoped to
+the exact 6 files CI's 15 failures came from (`test_alpha_capabilities.py`,
+`test_output_contract_graph.py`, `test_plot_inline.py`,
+`test_prepare_execution_node.py`, `test_procedure_store.py`,
+`test_todo_bg_analysis.py`) — 126/126 every time, no retries, no reruns hiding
+a failure.
 
-The 10 new tests are in `test/home_screen_confirmation_test.dart` and drive the
-real `HomeScreen`. They are **falsifiable**: reinstating the pre-fix behaviour
-turns 7 of the 10 red and leaves green exactly the three that probe unrelated
-frame kinds (tab wiring, progress/final_answer, async-task).
+**Not run this session, and not claimed as passed:** mobile (`flutter
+analyze`/`flutter test`/`flutter build apk --debug`) and Electron (`npm
+test`/`npm run build`) — neither touched; their last real evidence is the
+prior snapshot's, on `feda49b`'s tree, unchanged since (`git diff
+feda49b..HEAD -- mobile/ electron/` is empty). No Ollama A/B harness, no
+completion-contract evaluation, no real mailbox.
 
-**Live E2E, 2026-08-08 — real Galaxy S26 Ultra (`SM-S948B`), real server, real
-model, `shell_run` (L3) as the probe.** Server on `127.0.0.1:8000` reached over
-`adb reverse`; evidence is `data/audit_log.jsonl`:
-
-| | approve | deny |
-|---|---|---|
-| before the tap | `confirm_required`, 0 executions, no file | `confirm_required`, 0 executions, no file |
-| decision recorded | `user_approved` | `user_denied` |
-| executions | **exactly 1** start + 1 end, `ok=True` | **0** |
-| filesystem | probe file created | no file anywhere on disk |
-
-The approve probe's contents were `APPROVED` plus the CRLF `Set-Content` itself
-appends — reproduced byte-identically with a bare `Set-Content`, so nothing was
-added by JARVIS. On both runs the card rendered the server's plain-language
-description and **no frame internals** (`"type"`, `execution_id`, `args`,
-`payload`) appeared on screen, verified by `uiautomator dump`.
-
-**Correction kept visible:** `eb598ce`'s own commit message calls the device a
-Galaxy S24 Ultra. That was wrong — the marketing name was inferred from the
-`SM-S948B` model code and the inference was bad. The device is a **Galaxy S26
-Ultra**. The message was left as written rather than amended, because the
-recorded full-run evidence is keyed to that exact SHA.
-
-A second `confirm_required` row appears one millisecond before each decision row.
-That is the confirmation node re-recording its ruling on the resume pass
-([`nodes.py:1805`](jarvis/graph/nodes.py:1805) writes a decision for every
-risk ≥ 2 call each time the node runs), **not** a second prompt: no second card
-appeared and the execution count is unchanged.
-
-**Not run this session, and not claimed as passed:** Electron (`npm test`,
-`npm run build`) — untouched. No Ollama A/B harness, no completion-contract
-evaluation, no real mailbox.
-
-**CI:** this session's commit is **not on origin**, so it has no CI result —
-read it live after any push rather than predicting it here. The last judged tip
-(`6596335`, run `31234178265`, 2026-08-08) was `success`; read it per job
-(`gh run view <id> --json jobs`) rather than trusting the headline.
+**CI:** the last **judged** tip on origin is `c081cee` (still the current
+`origin/langgraph-migration`, since this session's commit is unpushed) — run
+`31270921707`, **`failure`**, the `python` job, exactly the `chromadb`
+flakiness this session fixed. This session's own commit (`8602a0b`) has no CI
+result yet — read it live after any push, per job
+(`gh run view <id> --json jobs`), never from the workflow headline.
 
 ## 5. Known open issues
 
 Each keeps its identifier; the detail stays in the linked document.
+`CI-FLAKE-CHROMA-01` is **closed** this session (§2) and removed from this
+list; it is not relabelled here, only dropped, per the doc rule.
 
 - **`MOBILE-16KB-01` — root cause binary-verified and fixed; live on-device
   re-confirmation still open.** The 2026-08-08 live E2E's dialog on the Galaxy
@@ -199,17 +194,15 @@ Each keeps its identifier; the detail stays in the linked document.
   the bump, on **both** `arm64-v8a` and `x86_64`. `zipalign -c -P 16 -v 4` on
   the rebuilt APK also reports `Verification successful` for the page-aligned
   uncompressed `.so` entries.
-  The four warning-only libraries were independently measured this session
-  (same tool, same APKs) and are **already** `Align 0x4000`/`0x10000` — at
-  baseline and after the bump alike — in this Flutter 3.44.6 / NDK
-  28.2.13676358 toolchain. Static evidence only; not touched by this change.
-  **Left open, not closed:** no ADB device was connected this session (`adb
-  devices` empty throughout, checked at both the start and the end), so the
-  actual acceptance test — the on-device dialog re-triggered against a real
-  16 KB-page device, or confirmed gone — was never re-run. `getconf PAGE_SIZE`
-  is still unread on any real device. §7 carries the follow-up.
-  `flutter analyze`: no issues. `flutter test`: 47 passed, same count as the
-  prior snapshot. `flutter build apk --debug`: builds.
+  The four warning-only libraries were independently measured (same tool,
+  same APKs) and are **already** `Align 0x4000`/`0x10000` — at baseline and
+  after the bump alike — in this Flutter 3.44.6 / NDK 28.2.13676358 toolchain.
+  Static evidence only; not touched by this change.
+  **Left open, not closed:** no ADB device has been connected in any session
+  since (`adb devices` empty), so the actual acceptance test — the on-device
+  dialog re-triggered against a real 16 KB-page device, or confirmed gone —
+  has never re-run. `getconf PAGE_SIZE` is still unread on any real device.
+  §7 carries the follow-up.
 - **Mobile confirmation: no cross-tab indicator, and no `conversation_id`.** A
   prompt raised while the user is on another tab is answerable when they return
   (the provider is app-scoped) but nothing signals it from elsewhere. Now that
@@ -245,9 +238,10 @@ Each keeps its identifier; the detail stays in the linked document.
 - **CI's Flutter version is unpinned** (`subosito/flutter-action@v2`,
   `channel: stable`) — a new stable release can redden `mobile` with no code
   change.
-- **`CI-FLAKE-CHROMA-01` — transient suspected, root cause unproven.**
-  `chromadb>=0.6` is unpinned. Rerun a failed job **once** only when
-  unexplainable by the diff; a passing rerun never proves a root cause.
+- **`chromadb>=0.6` is still unpinned in `requirements.txt`.** Not itself the
+  cause of `CI-FLAKE-CHROMA-01` (that was this codebase's own unresolved
+  persist-path identity, §2) but an upstream version bump remains untested
+  against the fix here until it happens.
 - **A lost CI verdict (`CI_INFRA_UNAVAILABLE`) has no recovery mechanism** beyond
   "the next push judges the next tip" — a documented, deliberate limit
   (`workflow_dispatch` cannot work on this repo's default-branch layout).
@@ -259,7 +253,7 @@ Each keeps its identifier; the detail stays in the linked document.
 - **Faz 5 (mail → calendar) has never run against the real mailbox** — green on
   fixtures only; background ingestion stays off until it does.
 - **Electron HUD confirmation is compile/parser-verified only — no live E2E.**
-  Mobile's equivalent gap is now closed (§4); Electron's is not.
+  Mobile's equivalent gap is closed.
 - **`python_run` is access-controlled, not sandboxed.**
 - **Proactive turns gate L3 only**; an unwatched L2 write is mitigated by prompt
   instruction, not structurally closed.
@@ -270,10 +264,12 @@ Each keeps its identifier; the detail stays in the linked document.
 
 ## 6. Next engineering priority
 
+`CI-FLAKE-CHROMA-01` was the previous session's own push blocker (§2) and is
+resolved; the branch is ready to push once the owner approves.
+
 **`MOBILE-16KB-01`**'s binary-level fix is done (§5): `onnxruntime-android`
 1.17.1 → 1.23.2 (`feda49b`), both previously-4 KB-aligned libraries now measure
-16 KB-aligned on `arm64-v8a` and `x86_64`, `flutter analyze` / `flutter test` /
-`flutter build apk --debug` all still pass. What is left is not engineering
+16 KB-aligned on `arm64-v8a` and `x86_64`. What is left is not engineering
 work — it is reconnecting a device and re-triggering the cold-launch dialog to
 confirm it live, tracked in §7.
 
@@ -284,7 +280,7 @@ own next unstarted phase is **Faz 5 (proaktif mail → takvim)**, blocked on the
 OAuth re-consent in §7.
 
 The **Electron HUD confirmation round-trip is now the only interface whose gate
-has never run live** — mobile's just did, and the same "2235 tests and 38/38
+has never run live** — mobile's already did, and the same "2235 tests and 38/38
 mutations, then 10/10 live failures" precedent applies to it.
 
 Do not start any of this — or any product work — inside a session that is
@@ -292,15 +288,14 @@ closing.
 
 ## 7. Human-required actions
 
-- **Reconnect the phone to confirm `MOBILE-16KB-01` live.** No ADB device was
-  attached this session; the ONNX Runtime bump (1.17.1 → 1.23.2, `feda49b`) is
-  binary-verified (§5) but the on-device 16 KB compatibility dialog has not been
-  re-triggered since the fix landed, and `getconf PAGE_SIZE` is still unread on
-  any real device.
+- **Reconnect the phone to confirm `MOBILE-16KB-01` live.** No ADB device has
+  been attached in any session since the fix (`feda49b`, binary-verified, §5);
+  the on-device 16 KB compatibility dialog has not been re-triggered since,
+  and `getconf PAGE_SIZE` is still unread on any real device.
 - **Google OAuth re-consent** (Gmail read, Calendar write, Contacts) — blocks the
   Faz 5 live measurement and the Faz 2 entity resolver.
 - **Mobile font binaries** — owner deferred 2026-08-06. This is the only blocker
-  to running `flutter test` in CI, and it now guards 47 tests rather than 37.
+  to running `flutter test` in CI, and it guards 47 tests.
 - **Should `flutter test` join `dev_verify.py`'s iteration loop?** Left unchanged
   deliberately: the tool would then assume font assets on every checkout.
 - **Default-branch / `.github/` layout** — `main` carries no `.github/`
@@ -324,13 +319,18 @@ push, never recorded here.
 - Session identity is machine-authored. Every lifecycle transition goes through
   `scripts/claude_session_state.py` (`prepare`/`close`/`block`/`show`), which
   takes no id argument. If it refuses, report the refusal verbatim and stop.
-- **The previous session closed cleanly** (marker `closed` at `6596335`), and
-  this session's preflight said so — the false "did not close" warning that fired
-  in the two sessions before this one did not recur.
+- **This session inherited a `blocked` marker from a DIFFERENT, earlier
+  session** (`b9b95e68`, `CI_BLOCKING_FAILURE`, run `31270921707`, job
+  `python`) — the correct outcome of that session's own close attempt, not
+  relabelled here. Between that session and this one, a third session
+  (`bb8cf67a`) started and exited (`reason: other`) with **no commits and no
+  dirty files** — reconciled at this session's start as nothing-to-recover,
+  not a lost-work case. This session prepares under its own identity
+  (`0e05d735`), which the helper confirmed differs from the blocked marker's
+  owner.
 - The gitignored `full-verification.json` holds this session's own reusable
-  evidence, recorded at `2d4392a8` (superseding the prior snapshot's `eb598ce`
-  record — same session, later HEAD after `feda49b` and an interim docs
-  commit). It is bound to a session id and a commit and is **not
-  transferable** — `claude_session_state.py verification` confirms `REUSABLE`
-  for this session's own record; a future session must re-run rather than
-  inherit it.
+  evidence, recorded at `8602a0b7` (superseding the prior snapshot's
+  `2d4392a8` record — different session, this session's own work commit). It
+  is bound to a session id and a commit and is **not transferable** —
+  `claude_session_state.py verification` confirms `REUSABLE` for this
+  session's own record; a future session must re-run rather than inherit it.

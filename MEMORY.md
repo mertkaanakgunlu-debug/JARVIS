@@ -905,10 +905,26 @@ grafik olarak") rather than asking for a modification afterwards.
   in that file). **The lesson generalizes: when a guard reads untrusted state before an
   overwrite/destructive action, "does it parse" is not "is it real" — enumerate the full shape the
   writer actually produces, or a narrower malformed input than the one you just fixed will find the
-  next gap.** Same family as [[feedback_make_the_check_falsifiable]]'s "does wrong input pass this
+  next gap.** Same family as feedback_make_the_check_falsifiable's "does wrong input pass this
   by construction" question, but the pointed addendum from this round: ask it again after each fix,
   not just once, because a partial fix creates a NEW, narrower blind spot rather than closing the
   class of bug.
+- **`chromadb`'s `SharedSystemClient` caches its process-global `System` keyed on the literal
+  `persist_directory` string, with zero normalization of its own**
+  (`chromadb/api/shared_system_client.py`: `identifier = settings.persist_directory`, no
+  `os.path.abspath`/`realpath`). A relative path — the untouched-`JARVIS_HOME` default
+  `data/chroma`, since `jarvis_home()` is `Path(".")` — is byte-identical across any two cwds, so
+  two `chromadb.PersistentClient(path=...)` calls made from different physical directories within
+  the SAME process (exactly what pytest-xdist's `-n 4 --dist load` does: many unrelated tests share
+  one worker) silently reuse ONE System: confirmed live to leak state cross-directory, and the
+  proven root cause of CI-FLAKE-CHROMA-01's `chromadb.errors.InternalError: no such table:
+  acquire_write` (all 15 failures on one xdist worker, every traceback sharing one
+  `RustBindingsAPI` instance address, run `31270921707`, 2026-08-08). Fixed by canonicalizing
+  `Memory`'s `chroma_dir` to an absolute, resolved path right before `PersistentClient` sees it
+  (`8602a0b`) — scoped to that one call site, not `jarvis/paths.py`'s `resolve()` generally. The
+  2026-07-23 `Memory.close()` lifecycle finding (`SharedSystemClient` is refcounted, never released
+  without `Client.close()`) was real but was treating a symptom of the same class, not this root
+  cause — a leaked System and a COLLIDING System are different bugs that happen to share one cache.
 
 ## A canonical helper does not help if a second copy of the path exists (2026-08-08)
 
