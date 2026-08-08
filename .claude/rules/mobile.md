@@ -99,18 +99,46 @@ neuter it:
   `AnimationController` calls `repeat()`, so it never settles. Pump explicit
   durations instead.
 
-Measured 2026-08-07 on `mobile/` with the font assets present locally:
-`flutter test` → **17 passed** (`widget_test.dart`, `chat_sse_test.dart`,
-`transcript_provider_test.dart`); `flutter analyze` → `No issues found`.
+Measured 2026-08-08 on `mobile/` with the font assets present locally:
+`flutter test` → **37 passed**; `flutter analyze` → `No issues found`. The
+suite is six files — `widget_test.dart`, `chat_sse_test.dart`,
+`transcript_provider_test.dart`, plus `pending_confirmation_test.dart`,
+`confirmation_provider_test.dart` and `ws_event_test.dart` from the L3
+confirmation round-trip (below). Only `widget_test.dart` pumps a widget tree;
+every other file is deliberately plain `test()` so it stays clear of
+MOBILE-TEST-01's failure mode.
 
 CI still runs `analyze` only. Adding `flutter test` to CI is now blocked by
 `MOBILE-ASSETS-01` (the gitignored fonts, above) rather than by this bug — and
 that is an owner decision, not a leftover.
 
-## Functional gap to keep in mind
+## L3 confirmations — what exists, and what is still unverified
 
-The mobile app renders **nothing** for a confirmation prompt. The safety gate
-still holds server-side (the action does not execute), but a mobile user gets no
-approve/deny UI, so any flow that can reach an L3 action is effectively
-unusable from the phone. Do not describe mobile confirmation support as
-existing.
+The approve/deny round-trip is **implemented** (2026-08-08): the phone shows a
+card, `POST /chat/confirm/{id}` resolves the interrupt, and the continuation
+streams back into the transcript through the same reader as a new turn
+(`_consume()` in `lib/screens/chat_screen.dart`). Three pieces are load-bearing
+and easy to undo by accident:
+
+- **`confirmationProvider` is app-scoped on purpose.** The SSE stream that
+  carries the prompt ends immediately (the graph is interrupted, TTL-bound), so
+  a prompt held in `_ChatScreenState` would not survive a rebuild or a tab
+  switch. Two legs feed it — the turn's own SSE frame and the WS
+  `confirmation_required` broadcast — and `raise()` is idempotent on id so both
+  firing is free. The WS leg is the only one that delivers a confirmation
+  raised on **another transport**, or one whose SSE stream died first.
+- **`beginSubmit()` is the double-submit gate, not the button's disabled
+  state.** Approving twice is not idempotent: the first POST pops the
+  confirmation server-side, so a second answers "expired or not found" over the
+  real continuation. `resolved()` is id-checked so a finishing POST cannot clear
+  a *second* interrupt raised mid-stream; `failed()` keeps the card up, because
+  a dropped connection is not a verdict.
+- **Never render `args` or the payload.** The card shows
+  `policy_guard.describe_call`'s plain-language line; a call with no description
+  degrades to its tool NAME. An args fallback would put raw JSON back on screen
+  and leak message bodies onto a lock screen.
+
+**Still true, do not oversell past it:** this is verified by `flutter analyze`
+and `flutter test` only. **No live E2E against a real server + model has been
+run from the phone** — the same limit `docs/SAFETY.md` records for the Electron
+HUD's confirmation round-trip.
