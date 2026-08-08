@@ -152,6 +152,18 @@ class Memory:
         (self._vault / "reports").mkdir(exist_ok=True)
 
         self._chroma_dir.mkdir(parents=True, exist_ok=True)
+        # CI-FLAKE-CHROMA-01: chromadb's SharedSystemClient caches its
+        # process-global System keyed on the literal persist_directory string
+        # with no normalization of its own (chromadb/api/shared_system_client.py
+        # -- identifier = settings.persist_directory). A relative string (the
+        # unresolved default here) is identical across any two cwds, so two
+        # Memory()s constructed in physically distinct directories within the
+        # same process silently share one System -- confirmed to leak state
+        # cross-directory and, when the first directory is later removed
+        # (e.g. pytest recycling an older tmp_path), to fail with "no such
+        # table: acquire_write" on the second. Resolving to an absolute,
+        # canonical path makes the identity match the physical directory.
+        self._chroma_dir = self._chroma_dir.resolve()
         self._client = chromadb.PersistentClient(path=str(self._chroma_dir))
 
         # jarvis_memory: conversation recall — default ONNX EF (local, lightweight)

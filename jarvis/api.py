@@ -182,6 +182,11 @@ async def lifespan(app: FastAPI):
             await _agent.reset_async()
         except Exception as _e:
             print(f"[lifespan] auto-reset on shutdown failed: {_e}")
+        # CI-FLAKE-CHROMA-01: release this process's reference to chromadb's
+        # System on a clean shutdown, same rationale as close_mcp_tools above
+        # (don't leave a resource behind). Memory.close() never raises (see
+        # its own docstring in jarvis/memory.py), so no try/except needed.
+        _agent.memory.close()
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 

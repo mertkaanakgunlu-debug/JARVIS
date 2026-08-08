@@ -39,6 +39,41 @@ def rollout_metrics_file(tmp_path, monkeypatch):
     return target
 
 
+@pytest.fixture(autouse=True)
+def _close_memory_instances(monkeypatch):
+    """Auto-close every jarvis.memory.Memory built during a test (CI-FLAKE-CHROMA-01).
+
+    AUTOUSE on purpose, same rationale as rollout_metrics_file above.
+    Memory.close() releases this instance's reference to chromadb's
+    process-global, refcounted SharedSystemClient System (see
+    jarvis/memory.py's Memory.close() docstring); skippable in production,
+    where the process exiting reclaims it anyway (also now wired into the
+    real CLI/API shutdown paths for defense in depth), but not across a
+    ~3450-test process where historically only a handful of the ~30 test
+    files that construct Memory (directly, or indirectly via JarvisAgent)
+    called close() themselves. Left unclosed at that scale, the leaked
+    Systems (live SQLite connections, background threads) accumulate for the
+    whole worker process's lifetime -- a real contributor to this suite's
+    chromadb flakiness, independent of the identity-collision root cause
+    fixed in Memory.__init__. Wrapping __init__ here closes every instance
+    automatically at test teardown without editing the individual test files
+    or adding any test-only branch to production code. Safe even for tests
+    that already call close() themselves -- Memory.close() is idempotent.
+    """
+    from jarvis.memory import Memory
+    created: list[Memory] = []
+    original_init = Memory.__init__
+
+    def _tracked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(Memory, "__init__", _tracked_init)
+    yield
+    for memory in created:
+        memory.close()
+
+
 @pytest.fixture
 def isolated_cwd(tmp_path, monkeypatch):
     """Chdir into a fresh temp dir for the test's duration.

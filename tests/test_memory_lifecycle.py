@@ -16,6 +16,7 @@ now gives each arm its own workspace-scoped chroma_dir) and generically here
 from __future__ import annotations
 
 import chromadb.api.shared_system_client as ssc
+import pytest
 
 from jarvis.config import Settings
 from jarvis.memory import Memory
@@ -106,3 +107,123 @@ def test_distinct_chroma_dirs_get_independent_systems(isolated_cwd, tmp_path):
     finally:
         m_off.close()
         m_shadow.close()
+
+
+# ---------------------------------------------------------------------------
+# CI-FLAKE-CHROMA-01: default (relative) chroma_dir across distinct cwds.
+#
+# jarvis/paths.py's jarvis_home() defaults to Path(".") with JARVIS_HOME
+# unset, so paths.resolve(settings.chroma_dir) on the DEFAULT chroma_dir
+# ("data/chroma") stayed a *relative* string. chromadb's SharedSystemClient
+# keys its process-global System cache on the literal persist_directory
+# string with no normalization of its own
+# (chromadb/api/shared_system_client.py:
+# `identifier = settings.persist_directory`) -- so two Memory()s built in
+# physically distinct cwds within the same pytest process (exactly what a
+# ~3450-test suite with isolated_cwd does, especially under
+# `-n 4 --dist load`, which packs many unrelated tests onto one worker
+# process) collided on the SAME identifier ("data\\chroma" on Windows) and
+# silently shared one chromadb System -- proven live via
+# repro_chroma_identity.py before this fix landed (identical identifier,
+# identical underlying System object, B's .count() read A's record without
+# ever writing it). The four tests below pin the fix at the level the review
+# above did NOT cover -- the *default*, cwd-relative path, not an explicit
+# absolute one.
+# ---------------------------------------------------------------------------
+
+
+def test_distinct_cwds_get_distinct_canonical_chroma_identity(tmp_path, monkeypatch):
+    """Pre-fix, this assertion fails: mem_a._chroma_dir == mem_b._chroma_dir
+    == the literal relative Path("data/chroma") in both cwds."""
+    dir_a = tmp_path / "workspace-a"
+    dir_b = tmp_path / "workspace-b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    monkeypatch.chdir(dir_a)
+    mem_a = Memory(Settings(_env_file=None))
+
+    monkeypatch.chdir(dir_b)
+    mem_b = Memory(Settings(_env_file=None))
+
+    assert mem_a._chroma_dir.is_absolute()
+    assert mem_b._chroma_dir.is_absolute()
+    assert mem_a._chroma_dir != mem_b._chroma_dir
+    assert mem_a._chroma_dir == (dir_a / "data" / "chroma").resolve()
+    assert mem_b._chroma_dir == (dir_b / "data" / "chroma").resolve()
+
+    mem_a.close()
+    mem_b.close()
+
+
+def test_distinct_cwds_do_not_leak_state_across_default_chroma_dir(tmp_path, monkeypatch):
+    """The observable failure mode CI actually hit: a Memory built in an
+    unrelated cwd silently reading (or corrupting) another workspace's data.
+    Pre-fix, mem_b.count() reads back mem_a's record instead of starting at 0."""
+    dir_a = tmp_path / "workspace-a"
+    dir_b = tmp_path / "workspace-b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    monkeypatch.chdir(dir_a)
+    mem_a = Memory(Settings(_env_file=None))
+    mem_a.store("user", "only ever written in workspace A", "sess-a")
+    assert mem_a.count() == 1
+
+    monkeypatch.chdir(dir_b)
+    mem_b = Memory(Settings(_env_file=None))
+    assert mem_b.count() == 0, "workspace B must start empty, not inherit A's state"
+
+    mem_a.close()
+    mem_b.close()
+
+
+def test_same_cwd_default_chroma_dir_still_shares_one_system(isolated_cwd):
+    """Regression guard on the fix itself: the legitimate case (two Memory()s
+    in the SAME physical directory) must still correctly share one System,
+    refcounted exactly as before -- canonicalizing must not turn every
+    same-path pair into accidental distinct identities."""
+    settings = Settings(_env_file=None)
+    identifier = str((isolated_cwd / "data" / "chroma").resolve())
+
+    m1 = Memory(settings)
+    m2 = Memory(settings)
+    assert m1._chroma_dir == m2._chroma_dir
+    assert _refcount(identifier) == 4
+
+    m1.close()
+    assert _refcount(identifier) == 2
+    m2.close()
+    assert _refcount(identifier) == 0
+
+
+def test_autoclose_fixture_releases_a_forgotten_memory(tmp_path):
+    """Mirrors tests/conftest.py's autouse `_close_memory_instances` fixture
+    logic in isolation (rather than relying on cross-test ordering, which
+    `-n 4 --dist load` can split across workers -- see MEMORY.md's
+    check-the-denominator lesson) to prove the tracking+auto-close mechanism
+    itself actually releases a Memory a test body never called .close() on."""
+    chroma_dir = tmp_path / "chroma"
+    identifier = str(chroma_dir)
+
+    mp = pytest.MonkeyPatch()
+    created: list[Memory] = []
+    original_init = Memory.__init__
+
+    def _tracked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    mp.setattr(Memory, "__init__", _tracked_init)
+    try:
+        settings = Settings(_env_file=None, chroma_dir=chroma_dir, vault_dir=tmp_path / "vault")
+        memory = Memory(settings)  # deliberately never call memory.close()
+        assert created == [memory]
+        assert _refcount(identifier) == 2
+    finally:
+        mp.undo()
+
+    # What the real fixture's teardown does with `created`.
+    for m in created:
+        m.close()
+    assert _refcount(identifier) == 0

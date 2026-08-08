@@ -433,6 +433,7 @@ async def _run_loop(agent: JarvisAgent, monitor=None) -> None:
         await _run_loop_impl(agent, monitor)
     finally:
         await agent.close_mcp_tools()
+        agent.memory.close()  # CI-FLAKE-CHROMA-01: release the chromadb System reference
 
 
 async def _run_loop_impl(agent: JarvisAgent, monitor=None) -> None:
@@ -1392,6 +1393,7 @@ async def _run_voice_loop(
     finally:
         clear_voice_session()
         await agent.close_mcp_tools()  # Faz 5: don't leave a launched browser process behind
+        agent.memory.close()  # CI-FLAKE-CHROMA-01: release the chromadb System reference
 
 
 def run(voice: bool = False, wakeword: bool = False, ptt: bool = False, monitor: bool = False) -> None:
