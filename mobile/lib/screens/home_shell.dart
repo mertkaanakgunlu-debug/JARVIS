@@ -13,19 +13,23 @@ import 'vault_screen.dart';
 class HomeShell extends ConsumerStatefulWidget {
   const HomeShell({super.key});
 
+  /// The tab contents, in tab order. Public so a test can assert that the chat
+  /// surface is actually reachable: the L3 approve/deny UI was once attached to
+  /// a screen no tab routed to, which let it pass every unit test while being
+  /// dead in the shipped app.
+  static const screens = [
+    HomeScreen(),
+    TasksScreen(),
+    ScheduleScreen(),
+    VaultScreen(),
+  ];
+
   @override
   ConsumerState<HomeShell> createState() => _HomeShellState();
 }
 
 class _HomeShellState extends ConsumerState<HomeShell> {
   int _index = 0;
-
-  static const _screens = [
-    HomeScreen(),
-    TasksScreen(),
-    ScheduleScreen(),
-    VaultScreen(),
-  ];
 
   @override
   void initState() {
@@ -39,7 +43,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: JarvisColors.bg,
-      body: IndexedStack(index: _index, children: _screens),
+      body: IndexedStack(index: _index, children: HomeShell.screens),
       bottomNavigationBar: _JarvisBottomNav(
         currentIndex: _index,
         onTap: (i) => setState(() => _index = i),

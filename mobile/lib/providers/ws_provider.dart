@@ -60,7 +60,7 @@ final wsDispatcherProvider = Provider<void>((ref) {
       } else if (event is ProgressEvent) {
         ref.read(progressProvider.notifier).state = event;
       } else if (event is ConfirmationRequiredEvent) {
-        // Second leg of the approval prompt (chat_screen.dart's own SSE
+        // Second leg of the approval prompt (home_screen.dart's own SSE
         // stream is the first). Dispatched here rather than in the chat
         // screen because this dispatcher is alive app-wide -- a confirmation
         // raised while the user is on another tab must still be answerable

@@ -4,12 +4,19 @@
 /// _sse_frames() emits.
 ///
 /// Mirrors electron/src/renderer/src/lib/chatStream.js's feed() -- one
-/// canonical classifier so chat_screen.dart does not re-implement ad hoc
-/// string-prefix checks per frame kind. Before this file existed,
-/// chat_screen.dart only special-cased `[DONE]`, `[ERROR]` and a literal
-/// `{"async":` prefix; a `{"type":"progress",...}` or `{"type":"final_answer",
-/// ...}` frame fell through and was appended to the visible assistant
-/// message (and spoken via TTS) as raw JSON.
+/// canonical classifier so no screen re-implements ad hoc string-prefix checks
+/// per frame kind. A screen that only special-cases `[DONE]`, `[ERROR]` and a
+/// literal `{"async":` prefix lets every other structured frame fall through
+/// and be appended to the visible assistant message (and spoken via TTS) as
+/// raw JSON.
+///
+/// That is not hypothetical. It was fixed once and then reintroduced by a
+/// SECOND copy of the reader: home_screen.dart -- the app's only reachable
+/// chat surface -- kept its own prefix loop, and a live L3 run on 2026-08-08
+/// printed a `confirmation_required` frame into the transcript and spoke it
+/// aloud, leaving a real approval prompt unanswerable. Both readers now go
+/// through this function. If a new surface needs to read a chat stream, route
+/// it here rather than adding a third loop.
 library;
 
 import 'dart:convert';
@@ -42,10 +49,11 @@ class ChatFinalAnswer extends ChatSseEvent {
   const ChatFinalAnswer(this.text);
 }
 
-/// An L3 tool call is pending approval. Mobile has no approve/deny UI
-/// (pre-existing, out of scope for the change that added this classifier) --
-/// callers must still recognize this shape so it is not displayed/spoken as
-/// raw JSON, same as every other structured frame here.
+/// An L3 tool call is pending approval. home_screen.dart turns this into the
+/// approve/deny card (via PendingConfirmation + confirmationProvider) and ends
+/// the stream; the graph stays interrupted server-side until it is answered.
+/// Recognizing this shape is load-bearing twice over: rendering it as raw JSON
+/// both leaks the payload and strands a prompt the user cannot answer.
 class ChatConfirmationRequired extends ChatSseEvent {
   final String id;
   final Map<String, dynamic> payload;

@@ -1,8 +1,8 @@
 /// confirmation_provider.dart -- the phone's single source of truth for "is
 /// an L3 tool call waiting on this user right now?".
 ///
-/// Held in a provider rather than in _ChatScreenState because the prompt must
-/// outlive the widget that happened to receive it: the SSE stream that
+/// Held in a provider rather than in the chat screen's own State because the
+/// prompt must outlive the widget that received it: the SSE stream that
 /// carried it ends immediately afterwards (the graph is interrupted
 /// server-side, TTL-bound), so a rebuild, a tab switch or a dropped
 /// connection would otherwise strand the interrupt with no way to answer it.

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +12,7 @@ import '../widgets/jarvis_orb.dart';
 import '../widgets/orbital_rings.dart';
 import '../widgets/hud_panel_card.dart';
 import '../models/conversation_state.dart';
+import '../models/pending_confirmation.dart';
 import '../models/transcript_turn.dart';
 import '../providers/state_provider.dart';
 import '../providers/ws_provider.dart';
@@ -21,20 +21,34 @@ import '../providers/finance_provider.dart';
 import '../providers/tasks_provider.dart';
 import '../providers/transcript_provider.dart';
 import '../providers/api_provider.dart';
+import '../providers/confirmation_provider.dart';
 import '../providers/settings_provider.dart';
+import '../core/chat_sse.dart';
 import '../core/wake_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HomeScreen — Merged CORE + COMMS
+//
+// This is the app's ONLY chat surface: HomeShell's tab list is
+// CORE/TASKS/SCHED/VAULT, and CORE is this screen. Anything that reads a chat
+// SSE stream therefore has to live here, and has to go through the one
+// canonical classifier -- see _consume().
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Plain-language note for a `progress` control frame, shown on the typing
+/// indicator. Never the raw frame: a progress marker is not answer text.
+String _progressNote(ChatProgress event) {
+  if (event.kind == 'chart') return 'Grafik hazırlanıyor…';
+  return 'İstenen çıktı hazırlanıyor…';
+}
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
   @override
-  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+  ConsumerState<HomeScreen> createState() => HomeScreenState();
 }
 
-class _HomeScreenState extends ConsumerState<HomeScreen> {
+class HomeScreenState extends ConsumerState<HomeScreen> {
   final _textCtrl   = TextEditingController();
   final _scrollCtrl = ScrollController();
   late final FlutterTts _tts;
@@ -232,47 +246,160 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     setState(() => _loadingNote = null);
 
     try {
-      ref
-          .read(transcriptProvider.notifier)
-          .add(const TranscriptTurn(who: 'j', text: ''));
+      await _consume(api.chatStream(query, language: settings.language));
+    } catch (e) {
+      // add(), not appendToLast(): _consume() has already dropped the empty
+      // bubble it opened, so there is no JARVIS turn left to append to and
+      // appendToLast would silently drop the message onto the user's own turn.
+      ref.read(transcriptProvider.notifier).add(
+        TranscriptTurn(who: 'j', text: 'Bağlantı hatası: $e'),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+          _loadingNote = null;
+        });
+      }
+      _scrollToBottom();
+    }
+  }
 
-      await for (final chunk
-          in api.chatStream(query, language: settings.language)) {
-        if (chunk == '[DONE]') break;
-        if (chunk.startsWith('[ERROR]')) {
-          ref
-              .read(transcriptProvider.notifier)
-              .appendToLast(chunk.substring(7));
-          break;
-        }
-        if (chunk.startsWith('{"async":')) {
-          try {
-            final j = jsonDecode(chunk) as Map<String, dynamic>;
-            if (j['async'] == true) {
-              final taskId = j['task_id'] as String?;
-              ref.read(transcriptProvider.notifier).appendToLast(
-                '🕐 Arka planda çalışıyor — task `$taskId`',
+  // ── One SSE stream, one reader ───────────────────────────────────────────
+
+  /// Drive one SSE stream into the transcript.
+  ///
+  /// Shared by a new turn (/chat/stream), a file upload (/chat/upload) and a
+  /// confirmation continuation (/chat/confirm/{id}) because all three are the
+  /// same stream: jarvis/api.py wraps every one of them through _sse_frames(),
+  /// so any of them can carry tokens, a progress marker, a final_answer -- and
+  /// a confirmation_required.
+  ///
+  /// Every frame goes through [classifyChatChunk]. This screen previously
+  /// hand-rolled `[DONE]`/`[ERROR]`/`{"async":` prefix checks, and a live L3
+  /// run on 2026-08-08 proved the cost: the confirmation_required frame fell
+  /// through to appendToLast() and was rendered as raw JSON in the transcript
+  /// AND spoken aloud by TTS. That is exactly the failure chat_sse.dart exists
+  /// to make impossible -- do not reintroduce a second reader here.
+  ///
+  /// Opens the empty JARVIS bubble itself and removes it again if the stream
+  /// produced no text at all (the L3 case: the graph interrupts for approval
+  /// without saying anything, and a blank bubble would sit above the card).
+  /// The upload leg's entry point for tests. `_sendFile` reaches [_consume]
+  /// only through file_picker, which a widget test cannot drive; this exposes
+  /// the same reader so "upload behaves like a turn" is asserted rather than
+  /// assumed. Production code never calls it.
+  @visibleForTesting
+  Future<void> consumeStreamForTest(Stream<String> chunks) => _consume(chunks);
+
+  Future<void> _consume(Stream<String> chunks) async {
+    final transcript = ref.read(transcriptProvider.notifier);
+    transcript.add(const TranscriptTurn(who: 'j', text: ''));
+    try {
+      // Labeled so the terminal cases can end the WHOLE stream from inside the
+      // switch -- a bare `break` in a Dart switch only exits the switch.
+      chunkLoop:
+      await for (final chunk in chunks) {
+        final event = classifyChatChunk(chunk);
+        switch (event) {
+          case ChatDone():
+            break chunkLoop;
+          case ChatError():
+            transcript.appendToLast(event.message);
+            break chunkLoop;
+          case ChatAsyncTask():
+            transcript.appendToLast(
+              '🕐 Arka planda çalışıyor — task `${event.taskId ?? '?'}`',
+            );
+            ref.read(tasksProvider.notifier).refresh();
+            break chunkLoop;
+          case ChatConfirmationRequired():
+            // An L3 tool call needs the user. The graph is interrupted
+            // server-side and this stream ends here; the prompt goes to the
+            // app-wide provider (not local state) so it survives the stream
+            // that delivered it and any rebuild/tab switch.
+            final pending =
+                PendingConfirmation.fromPayload(event.id, event.payload);
+            if (pending != null) {
+              ref.read(confirmationProvider.notifier).raise(pending);
+            } else {
+              // Unanswerable prompt (no id, or no tool we can name). Say so
+              // plainly rather than rendering an approve button over a blank
+              // description -- and never fall back to dumping the payload.
+              transcript.appendToLast(
+                '⚠️ Onay gerekiyor ama istek okunamadı. PC üzerinden yanıtlayın.',
               );
-              ref.read(tasksProvider.notifier).refresh();
-              break;
             }
-          } catch (_) {}
+            break chunkLoop;
+          case ChatProgress():
+            if (mounted) setState(() => _loadingNote = _progressNote(event));
+            break;
+          case ChatFinalAnswer():
+            transcript.replaceLast(event.text);
+            if (_loadingNote != null && mounted) {
+              setState(() => _loadingNote = null);
+            }
+            // Not re-spoken: whatever already streamed was already read aloud
+            // by _speakChunk as it arrived.
+            _scrollToBottom();
+            break;
+          case ChatToken():
+            if (_loadingNote != null && mounted) {
+              setState(() => _loadingNote = null);
+            }
+            transcript.appendToLast(event.text);
+            _speakChunk(event.text);
+            _scrollToBottom();
+            break;
         }
-        final clean = chunk.replaceAll(r'\n', '\n');
-        ref.read(transcriptProvider.notifier).appendToLast(clean);
-        _speakChunk(clean);
-        _scrollToBottom();
       }
       _flushTts();
-    } catch (e) {
-      ref
-          .read(transcriptProvider.notifier)
-          .appendToLast('Bağlantı hatası: $e');
     } finally {
-      setState(() {
-        _isSending = false;
-        _loadingNote = null;
-      });
+      transcript.removeLastIfEmpty();
+    }
+  }
+
+  // ── L3 confirmation ──────────────────────────────────────────────────────
+
+  /// Answer the pending confirmation and stream the graph's continuation back
+  /// into the transcript.
+  ///
+  /// [decision] is the server's own vocabulary ("approve" / "deny"), passed
+  /// through untranslated -- confirmation_node validates it fail-closed.
+  Future<void> _resolveConfirmation(String decision) async {
+    final notifier = ref.read(confirmationProvider.notifier);
+    final pending = ref.read(confirmationProvider).pending;
+    if (pending == null) return;
+    // The double-submit / stale-tap gate. Owned by the notifier, not by the
+    // buttons' disabled state, because approving twice is not idempotent: the
+    // first POST claims the interrupt server-side, so a second would answer
+    // "expired or not found" over the real continuation.
+    if (!notifier.beginSubmit(pending.id)) return;
+
+    final api = ref.read(apiClientProvider);
+    if (api == null) { notifier.failed(); return; }
+
+    setState(() { _isSending = true; _loadingNote = null; });
+    _tts.stop();
+    _ttsBuffer.clear();
+    _ttsQueue.clear();
+    _ttsPlaying = false;
+    _scrollToBottom();
+
+    try {
+      await _consume(api.confirmStream(pending.id, decision));
+      // Clears the card -- unless the continuation raised a SECOND interrupt,
+      // which resolved() leaves alone because it is id-checked.
+      notifier.resolved(pending.id);
+    } catch (e) {
+      // Transport failure, not a verdict. The interrupt may still be alive
+      // server-side until its TTL, so the card STAYS and the user can retry.
+      ref.read(transcriptProvider.notifier).add(
+        TranscriptTurn(who: 'j', text: 'Onay iletilemedi: $e'),
+      );
+      notifier.failed();
+    } finally {
+      if (mounted) setState(() { _isSending = false; _loadingNote = null; });
       _scrollToBottom();
     }
   }
@@ -289,9 +416,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     ref.read(transcriptProvider.notifier).add(
       TranscriptTurn(who: 'u', text: '📎 ${file.name}${query.isNotEmpty ? '\n$query' : ''}'),
     );
-    ref.read(transcriptProvider.notifier).add(
-      const TranscriptTurn(who: 'j', text: ''),
-    );
+    // The empty JARVIS bubble is opened by _consume(), not here -- opening it
+    // twice would leave a blank one behind on an L3 interrupt.
     _scrollToBottom();
 
     final api = ref.read(apiClientProvider);
@@ -303,27 +429,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     try {
       setState(() => _loadingNote = 'Analiz ediliyor…');
-      await for (final chunk in api.uploadFileStream(
+      // Same reader as a plain turn: /chat/upload goes through the server's
+      // _sse_frames() too, so an uploaded file whose analysis reaches an L3
+      // tool call raises the card instead of printing the frame.
+      await _consume(api.uploadFileStream(
         file.path!,
         file.name,
         query: displayQuery,
         language: settings.language,
-      )) {
-        if (chunk == '[DONE]') break;
-        if (chunk.startsWith('[ERROR]')) {
-          ref.read(transcriptProvider.notifier).appendToLast(chunk.substring(7));
-          break;
-        }
-        final clean = chunk.replaceAll(r'\n', '\n');
-        ref.read(transcriptProvider.notifier).appendToLast(clean);
-        _speakChunk(clean);
-        _scrollToBottom();
-      }
-      _flushTts();
+      ));
     } catch (e) {
-      ref.read(transcriptProvider.notifier).appendToLast('Yükleme hatası: $e');
+      ref.read(transcriptProvider.notifier).add(
+        TranscriptTurn(who: 'j', text: 'Yükleme hatası: $e'),
+      );
     } finally {
-      setState(() { _isSending = false; _loadingNote = null; });
+      if (mounted) setState(() { _isSending = false; _loadingNote = null; });
       _scrollToBottom();
     }
   }
@@ -354,6 +474,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final calEvents  = ref.watch(calendarWsProvider);
     final finAsync   = ref.watch(financeSummaryProvider);
     final transcript = ref.watch(transcriptProvider);
+    final confirmation = ref.watch(confirmationProvider);
 
     final runningCount =
         tasksAsync.valueOrNull?.where((t) => t.isRunning).length ?? 0;
@@ -512,25 +633,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ],
             ),
 
-            // ── Composer (fixed bottom) ─────────────────────────────────────
+            // ── Composer / approval card (fixed bottom) ─────────────────────
             Positioned(
               bottom: 0,
               left: 0,
               right: 0,
-              child: _Composer(
-                controller: _textCtrl,
-                isComposing: _isComposing,
-                onChanged: (v) =>
-                    setState(() => _isComposing = v.isNotEmpty),
-                onSubmit: _send,
-                onStopTts: () {
-                  _tts.stop();
-                  _ttsBuffer.clear();
-                  _ttsQueue.clear();
-                  _ttsPlaying = false;
-                },
-                onFileUpload: _sendFile,
-              ),
+              // The approval card REPLACES the composer while an interrupt is
+              // open. Structural, not cosmetic: it is what stops a new turn
+              // being started on top of a graph that is still paused waiting
+              // for this answer, without threading a disabled flag through the
+              // composer.
+              child: confirmation.pending != null
+                  ? _ConfirmationCard(
+                      confirmation: confirmation.pending!,
+                      submitting: confirmation.submitting,
+                      onDecision: _resolveConfirmation,
+                    )
+                  : _Composer(
+                      controller: _textCtrl,
+                      isComposing: _isComposing,
+                      onChanged: (v) =>
+                          setState(() => _isComposing = v.isNotEmpty),
+                      onSubmit: _send,
+                      onStopTts: () {
+                        _tts.stop();
+                        _ttsBuffer.clear();
+                        _ttsQueue.clear();
+                        _ttsPlaying = false;
+                      },
+                      onFileUpload: _sendFile,
+                    ),
             ),
           ],
         ),
@@ -545,6 +677,132 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       return '${start.substring(11, 16)} · $title';
     }
     return title;
+  }
+}
+
+// ── L3 confirmation card ─────────────────────────────────────────────────────
+
+/// The approve/deny prompt. Shows the server's own plain-language description
+/// of each pending call (PendingConfirmation's `label`) -- never the raw
+/// payload, never tool arguments. An args fallback would put raw JSON back on
+/// screen and leak message bodies onto a lock screen.
+class _ConfirmationCard extends StatelessWidget {
+  final PendingConfirmation confirmation;
+  final bool submitting;
+  final ValueChanged<String> onDecision;
+
+  const _ConfirmationCard({
+    required this.confirmation,
+    required this.submitting,
+    required this.onDecision,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 12),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.bottomCenter,
+          end: Alignment.topCenter,
+          colors: [Colors.black.withValues(alpha: 0.95), Colors.transparent],
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            border: Border.all(color: JarvisColors.amber, width: 1),
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [
+              BoxShadow(
+                  color: JarvisColors.amber.withValues(alpha: 0.18),
+                  blurRadius: 14),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.shield_outlined,
+                      size: 14, color: JarvisColors.amber),
+                  const SizedBox(width: 6),
+                  Text('ONAY GEREKİYOR',
+                      style: JarvisText.chip.copyWith(
+                        color: JarvisColors.amber,
+                        letterSpacing: 8 * 0.24,
+                      )),
+                ],
+              ),
+              const SizedBox(height: 8),
+              for (final tool in confirmation.tools)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text('• ${tool.label}',
+                      style: JarvisText.chatBody
+                          .copyWith(color: JarvisColors.cyanSoft)),
+                ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: _DecisionButton(
+                      label: submitting ? 'GÖNDERİLİYOR…' : 'ONAYLA',
+                      color: JarvisColors.cyan,
+                      // Null disables the tap. The real guard is
+                      // ConfirmationNotifier.beginSubmit(); this only keeps the
+                      // button from looking live while a POST is open.
+                      onTap: submitting ? null : () => onDecision('approve'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _DecisionButton(
+                      label: 'REDDET',
+                      color: JarvisColors.red,
+                      onTap: submitting ? null : () => onDecision('deny'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DecisionButton extends StatelessWidget {
+  final String label;
+  final Color color;
+  final VoidCallback? onTap;
+
+  const _DecisionButton({required this.label, required this.color, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: enabled ? 0.16 : 0.05),
+          border: Border.all(color: color.withValues(alpha: enabled ? 1 : 0.35)),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(label,
+            style: JarvisText.chip.copyWith(
+              color: color.withValues(alpha: enabled ? 1 : 0.45),
+            )),
+      ),
+    );
   }
 }
 
