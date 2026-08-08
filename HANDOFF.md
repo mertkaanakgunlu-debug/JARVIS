@@ -170,25 +170,34 @@ read it live after any push rather than predicting it here. The last judged tip
 
 Each keeps its identifier; the detail stays in the linked document.
 
-- **`MOBILE-16KB-01` — the app fails Android's 16 KB page-size ELF compatibility
-  check. Observed live on the device, 2026-08-08.** The debug APK's first launch
-  on the Galaxy S26 Ultra raised an Android system dialog stating the app is not
-  16 KB page-size compatible and that the ELF compatibility check failed:
-  **LOAD-segment alignment errors** for `libonnxruntime.so` and
-  `libonnxruntime4j_jni.so`, plus compatibility warnings for `libflutter.so`,
-  `libdartjni.so`, `libdatastore_shared_counter.so` and
+- **`MOBILE-16KB-01` — root cause binary-verified and fixed; live on-device
+  re-confirmation still open.** The 2026-08-08 live E2E's dialog on the Galaxy
+  S26 Ultra named two hard-failure libraries — `libonnxruntime.so` and
+  `libonnxruntime4j_jni.so` — plus four compatibility warnings —
+  `libflutter.so`, `libdartjni.so`, `libdatastore_shared_counter.so`,
   `libVkLayer_khronos_validation.so`.
-  **Not a runtime blocker as things stand** — the app launched anyway and the
-  mobile L3 E2E completed on that same launch — but it is a real, device-verified
-  Android compatibility/hardening gap, and the alignment errors sit in native
-  libraries this project does not build itself. Deliberately out of scope for
-  `eb598ce`.
-  Two honest limits on this entry: the evidence is the **owner's reading of the
-  on-device dialog**, not a captured log — the warning appears in nothing this
-  session's build or `adb install` output recorded, so a future session should
-  expect to re-trigger it on-device rather than grep a build log. And it is
-  unmeasured against a device that actually *uses* 16 KB pages; the phone was
-  disconnected before `getconf PAGE_SIZE` could be read.
+  `feda49b` bumped `com.microsoft.onnxruntime:onnxruntime-android` `1.17.1` →
+  `1.23.2` in [`mobile/android/app/build.gradle`](mobile/android/app/build.gradle)
+  (upstream's 16 KB JNI linker fix, microsoft/onnxruntime PR #24947 / commit
+  `8484199`, merged 2025-06-04, postdates 1.17.1). `gradlew app:dependencies`
+  confirmed 1.17.1 was the sole resolved artifact before the bump and 1.23.2
+  after, with no version conflict. Measured directly with `llvm-readelf -l`
+  (NDK 28.2.13676358) on the extracted debug APK: both hard-failure libraries
+  went from `Align 0x1000` (4 KB) at baseline to `Align 0x4000` (16 KB) after
+  the bump, on **both** `arm64-v8a` and `x86_64`. `zipalign -c -P 16 -v 4` on
+  the rebuilt APK also reports `Verification successful` for the page-aligned
+  uncompressed `.so` entries.
+  The four warning-only libraries were independently measured this session
+  (same tool, same APKs) and are **already** `Align 0x4000`/`0x10000` — at
+  baseline and after the bump alike — in this Flutter 3.44.6 / NDK
+  28.2.13676358 toolchain. Static evidence only; not touched by this change.
+  **Left open, not closed:** no ADB device was connected this session (`adb
+  devices` empty throughout, checked at both the start and the end), so the
+  actual acceptance test — the on-device dialog re-triggered against a real
+  16 KB-page device, or confirmed gone — was never re-run. `getconf PAGE_SIZE`
+  is still unread on any real device. §7 carries the follow-up.
+  `flutter analyze`: no issues. `flutter test`: 47 passed, same count as the
+  prior snapshot. `flutter build apk --debug`: builds.
 - **Mobile confirmation: no cross-tab indicator, and no `conversation_id`.** A
   prompt raised while the user is on another tab is answerable when they return
   (the provider is app-scoped) but nothing signals it from elsewhere. Now that
@@ -249,14 +258,12 @@ Each keeps its identifier; the detail stays in the linked document.
 
 ## 6. Next engineering priority
 
-**`MOBILE-16KB-01`** is the owner's nominated next item, and §5 already names the
-offending libraries, so the work starts at *fixing*, not finding. The two hard
-errors (`libonnxruntime.so`, `libonnxruntime4j_jni.so`) come from a dependency
-rather than from this project's own code, so the first question is whether a
-newer 16 KB-aligned ONNX Runtime exists — not how to re-link it here. Scope the
-`libflutter.so` / `libdartjni.so` warnings against the Flutter version too
-(CI's Flutter is unpinned, §5), and re-trigger the dialog on-device to confirm
-any fix, since the check does not surface in build output.
+**`MOBILE-16KB-01`**'s binary-level fix is done (§5): `onnxruntime-android`
+1.17.1 → 1.23.2 (`feda49b`), both previously-4 KB-aligned libraries now measure
+16 KB-aligned on `arm64-v8a` and `x86_64`, `flutter analyze` / `flutter test` /
+`flutter build apk --debug` all still pass. What is left is not engineering
+work — it is reconnecting a device and re-triggering the cold-launch dialog to
+confirm it live, tracked in §7.
 
 After that, **completion-contract Finding 2** is the pilot's remaining open
 finding, and its fix belongs to the next revision of the gate rather than to the
@@ -273,6 +280,11 @@ closing.
 
 ## 7. Human-required actions
 
+- **Reconnect the phone to confirm `MOBILE-16KB-01` live.** No ADB device was
+  attached this session; the ONNX Runtime bump (1.17.1 → 1.23.2, `feda49b`) is
+  binary-verified (§5) but the on-device 16 KB compatibility dialog has not been
+  re-triggered since the fix landed, and `getconf PAGE_SIZE` is still unread on
+  any real device.
 - **Google OAuth re-consent** (Gmail read, Calendar write, Contacts) — blocks the
   Faz 5 live measurement and the Faz 2 entity resolver.
 - **Mobile font binaries** — owner deferred 2026-08-06. This is the only blocker
