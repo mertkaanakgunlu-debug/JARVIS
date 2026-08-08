@@ -120,7 +120,21 @@ activity in front); the full post-launch `logcat` capture (10156 lines) has
 zero `onnxruntime`/`16 ?kb`/`page.?size`/`compat` matches on the app's own
 lines, only a clean launch sequence; and a `uiautomator dump` of the live UI
 tree has exactly one `package` value (`com.mertkaan.jarvis`) and zero
-compatibility-related text anywhere in it. The dialog is gone. Closed.
+compatibility-related text anywhere in it. The dialog is gone.
+
+**Residual limitation, stated plainly: no session has produced runtime
+execution evidence on an actual 16 KB-page kernel.** This device is a 4 KB
+device (`getconf PAGE_SIZE=4096`, above) — closure rests on two things only:
+(1) the binary ELF/APK alignment fix, verified statically with
+`llvm-readelf`/`zipalign` (§5's old entry, now dropped), and (2) this same
+physical device's Android compatibility warning no longer appearing with the
+new APK. Neither is "tested on a 16 KB device." If a genuine 16 KB-page
+device or emulator ever becomes available, that is a stronger acceptance test
+this project has still never run. Closed on the evidence above regardless —
+the compatibility warning Android showed pre-fix was itself never a live
+16 KB-kernel test either (same 4 KB device, same static alignment check,
+before vs. after), so this closure is symmetric with what opened the issue,
+not a weaker bar applied only at the end.
 
 ## 3. Operational modes and rollout decisions
 
