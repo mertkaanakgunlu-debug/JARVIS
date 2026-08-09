@@ -214,11 +214,18 @@ async def test_invalid_decision_is_denied_not_silently_approved(isolated_cwd, mo
     node = make_confirmation_node(settings)
     result = await node(state)
 
-    assert result["confirmation_result"] == "denied"
+    # Electron live E2E, 2026-08-09: an explicit interrupt-resume decision
+    # (including this fail-closed "wasn't approve, so it's a deny") is now
+    # its own confirmation_result value, "user_denied" -- routed straight to
+    # the terminal chain with a code-authored answer rather than back through
+    # the tool-bound agent (see route_from_confirmation / confirmation_node).
+    # The fail-closed BEHAVIOR this test pins is unchanged: nothing executed.
+    assert result["confirmation_result"] == "user_denied"
     assert any(
         "not executed" in m.content or "not authorized" in m.content
         for m in result["messages"] if hasattr(m, "content")
     )
+    assert result["response"].startswith("İşlemi reddettiniz. Komut çalıştırılmadı.")
 
 
 @pytest.mark.asyncio
@@ -333,7 +340,7 @@ async def test_denial_path_is_unaffected_by_faz2_changes(isolated_cwd, monkeypat
     node = make_confirmation_node(settings)
     result = await node(state)
 
-    assert result["confirmation_result"] == "denied"
+    assert result["confirmation_result"] == "user_denied"
     assert any("not now" in m.content for m in result["messages"] if hasattr(m, "content"))
 
 
@@ -740,3 +747,186 @@ async def test_real_graph_interrupt_then_approve_executes_and_commits(isolated_c
 
     assert "__interrupt__" not in (result or {})
     assert idempotency.is_committed(exec_id) is True, "a real successful execution must commit to the journal"
+
+
+# ── Electron live E2E, 2026-08-09: explicit user denial is code-authored ──
+#
+# The live round-trip proved the mechanism (card, exactly-one-execution on
+# approve, zero on deny, no raw protocol leak) but caught a real bug: an
+# explicit human DENY was still routed back through the tool-bound agent
+# purely to have the model acknowledge a fact confirmation_node already knew
+# with certainty. The model correctly said the action was denied, then
+# fabricated an unrelated cause ("permission restrictions... run PowerShell
+# as an administrator") for a denial that was the user's own choice.
+# confirmation_node now composes the final answer itself for this one
+# outcome and routes straight to the terminal chain (verify, and
+# output_contract when enabled) -- the exact same choke-point shape
+# invalid_args_exhausted already used. The tests below are against the REAL
+# compiled graph, not a direct node call, so they exercise route_from_
+# confirmation's actual conditional edge, not just its return value.
+
+@pytest.mark.asyncio
+async def test_real_graph_interrupt_then_deny_never_calls_the_agent_again(
+    isolated_cwd, tmp_path, monkeypatch,
+):
+    """Falsifiable the way this bug actually was: give the scripted LLM a
+    SECOND response that would only ever be consumed if the graph called it
+    again after the deny. If that text leaked into the final answer, or if
+    the LLM was invoked a second time at all, this fails."""
+    from jarvis.graph.graph import build_graph, make_checkpointer
+    from jarvis.memory import Memory
+    from langgraph.types import Command
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    settings = Settings(_env_file=None)
+    poison = "HALLUCINATED_POST_DENY_NARRATION_MUST_NEVER_APPEAR"
+    llm = _ScriptedLLM([
+        _ai_tool("shell_run", {"command": "echo ok"}),
+        AIMessage(content=poison),
+    ])
+    monkeypatch.setattr("jarvis.providers.get_llm", lambda *a, **k: llm)
+    monkeypatch.setattr("jarvis.graph.graph.get_llm", lambda *a, **k: llm)
+
+    memory = Memory(settings)
+    checkpointer = make_checkpointer(workspace / "cp" / "checkpoints.db")
+    graph = build_graph(settings, workspace, memory, checkpointer=checkpointer)
+
+    state = {
+        "messages": [SystemMessage(content="test"), HumanMessage(content="shell ile echo ok calistir")],
+        "user_query": "shell ile echo ok calistir",
+        "language": "tr", "memory_context": "", "needs_planning": False,
+        "use_pro_agent": False, "plan": "", "response": "", "revise_count": 0,
+        "critic_verdict": "", "critique": "", "transport": "cli-text",
+        "tool_route": None, "tool_calls_attempted": 0, "tool_rounds": 0,
+        "seen_tool_fingerprints": [], "completed_tool_fingerprints": [],
+        "tool_execution_ledger": [],
+    }
+    config = {"configurable": {"thread_id": "prep-exec-real-graph-deny"}, "recursion_limit": 25}
+
+    payload, _ = await _invoke_and_get_interrupt(graph, state, config)
+    assert payload is not None, "shell_run must interrupt for confirmation"
+    exec_id = payload["tools"][0]["execution_id"]
+    assert idempotency.is_committed(exec_id) is False
+    assert llm.consumed == 1, "sanity: exactly one LLM call before the interrupt"
+
+    result = await graph.ainvoke(Command(resume="deny"), config)
+
+    assert "__interrupt__" not in (result or {})
+    assert idempotency.is_committed(exec_id) is False, "a denied action must never execute"
+    assert llm.consumed == 1, (
+        "the agent LLM must NOT be invoked again after an explicit user deny -- "
+        "confirmation_node must compose the final answer itself"
+    )
+    assert result["confirmation_result"] == "user_denied"
+    assert result["response"] == "İşlemi reddettiniz. Komut çalıştırılmadı."
+    assert poison not in result["response"]
+    assert not any(
+        isinstance(m, AIMessage) and poison in (m.content or "")
+        for m in result["messages"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_graph_interrupt_then_deny_with_reason_is_quoted_not_reinterpreted(
+    isolated_cwd, tmp_path, monkeypatch,
+):
+    """A user-supplied deny reason is carried through verbatim -- the code
+    never invents or reinterprets a cause, matching 'do not invent causes'."""
+    from jarvis.graph.graph import build_graph, make_checkpointer
+    from jarvis.memory import Memory
+    from langgraph.types import Command
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    settings = Settings(_env_file=None)
+    llm = _ScriptedLLM([_ai_tool("shell_run", {"command": "echo ok"})])
+    monkeypatch.setattr("jarvis.providers.get_llm", lambda *a, **k: llm)
+    monkeypatch.setattr("jarvis.graph.graph.get_llm", lambda *a, **k: llm)
+
+    memory = Memory(settings)
+    checkpointer = make_checkpointer(workspace / "cp" / "checkpoints.db")
+    graph = build_graph(settings, workspace, memory, checkpointer=checkpointer)
+
+    state = {
+        "messages": [SystemMessage(content="test"), HumanMessage(content="shell ile echo ok calistir")],
+        "user_query": "shell ile echo ok calistir",
+        "language": "tr", "memory_context": "", "needs_planning": False,
+        "use_pro_agent": False, "plan": "", "response": "", "revise_count": 0,
+        "critic_verdict": "", "critique": "", "transport": "cli-text",
+        "tool_route": None, "tool_calls_attempted": 0, "tool_rounds": 0,
+        "seen_tool_fingerprints": [], "completed_tool_fingerprints": [],
+        "tool_execution_ledger": [],
+    }
+    config = {"configurable": {"thread_id": "prep-exec-real-graph-deny-reason"}, "recursion_limit": 25}
+
+    await _invoke_and_get_interrupt(graph, state, config)
+    result = await graph.ainvoke(Command(resume="deny:henuz emin degilim"), config)
+
+    assert result["response"] == (
+        "İşlemi reddettiniz. Komut çalıştırılmadı. Belirttiğiniz gerekçe: henuz emin degilim"
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_graph_interrupt_then_deny_passes_through_output_contract_when_enabled(
+    isolated_cwd, tmp_path, monkeypatch,
+):
+    """The terminal honesty choke point must not be bypassable: with
+    required_outputs_mode on, user_denied routes through output_contract
+    (this turn declares no required output, so it's a pass-through) and then
+    verify, exactly like every other terminal path -- never straight to a
+    raw graph END."""
+    from jarvis.graph.graph import build_graph, make_checkpointer
+    from jarvis.memory import Memory
+    from langgraph.types import Command
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    settings = Settings(_env_file=None, required_outputs_mode="shadow")
+    llm = _ScriptedLLM([_ai_tool("shell_run", {"command": "echo ok"})])
+    monkeypatch.setattr("jarvis.providers.get_llm", lambda *a, **k: llm)
+    monkeypatch.setattr("jarvis.graph.graph.get_llm", lambda *a, **k: llm)
+
+    memory = Memory(settings)
+    checkpointer = make_checkpointer(workspace / "cp" / "checkpoints.db")
+    graph = build_graph(settings, workspace, memory, checkpointer=checkpointer)
+
+    state = {
+        "messages": [SystemMessage(content="test"), HumanMessage(content="shell ile echo ok calistir")],
+        "user_query": "shell ile echo ok calistir",
+        "language": "tr", "memory_context": "", "needs_planning": False,
+        "use_pro_agent": False, "plan": "", "response": "", "revise_count": 0,
+        "critic_verdict": "", "critique": "", "transport": "cli-text",
+        "tool_route": None, "tool_calls_attempted": 0, "tool_rounds": 0,
+        "seen_tool_fingerprints": [], "completed_tool_fingerprints": [],
+        "tool_execution_ledger": [],
+    }
+    config = {"configurable": {"thread_id": "prep-exec-real-graph-deny-contract"}, "recursion_limit": 25}
+
+    await _invoke_and_get_interrupt(graph, state, config)
+    result = await graph.ainvoke(Command(resume="deny"), config)
+
+    assert "__interrupt__" not in (result or {})
+    assert result["response"] == "İşlemi reddettiniz. Komut çalıştırılmadı."
+    assert result["output_contract_action"] == "continue", (
+        "output_contract must actually run this turn (mode is shadow, not off) "
+        "and pass the code-authored deny answer straight through"
+    )
+
+
+def test_route_from_confirmation_full_branch_table():
+    """Direct, cheap documentation of every branch -- catches a future
+    accidental change to any one of them without needing a real graph."""
+    from jarvis.graph.nodes import route_from_confirmation
+    from langgraph.graph import END
+
+    assert route_from_confirmation({"confirmation_result": "approved"}) == "tools"
+    assert route_from_confirmation({}) == "tools", "missing key defaults to approved -> tools"
+    assert route_from_confirmation({"confirmation_result": "user_denied"}) == END
+    assert route_from_confirmation({"confirmation_result": "invalid_args_exhausted"}) == END
+    # Every OTHER denied-family outcome (kill switch, capability disabled,
+    # external writes off, proactive read-only, stale approval, duplicate
+    # execution) still needs the model to narrate its own specific reason --
+    # this is the one branch this fix deliberately left unchanged.
+    assert route_from_confirmation({"confirmation_result": "denied"}) == "agent"

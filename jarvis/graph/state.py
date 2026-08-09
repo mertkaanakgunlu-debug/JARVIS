@@ -25,7 +25,8 @@ class JarvisState(TypedDict):
     revise_count: int    # critic revision loop counter
     critic_verdict: str  # "accept" | "revise" | "redirect"
     critique: str        # feedback for executor
-    confirmation_result: str  # "approved" | "denied" — set by confirmation_node
+    confirmation_result: str  # "approved" | "denied" | "invalid_args_exhausted"
+                              # | "user_denied" — set by confirmation_node
     transport: str       # Faz 4: "cli-text" | "voice-cli" | "voice-local" | "voice-remote"
                           # | "api" | "api-stream" | "api-upload" | "task-async" — set by
                           # JarvisAgent.chat()/chat_stream(); audit_log's provenance tag

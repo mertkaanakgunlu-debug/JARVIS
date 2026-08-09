@@ -2014,7 +2014,8 @@ def make_confirmation_node(settings):
                     "decision", tool=d.tool, action=d.action, risk_level=d.risk_level,
                     transport=transport, outcome="user_denied", reason=guidance,
                 )
-            # Inject stub ToolMessages so LangGraph state is valid, then route to agent
+            # Inject stub ToolMessages so LangGraph state stays valid for any
+            # later turn in this same conversation.
             stub_msgs = [
                 ToolMessage(
                     content="[DENIED by user — action not authorized]",
@@ -2022,16 +2023,31 @@ def make_confirmation_node(settings):
                 )
                 for tc in last_ai.tool_calls
             ]
-            ack_msg = HumanMessage(
-                content=(
-                    "Your last tool call(s) were denied by the user."
-                    + (f" Reason: {guidance}." if guidance else "")
-                    + " Do NOT retry them. Acknowledge that the action was not executed."
-                )
+            # Electron live E2E, 2026-08-09: an explicit human denial is
+            # already a complete, deterministic terminal fact -- "nothing
+            # executed, because the user said no" -- known here from the
+            # interrupt's own resume value. Routing it back through the
+            # tool-bound agent only to have the model re-narrate a fact the
+            # code already knows produced exactly the live failure this
+            # closes: the model correctly reported non-execution, then
+            # fabricated an unrelated cause (a permission/administrator
+            # explanation) for a denial that was the user's own choice. Same
+            # "code-authored, routed straight to the terminal chain" shape
+            # as invalid_args_exhausted below -- reuse, not a parallel
+            # mechanism. Every OTHER denied-family outcome in this node
+            # (kill switch, capability disabled, external writes off,
+            # proactive read-only, stale approval, duplicate execution)
+            # still routes through "agent" unchanged: each of those needs
+            # the model to narrate its own specific, varying reason, and
+            # none of them is the bug this closes.
+            final_text = (
+                "İşlemi reddettiniz. Komut çalıştırılmadı."
+                + (f" Belirttiğiniz gerekçe: {guidance}" if guidance else "")
             )
             return {
-                "confirmation_result": "denied",
-                "messages": stub_msgs + [ack_msg],
+                "confirmation_result": "user_denied",
+                "messages": stub_msgs + [AIMessage(content=final_text)],
+                "response": final_text,
                 # The one block that must NEVER be retried on the system's own
                 # initiative -- a completion contract that re-drove the model
                 # here would be overriding the user in their own name.
@@ -2128,14 +2144,28 @@ def make_confirmation_node(settings):
 
 
 def route_from_confirmation(state: JarvisState) -> str:
-    """approved → 'tools'; denied → 'agent' (LLM acknowledges denial);
-    invalid_args_exhausted → END (Agent Runtime rev.2, Faz 6 Part 2 -- the
-    bounded-repair budget is spent; confirmation_node already composed the
-    final honest answer directly, so there is nothing left for the
-    tool-bound agent OR the critic to do with this turn)."""
+    """approved → 'tools'; user_denied → the terminal chain directly (an
+    explicit human denial is code-authored in confirmation_node, same
+    choke-point shape as invalid_args_exhausted below -- see that branch's
+    comment); denied → 'agent' (every OTHER denied-family outcome -- kill
+    switch, capability disabled, external writes off, proactive read-only,
+    stale approval, duplicate execution -- still needs the model to narrate
+    its own specific, varying reason); invalid_args_exhausted → END (Agent
+    Runtime rev.2, Faz 6 Part 2 -- the bounded-repair budget is spent;
+    confirmation_node already composed the final honest answer directly, so
+    there is nothing left for the tool-bound agent OR the critic to do with
+    this turn).
+
+    The `END` returned for both terminal cases is a dict KEY, not a literal
+    graph exit -- graph.py's conditional-edge map binds it to the terminal
+    chain (output_contract when enabled, then verify), the same single
+    choke-point every other path passes through. See graph.py's own comment
+    on that mapping for why "every path to END passes verify" has to be
+    literally true.
+    """
     from langgraph.graph import END
     result = state.get("confirmation_result", "approved")
-    if result == "invalid_args_exhausted":
+    if result in ("invalid_args_exhausted", "user_denied"):
         return END
     if result == "denied":
         return "agent"
