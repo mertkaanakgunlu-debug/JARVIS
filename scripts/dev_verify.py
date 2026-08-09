@@ -46,18 +46,29 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: lock contention, a credential prompt) must cost seconds, not the session.
 GIT_TIMEOUT_S = 30.0
 
-#: Documents and configuration whose CONTENT is asserted by a real Python test.
-#: These look like "docs-only" changes and are not: `tests/
-#: test_claude_session_hooks.py` reads them from the real repository root and
-#: asserts on what they say (CLAUDE.md's size and `@HANDOFF.md` import, each
-#: rule file's frontmatter, the skill's mode headings and CI vocabulary, the
-#: settings hook wiring, the gitignore entries, the CI job matrix).
+#: Documents and configuration whose CONTENT is asserted by the session tests.
+#: These look like "docs-only" changes and are not: the suite reads them from
+#: the real repository root and asserts on what they say.
 GOVERNED_DOCS = frozenset({
     "CLAUDE.md",
     ".gitignore",
     ".claude/settings.json",
     ".claude/skills/session-close/SKILL.md",
     ".github/workflows/ci.yml",
+})
+
+#: Shared Claude/Codex contracts and adapters have their own focused relational
+#: checks. The overlap with GOVERNED_DOCS is deliberate: changing Claude's
+#: adapter, settings, canonical skill, or gitignore must run BOTH suites.
+INTEROP_DOCS = frozenset({
+    "AGENT_CONTRACT.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".agents/skills/session-close/SKILL.md",
+    ".claude/settings.json",
+    ".claude/skills/session-close/SKILL.md",
+    ".codex/hooks.json",
+    ".gitignore",
 })
 
 #: Same, by prefix: every `.claude/rules/*.md` is checked for its path scope.
@@ -82,6 +93,7 @@ SESSION_SCRIPTS = frozenset({
 })
 
 SESSION_TESTS = ("tests/test_claude_session_hooks.py",)
+INTEROP_TESTS = ("tests/test_agent_interop.py",)
 
 #: A change here changes what every other test means, so no subset is honest.
 GLOBAL_PYTHON = frozenset({
@@ -345,6 +357,16 @@ def _classify(rel: str, root: Path, plan: Plan) -> None:
     suffix = Path(rel).suffix
     if suffix == ".py":
         plan.py_sources_changed = True
+
+    if rel in INTEROP_DOCS:
+        for target in INTEROP_TESTS:
+            plan.tests.append(Selection(
+                target, "shared agent-interoperability contract tests", rel))
+        if rel in GOVERNED_DOCS:
+            for target in SESSION_TESTS:
+                plan.tests.append(Selection(
+                    target, "content asserted by the session-protocol tests", rel))
+        return
 
     if rel in GOVERNED_DOCS or rel.startswith(GOVERNED_PREFIXES):
         for target in SESSION_TESTS:

@@ -129,7 +129,7 @@ Rules the file must obey (see `.claude/rules/documentation.md`):
 
 #### Keep it a snapshot, not an account of the session
 
-HANDOFF is imported by `CLAUDE.md` and therefore read in full at the start of
+Both platform entrypoints require HANDOFF to be read in full at the start of
 every session, so every line it carries is paid for on every future turn. Its
 job is to leave the next session **oriented**, not **informed about this one**.
 

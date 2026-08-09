@@ -49,9 +49,16 @@ execution ("confirm-or-notify, never silent execution").
 
 ## Known limits — do not oversell past these
 
-- The Electron HUD's confirmation round-trip is compile/parser-verified only;
-  **no live HUD E2E against a real server+model has been run**. The Flutter app
-  renders nothing for confirmations.
+- The Electron HUD's card and transport mechanics have run live against a real
+  server, graph, and `BrowserWindow`: no raw protocol leaked, approve executed
+  exactly once, and deny executed zero times. The explicit-deny narration bug
+  is fixed. **The approve-side final-response/result-binding issue remains
+  open**: a clean successful execution can still receive fabricated uncertainty
+  in the model's free-text answer.
+- The Flutter confirmation UI has run live on a real Galaxy S26 Ultra: approve
+  executed exactly once, deny executed zero times, and no raw protocol appeared
+  on screen. Its residual limits are cross-tab visibility and the absent
+  `conversation_id`, not an unrun live E2E.
 - `python_run`'s L2→L3 reclassification is access control, **not a sandbox** —
   the subprocess still has no resource or network restriction.
 - A background `TaskExecutor` job that hits a confirmable action fails with a

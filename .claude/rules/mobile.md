@@ -112,7 +112,7 @@ CI still runs `analyze` only. Adding `flutter test` to CI is now blocked by
 `MOBILE-ASSETS-01` (the gitignored fonts, above) rather than by this bug — and
 that is an owner decision, not a leftover.
 
-## L3 confirmations — what exists, and what is still unverified
+## L3 confirmations — live-verified, with bounded residual limits
 
 The approve/deny round-trip is **implemented** (2026-08-08): the phone shows a
 card, `POST /chat/confirm/{id}` resolves the interrupt, and the continuation
@@ -138,7 +138,14 @@ and easy to undo by accident:
   degrades to its tool NAME. An args fallback would put raw JSON back on screen
   and leak message bodies onto a lock screen.
 
-**Still true, do not oversell past it:** this is verified by `flutter analyze`
-and `flutter test` only. **No live E2E against a real server + model has been
-run from the phone** — the same limit `docs/SAFETY.md` records for the Electron
-HUD's confirmation round-trip.
+Live E2E ran on 2026-08-08 on a real Galaxy S26 Ultra (`SM-S948B`) against the
+real server and model, using `shell_run` as the L3 probe. Audit-log and
+filesystem evidence showed exactly one execution on approve and zero on deny;
+the card displayed only the plain-language description, with no frame internals
+visible in the UI.
+
+The residual limits are narrower: a prompt raised while another tab is active
+has no cross-tab indicator, although the app-scoped provider keeps it answerable
+when the user returns to CORE; and `confirmStream()` carries no
+`conversation_id`, matching `chatStream()`. If mobile later pins a conversation,
+both request paths must change together or the server can refuse the resume.

@@ -219,6 +219,24 @@ def test_handoff_selects_its_own_contract_test_not_the_slow_session_suite():
     assert not plan.full_python_fallback
 
 
+@pytest.mark.parametrize("rel", [
+    "AGENT_CONTRACT.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".agents/skills/session-close/SKILL.md",
+    ".claude/settings.json",
+    ".claude/skills/session-close/SKILL.md",
+    ".codex/hooks.json",
+    ".gitignore",
+])
+def test_interop_contracts_select_the_focused_regression_file(rel):
+    plan = dv.build_plan([rel])
+
+    assert "tests/test_agent_interop.py" in plan.selected_tests
+    assert plan.ignored == []
+    assert not plan.full_python_fallback
+
+
 def test_a_closing_docs_change_set_reuses_a_verified_full_run():
     """The change set `/session-close` produces when the work commit already had
     its own full run: the closing commit is documentation, and the only thing in

@@ -1,6 +1,6 @@
 # J.A.R.V.I.S. — Safety & Confirmation Model
 
-> Updated 2026-07-15 (Faz 7). Phase 2 (ToolSpec metadata, commit `166a205`) and Phase 3
+> Updated 2026-08-09. Phase 2 (ToolSpec metadata, commit `166a205`) and Phase 3
 > (confirmation gate node, commit `7e7e471`) shipped 2026-05-24 but, per the 2026-07-14 review,
 > didn't protect anything end-to-end. **Faz 4 closed that gap** — see "What Faz 4 changed" below.
 > **Faz 5 extended it to a second, dynamically-discovered tool source (MCP)** without changing the
@@ -88,8 +88,8 @@ operation — which is why the table is per-tool rather than a global set of rea
   - **API**: `POST /chat` now catches `ConfirmationRequired` and returns
     `{"confirmation_required": true, "id": ..., "payload": ...}` instead of an opaque 500
     (BUG-confirm-payload); `POST /chat/stream` already carried the JSON marker through as an SSE
-    frame. The Electron HUD builds a real UI around this since 2026-07-23 (`52d0b72`); mobile
-    still doesn't — see Known limits below.
+    frame. The Electron HUD builds a real UI around this since 2026-07-23 (`52d0b72`), and the
+    Flutter app now has the same approve/deny capability — see Known limits below.
 - The system prompt (`jarvis/prompts/core/02_tool_policy.md`) no longer tells the model it never
   needs to ask — it now says the system itself pauses for risky actions and describes how to react
   to an approval/denial coming back.
@@ -135,8 +135,8 @@ operation — which is why the table is per-tool rather than a global set of rea
   interrupts for an L3 action, the pending confirmation is discarded (never resumed, never silently
   executed) and reported back as `kind="needs_confirmation"`; `monitor.py` turns that into a toast
   naming the gated tool(s) and telling the user to ask JARVIS directly, instead of leaving a
-  confirmation dangling behind a `POST /chat/confirm/{conf_id}` round-trip that (see Known limits
-  below) no UI actually completes yet.
+  confirmation dangling for an interactive client to resolve through
+  `POST /chat/confirm/{conf_id}`.
 - **Live finding, not theoretical — a real gap at L2, honestly documented, not fully closed**: a
   real verification run against local `qwen2.5:7b-instruct` gave `proactive_turn()` a mundane
   calendar-event trigger and the model hallucinated an unrelated `procedure_save` call. That tool is
@@ -274,13 +274,17 @@ word whether it resolved to the right day, which is how a one-day-early event ge
 
 ## Known limits (honest, not aspirational)
 
-- **Electron confirmation UI exists but is not yet live-verified; mobile has none.** The HUD
-  renders the structured payload as an approve/deny overlay and completes the
-  `/chat/confirm/{id}` round-trip (2026-07-23, `52d0b72`) — verified by `npm run build` and a
-  simulated-stream parser test, **not yet by a live HUD session against a real server+model**
-  (that live E2E is the explicit next manual step). The Flutter app still renders nothing for
-  confirmations; a mobile-initiated L3 action's approval currently requires the CLI, voice, or
-  the HUD.
+- **Electron and mobile confirmation mechanics are live-verified; Electron's
+  approve-side final response remains open.** The Electron HUD ran against a
+  real server, graph, and `BrowserWindow`: the card rendered, no raw protocol
+  leaked, approve produced exactly one execution, and deny produced zero. The
+  explicit-deny narration bug is fixed, but an approved clean execution can
+  still receive fabricated uncertainty in the model's free-text final answer;
+  result binding on that path remains open. The Flutter UI also ran against the
+  real server and model on a Galaxy S26 Ultra (`SM-S948B`): exactly one
+  execution on approve, zero on deny, and no raw protocol on screen. Mobile's
+  remaining confirmation limitations are the missing cross-tab indicator and
+  missing `conversation_id`, not an unrun live E2E.
 - **Voice confirmation phrasing is functional, not fully localized** — the spoken question wrapper
   is bilingual (`jarvis/voice/session.py`'s `describe_confirmation`), but the per-call description
   embedded in it (`jarvis/policy_guard.py`'s `describe_call`) is always in English technical form
