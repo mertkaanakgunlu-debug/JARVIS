@@ -426,13 +426,14 @@ push, never recorded here.
   session's own record; a future session must re-run rather than inherit it.
   Still current: this chapter made no code change, so no new full run was
   needed or recorded.
-- **Session `0e05d735` has now closed itself twice already** (`closed` at
-  `41651b45` after `CI-FLAKE-CHROMA-01`, then again at `126ae807` after
-  `MOBILE-16KB-01`) and this chapter — the Electron confirmation live E2E —
-  is its **third** `prepare → close` cycle, each under the owner's own
-  follow-up prompt in the same conversation rather than a fresh
-  `SessionStart`. `prepare`/`close` do not forbid re-preparing a session whose
-  marker is `closed` (only a `blocked` marker is refused), so this is
-  legitimate, not a protocol violation — but a future preflight seeing a
-  `closed` marker whose `head` is behind the actual tip should read this
-  bullet before assuming something is wrong.
+- **Session `0e05d735` closed itself twice already** (`closed` at `41651b45`
+  after `CI-FLAKE-CHROMA-01`, then again at `126ae807` after `MOBILE-16KB-01`)
+  before this chapter — the Electron confirmation live E2E — started what
+  would have been its third `prepare → close` cycle. Partway through this
+  chapter `current.json` picked up a **new** identity, `10a2a983...`,
+  `source: resume` (the underlying tool session was resumed, not a fresh
+  `SessionStart`) — its own `head` at pickup was `126ae807`, matching this
+  chapter's own start point exactly, so no work is unaccounted for. This
+  chapter's `prepare`/`close` therefore run under `10a2a983`, not `0e05d735`;
+  a future preflight comparing identities across this HANDOFF should expect
+  that split rather than read it as an anomaly.
