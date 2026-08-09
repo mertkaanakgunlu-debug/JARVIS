@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 41651b4597c17d38a7ff93357dd2e59a314466a9
+covered_through_sha: 126ae807acc7567cec69b960cecdd4cf525809e7
 ---
 
 # HANDOFF — current state
@@ -22,14 +22,14 @@ file's own closing commit.
 - Branch **`langgraph-migration`**. `main` is `5f6f6ff` and a strict ancestor;
   never quote how far behind it is — derive it:
   `git rev-list --left-right --count origin/main...origin/langgraph-migration`
-- `8602a0b` (`CI-FLAKE-CHROMA-01`) and `41651b4` (its closing docs) are
-  **pushed and CI-confirmed**: run `31274352271`, `python`/`electron`/`mobile`
-  all `success` at job level, the `python` job's full log carries zero
-  `acquire_write`/`no such table` occurrences (was the previous push's
-  `python`-job failure signature, run `31270921707`).
-- This chapter started at `41651b4` and made **no code change** — only a
-  live-device confirmation (§2) — so it produces one closing documentation
-  commit on top of it.
+- `8602a0b` (`CI-FLAKE-CHROMA-01`), `41651b4` and `126ae80` (`MOBILE-16KB-01`
+  closing docs) are **pushed and CI-confirmed**: run `31274352271`,
+  `python`/`electron`/`mobile` all `success` at job level, the `python` job's
+  full log carries zero `acquire_write`/`no such table` occurrences (was the
+  previous push's `python`-job failure signature, run `31270921707`).
+- This chapter started at `126ae80` and made **no code change** — only a
+  live Electron confirmation E2E (§2) — so it produces one closing
+  documentation commit on top of it.
 - Push state and CI for this document's own closing commit are **derived
   live**, never stored here:
 
@@ -136,6 +136,67 @@ the compatibility warning Android showed pre-fix was itself never a live
 before vs. after), so this closure is symmetric with what opened the issue,
 not a weaker bar applied only at the end.
 
+**Electron HUD L3 confirmation — the round-trip's first live E2E against a
+real server, real graph and a real (not packaged) Electron window, and it
+closes the gap.** No code changed. There was no existing Electron UI
+automation harness (no Playwright/Spectron in this repo) and no native way to
+drive the actual `BrowserWindow`, so `npm run dev` was launched with
+`--remote-debugging-port` (a launch-time flag, not a code change) and driven
+over the Chrome DevTools Protocol against the mainWindow's own real render
+target — the same technique Playwright/Puppeteer use for Electron, not a
+substitute browser tab (no IPC-provided API key exists outside the real
+window, so a plain browser tab could not even authenticate). The window was
+opened the way a real user opens it: a real left-click on the system tray
+icon (`toggleMain()`), located via Windows UI Automation since the app ships
+tray-only, hidden-on-launch by design.
+
+**Approve, real UI, real `shell_run` (L3) probe:** card showed only
+`policy_guard.describe_call()`'s plain-language text (`run the shell command:
+Set-Content -Path "...\electron_l3_probe_approve.txt" -Value "APPROVED"`) —
+no `execution_id`, no `"type":`, no raw `args`, confirmed both visually and by
+a zero-match text search of the entire rendered page for those markers.
+Before the real APPROVE click: 0 executions, no probe file. After: **exactly
+one** `execution_start`/`execution_end` pair in `data/audit_log.jsonl`
+(`ok: true`), probe file created with the exact expected content. A `resume`
+pass re-records a second `confirm_required`/`user_approved` row a millisecond
+apart — the same already-documented artifact as mobile's live E2E, not a
+second prompt.
+
+**Deny, real UI, a second unique probe:** the local model (qwen3:8b) turned
+out to be unreliable at actually *calling* `shell_run` for several phrasings
+of this prompt — it repeatedly wrote a suggested PowerShell snippet as
+**text** instead of invoking the tool, which never reaches the confirmation
+gate at all. That is a model behaviour/prompt-phrasing issue, not a
+confirmation-round-trip defect: the fix was a more directive prompt ("run
+this PowerShell command: ..."), not a code change. Once the gate was reached,
+the real DENY click produced `user_denied` in the audit log, **zero**
+`execution_start` rows anywhere in the full log for that probe path, and the
+probe file was never created. The final assistant text correctly said the
+action was not performed — but then added a fabricated explanation
+("permission restrictions", "run PowerShell as an administrator") for a
+denial that was actually the user's own choice. The approve arm showed the
+same class of issue from the other side: after Ollama itself hung (see
+below) and was restarted, the eventual final answer speculated about problems
+that never happened despite `execution_end: ok=true`. Both are the model's
+free-text narration layer fabricating a plausible-sounding *reason*, not the
+confirmation gate or the audit trail lying about *what happened* — consistent
+with why `execution_contract_mode` stays `shadow` (§3) rather than `enforce`.
+
+**A genuine, separate finding: Ollama itself hung mid-generation once during
+this chapter.** After the approve click, the turn stalled for several
+minutes; `py-spy dump` on the JARVIS process showed every thread idle
+(waiting on I/O, not looping), and a **completely fresh, unrelated**
+`POST /api/generate` straight to Ollama's own `:11434` also timed out with
+zero bytes back — proving Ollama's server, not JARVIS's code, was wedged.
+Killing and letting `ollama app.exe`'s tray wrapper respawn `ollama.exe`
+unstuck it immediately. This is an infrastructure flake in the local Ollama
+dependency, not a confirmation-round-trip bug — noted here because it
+delayed and contaminated one measurement, not because it changes the
+verdict on Electron's gate.
+
+`npm test` (32/32) and `npm run build` both green before the live E2E, per
+the task's own gate (§4).
+
 ## 3. Operational modes and rollout decisions
 
 Defaults re-read from `jarvis/config.py` on 2026-08-08 (verify there, not here).
@@ -145,7 +206,7 @@ Defaults re-read from `jarvis/config.py` on 2026-08-08 (verify there, not here).
 |---|---|---|
 | `required_outputs_mode` | `off` | Gate pre-registered and still unpassed; `object_created` delta and the corpus-B false-positive clauses remain the blockers. |
 | `execution_contract_mode` | `shadow` | Honesty kernel. `enforce` gated on 100 real artifact operations with 0 reported false blocks. |
-| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface; mobile approve **and** deny are live-verified on real hardware (untouched this session — see prior evidence, §4). |
+| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface; mobile (Flutter) and Electron approve/deny are now both live-verified (mobile: prior chapter; Electron: this chapter, §2). |
 | `external_writes_enabled` | `True` | `--profile test` flips it off. |
 | `monitor_proactive_enabled` | `False` | Proactive turns off by default. |
 | `calendar_from_mail_enabled` | `False` | Faz 5; never run against a real mailbox. |
@@ -198,31 +259,44 @@ the exact 6 files CI's 15 failures came from (`test_alpha_capabilities.py`,
 `test_todo_bg_analysis.py`) — 126/126 every time, no retries, no reruns hiding
 a failure.
 
-**Mobile, this chapter — live device, no code change:** `flutter build apk
+**Mobile, prior chapter — live device, no code change:** `flutter build apk
 --debug` on the unchanged `feda49b` tree, `zipalign -c -P 16` re-confirmed
 `Verification successful`, `adb install -r` onto the real Galaxy S26 Ultra
-(`SM-S948B`) preserving app data, cold-launch verified dialog-free — full
-evidence and the surprising `getconf PAGE_SIZE=4096` reading are in §2.
+(`SM-S948B`) preserving app data, cold-launch verified dialog-free.
 `flutter analyze`/`flutter test` were **not** rerun this chapter (no code
-changed since the prior snapshot's run on this same `feda49b` tree). Electron
-(`npm test`/`npm run build`) untouched. No Ollama A/B harness, no
-completion-contract evaluation, no real mailbox.
+changed since that run on the same `feda49b` tree).
 
-**CI:** the last **judged** tip on origin is now `41651b4` (also the tip when
-this document was written, current `origin/langgraph-migration`) — run
-`31274352271`, **`success`** at job level for `python`, `electron`, and
-`mobile` alike; the `python` job's full log (1048 lines) carries zero
-`acquire_write`/`no such table` occurrences, and its pytest summary line reads
-`3453 passed, 1 skipped` (3454 selected, 0 failed) in `297.94s`, matching the
-local `-n 4 --dist load` evidence above. `CI-FLAKE-CHROMA-01`'s acceptance CI
-is this run. Read future commits' CI live, per job
-(`gh run view <id> --json jobs`), never from the workflow headline.
+**Electron, this chapter — live E2E, no code change:**
+
+```powershell
+cd electron; npm test    # -> 32 passed (2 files)
+cd electron; npm run build   # -> electron-vite build, all three targets succeed
+```
+
+Both green **before** the live E2E ran (the task's own gate). The live
+round-trip itself (real server, real graph, real `BrowserWindow` driven over
+CDP, real tray-icon click, real APPROVE/DENY clicks) is narrated in §2 —
+exactly-one execution on approve, zero executions on deny, zero raw-protocol
+matches anywhere in the rendered page text, audit-log-backed. No Ollama A/B
+harness, no completion-contract evaluation, no real mailbox.
+
+**CI:** the last **judged** tip on origin is `126ae80` (current
+`origin/langgraph-migration`) — run `31284738620`, **`success`** at job level
+for `python`, `electron`, and `mobile` alike (the wording-fix commit changed
+`HANDOFF.md` only, so this run mainly reconfirms `31274352271`'s earlier
+green: `python`'s full log carries zero `acquire_write`/`no such table`
+occurrences, pytest summary `3453 passed, 1 skipped` in `297.94s`).
+`CI-FLAKE-CHROMA-01`'s acceptance CI was `31274352271`. This chapter's own
+closing commit is unpushed and has no CI result yet. Read future commits' CI
+live, per job (`gh run view <id> --json jobs`), never from the workflow
+headline.
 
 ## 5. Known open issues
 
 Each keeps its identifier; the detail stays in the linked document.
-`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are **closed** (§2) and removed from
-this list; neither is relabelled here, only dropped, per the doc rule.
+`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are **closed** (§1/§2); the Electron
+HUD confirmation live-E2E gap is closed too (§2). None is relabelled here,
+only dropped, per the doc rule.
 
 - **Mobile confirmation: no cross-tab indicator, and no `conversation_id`.** A
   prompt raised while the user is on another tab is answerable when they return
@@ -273,8 +347,6 @@ this list; neither is relabelled here, only dropped, per the doc rule.
   casefold on Turkish İ/i; pre-execution guard has deterministic evidence only.
 - **Faz 5 (mail → calendar) has never run against the real mailbox** — green on
   fixtures only; background ingestion stays off until it does.
-- **Electron HUD confirmation is compile/parser-verified only — no live E2E.**
-  Mobile's equivalent gap is closed.
 - **`python_run` is access-controlled, not sandboxed.**
 - **Proactive turns gate L3 only**; an unwatched L2 write is mitigated by prompt
   instruction, not structurally closed.
@@ -285,8 +357,10 @@ this list; neither is relabelled here, only dropped, per the doc rule.
 
 ## 6. Next engineering priority
 
-`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are both closed and pushed (§1, §2) —
-nothing left on either.
+`CI-FLAKE-CHROMA-01`, `MOBILE-16KB-01`, and the Electron confirmation live-E2E
+gap are all closed (§1, §2). **Every confirmation surface — CLI, API, mobile,
+Electron — has now had a live E2E**; none remains compile/parser-verified
+only.
 
 **Completion-contract Finding 2** is the pilot's remaining open
 finding, and its fix belongs to the next revision of the gate rather than to the
@@ -294,9 +368,14 @@ current one — do not redefine a pre-registered metric in place. `ROADMAP.md`'s
 own next unstarted phase is **Faz 5 (proaktif mail → takvim)**, blocked on the
 OAuth re-consent in §7.
 
-The **Electron HUD confirmation round-trip is now the only interface whose gate
-has never run live** — mobile's already did, and the same "2235 tests and 38/38
-mutations, then 10/10 live failures" precedent applies to it.
+Two observations from this chapter are worth a look, not a fix: Ollama hung
+once mid-generation (§2) — worth watching for recurrence, not yet a pattern —
+and the model's free-text final-answer narration fabricated a plausible-but-
+wrong *reason* on both the approve and deny arms while the actual gate/audit
+trail stayed correct throughout (§2) — this is exactly the class of thing
+`execution_contract_mode: shadow` (§3) exists to eventually catch; it is
+evidence for, not against, keeping that gate in shadow rather than promoting
+it early.
 
 Do not start any of this — or any product work — inside a session that is
 closing.
@@ -347,13 +426,13 @@ push, never recorded here.
   session's own record; a future session must re-run rather than inherit it.
   Still current: this chapter made no code change, so no new full run was
   needed or recorded.
-- **Session `0e05d735` closed once already** (marker `closed` at `41651b45`,
-  after `8602a0b`/`CI-FLAKE-CHROMA-01` pushed and CI-confirmed) and then did
-  one more chapter of work — the `MOBILE-16KB-01` live confirmation this
-  document describes — under the **same** session identity, per the owner's
-  own follow-up prompt in the same conversation rather than a fresh
+- **Session `0e05d735` has now closed itself twice already** (`closed` at
+  `41651b45` after `CI-FLAKE-CHROMA-01`, then again at `126ae807` after
+  `MOBILE-16KB-01`) and this chapter — the Electron confirmation live E2E —
+  is its **third** `prepare → close` cycle, each under the owner's own
+  follow-up prompt in the same conversation rather than a fresh
   `SessionStart`. `prepare`/`close` do not forbid re-preparing a session whose
-  marker is `closed` (only a `blocked` marker is refused), so this is a
-  legitimate second `prepare → close` cycle, not a protocol violation — but a
-  future preflight seeing a `closed` marker whose `head` is behind the actual
-  tip should read this bullet before assuming something is wrong.
+  marker is `closed` (only a `blocked` marker is refused), so this is
+  legitimate, not a protocol violation — but a future preflight seeing a
+  `closed` marker whose `head` is behind the actual tip should read this
+  bullet before assuming something is wrong.
