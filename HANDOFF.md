@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 126ae807acc7567cec69b960cecdd4cf525809e7
+covered_through_sha: ea7ad2e100c6d85e63d0988f8e5b85c65c90e879
 ---
 
 # HANDOFF — current state
@@ -27,9 +27,20 @@ file's own closing commit.
   `python`/`electron`/`mobile` all `success` at job level, the `python` job's
   full log carries zero `acquire_write`/`no such table` occurrences (was the
   previous push's `python`-job failure signature, run `31270921707`).
-- This chapter started at `126ae80` and made **no code change** — only a
-  live Electron confirmation E2E (§2) — so it produces one closing
-  documentation commit on top of it.
+- This chapter started at `126ae80` and built **one work commit**, `ea7ad2e`
+  (a correction to the previous chapter's own Electron confirmation work —
+  §2), plus this closing documentation commit on top of it.
+- **The previous chapter's `fc4154c`/`5484b8c` closed the Electron HUD
+  confirmation live-E2E gap prematurely.** The transport/safety mechanics it
+  proved (card render, no raw protocol leak, exactly-one execution on
+  approve, zero on deny) were real and remain true — but it did not catch
+  that an explicit human DENY was still routed back through the tool-bound
+  agent, which is what produced the fabricated "permission restrictions"
+  explanation that chapter's own evidence recorded and then explained away.
+  This chapter's own fresh, clean re-run also found a SECOND issue the prior
+  one didn't have clean evidence for either way: an approve turn's free-text
+  final answer can still add fabricated uncertainty even with Ollama fully
+  healthy throughout. See §2 for what's fixed and what's still open.
 - Push state and CI for this document's own closing commit are **derived
   live**, never stored here:
 
@@ -136,66 +147,93 @@ the compatibility warning Android showed pre-fix was itself never a live
 before vs. after), so this closure is symmetric with what opened the issue,
 not a weaker bar applied only at the end.
 
-**Electron HUD L3 confirmation — the round-trip's first live E2E against a
-real server, real graph and a real (not packaged) Electron window, and it
-closes the gap.** No code changed. There was no existing Electron UI
-automation harness (no Playwright/Spectron in this repo) and no native way to
-drive the actual `BrowserWindow`, so `npm run dev` was launched with
-`--remote-debugging-port` (a launch-time flag, not a code change) and driven
-over the Chrome DevTools Protocol against the mainWindow's own real render
-target — the same technique Playwright/Puppeteer use for Electron, not a
-substitute browser tab (no IPC-provided API key exists outside the real
-window, so a plain browser tab could not even authenticate). The window was
-opened the way a real user opens it: a real left-click on the system tray
-icon (`toggleMain()`), located via Windows UI Automation since the app ships
-tray-only, hidden-on-launch by design.
+**Electron HUD L3 confirmation, corrected — the transport is proven sound and
+the deny-side bug that produced a fabricated explanation is fixed; the
+approve-side final-answer quality is a separate, still-open finding.** The
+prior chapter's live E2E (below, facts kept, conclusion corrected) proved the
+transport/safety mechanics against a real server, real graph and a real
+(unpackaged) `BrowserWindow` driven over the Chrome DevTools Protocol (`npm
+run dev --remote-debugging-port`, a launch flag, not a code change — no
+Playwright/Spectron harness exists here and a plain browser tab can't get the
+IPC-provided API key), opened the way a real user opens it: a real left-click
+on the system tray icon, located via Windows UI Automation. Those mechanics
+remain true and this chapter re-confirmed them on a fresh run: the card shows
+only `policy_guard.describe_call()`'s plain-language text, zero raw-protocol
+matches anywhere in the rendered page, exactly one `execution_start`/
+`execution_end` pair on approve, zero anywhere in the log on deny.
 
-**Approve, real UI, real `shell_run` (L3) probe:** card showed only
-`policy_guard.describe_call()`'s plain-language text (`run the shell command:
-Set-Content -Path "...\electron_l3_probe_approve.txt" -Value "APPROVED"`) —
-no `execution_id`, no `"type":`, no raw `args`, confirmed both visually and by
-a zero-match text search of the entire rendered page for those markers.
-Before the real APPROVE click: 0 executions, no probe file. After: **exactly
-one** `execution_start`/`execution_end` pair in `data/audit_log.jsonl`
-(`ok: true`), probe file created with the exact expected content. A `resume`
-pass re-records a second `confirm_required`/`user_approved` row a millisecond
-apart — the same already-documented artifact as mobile's live E2E, not a
-second prompt.
+**What was actually wrong, root-caused this chapter:** `confirmation_node`'s
+explicit-deny branch injected a `HumanMessage` asking the tool-bound agent to
+*acknowledge* a fact the code already knew with certainty — "nothing
+executed, the user said no" — and routed back through it
+(`route_from_confirmation`'s `"denied" → "agent"` branch). The live evidence
+showed the consequence directly: on deny, the model correctly reported
+non-execution, then fabricated an unrelated cause ("permission restrictions…
+run PowerShell as an administrator") for a denial that was the user's own
+choice. **Fixed in `ea7ad2e`:** an explicit human decision (approve, deny, or
+an invalid resume value normalized to deny — all reach this branch through
+the same `_interrupt()` call) is now a new `confirmation_result` value,
+`"user_denied"`, composed by `confirmation_node` itself and routed straight
+to the terminal chain (`output_contract` when enabled, then `verify`) — the
+exact choke-point shape `invalid_args_exhausted` already used, so no
+`graph.py` change was needed. Every OTHER "denied" producer in this node
+(kill switch, capability disabled, external writes off, proactive read-only,
+stale approval, duplicate execution) is a structural pre-interrupt block, not
+an explicit human decision, and still routes to `agent` unchanged — each
+needs the model to narrate its own specific, varying reason; only the
+explicit-decision branch was the bug. Verified safe against the honesty
+kernel by construction, not assumption: the new Turkish text ("İşlemi
+reddettiniz. Komut çalıştırılmadı.") matches none of `evidence.py`'s
+`_COMPLETION_PATTERNS`, so `detect_unbacked_claims` short-circuits to a clean
+verdict before `verify` (mode `shadow` by default) ever inspects it for an
+admission of failure. Regression tests against the REAL compiled graph
+(`tests/test_prepare_execution_node.py`): the agent LLM is invoked exactly
+once — never again after an explicit deny, proven with a poison second
+scripted LLM response that must never reach the final answer — execution
+stays at zero, a user-supplied deny reason is quoted verbatim, and the fix
+passes through `output_contract` rather than bypassing it when
+`required_outputs_mode` is on. All four fail against the pre-fix code
+(verified via a temporary `git stash`).
 
-**Deny, real UI, a second unique probe:** the local model (qwen3:8b) turned
-out to be unreliable at actually *calling* `shell_run` for several phrasings
-of this prompt — it repeatedly wrote a suggested PowerShell snippet as
-**text** instead of invoking the tool, which never reaches the confirmation
-gate at all. That is a model behaviour/prompt-phrasing issue, not a
-confirmation-round-trip defect: the fix was a more directive prompt ("run
-this PowerShell command: ..."), not a code change. Once the gate was reached,
-the real DENY click produced `user_denied` in the audit log, **zero**
-`execution_start` rows anywhere in the full log for that probe path, and the
-probe file was never created. The final assistant text correctly said the
-action was not performed — but then added a fabricated explanation
-("permission restrictions", "run PowerShell as an administrator") for a
-denial that was actually the user's own choice. The approve arm showed the
-same class of issue from the other side: after Ollama itself hung (see
-below) and was restarted, the eventual final answer speculated about problems
-that never happened despite `execution_end: ok=true`. Both are the model's
-free-text narration layer fabricating a plausible-sounding *reason*, not the
-confirmation gate or the audit trail lying about *what happened* — consistent
-with why `execution_contract_mode` stays `shadow` (§3) rather than `enforce`.
+**Fresh live re-run, Ollama independently confirmed healthy before starting,
+never restarted mid-turn:** deny is now clean end to end — card shows a
+plain-language command, real DENY click, card cleared (button's `disabled`/
+`opacity: 0.5`/`cursor: wait` confirmed true immediately after the click, via
+direct DOM property inspection, not a screenshot guess) within seconds,
+`user_denied` in the audit log, zero `execution_start` rows for that probe
+anywhere in the log, probe file never created, and the final answer was
+**exactly** `"İşlemi reddettiniz. Komut çalıştırılmadı."` — no fabricated
+cause. **Approve's transport is equally clean, but its final answer is not:**
+exactly one execution, probe file correct — but the free-text final answer
+still added unprompted, unwarranted hedging ("çıktı görünmüyor olabilir…
+erişim reddi alıyorsanız Yönetici olarak çalıştırmanız gerekebilir")
+contradicting a clean `execution_end: ok=true` with no error at all. This is
+a genuine, separate, **still-open** finding — not hidden under
+`execution_contract_mode=shadow`: the mode's own `unbacked_claim` audit
+record independently flagged the same turn's file claim as unbacked, because
+`shell_run` never declares artifacts to the evidence system at all — a real
+structural gap, and plausibly part of *why* the model hedges even on a clean
+success, but that is a hypothesis, not yet the proven root cause. See §5.
 
-**A genuine, separate finding: Ollama itself hung mid-generation once during
-this chapter.** After the approve click, the turn stalled for several
-minutes; `py-spy dump` on the JARVIS process showed every thread idle
-(waiting on I/O, not looping), and a **completely fresh, unrelated**
-`POST /api/generate` straight to Ollama's own `:11434` also timed out with
-zero bytes back — proving Ollama's server, not JARVIS's code, was wedged.
-Killing and letting `ollama app.exe`'s tray wrapper respawn `ollama.exe`
-unstuck it immediately. This is an infrastructure flake in the local Ollama
-dependency, not a confirmation-round-trip bug — noted here because it
-delayed and contaminated one measurement, not because it changes the
-verdict on Electron's gate.
+**The post-approve "stuck-looking" card, root-caused, not guessed:**
+instrumented non-invasively via the CDP `Network` domain (no source change)
+watching the real `/chat/confirm/{id}` request live. Category **A** — the
+same DOM card waiting on ONE genuinely long-running continuation stream, not
+a second `confirmation_required` frame and not a UI bug: exactly one HTTP
+request for the whole continuation (`REQUEST_START` once, `REQUEST_FINISHED`
+once, ~101 s later), a continuous trickle of ~9–20-byte `DATA_CHUNK` events
+(the local model streaming its narration token by token), and the
+accumulated response body never matched `confirmation_required` even once
+across the whole stream. The card *is* correctly non-actionable throughout —
+confirmed by direct property inspection immediately after the click
+(`disabled: true, opacity: "0.5", cursor: "wait"`), matching
+`ConfirmationOverlay`'s existing `disabled={busy}` wiring in
+`electron/src/renderer/src/App.jsx`. No code change: this is the documented,
+tested finding the task asked for when source inspection proves the button
+was genuinely non-actionable.
 
-`npm test` (32/32) and `npm run build` both green before the live E2E, per
-the task's own gate (§4).
+`npm test` (32/32) and `npm run build` both green before this chapter's live
+re-run (electron/ itself untouched this chapter — no code change there).
 
 ## 3. Operational modes and rollout decisions
 
@@ -206,7 +244,7 @@ Defaults re-read from `jarvis/config.py` on 2026-08-08 (verify there, not here).
 |---|---|---|
 | `required_outputs_mode` | `off` | Gate pre-registered and still unpassed; `object_created` delta and the corpus-B false-positive clauses remain the blockers. |
 | `execution_contract_mode` | `shadow` | Honesty kernel. `enforce` gated on 100 real artifact operations with 0 reported false blocks. |
-| `confirmation_gate_enabled` | `True` | The L3 gate is live in every interface; mobile (Flutter) and Electron approve/deny are now both live-verified (mobile: prior chapter; Electron: this chapter, §2). |
+| `confirmation_gate_enabled` | `True` | The L3 gate itself (card, exactly-once execution, zero on deny) is live-verified on mobile (Flutter) and Electron alike. Electron's deny-side final-answer bug is fixed this chapter; its approve-side final-answer quality is a separate, still-open finding (§5) — the GATE is sound, the model's free-text narration of a clean result is not always. |
 | `external_writes_enabled` | `True` | `--profile test` flips it off. |
 | `monitor_proactive_enabled` | `False` | Proactive turns off by default. |
 | `calendar_from_mail_enabled` | `False` | Faz 5; never run against a real mailbox. |
@@ -225,21 +263,31 @@ deliberate edit, not a side effect of having auth configured.
 
 ## 4. Tests and CI
 
-**Python, this session, run through the recorder on `8602a0b`** (the only work
+**Python, this chapter, run through the recorder on `ea7ad2e`** (the only work
 commit; this closing commit changes documents only):
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check jarvis scripts tests    # -> All checks passed!
 .venv\Scripts\python.exe scripts\dev_verify.py --full
 #   -> git diff --check clean
-#      pytest -q -> 3454 passed, 5 deselected, 0 failed, 390 warnings (603.84s)
-#      recorded at 8602a0b7
+#      pytest -q -> 3458 passed, 5 deselected, 0 failed, 402 warnings (586.76s)
+#      recorded at ea7ad2e1
 ```
 
-3454 vs. the prior snapshot's 3450 is exactly the **+4** new regression tests
-in `tests/test_memory_lifecycle.py` (distinct-cwd identity, no cross-cwd leak,
-same-path reuse unchanged, the autoclose mechanism itself) — nothing else in
-the diff touches test collection.
+3458 vs. the prior snapshot's 3454 is exactly the **+4** new regression tests
+in `tests/test_prepare_execution_node.py` (agent LLM invoked exactly once
+across an explicit deny, a user-supplied deny reason quoted verbatim, the fix
+passing through `output_contract` when enabled, and the full
+`route_from_confirmation` branch table) — nothing else in the diff touches
+test collection. Before this, `dev_verify.py --base ea7ad2e --run`'s own
+targeted selector independently mapped the same change's impact to 47 files /
+1300 tests, all green, giving a second, independent confirmation ahead of the
+full run.
+
+**Prior snapshot's Python evidence (`8602a0b7`, CI-FLAKE-CHROMA-01)** is
+unaffected by this chapter and stays valid for what it covered; it is not
+re-quoted here since this chapter's own full run supersedes it as the current
+record.
 
 **The acceptance bar for this task was CI's own exact command, not the
 serial suite** — the un-fixed tree passed `pytest -q` locally while
@@ -266,38 +314,63 @@ a failure.
 `flutter analyze`/`flutter test` were **not** rerun this chapter (no code
 changed since that run on the same `feda49b` tree).
 
-**Electron, this chapter — live E2E, no code change:**
+**Electron, this chapter — `electron/` itself untouched (the fix is entirely
+in `jarvis/graph/`), re-run anyway since it gates the live E2E:**
 
 ```powershell
 cd electron; npm test    # -> 32 passed (2 files)
 cd electron; npm run build   # -> electron-vite build, all three targets succeed
 ```
 
-Both green **before** the live E2E ran (the task's own gate). The live
-round-trip itself (real server, real graph, real `BrowserWindow` driven over
-CDP, real tray-icon click, real APPROVE/DENY clicks) is narrated in §2 —
-exactly-one execution on approve, zero executions on deny, zero raw-protocol
-matches anywhere in the rendered page text, audit-log-backed. No Ollama A/B
-harness, no completion-contract evaluation, no real mailbox.
+Both green, both before and after this chapter's live re-run. The live
+round-trip itself — real server, real graph, real `BrowserWindow` driven over
+CDP, real tray-icon click, real APPROVE/DENY clicks, on a fresh conversation
+with Ollama independently confirmed healthy and never restarted mid-turn —
+is narrated in full in §2: exactly-one execution on approve, zero on deny,
+zero raw-protocol matches anywhere in the rendered page text, the post-decide
+card independently proven non-actionable via direct DOM property inspection,
+audit-log-backed throughout.
 
 **CI:** the last **judged** tip on origin is `126ae80` (current
-`origin/langgraph-migration`) — run `31284738620`, **`success`** at job level
-for `python`, `electron`, and `mobile` alike (the wording-fix commit changed
-`HANDOFF.md` only, so this run mainly reconfirms `31274352271`'s earlier
-green: `python`'s full log carries zero `acquire_write`/`no such table`
-occurrences, pytest summary `3453 passed, 1 skipped` in `297.94s`).
-`CI-FLAKE-CHROMA-01`'s acceptance CI was `31274352271`. This chapter's own
-closing commit is unpushed and has no CI result yet. Read future commits' CI
-live, per job (`gh run view <id> --json jobs`), never from the workflow
-headline.
+`origin/langgraph-migration` — this chapter's commits are unpushed) — run
+`31284738620`, **`success`** at job level for `python`, `electron`, and
+`mobile` alike. `CI-FLAKE-CHROMA-01`'s acceptance CI was `31274352271`. This
+chapter's own work commit (`ea7ad2e`) and closing commit have no CI result
+yet. Read future commits' CI live, per job (`gh run view <id> --json jobs`),
+never from the workflow headline.
 
 ## 5. Known open issues
 
 Each keeps its identifier; the detail stays in the linked document.
-`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are **closed** (§1/§2); the Electron
-HUD confirmation live-E2E gap is closed too (§2). None is relabelled here,
-only dropped, per the doc rule.
+`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are **closed** (§1/§2), not
+relabelled here, only dropped, per the doc rule. The Electron HUD
+confirmation live-E2E gap is **narrower, not closed**: the gate mechanics
+(card, exactly-one execution, zero on deny, no raw leak) and the deny-side
+final-answer bug are proven and fixed (§2); what's left is the new item
+directly below.
 
+- **Approve-turn final answers can add fabricated uncertainty even when the
+  tool cleanly succeeded.** Live-observed twice this chapter, the second time
+  with Ollama independently confirmed healthy and never restarted mid-turn:
+  a `shell_run` L3 call approved and executed cleanly
+  (`execution_end: ok=true`, no error, correct file content on disk), and the
+  model's free-text final answer still added unprompted hedging — "the output
+  might not be visible… if you're still getting access denied, you may need
+  to run PowerShell as Administrator" — describing a failure mode that never
+  happened. Not hidden under `execution_contract_mode=shadow` (§3): that
+  mode's own `unbacked_claim` audit record independently flagged the SAME
+  turn's file-creation claim as unbacked, because `shell_run` never declares
+  artifacts to the evidence system at all (`jarvis/execution/evidence.py`'s
+  `_backed_by()` only matches a tool's own declared artifact list or a path
+  that already exists under a declared capability — a generic shell command
+  has neither). That gap is a real, separate, plausible contributor, but it
+  is a hypothesis, not yet the proven root cause — this was explicitly left
+  unfixed rather than guessed at, per the task's own "STOP and report, don't
+  hide it" instruction. Not scoped to Electron: the same `agent`/`compose`
+  path composes this text for every transport (CLI, API, mobile), so this is
+  a completion-contract-adjacent finding, not a confirmation-round-trip one.
+  Next step: instrument what `compose_node`/`critic_node` actually hand the
+  model about a `shell_run` result and why it hedges regardless.
 - **Mobile confirmation: no cross-tab indicator, and no `conversation_id`.** A
   prompt raised while the user is on another tab is answerable when they return
   (the provider is app-scoped) but nothing signals it from elsewhere. Now that
@@ -357,25 +430,27 @@ only dropped, per the doc rule.
 
 ## 6. Next engineering priority
 
-`CI-FLAKE-CHROMA-01`, `MOBILE-16KB-01`, and the Electron confirmation live-E2E
-gap are all closed (§1, §2). **Every confirmation surface — CLI, API, mobile,
-Electron — has now had a live E2E**; none remains compile/parser-verified
-only.
+`CI-FLAKE-CHROMA-01` and `MOBILE-16KB-01` are closed (§1). The Electron
+confirmation live-E2E work found and fixed a real bug (explicit deny routed
+back through the LLM instead of being code-authored — §2) but also
+**surfaced a new, not-yet-closed finding**: an approve turn's free-text final
+answer can hedge with a fabricated failure scenario even when the tool
+cleanly succeeded (§5). That is the most concrete next lead — narrower and
+better-evidenced than it would have been without this chapter's live re-run
+(reproduced with Ollama healthy throughout, and independently corroborated
+by the honesty kernel's own `unbacked_claim` record on the same turn) —
+worth investigating before calling any confirmation surface's live E2E fully
+clean end to end.
 
-**Completion-contract Finding 2** is the pilot's remaining open
-finding, and its fix belongs to the next revision of the gate rather than to the
-current one — do not redefine a pre-registered metric in place. `ROADMAP.md`'s
-own next unstarted phase is **Faz 5 (proaktif mail → takvim)**, blocked on the
-OAuth re-consent in §7.
+**Completion-contract Finding 2** is the pilot's remaining pre-registered open
+finding, and its fix belongs to the next revision of the gate rather than to
+the current one — do not redefine a pre-registered metric in place.
+`ROADMAP.md`'s own next unstarted phase is **Faz 5 (proaktif mail → takvim)**,
+blocked on the OAuth re-consent in §7.
 
-Two observations from this chapter are worth a look, not a fix: Ollama hung
-once mid-generation (§2) — worth watching for recurrence, not yet a pattern —
-and the model's free-text final-answer narration fabricated a plausible-but-
-wrong *reason* on both the approve and deny arms while the actual gate/audit
-trail stayed correct throughout (§2) — this is exactly the class of thing
-`execution_contract_mode: shadow` (§3) exists to eventually catch; it is
-evidence for, not against, keeping that gate in shadow rather than promoting
-it early.
+One observation from the previous chapter, not yet a pattern: Ollama hung
+once mid-generation there — worth watching for recurrence, nothing to act on
+from a single occurrence.
 
 Do not start any of this — or any product work — inside a session that is
 closing.
@@ -418,22 +493,22 @@ push, never recorded here.
   not a lost-work case. This session prepares under its own identity
   (`0e05d735`), which the helper confirmed differs from the blocked marker's
   owner.
-- The gitignored `full-verification.json` holds this session's own reusable
-  evidence, recorded at `8602a0b7` (superseding the prior snapshot's
-  `2d4392a8` record — different session, this session's own work commit). It
-  is bound to a session id and a commit and is **not transferable** —
-  `claude_session_state.py verification` confirms `REUSABLE` for this
-  session's own record; a future session must re-run rather than inherit it.
-  Still current: this chapter made no code change, so no new full run was
-  needed or recorded.
-- **Session `0e05d735` closed itself twice already** (`closed` at `41651b45`
-  after `CI-FLAKE-CHROMA-01`, then again at `126ae807` after `MOBILE-16KB-01`)
-  before this chapter — the Electron confirmation live E2E — started what
-  would have been its third `prepare → close` cycle. Partway through this
-  chapter `current.json` picked up a **new** identity, `10a2a983...`,
-  `source: resume` (the underlying tool session was resumed, not a fresh
-  `SessionStart`) — its own `head` at pickup was `126ae807`, matching this
-  chapter's own start point exactly, so no work is unaccounted for. This
-  chapter's `prepare`/`close` therefore run under `10a2a983`, not `0e05d735`;
-  a future preflight comparing identities across this HANDOFF should expect
-  that split rather than read it as an anomaly.
+- The gitignored `full-verification.json` holds this chapter's own reusable
+  evidence, recorded at `ea7ad2e1` (superseding the prior snapshot's
+  `8602a0b7` record — a real code change this time, `jarvis/graph/nodes.py` +
+  `jarvis/graph/state.py` + their tests). It is bound to a session id and a
+  commit and is **not transferable** — `claude_session_state.py verification`
+  confirms `REUSABLE` for this session's own record; a future session must
+  re-run rather than inherit it.
+- **Session `0e05d735` closed itself twice** (`closed` at `41651b45` after
+  `CI-FLAKE-CHROMA-01`, then again at `126ae807` after `MOBILE-16KB-01`), then
+  partway through the next chapter `current.json` picked up a **new**
+  identity, `10a2a983...`, `source: resume` (the underlying tool session was
+  resumed, not a fresh `SessionStart`) — its own `head` at pickup was
+  `126ae807`, matching that chapter's own start point exactly, so no work was
+  unaccounted for. **This chapter — the Electron confirmation correction —
+  is session `10a2a983`'s own second `prepare → close` cycle**, still under
+  that same identity (no further split this time). A future preflight
+  comparing identities across this HANDOFF should expect the ONE split
+  documented here (`0e05d735` → `10a2a983`) rather than read either half as
+  an anomaly.
