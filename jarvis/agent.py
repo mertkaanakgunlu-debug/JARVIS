@@ -554,16 +554,35 @@ strip_completion_contract_marker = strip_repair_directive
 _COMPLETION_REPAIR_SUPERSTEPS = 9
 
 
-def finalize_terminal_response(response: str) -> str:
-    """The single sanitiser every surface runs before showing/persisting text.
+def finalize_terminal_response(
+    response: str,
+    *,
+    execution_ledger: list[dict] | None = None,
+    execution_envelopes: list[dict] | None = None,
+    preexecution_history: list[dict] | None = None,
+    execution_contract_mode: str = "off",
+    language: str = "",
+) -> str:
+    """The single terminal finalizer before any surface shows or stores text.
 
     There are four of them (chat, chat_stream, resume_and_stream,
     background_turn) and before this only chat() cleaned anything, so the
     exact same model output was scrubbed on one transport and not on the
-    other three. One function, called in four places, is the only version of
-    this that stays true.
+    other three. It also performs approve-side result binding from the
+    always-on ledger; keeping both operations here prevents API, CLI, voice,
+    and background transports from acquiring divergent terminal truth.
     """
-    return strip_completion_contract_marker(strip_internal_markers(response))
+    from jarvis.execution.result_binding import bind_approved_external_write_result
+
+    cleaned = strip_completion_contract_marker(strip_internal_markers(response))
+    return bind_approved_external_write_result(
+        cleaned,
+        execution_ledger=execution_ledger,
+        execution_envelopes=execution_envelopes,
+        preexecution_history=preexecution_history,
+        execution_contract_mode=execution_contract_mode,
+        language=language,
+    )
 
 
 def _progress_marker_json(phase: str, required_outputs: list[dict] | None) -> str:
@@ -1102,6 +1121,40 @@ class JarvisAgent:
             return list(values.get("required_outputs") or [])
         except Exception:  # noqa: BLE001 -- see the docstring
             return []
+
+    def _approval_result_buffered(
+        self,
+        config: dict,
+        *,
+        include_pending: bool = True,
+        fail_safe_candidate: bool = False,
+    ) -> bool:
+        """Buffer a confirmation resume whose terminal result is code-bound.
+
+        The pending request is enough to require buffering, but never enough
+        to claim approval. The latter is recorded only after confirmation_node
+        verifies and consumes the exact signed request. Existing bound ledger
+        rows keep later confirmation rounds buffered as well.
+        """
+        if not self.settings.confirmation_gate_enabled:
+            return False
+        try:
+            from jarvis.execution.result_binding import (
+                checkpoint_requires_result_buffering,
+            )
+
+            tuple_ = self._checkpointer.get_tuple(config)
+            values = tuple_.checkpoint["channel_values"] if tuple_ else {}
+            return checkpoint_requires_result_buffering(
+                values, include_pending=include_pending,
+            ) or (include_pending and fail_safe_candidate)
+        except Exception:  # noqa: BLE001 -- unreadable/transient checkpoint
+            logger.debug("could not read approval result facts for buffering", exc_info=True)
+            # An exact APPROVE may be about to execute an external write. If
+            # the checkpoint read is temporarily unavailable, streaming the
+            # draft is irreversible for voice; buffer this one continuation
+            # fail-safe. Denials and non-approve decisions still return False.
+            return include_pending and fail_safe_candidate
 
     @property
     def _env_block(self) -> str:
@@ -1723,6 +1776,7 @@ class JarvisAgent:
                 "seen_tool_fingerprints": [],
                 "completed_tool_fingerprints": [],
                 "tool_execution_ledger": [],
+                "user_approved_execution_ids": [],
                 # Agent Runtime rev.2, Faz 6 Part 2: explicit bounded-repair
                 # tracking -- see JarvisState's own comment on this field.
                 "args_repair_attempted": False,
@@ -1763,7 +1817,9 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._register_pending_confirmation(conf_id, config, recorder)
+                self._register_pending_confirmation(
+                    conf_id, config, recorder, payload=payload,
+                )
                 event_bus.confirmation_required(conf_id, payload)
                 raise ConfirmationRequired(conf_id, payload) from exc
             except GraphRecursionError:
@@ -1803,7 +1859,9 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._register_pending_confirmation(conf_id, config, recorder)
+                self._register_pending_confirmation(
+                    conf_id, config, recorder, payload=payload,
+                )
                 event_bus.confirmation_required(conf_id, payload)
                 raise ConfirmationRequired(conf_id, payload)
 
@@ -1829,7 +1887,14 @@ class JarvisAgent:
             # The model has been observed copying the internal
             # "[Tool execution summary: ...]" marker into its own answer while
             # calling nothing -- see strip_internal_markers().
-            response = finalize_terminal_response(response)
+            response = finalize_terminal_response(
+                response,
+                execution_ledger=result.get("tool_execution_ledger"),
+                execution_envelopes=result.get("execution_envelopes"),
+                preexecution_history=result.get("preexecution_history"),
+                execution_contract_mode=self.settings.execution_contract_mode,
+                language=result.get("language") or detected_language,
+            )
 
             # Runtime truth: label the turn with the provider that ACTUALLY
             # answered (per-tier callback metadata), not the requested role.
@@ -1913,7 +1978,14 @@ class JarvisAgent:
         except Exception:
             return {}
 
-    def _register_pending_confirmation(self, conf_id: str, config: dict, recorder) -> None:
+    def _register_pending_confirmation(
+        self,
+        conf_id: str,
+        config: dict,
+        recorder,
+        *,
+        payload: dict | None = None,
+    ) -> None:
         """Register a turn paused for confirmation, and opportunistically
         evict stale entries -- review remediation: no Electron/mobile UI
         renders this prompt yet (CLAUDE.md's safety-model section), and any
@@ -1933,8 +2005,36 @@ class JarvisAgent:
             if now - entry.get("created_at", now) > stale_after
         ]:
             del self._pending_confirmations[stale_id]
+        result_binding_candidate = False
+        if isinstance(payload, dict):
+            from jarvis import policy_guard
+
+            for tool in payload.get("tools") or []:
+                if not isinstance(tool, dict):
+                    continue
+                try:
+                    decision = policy_guard.evaluate(
+                        str(tool.get("name") or ""),
+                        tool.get("args") or {},
+                        self.settings,
+                    )
+                except Exception:  # noqa: BLE001 -- auxiliary hint only
+                    logger.debug(
+                        "could not classify confirmation payload for buffering",
+                        exc_info=True,
+                    )
+                    continue
+                if decision.side_effect_type == "external_write":
+                    result_binding_candidate = True
+                    break
+
         self._pending_confirmations[conf_id] = {
             "config": config, "recorder": recorder, "created_at": now,
+            # Pinned from the interrupt payload while it is available. This
+            # lets an exact APPROVE fail-safe buffer even if a later checkpoint
+            # probe is transiently unreadable, without broadening that fallback
+            # to unrelated confirmation continuations.
+            "result_binding_candidate": result_binding_candidate,
             # Post-MVP Faz 2.75 (Paket B): WHOSE turn this is.
             #
             # A single JarvisAgent serves every API client, and self.session_id
@@ -2134,6 +2234,7 @@ class JarvisAgent:
                 "seen_tool_fingerprints": [],
                 "completed_tool_fingerprints": [],
                 "tool_execution_ledger": [],
+                "user_approved_execution_ids": [],
                 # Agent Runtime rev.2, Faz 6 Part 2: explicit bounded-repair
                 # tracking -- see JarvisState's own comment on this field.
                 "args_repair_attempted": False,
@@ -2205,7 +2306,9 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 conf_id = str(uuid.uuid4())
-                self._register_pending_confirmation(conf_id, config, recorder)
+                self._register_pending_confirmation(
+                    conf_id, config, recorder, payload=payload,
+                )
                 event_bus.confirmation_required(conf_id, payload)
                 yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
             except GraphRecursionError:
@@ -2236,7 +2339,9 @@ class JarvisAgent:
                 if payload is not None:
                     _confirmation_issued = True
                     conf_id = str(uuid.uuid4())
-                    self._register_pending_confirmation(conf_id, config, recorder)
+                    self._register_pending_confirmation(
+                        conf_id, config, recorder, payload=payload,
+                    )
                     event_bus.confirmation_required(conf_id, payload)
                     yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
 
@@ -2262,10 +2367,12 @@ class JarvisAgent:
             # the try/except has already exited.
             checkpoint_tuple = None
             terminal_response = ""
+            terminal_values: dict = {}
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
                 if checkpoint_tuple:
                     values = checkpoint_tuple.checkpoint["channel_values"]
+                    terminal_values = values
                     ledger = list(values.get("tool_execution_ledger") or [])
                     terminal_response = str(values.get("response") or "")
             except Exception:
@@ -2289,7 +2396,12 @@ class JarvisAgent:
             # response: an interrupted or checkpoint-less run should persist
             # something the user actually saw rather than nothing.
             full_response = finalize_terminal_response(
-                terminal_response or streamed_response
+                terminal_response or streamed_response,
+                execution_ledger=ledger,
+                execution_envelopes=terminal_values.get("execution_envelopes"),
+                preexecution_history=terminal_values.get("preexecution_history"),
+                execution_contract_mode=self.settings.execution_contract_mode,
+                language=terminal_values.get("language") or detected_language,
             )
 
             if buffered:
@@ -2451,7 +2563,19 @@ class JarvisAgent:
             # joins a turn that chat_stream() started and has no state dict of
             # its own. Decided BEFORE the first token, which is the only point
             # at which the decision is still available.
-            buffered = self._contract_buffered(config)
+            contract_buffered = self._contract_buffered(config)
+            approval_result_buffered = JarvisAgent._approval_result_buffered(
+                self,
+                config,
+                include_pending=(
+                    isinstance(decision, str)
+                    and decision.strip().lower() == "approve"
+                ),
+                fail_safe_candidate=bool(
+                    pending.get("result_binding_candidate", False)
+                ),
+            )
+            buffered = contract_buffered or approval_result_buffered
 
             # BUG-12: reuse the same helper chat_stream() uses instead of an inline
             # copy-pasted filter — this method independently had the same
@@ -2466,10 +2590,15 @@ class JarvisAgent:
                     # after having just answered a confirmation prompt. Same
                     # try/except placement as chat_stream(), for the same
                     # cancellation-safety reason; never joins `chunks`.
-                    yield _progress_marker_json(
-                        "resuming_required_output",
-                        self._buffered_required_outputs(config),
-                    )
+                    if contract_buffered:
+                        yield _progress_marker_json(
+                            "resuming_required_output",
+                            self._buffered_required_outputs(config),
+                        )
+                    else:
+                        yield _progress_marker_json(
+                            "finalizing_action_result", None,
+                        )
                 async for text in graph_stream_to_text(
                     self._graph, Command(resume=decision), config
                 ):
@@ -2498,7 +2627,9 @@ class JarvisAgent:
                 except Exception:
                     payload = {}
                 new_conf_id = str(uuid.uuid4())
-                self._register_pending_confirmation(new_conf_id, config, recorder)
+                self._register_pending_confirmation(
+                    new_conf_id, config, recorder, payload=payload,
+                )
                 event_bus.confirmation_required(new_conf_id, payload)
                 yield json.dumps({"__jarvis_confirm__": True, "id": new_conf_id, "payload": payload})
                 event_bus.state("idle")
@@ -2535,7 +2666,9 @@ class JarvisAgent:
             if resumed_payload is not None:
                 resumed_confirmation_issued = True
                 new_conf_id = str(uuid.uuid4())
-                self._register_pending_confirmation(new_conf_id, config, recorder)
+                self._register_pending_confirmation(
+                    new_conf_id, config, recorder, payload=resumed_payload,
+                )
                 event_bus.confirmation_required(new_conf_id, resumed_payload)
                 yield json.dumps(
                     {"__jarvis_confirm__": True, "id": new_conf_id, "payload": resumed_payload}
@@ -2563,10 +2696,12 @@ class JarvisAgent:
             ledger: list[dict] = []
             resumed_user_query = ""
             terminal_response = ""
+            terminal_values: dict = {}
             try:
                 checkpoint_tuple = self._checkpointer.get_tuple(config)
                 if checkpoint_tuple:
                     vals = checkpoint_tuple.checkpoint["channel_values"]
+                    terminal_values = vals
                     ledger = list(vals.get("tool_execution_ledger") or [])
                     resumed_user_query = str(vals.get("user_query") or "")
                     terminal_response = str(vals.get("response") or "")
@@ -2584,7 +2719,12 @@ class JarvisAgent:
             # risky action. Falls back to the streamed text when the checkpoint
             # carries no response (old checkpoints, checkpointer-less tests).
             full_response = finalize_terminal_response(
-                terminal_response or streamed_response
+                terminal_response or streamed_response,
+                execution_ledger=ledger,
+                execution_envelopes=terminal_values.get("execution_envelopes"),
+                preexecution_history=terminal_values.get("preexecution_history"),
+                execution_contract_mode=self.settings.execution_contract_mode,
+                language=terminal_values.get("language") or "",
             )
             if buffered:
                 # Nothing streamed yet: the verified answer goes out once, as
@@ -2876,6 +3016,7 @@ class JarvisAgent:
             "seen_tool_fingerprints": [],
             "completed_tool_fingerprints": [],
             "tool_execution_ledger": [],
+            "user_approved_execution_ids": [],
             "args_repair_attempted": False,
             **self._output_contract_state(user_query, output_baseline),
         }
@@ -2940,7 +3081,14 @@ class JarvisAgent:
         # _compact_completed_turn_for_history, so it is the one surface where
         # "what gets persisted" and "what gets cleaned" could drift apart
         # silently -- and it is the surface with nobody watching in real time.
-        response = finalize_terminal_response(response)
+        response = finalize_terminal_response(
+            response,
+            execution_ledger=result.get("tool_execution_ledger"),
+            execution_envelopes=result.get("execution_envelopes"),
+            preexecution_history=result.get("preexecution_history"),
+            execution_contract_mode=self.settings.execution_contract_mode,
+            language=result.get("language") or "tr",
+        )
 
         # Brief critical section -- not held across the ainvoke() above -- to
         # append this result into the *real* history, same shared-state

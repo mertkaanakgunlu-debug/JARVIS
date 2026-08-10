@@ -30,6 +30,7 @@
 | **Tool-call dedup (Patch 1.2)** | `seen`/`completed` fingerprint sets in graph state; `jarvis/graph/tool_accounting.py` | The same `tool + normalized-args` fingerprint never executes twice in a turn — a repeat is stubbed with `[DUPLICATE_TOOL_CALL_BLOCKED]`, whether the first attempt succeeded or failed. `completed` is stamped only by the post-execution `tool_result_accounting` node (the confirmation node can't know an outcome yet). Motivated by live incident F16 (procedure_save re-issued ~10× after already succeeding). |
 | **Tool error boundary (Patch 1.2)** | `jarvis/graph/safe_tools.py` (`SafeToolNode`) | A tool body raising (missing dep, bad credential, timeout, …) becomes a structured `[TOOL_ERROR]` ToolMessage the model can react to, not a crashed graph run / HTTP 500. The error text is sanitized to one line — never a `repr()`/traceback, which could leak a credential, token, or path into the transcript. |
 | **Bare compose node (Sprint 2)** | `jarvis/graph/nodes.py` (`make_compose_node`), wired `tools→…→compose→critic` | The node that writes the final user-facing answer has NO tools bound, so it structurally cannot re-issue the call it just watched run. This is the structural (not prompt-based) fix for F16's `agent→procedure_save→agent→…` loop; re-entering the tool-bound agent is allowed only for multi-step-shaped turns within the round budget. |
+| **Approve-side terminal result binding** | `jarvis/graph/nodes.py`, `jarvis/graph/tool_accounting.py`, `jarvis/execution/result_binding.py`, `jarvis/agent.py` | After the exact signed request passes interactive approval, `confirmation_node` records that execution id as user-approved. Post-tool accounting correlates the executed call with its `ExecutionRequest` and stores safe provenance plus the actual result in the always-on ledger; raw args/results are not added. The shared terminal finalizer replaces model narration for that approved external-write class with a code-authored success/failure/unknown receipt whose label is limited to a bounded capability identifier. Post-approval prose is buffered until terminal state, including voice transports; a second confirmation still travels as a control frame. Unknown timed-out writes are never upgraded or retried. Auto-approved, read-only, local, and legacy calls do not qualify. Approval provenance and ledger-result binding remain always-on, independent of both rollout ladders. In `off` and `shadow`, execution envelopes are observation-only and cannot change that receipt; only an `enforce_*` execution-contract mode may make confirmed postconditions or verification failures authoritative. Neither rollout default changed. |
 | **Capability router / turn-scoped tools (Sprint 2)** | `jarvis/graph/tool_router.py`; `ToolSpec.domain` | The model sees only the ~0–8 tool schemas relevant to the turn's domain, not all ~36. Not itself a safety gate, but it shrinks the hallucination surface that the limits above defend, and it keeps MCP/browser tools quarantined behind explicit intent. |
 
 ## Per-action, not per-tool (BUG-6 — fixed)
@@ -274,14 +275,17 @@ word whether it resolved to the right day, which is how a one-day-early event ge
 
 ## Known limits (honest, not aspirational)
 
-- **Electron and mobile confirmation mechanics are live-verified; Electron's
-  approve-side final response remains open.** The Electron HUD ran against a
+- **Electron and mobile confirmation mechanics are live-verified; approve-side
+  terminal result binding is code-enforced.** The Electron HUD ran against a
   real server, graph, and `BrowserWindow`: the card rendered, no raw protocol
   leaked, approve produced exactly one execution, and deny produced zero. The
-  explicit-deny narration bug is fixed, but an approved clean execution can
-  still receive fabricated uncertainty in the model's free-text final answer;
-  result binding on that path remains open. The Flutter UI also ran against the
-  real server and model on a Galaxy S26 Ultra (`SM-S948B`): exactly one
+  explicit-deny narration bug is fixed. For a genuinely user-approved external
+  write, the shared terminal finalizer now derives visible status from the
+  execution ledger and discards contradictory model prose. Deterministic fake-
+  write graph, multi-confirmation, SSE, and voice-buffering coverage proves the
+  result-binding path without touching a real external service. A post-fix real
+  Gmail/calendar/Drive write E2E was deliberately **not run**. The Flutter UI
+  also ran against the real server and model on a Galaxy S26 Ultra (`SM-S948B`): exactly one
   execution on approve, zero on deny, and no raw protocol on screen. Mobile's
   remaining confirmation limitations are the missing cross-tab indicator and
   missing `conversation_id`, not an unrun live E2E.

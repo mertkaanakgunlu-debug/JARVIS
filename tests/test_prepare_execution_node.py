@@ -170,12 +170,17 @@ async def _through_pipeline(tool_name, args, settings, *, call_id="call_1"):
 async def test_happy_path_approves_and_matches_signed_request(isolated_cwd, monkeypatch):
     settings = _settings()
     state = await _through_pipeline("gmail", {"action": "send", "to": "a@b.c", "subject": "s", "body": "b"}, settings)
+    state["user_approved_execution_ids"] = ["approved-in-an-earlier-round"]
     monkeypatch.setattr("langgraph.types.interrupt", lambda payload: "approve")
 
     node = make_confirmation_node(settings)
     result = await node(state)
 
     assert result["confirmation_result"] == "approved"
+    expected_id = state["execution_requests"][0]["request"]["execution_id"]
+    assert result["user_approved_execution_ids"] == [
+        "approved-in-an-earlier-round", expected_id,
+    ]
 
 
 @pytest.mark.asyncio
@@ -221,6 +226,7 @@ async def test_invalid_decision_is_denied_not_silently_approved(isolated_cwd, mo
     # the tool-bound agent (see route_from_confirmation / confirmation_node).
     # The fail-closed BEHAVIOR this test pins is unchanged: nothing executed.
     assert result["confirmation_result"] == "user_denied"
+    assert result.get("user_approved_execution_ids", []) == []
     assert any(
         "not executed" in m.content or "not authorized" in m.content
         for m in result["messages"] if hasattr(m, "content")
@@ -246,6 +252,7 @@ async def test_args_changed_after_approval_is_denied(isolated_cwd, monkeypatch):
     result = await node(state)
 
     assert result["confirmation_result"] == "denied"
+    assert result.get("user_approved_execution_ids", []) == []
     assert any("no longer valid" in m.content for m in result["messages"] if hasattr(m, "content"))
 
 
@@ -260,6 +267,7 @@ async def test_tampered_signature_is_denied(isolated_cwd, monkeypatch):
     result = await node(state)
 
     assert result["confirmation_result"] == "denied"
+    assert result.get("user_approved_execution_ids", []) == []
 
 
 @pytest.mark.asyncio
@@ -279,6 +287,7 @@ async def test_expired_approval_is_denied(isolated_cwd, monkeypatch):
     result = await node(state)
 
     assert result["confirmation_result"] == "denied"
+    assert result.get("user_approved_execution_ids", []) == []
 
 
 @pytest.mark.asyncio
@@ -297,6 +306,7 @@ async def test_replayed_already_committed_execution_is_denied(isolated_cwd, monk
     result = await node(state)
 
     assert result["confirmation_result"] == "denied"
+    assert result.get("user_approved_execution_ids", []) == []
     assert any("already ran" in m.content for m in result["messages"] if hasattr(m, "content"))
 
 

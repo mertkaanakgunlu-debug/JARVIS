@@ -52,9 +52,16 @@ execution ("confirm-or-notify, never silent execution").
 - The Electron HUD's card and transport mechanics have run live against a real
   server, graph, and `BrowserWindow`: no raw protocol leaked, approve executed
   exactly once, and deny executed zero times. The explicit-deny narration bug
-  is fixed. **The approve-side final-response/result-binding issue remains
-  open**: a clean successful execution can still receive fabricated uncertainty
-  in the model's free-text answer.
+  is fixed. **Approve-side terminal result binding is now code-enforced** for
+  genuinely user-approved external writes: the shared finalizer uses safe
+  execution-ledger provenance and actual success/failure/unknown facts, while
+  post-approval model prose is buffered so streaming and voice cannot expose a
+  discarded draft. In `off` and `shadow`, execution envelopes remain
+  observation-only; only an `enforce_*` mode may make confirmed postconditions
+  or verification failures authoritative for that visible receipt. Unknown
+  outcomes are never upgraded in any mode. Deterministic fake-write graph/SSE
+  coverage exists; a
+  post-fix real Gmail/calendar/Drive write E2E was deliberately not run.
 - The Flutter confirmation UI has run live on a real Galaxy S26 Ultra: approve
   executed exactly once, deny executed zero times, and no raw protocol appeared
   on screen. Its residual limits are cross-tab visibility and the absent

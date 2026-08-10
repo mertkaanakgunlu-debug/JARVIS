@@ -18,6 +18,7 @@ compiled graph/checkpointer machinery is needed.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import types
 from types import SimpleNamespace
@@ -286,6 +287,95 @@ async def test_resume_falls_back_to_the_stream_without_a_checkpoint_response(mon
 
     assert ("assistant", "resumed answer") in stored
     assert not any("__jarvis_final__" in c for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_approved_external_write_buffers_and_discards_uncertain_model_text(monkeypatch):
+    """Voice and token streams must never receive prose the receipt replaces."""
+    uncertain = "E-postanın gerçekten gönderildiğinden emin değilim."
+
+    async def _uncertain_stream(graph, command, config):
+        yield uncertain
+
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _uncertain_stream)
+    agent = _FakeResumeAgent({
+        "c1": {
+            "config": {"configurable": {"thread_id": "s1-t1"}},
+            "recorder": None,
+            "result_binding_candidate": True,
+        },
+    })
+    bound_row = {
+        "tool": "gmail",
+        "tool_call_id": "call-1",
+        "action": "send",
+        "ok": True,
+        "authorization": "user_approved",
+        "side_effect_type": "external_write",
+        "confirmation_required": True,
+    }
+    agent._checkpointer = SimpleNamespace(get_tuple=lambda cfg: _checkpoint(
+        user_query="E-postayı gönder",
+        response=uncertain,
+        language="tr",
+        tool_execution_ledger=[bound_row],
+    ))
+
+    chunks = [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert json.loads(chunks[0]) == {
+        "__jarvis_progress__": True,
+        "phase": "finalizing_action_result",
+    }
+    assert all(uncertain not in chunk for chunk in chunks)
+    assert "başarılı" in chunks[-1]
+    assert not any("__jarvis_final__" in chunk for chunk in chunks)
+    _, saved_history, _ = agent.saved_turns[-1]
+    assert any("başarılı" in getattr(message, "content", "") for message in saved_history)
+
+
+@pytest.mark.asyncio
+async def test_approve_buffers_fail_safe_when_checkpoint_probe_errors(monkeypatch):
+    """A transient pre-stream read failure must not expose a voice draft."""
+    monkeypatch.setattr(agent_mod, "graph_stream_to_text", _fake_stream)
+    agent = _FakeResumeAgent({
+        "c1": {
+            "config": {"configurable": {"thread_id": "s1-t1"}},
+            "recorder": None,
+            "result_binding_candidate": True,
+        },
+    })
+
+    def _unreadable_checkpoint(config):
+        raise OSError("transient checkpoint read failure")
+
+    agent._checkpointer = SimpleNamespace(get_tuple=_unreadable_checkpoint)
+
+    chunks = [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    assert json.loads(chunks[0])["phase"] == "finalizing_action_result"
+    assert chunks[1:] == ["resumed answer"]
+
+
+def test_confirmation_registration_pins_external_write_buffering_eligibility():
+    agent = _FakeResumeAgent({})
+
+    JarvisAgent._register_pending_confirmation(
+        agent,
+        "c1",
+        {"configurable": {"thread_id": "s1-t1"}},
+        None,
+        payload={
+            "tools": [{
+                "name": "gmail",
+                "args": {
+                    "action": "send", "to": "a@b.c", "subject": "s", "body": "b",
+                },
+            }],
+        },
+    )
+
+    assert agent._pending_confirmations["c1"]["result_binding_candidate"] is True
 
 
 @pytest.mark.asyncio

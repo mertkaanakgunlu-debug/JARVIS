@@ -2075,6 +2075,7 @@ def make_confirmation_node(settings):
         from jarvis.execution import approval as _approval, idempotency as _idempotency
         from jarvis.execution.request import ExecutionRequest as _ExecutionRequest
 
+        approved_execution_ids = list(state.get("user_approved_execution_ids") or [])
         for tc in confirmable:
             entry = requests_by_id.get(tc.get("id"))
             if entry is None:
@@ -2137,7 +2138,14 @@ def make_confirmation_node(settings):
                         **counter_updates}
             _approval.consume(req)
 
-        return {"confirmation_result": "approved", **counter_updates}
+            if req.execution_id not in approved_execution_ids:
+                approved_execution_ids.append(req.execution_id)
+
+        return {
+            "confirmation_result": "approved",
+            "user_approved_execution_ids": approved_execution_ids,
+            **counter_updates,
+        }
 
     confirmation_node.__name__ = "confirmation_node"
     return confirmation_node

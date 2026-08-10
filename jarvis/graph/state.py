@@ -57,7 +57,15 @@ class JarvisState(TypedDict):
     tool_rounds: int                   # how many tool batches the agent produced this turn
     seen_tool_fingerprints: list[str]      # sha256(tool + canonical args) at policy time
     completed_tool_fingerprints: list[str]  # subset of seen that actually succeeded
-    tool_execution_ledger: list[dict]  # {"tool", "fingerprint", "ok", "content_head"} per call
+    # Safe per-call result facts. In addition to tool/fingerprint/ok and a
+    # redacted content preview, rows carry request-derived risk/effect,
+    # confirmation_required, and authorization provenance. Never raw args.
+    tool_execution_ledger: list[dict]
+
+    # Exact requests that passed interactive approval verification this turn.
+    # Append-only across confirmation rounds; risk level alone never implies
+    # user approval.
+    user_approved_execution_ids: list[str]
 
     # Agent Runtime rev.2, Faz 1: one ExecutionEnvelope (jarvis/execution/
     # envelope.py, .model_dump()'d) per tool call, built by

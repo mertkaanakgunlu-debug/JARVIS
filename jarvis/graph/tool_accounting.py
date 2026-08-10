@@ -244,6 +244,13 @@ def make_tool_result_accounting_node(settings=None, workspace: Path | None = Non
     as before) -- when absent, postcondition checks that need a path to
     resolve report "unverified" rather than crashing (see
     postcondition_runner.py's own path-resolution fallback).
+
+    Approve-side result binding: the always-on ledger also correlates each
+    executed call with its latest ExecutionRequest and records only safe
+    structured authorization metadata. ``user_approved`` requires all three
+    facts: the request required confirmation, the interactive gate was
+    enabled, and confirmation_node recorded that exact execution id after
+    signed-request verification. Risk level by itself is never sufficient.
     """
     mode = getattr(settings, "execution_contract_mode", "off") if settings is not None else "off"
 
@@ -258,6 +265,7 @@ def make_tool_result_accounting_node(settings=None, workspace: Path | None = Non
         requests_by_id = {
             r["tool_call_id"]: r for r in (state.get("execution_requests") or [])
         }
+        user_approved_ids = set(state.get("user_approved_execution_ids") or [])
         for tc in last_ai.tool_calls:
             name = tc.get("name", "")
             args = tc.get("args") or {}
@@ -266,18 +274,43 @@ def make_tool_result_accounting_node(settings=None, workspace: Path | None = Non
             ok = tool_message_ok(tm)
             if ok and fp not in completed:
                 completed.append(fp)
-            if ok:
-                entry = requests_by_id.get(tc.get("id", ""))
-                if entry is not None:
-                    idempotency.commit(entry["request"]["execution_id"], name, fp)
+            request_entry = requests_by_id.get(tc.get("id", ""))
+            if ok and request_entry is not None:
+                idempotency.commit(
+                    request_entry["request"]["execution_id"], name, fp,
+                )
             content = "" if tm is None else (
                 tm.content if isinstance(tm.content, str) else str(tm.content)
             )
             code = parse_blocked_code(content)
+            request = (
+                request_entry.get("request")
+                if isinstance(request_entry, dict) else None
+            )
+            request = request if isinstance(request, dict) else None
+            genuinely_user_approved = bool(
+                request
+                and request.get("execution_id") in user_approved_ids
+                and request.get("requires_confirmation") is True
+                and getattr(settings, "confirmation_gate_enabled", False)
+            )
             ledger.append({
                 "tool": name,
                 "fingerprint": fp,
                 "ok": ok,
+                "tool_call_id": tc.get("id", ""),
+                "risk_level": request.get("risk_level") if request else None,
+                "side_effect_type": (
+                    str(request.get("side_effect_type") or "unknown")
+                    if request else "unknown"
+                ),
+                "confirmation_required": (
+                    bool(request.get("requires_confirmation")) if request else None
+                ),
+                "authorization": (
+                    "user_approved" if genuinely_user_approved
+                    else "auto_approved" if request else "unknown"
+                ),
                 # Faz 1: redacted, not raw -- this ledger rides in graph
                 # state through the SqliteSaver checkpointer.
                 "content_head": redact_preview(content, max_chars=_CONTENT_HEAD_CHARS),

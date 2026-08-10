@@ -179,8 +179,8 @@ def _resume_agent(pending: dict, *, aget_state_return):
         lambda cfg: JarvisAgent._pending_interrupt_payload(agent, cfg)
     )
     agent._register_pending_confirmation = (
-        lambda conf_id, config, recorder: JarvisAgent._register_pending_confirmation(
-            agent, conf_id, config, recorder
+        lambda conf_id, config, recorder, payload=None: JarvisAgent._register_pending_confirmation(
+            agent, conf_id, config, recorder, payload=payload,
         )
     )
     # Post-MVP Faz 6: resume_and_stream asks whether this turn's answer is
@@ -213,6 +213,35 @@ async def test_resume_and_stream_detects_a_second_interrupt(monkeypatch):
     assert marker["id"] != "c1"
     assert marker["id"] in agent._pending_confirmations
     assert "c1" not in agent._pending_confirmations  # the original was already popped
+
+
+@pytest.mark.asyncio
+async def test_result_buffering_still_surfaces_a_second_confirmation(monkeypatch):
+    payload = {"tools": [{"name": "google_drive", "args": {"action": "delete"}}]}
+    agent = _resume_agent(
+        {"c1": {"config": {"configurable": {"thread_id": "s1-t1"}}, "recorder": None}},
+        aget_state_return=_interrupt_snapshot(payload),
+    )
+    agent._checkpointer = SimpleNamespace(get_tuple=lambda cfg: SimpleNamespace(
+        checkpoint={"channel_values": {
+            "execution_requests": [{
+                "request": {
+                    "requires_confirmation": True,
+                    "side_effect_type": "external_write",
+                },
+            }],
+        }},
+    ))
+    monkeypatch.setattr("jarvis.agent.graph_stream_to_text", _fake_empty_stream)
+
+    chunks = [c async for c in JarvisAgent.resume_and_stream(agent, "c1", "approve")]
+
+    progress = json.loads(chunks[0])
+    confirmation = json.loads(chunks[1])
+    assert progress["phase"] == "finalizing_action_result"
+    assert confirmation["__jarvis_confirm__"] is True
+    assert confirmation["payload"] == payload
+    assert confirmation["id"] in agent._pending_confirmations
 
 
 @pytest.mark.asyncio

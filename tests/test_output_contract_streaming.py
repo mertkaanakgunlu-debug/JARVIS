@@ -77,8 +77,10 @@ class _FakeResumeAgent:
     def _schedule_memory_extraction(self, user_text, response):
         pass
 
-    def _register_pending_confirmation(self, conf_id, config, recorder):
-        self._pending_confirmations[conf_id] = {"config": config, "recorder": recorder}
+    def _register_pending_confirmation(self, conf_id, config, recorder, *, payload=None):
+        self._pending_confirmations[conf_id] = {
+            "config": config, "recorder": recorder, "payload": payload,
+        }
 
     async def _pending_interrupt_payload(self, config):
         return await JarvisAgent._pending_interrupt_payload(self, config)

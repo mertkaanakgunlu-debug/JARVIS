@@ -60,6 +60,15 @@ def test_describe_progress_never_claims_completion():
         assert not any(f in lowered for f in forbidden), phrase
 
 
+@pytest.mark.parametrize("lang,expected", [
+    ("tr", "İşlemin sonucunu kesinleştiriyorum."),
+    ("en", "I'm finalizing the action's result."),
+])
+def test_describe_approve_result_progress_without_claiming_completion(lang, expected):
+    marker = {"phase": "finalizing_action_result"}
+    assert describe_progress(marker, lang) == expected
+
+
 # ── shared fakes ─────────────────────────────────────────────────────────────
 
 class _FakeEngine:

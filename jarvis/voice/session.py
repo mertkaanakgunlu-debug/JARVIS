@@ -124,6 +124,11 @@ def describe_progress(marker: dict, lang: str = "en") -> str:
     never phrased as a completed action: the tool this turn is buffering for
     may not have run yet (may not even succeed) when this is spoken."""
     kind = (marker or {}).get("kind")
+    phase = (marker or {}).get("phase")
+    if phase == "finalizing_action_result":
+        if lang == "tr":
+            return "İşlemin sonucunu kesinleştiriyorum."
+        return "I'm finalizing the action's result."
     if lang == "tr":
         if kind == "chart":
             return "Grafiği hazırlıyorum."
