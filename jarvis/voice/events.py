@@ -20,7 +20,12 @@ class PartialTranscript:
 
 @dataclass(frozen=True)
 class FinalTranscript:
-    """End-of-turn (sustained silence) reached; this is the authoritative transcript."""
+    """Terminal STT result after end-of-turn.
+
+    Text may be blank when Whisper decoded no speech.  Session drivers must
+    not create an agent turn for blank text, but one-shot capture still uses
+    the event to return to its PTT/wakeword activation gate.
+    """
     text: str
     lang: str
     # Faz F (WAV replay harness): Whisper already computes this for its own

@@ -52,12 +52,37 @@ class VoiceDiagnosticsSnapshot:
     input_overflow_count: "int | None" = None
     output_underrun_count: "int | None" = None
 
+    # Current/last local capture activation: callback -> queue -> consumer.
+    capture_callback_count: "int | None" = None
+    capture_sample_count: "int | None" = None
+    capture_consumed_frame_count: "int | None" = None
+    capture_consumed_sample_count: "int | None" = None
+    capture_frame_size_mismatch_count: "int | None" = None
+    capture_queue_initial_depth: "int | None" = None
+    capture_queue_high_watermark: "int | None" = None
+    capture_input_status_count: "int | None" = None
+    capture_input_overflow_count: "int | None" = None
+
+    # Current/last engine activation: consumer -> VAD -> segmenter -> STT.
+    vad_speech_threshold: "float | None" = None
+    vad_frame_count: "int | None" = None
+    frame_contract_mismatch_count: "int | None" = None
+    speech_started_count: "int | None" = None
+    turn_ended_count: "int | None" = None
+    stt_attempt_count: "int | None" = None
+    stt_nonempty_count: "int | None" = None
+    recent_frame_count: "int | None" = None
+    recent_input_rms_max: "float | None" = None
+    recent_vad_prob_max: "float | None" = None
+    recent_vad_prob_mean: "float | None" = None
+
     # Last completed turn (None until one has completed)
     last_vad_prob_max: "float | None" = None
     last_vad_prob_mean: "float | None" = None
     last_turn_end_reason: "str | None" = None
     last_captured_audio_s: "float | None" = None
     last_stt_s: "float | None" = None
+    last_stt_had_text: "bool | None" = None
 
     # Reducer (jarvis/voice/state.py). None when no session is running.
     capture: "str | None" = None
@@ -121,6 +146,35 @@ def collect(engine: Any, state: Any = None, *, query_devices: bool = True) -> Vo
     snap.input_status_count = getattr(audio_io, "input_status_count", None)
     snap.input_overflow_count = getattr(audio_io, "input_overflow_count", None)
     snap.output_underrun_count = getattr(audio_io, "underrun_count", None)
+    for name in (
+        "capture_callback_count",
+        "capture_sample_count",
+        "capture_consumed_frame_count",
+        "capture_consumed_sample_count",
+        "capture_frame_size_mismatch_count",
+        "capture_queue_initial_depth",
+        "capture_queue_high_watermark",
+        "capture_input_status_count",
+        "capture_input_overflow_count",
+    ):
+        setattr(snap, name, getattr(audio_io, name, None))
+
+    snap.vad_speech_threshold = getattr(getattr(engine, "_settings", None), "vad_speech_threshold", None)
+    capture = getattr(engine, "capture_metrics", None)
+    if isinstance(capture, dict):
+        for name in (
+            "vad_frame_count",
+            "frame_contract_mismatch_count",
+            "speech_started_count",
+            "turn_ended_count",
+            "stt_attempt_count",
+            "stt_nonempty_count",
+            "recent_frame_count",
+            "recent_input_rms_max",
+            "recent_vad_prob_max",
+            "recent_vad_prob_mean",
+        ):
+            setattr(snap, name, capture.get(name))
 
     last = getattr(engine, "last_turn_metrics", None)
     if isinstance(last, dict):
@@ -129,6 +183,7 @@ def collect(engine: Any, state: Any = None, *, query_devices: bool = True) -> Vo
         snap.last_turn_end_reason = last.get("turn_end_reason")
         snap.last_captured_audio_s = last.get("captured_audio_duration_s")
         snap.last_stt_s = last.get("stt_s")
+        snap.last_stt_had_text = last.get("stt_had_text")
 
     if state is not None:
         snap.capture = getattr(state, "capture", None)

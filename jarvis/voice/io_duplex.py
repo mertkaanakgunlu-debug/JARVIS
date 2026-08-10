@@ -105,6 +105,24 @@ class DuplexAudioIO:
         # dropped microphone audio.
         self.input_status_count = 0
         self.input_overflow_count = 0
+        self._reset_capture_metrics()
+
+    def _reset_capture_metrics(self) -> None:
+        """Reset the stage counters for one local capture activation.
+
+        Cumulative status/overflow counters above remain available for the
+        process lifetime.  These counters answer the narrower localization
+        question: how far did audio travel during the current/last activation?
+        """
+        self.capture_callback_count = 0
+        self.capture_sample_count = 0
+        self.capture_consumed_frame_count = 0
+        self.capture_consumed_sample_count = 0
+        self.capture_frame_size_mismatch_count = 0
+        self.capture_input_status_count = 0
+        self.capture_input_overflow_count = 0
+        self.capture_queue_initial_depth = self._mic_queue.qsize()
+        self.capture_queue_high_watermark = self.capture_queue_initial_depth
 
     # ── Capture ─────────────────────────────────────────────────────────────
 
@@ -115,16 +133,26 @@ class DuplexAudioIO:
         if status:
             logger.debug("[voice] input stream status: %s", status)
             self.input_status_count += 1
+            self.capture_input_status_count += 1
             # getattr, not status.input_overflow: sounddevice's CallbackFlags
             # is the normal case, but the callback is also driven directly by
             # tests (and, in principle, by any other PortAudio binding) with
             # a plainer status object that has no such attribute.
             if getattr(status, "input_overflow", False):
                 self.input_overflow_count += 1
+                self.capture_input_overflow_count += 1
         mono = indata[:, 0].copy()
+        self.capture_callback_count += 1
+        self.capture_sample_count += int(mono.size)
+        if frames != self._frame_samples or mono.size != self._frame_samples:
+            self.capture_frame_size_mismatch_count += 1
         self._mic_queue.put(mono)
+        self.capture_queue_high_watermark = max(
+            self.capture_queue_high_watermark, self._mic_queue.qsize(),
+        )
 
     async def start(self) -> None:
+        self._reset_capture_metrics()
         self._input_stream = sd.InputStream(
             samplerate=self._sample_rate,
             channels=1,
@@ -146,6 +174,8 @@ class DuplexAudioIO:
         loop = asyncio.get_running_loop()
         while self._input_stream is not None:
             frame = await loop.run_in_executor(None, self._mic_queue.get)
+            self.capture_consumed_frame_count += 1
+            self.capture_consumed_sample_count += int(frame.size)
             self._last_input_rms = float(np.sqrt(np.mean(frame ** 2))) if frame.size else 0.0
             yield frame
 

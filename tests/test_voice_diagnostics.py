@@ -29,6 +29,15 @@ class _FakeAudioIO:
         self.input_status_count = 3
         self.input_overflow_count = 1
         self.underrun_count = 2
+        self.capture_callback_count = 11
+        self.capture_sample_count = 5632
+        self.capture_consumed_frame_count = 10
+        self.capture_consumed_sample_count = 5120
+        self.capture_frame_size_mismatch_count = 0
+        self.capture_queue_initial_depth = 0
+        self.capture_queue_high_watermark = 2
+        self.capture_input_status_count = 1
+        self.capture_input_overflow_count = 0
         self._rms = 0.42
         for k, v in overrides.items():
             setattr(self, k, v)
@@ -44,6 +53,19 @@ class _FakeEngine:
     def __init__(self, audio_io=None, stt_device="cuda", last_turn=None):
         self._audio_io = audio_io if audio_io is not None else _FakeAudioIO()
         self._models = SimpleNamespace(stt=SimpleNamespace(_device=stt_device))
+        self._settings = SimpleNamespace(vad_speech_threshold=0.5)
+        self.capture_metrics = {
+            "vad_frame_count": 10,
+            "frame_contract_mismatch_count": 0,
+            "speech_started_count": 1,
+            "turn_ended_count": 1,
+            "stt_attempt_count": 1,
+            "stt_nonempty_count": 1,
+            "recent_frame_count": 10,
+            "recent_input_rms_max": 0.42,
+            "recent_vad_prob_max": 0.98,
+            "recent_vad_prob_mean": 0.61,
+        }
         self.last_turn_metrics = last_turn if last_turn is not None else {}
 
 
@@ -70,6 +92,18 @@ def test_collects_devices_counters_and_reducer_state():
     assert snap.input_status_count == 3
     assert snap.input_overflow_count == 1
     assert snap.output_underrun_count == 2
+    assert snap.capture_callback_count == 11
+    assert snap.capture_consumed_frame_count == 10
+    assert snap.capture_queue_high_watermark == 2
+    assert snap.capture_frame_size_mismatch_count == 0
+    assert snap.capture_input_overflow_count == 0
+    assert snap.vad_frame_count == 10
+    assert snap.speech_started_count == 1
+    assert snap.turn_ended_count == 1
+    assert snap.stt_attempt_count == 1
+    assert snap.stt_nonempty_count == 1
+    assert snap.recent_vad_prob_max == pytest.approx(0.98)
+    assert snap.vad_speech_threshold == pytest.approx(0.5)
     assert (snap.capture, snap.response) == ("listening", "thinking")
     assert snap.display == "thinking"
     assert snap.hud_state == "thinking"
@@ -93,6 +127,7 @@ def test_last_turn_metrics_are_surfaced():
     engine = _FakeEngine(last_turn={
         "turn_end_reason": "silence", "captured_audio_duration_s": 1.25,
         "vad_prob_max": 0.98, "vad_prob_mean": 0.61, "stt_s": 0.33,
+        "stt_had_text": False,
     })
     snap = collect(engine, query_devices=False)
     assert snap.last_turn_end_reason == "silence"
@@ -100,6 +135,7 @@ def test_last_turn_metrics_are_surfaced():
     assert snap.last_vad_prob_max == pytest.approx(0.98)
     assert snap.last_vad_prob_mean == pytest.approx(0.61)
     assert snap.last_stt_s == pytest.approx(0.33)
+    assert snap.last_stt_had_text is False
 
 
 def test_missing_counters_report_unknown_not_zero():
@@ -228,6 +264,14 @@ def test_voice_status_endpoint_reports_a_live_session():
         assert body["queue_depth"] == 7
         assert body["input_status_count"] == 3
         assert body["input_overflow_count"] == 1
+        assert body["capture_callback_count"] == 11
+        assert body["capture_consumed_frame_count"] == 10
+        assert body["capture_queue_high_watermark"] == 2
+        assert body["vad_frame_count"] == 10
+        assert body["speech_started_count"] == 1
+        assert body["turn_ended_count"] == 1
+        assert body["stt_attempt_count"] == 1
+        assert body["stt_nonempty_count"] == 1
         assert body["output_underrun_count"] == 2
         assert body["stt_device"] == "cuda"
         assert body["display"] == "speaking"

@@ -288,6 +288,17 @@ async def test_the_engine_retains_the_last_turn_metrics_it_yielded():
     assert m["vad_prob_max"] == 1.0
     assert 0.0 < m["vad_prob_mean"] <= 1.0
     assert m["stt_s"] == 0.01
+    assert m["stt_had_text"] is True
+
+    path = engine.capture_metrics
+    assert path["vad_frame_count"] > 0
+    assert path["frame_contract_mismatch_count"] == 0
+    assert path["speech_started_count"] == 1
+    assert path["turn_ended_count"] == 1
+    assert path["stt_attempt_count"] == 1
+    assert path["stt_nonempty_count"] == 1
+    assert path["recent_input_rms_max"] >= 0.0
+    assert path["recent_vad_prob_max"] in (0.0, 1.0)
 
 
 @pytest.mark.asyncio
@@ -297,3 +308,26 @@ async def test_metrics_start_empty_and_stay_empty_when_no_turn_happens():
         _FakeVAD(), _FakeStt(),
     )
     assert engine.last_turn_metrics == {}
+    path = engine.capture_metrics
+    assert path["vad_frame_count"] == 20
+    assert path["speech_started_count"] == 0
+    assert path["turn_ended_count"] == 0
+    assert path["stt_attempt_count"] == 0
+    assert path["stt_nonempty_count"] == 0
+    assert path["recent_input_rms_max"] == 0.0
+    assert path["recent_vad_prob_max"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_empty_stt_is_retained_as_the_terminal_stage_of_a_captured_turn():
+    engine = await _engine_after_replay(
+        WavAudioIO(_speech_then_silence(), trailing_silence_s=1.6),
+        _FakeVAD(),
+        _FakeStt(text=""),
+    )
+
+    assert engine.last_turn_metrics["stt_had_text"] is False
+    assert engine.capture_metrics["speech_started_count"] == 1
+    assert engine.capture_metrics["turn_ended_count"] == 1
+    assert engine.capture_metrics["stt_attempt_count"] == 1
+    assert engine.capture_metrics["stt_nonempty_count"] == 0

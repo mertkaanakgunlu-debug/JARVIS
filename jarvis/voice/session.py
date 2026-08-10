@@ -423,6 +423,14 @@ async def drive_voice_session(
 
                 if isinstance(event, FinalTranscript):
                     if not event.text.strip():
+                        if state is not None:
+                            state.set_capture("listening")
+                        # Blank Whisper output must not become an agent turn,
+                        # but it still completes this capture attempt.  Without
+                        # this, PTT/wakeword stays armed until a second
+                        # utterance arrives and the first attempt looks lost.
+                        if stop_after_first_turn and turn_task is None:
+                            return "turn_complete"
                         continue
                     if state is not None:
                         # Response BEFORE capture, deliberately. Both orders

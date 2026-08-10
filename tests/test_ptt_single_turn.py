@@ -143,6 +143,28 @@ async def test_an_exit_phrase_still_wins_over_stop_after_first_turn():
     assert outcome == "exit"
 
 
+@pytest.mark.asyncio
+async def test_an_empty_stt_result_still_completes_one_ptt_capture():
+    """A captured/VAD-ended turn whose Whisper result is blank is still one
+    completed press-to-talk attempt.  It must return to the activation gate
+    instead of silently keeping the microphone session open until the user
+    speaks a second time."""
+    engine = _engine(_FakeStt(text=""))
+    await engine.load()
+    handled: list[str] = []
+
+    async def on_transcript(text, lang):
+        handled.append(text)
+        return None
+
+    outcome = await drive_voice_session(
+        engine, on_transcript, stop_after_first_turn=True,
+    )
+
+    assert outcome == "turn_complete"
+    assert handled == [], "blank STT output must not become an agent turn"
+
+
 # ── The state half of the same symptom ──────────────────────────────────────
 
 @pytest.mark.asyncio

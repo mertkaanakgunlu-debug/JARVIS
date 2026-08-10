@@ -112,6 +112,9 @@ class RealtimeVoiceEngine:
         # the /voice-status surfaces) had nothing to read. Last turn only:
         # this is a diagnostic, not a history.
         self.last_turn_metrics: dict = {}
+        # Per-events() activation stage ladder.  Unlike last_turn_metrics this
+        # remains meaningful when no turn reaches SpeechStarted/TurnEnded.
+        self.capture_metrics: dict = {}
 
     async def load(self) -> None:
         """Loads shared models if none were injected via the constructor (the
@@ -155,6 +158,23 @@ class RealtimeVoiceEngine:
 
         vad.reset_states()
         self._segmenter.reset()
+        self.capture_metrics = {
+            "vad_frame_count": 0,
+            "frame_contract_mismatch_count": 0,
+            "speech_started_count": 0,
+            "turn_ended_count": 0,
+            "stt_attempt_count": 0,
+            "stt_nonempty_count": 0,
+            "recent_frame_count": 0,
+            "recent_input_rms_max": 0.0,
+            "recent_vad_prob_max": 0.0,
+            "recent_vad_prob_mean": 0.0,
+        }
+        # Five seconds of frame-level evidence is long enough to cover a
+        # natural command while keeping continuous-listen diagnostics recent.
+        recent_frame_limit = max(1, round(5.0 * 16000 / vad.frame_samples))
+        recent_rms: deque[float] = deque(maxlen=recent_frame_limit)
+        recent_vad: deque[float] = deque(maxlen=recent_frame_limit)
         buffer: list[np.ndarray] = []
         # Rolling tail of the most recent frames, sized to the barge-in gate's
         # own confirmation window. Without this, the frames that built up
@@ -171,8 +191,20 @@ class RealtimeVoiceEngine:
         vad_probs: list[float] = []
 
         async for frame in self._audio_io.raw_frames():
+            if frame.ndim != 1 or frame.size != vad.frame_samples:
+                self.capture_metrics["frame_contract_mismatch_count"] += 1
             prob = vad.process_chunk(frame)
-            yield MicLevel(source="input", rms=self._audio_io.mic_level())
+            rms = self._audio_io.mic_level()
+            self.capture_metrics["vad_frame_count"] += 1
+            recent_rms.append(rms)
+            recent_vad.append(prob)
+            self.capture_metrics.update({
+                "recent_frame_count": len(recent_vad),
+                "recent_input_rms_max": max(recent_rms),
+                "recent_vad_prob_max": max(recent_vad),
+                "recent_vad_prob_mean": sum(recent_vad) / len(recent_vad),
+            })
+            yield MicLevel(source="input", rms=rms)
 
             if self._speaking:
                 barge_in_tail.append(frame)
@@ -193,10 +225,12 @@ class RealtimeVoiceEngine:
 
             signal = self._segmenter.push(prob)
             if isinstance(signal, SpeechStartedSignal):
+                self.capture_metrics["speech_started_count"] += 1
                 buffer = [frame]
                 vad_probs = [prob]
                 yield SpeechStarted()
             elif isinstance(signal, TurnEndedSignal):
+                self.capture_metrics["turn_ended_count"] += 1
                 audio = np.concatenate(buffer) if buffer else np.array([], dtype=np.float32)
                 buffer = []
                 probs_this_turn, vad_probs = vad_probs, []
@@ -222,15 +256,24 @@ class RealtimeVoiceEngine:
                     "vad_prob_max": turn_ended.vad_prob_max,
                     "vad_prob_mean": turn_ended.vad_prob_mean,
                     "stt_s": None,  # filled in below once STT has actually run
+                    "stt_had_text": None,
                 }
                 yield turn_ended
                 if audio.size == 0:
                     continue
                 loop = asyncio.get_running_loop()
+                self.capture_metrics["stt_attempt_count"] += 1
                 result = await loop.run_in_executor(None, self._models.stt.transcribe, audio)
                 self.last_turn_metrics["stt_s"] = result.stt_s
-                if result.text.strip():
-                    yield FinalTranscript(text=result.text, lang=result.lang, stt_s=result.stt_s)
+                had_text = bool(result.text.strip())
+                self.last_turn_metrics["stt_had_text"] = had_text
+                if had_text:
+                    self.capture_metrics["stt_nonempty_count"] += 1
+                # A blank decoder result is still the terminal outcome of one
+                # captured turn.  The session driver needs this event to
+                # re-arm PTT/wakeword instead of silently waiting for a second
+                # utterance in the same activation.
+                yield FinalTranscript(text=result.text, lang=result.lang, stt_s=result.stt_s)
             elif self._segmenter.is_speaking:
                 buffer.append(frame)
                 vad_probs.append(prob)

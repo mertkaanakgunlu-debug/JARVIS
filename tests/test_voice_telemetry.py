@@ -96,6 +96,9 @@ def test_input_status_and_overflow_counts_start_at_zero():
     io = _io()
     assert io.input_status_count == 0
     assert io.input_overflow_count == 0
+    assert io.capture_callback_count == 0
+    assert io.capture_consumed_frame_count == 0
+    assert io.capture_queue_high_watermark == 0
 
 
 def test_a_real_input_overflow_increments_both_counters():
@@ -104,6 +107,8 @@ def test_a_real_input_overflow_increments_both_counters():
     io._input_callback(indata, 512, None, _Flags(input_overflow=True))
     assert io.input_status_count == 1
     assert io.input_overflow_count == 1
+    assert io.capture_input_status_count == 1
+    assert io.capture_input_overflow_count == 1
 
 
 def test_a_non_overflow_status_counts_as_status_but_not_as_overflow():
@@ -132,6 +137,10 @@ def test_input_callback_still_queues_the_frame_regardless_of_status():
     assert io.queue_depth() == 1
     frame = io._mic_queue.get_nowait()
     assert np.all(frame == 3.0)
+    assert io.capture_callback_count == 1
+    assert io.capture_sample_count == 4
+    assert io.capture_queue_high_watermark == 1
+    assert io.capture_frame_size_mismatch_count == 1
 
 
 # ── queue_depth() ────────────────────────────────────────────────────────────
@@ -144,3 +153,23 @@ def test_queue_depth_reflects_unconsumed_frames():
     assert io.queue_depth() == 2
     io._mic_queue.get_nowait()
     assert io.queue_depth() == 1
+
+
+def test_raw_frame_consumption_advances_the_capture_stage_ladder():
+    import asyncio
+
+    io = _io()
+    io._input_stream = object()
+    io._input_callback(np.zeros((512, 1), dtype=np.float32), 512, None, None)
+
+    async def _consume_one():
+        frame = await anext(io.raw_frames())
+        io._input_stream = None
+        return frame
+
+    frame = asyncio.run(_consume_one())
+    assert frame.size == 512
+    assert io.capture_callback_count == 1
+    assert io.capture_consumed_frame_count == 1
+    assert io.capture_consumed_sample_count == 512
+    assert io.capture_frame_size_mismatch_count == 0

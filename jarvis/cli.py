@@ -289,6 +289,20 @@ def _print_voice_status(engine, state=None) -> None:
         f"Queue depth:    {_n(snap.queue_depth)} frame(s)",
         f"Input status:   {_n(snap.input_status_count)} flagged"
         f"  ({_n(snap.input_overflow_count)} real overflow)",
+        f"Capture path:   callback={_n(snap.capture_callback_count)}"
+        f"  consumed={_n(snap.capture_consumed_frame_count)}"
+        f"  queue={_n(snap.capture_queue_initial_depth)}->{_n(snap.capture_queue_high_watermark)}",
+        f"Capture faults: frame-size={_n(snap.capture_frame_size_mismatch_count)}"
+        f"  status={_n(snap.capture_input_status_count)}"
+        f"  overflow={_n(snap.capture_input_overflow_count)}",
+        f"Engine path:    vad={_n(snap.vad_frame_count)}"
+        f"  speech={_n(snap.speech_started_count)}"
+        f"  ended={_n(snap.turn_ended_count)}"
+        f"  stt={_n(snap.stt_attempt_count)}"
+        f"  text={_n(snap.stt_nonempty_count)}",
+        f"Recent signal:  rms-max={_n(round(snap.recent_input_rms_max, 4) if snap.recent_input_rms_max is not None else None)}"
+        f"  vad-max={_n(round(snap.recent_vad_prob_max, 3) if snap.recent_vad_prob_max is not None else None)}"
+        f"  threshold={_n(snap.vad_speech_threshold)}",
         f"Out underruns:  {_n(snap.output_underrun_count)}",
         "",
         f"Last turn:      end={_n(snap.last_turn_end_reason)}"
@@ -296,6 +310,7 @@ def _print_voice_status(engine, state=None) -> None:
         f"  stt={_n(round(snap.last_stt_s, 2) if snap.last_stt_s is not None else None, 's')}",
         f"Last turn VAD:  max={_n(round(snap.last_vad_prob_max, 3) if snap.last_vad_prob_max is not None else None)}"
         f"  mean={_n(round(snap.last_vad_prob_mean, 3) if snap.last_vad_prob_mean is not None else None)}",
+        f"Last STT text:   {_n(snap.last_stt_had_text)}",
     ]
     console.print(Panel(
         Text("\n".join(lines), style="white"),
