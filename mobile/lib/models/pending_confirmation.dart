@@ -47,9 +47,22 @@ class ConfirmationTool {
 class PendingConfirmation {
   /// The conf_id to POST back to /chat/confirm/{id}.
   final String id;
+
+  /// The conversation the interrupted graph belongs to. Transport metadata
+  /// only -- never rendered by the confirmation card.
+  final String conversationId;
+
+  /// Client-side lifetime for the pending indicator. The server remains the
+  /// authority; this only prevents an expired card lingering in another tab.
+  final int? expiresInSeconds;
   final List<ConfirmationTool> tools;
 
-  const PendingConfirmation({required this.id, required this.tools});
+  const PendingConfirmation({
+    required this.id,
+    required this.tools,
+    this.conversationId = '',
+    this.expiresInSeconds,
+  });
 
   /// Parse a payload into a prompt, or null when there is nothing safe to
   /// show. Null is a real outcome, not an error case to paper over: an empty
@@ -57,12 +70,22 @@ class PendingConfirmation {
   /// payload with no readable tool would render an approve button over a
   /// blank description -- asking the user to approve something the screen
   /// never named.
-  static PendingConfirmation? fromPayload(String id, Map<String, dynamic> payload) {
+  static PendingConfirmation? fromPayload(
+    String id,
+    Map<String, dynamic> payload, {
+    String conversationId = '',
+    int? expiresInSeconds,
+  }) {
     if (id.trim().isEmpty) return null;
     final raw = payload['tools'];
     if (raw is! List) return null;
     final tools = raw.map(ConfirmationTool._parse).nonNulls.toList(growable: false);
     if (tools.isEmpty) return null;
-    return PendingConfirmation(id: id.trim(), tools: tools);
+    return PendingConfirmation(
+      id: id.trim(),
+      tools: tools,
+      conversationId: conversationId.trim(),
+      expiresInSeconds: expiresInSeconds,
+    );
   }
 }

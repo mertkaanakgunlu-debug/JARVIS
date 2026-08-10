@@ -25,6 +25,7 @@ import pytest
 
 import jarvis.agent as agent_mod
 from jarvis.agent import JarvisAgent
+from jarvis.ws import JarvisEventBus
 
 
 # ── the pending record names its conversation ─────────────────────────────────
@@ -53,6 +54,33 @@ def test_the_record_still_carries_what_it_always_did():
     assert entry["config"] == {"cfg": 1}
     assert entry["recorder"] == "rec"
     assert "created_at" in entry
+
+
+def test_confirmation_events_carry_transport_metadata_without_nesting_ids(monkeypatch):
+    bus = JarvisEventBus()
+    events = []
+    monkeypatch.setattr(bus, "emit", events.append)
+
+    bus.confirmation_required(
+        "conf-1",
+        {"tools": [{"name": "gmail", "description": "send an email"}]},
+        conversation_id="conv-A",
+        expires_in_seconds=300,
+    )
+    bus.confirmation_closed("conf-1")
+
+    assert events == [
+        {
+            "type": "confirmation_required",
+            "id": "conf-1",
+            "conversation_id": "conv-A",
+            "expires_in_seconds": 300,
+            "payload": {
+                "tools": [{"name": "gmail", "description": "send an email"}],
+            },
+        },
+        {"type": "confirmation_closed", "id": "conf-1"},
+    ]
 
 
 # ── resume writes into the pinned conversation, not the active one ────────────

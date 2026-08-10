@@ -57,7 +57,14 @@ class ChatFinalAnswer extends ChatSseEvent {
 class ChatConfirmationRequired extends ChatSseEvent {
   final String id;
   final Map<String, dynamic> payload;
-  const ChatConfirmationRequired(this.id, this.payload);
+  final String conversationId;
+  final int? expiresInSeconds;
+  const ChatConfirmationRequired(
+    this.id,
+    this.payload,
+    this.conversationId,
+    this.expiresInSeconds,
+  );
 }
 
 /// The query was diverted to a background task instead of answered inline.
@@ -98,6 +105,8 @@ ChatSseEvent classifyChatChunk(String payload) {
         return ChatConfirmationRequired(
           (obj['id'] as String?) ?? '',
           (obj['payload'] as Map<String, dynamic>?) ?? const {},
+          (obj['conversation_id'] as String?) ?? '',
+          (obj['expires_in_seconds'] as num?)?.toInt(),
         );
       }
       if (type == 'progress') {

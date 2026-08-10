@@ -352,19 +352,26 @@ def test_chat_confirm_emits_structured_confirmation_frame_for_a_second_interrupt
     resume endpoint."""
     marker = json.dumps({
         "__jarvis_confirm__": True, "id": "conf-456",
+        "conversation_id": "conv-mobile", "expires_in_seconds": 300,
         "payload": {"tools": [{"name": "google_calendar", "description": "delete an event"}]},
     })
+
+    resume_calls = []
 
     class _ConfirmingAgent:
         session_id = "s"
 
         async def resume_and_stream(self, conf_id, decision, *,
                                     pre_claimed=None, conversation_id=""):
+            resume_calls.append((conf_id, decision, conversation_id))
             yield "Okay, one more thing. "
             yield marker
 
     client = _client(monkeypatch, agent=_ConfirmingAgent())
-    resp = client.post("/chat/confirm/conf-123", json={"decision": "approve"})
+    resp = client.post(
+        "/chat/confirm/conf-123",
+        json={"decision": "approve", "conversation_id": "conv-mobile"},
+    )
 
     assert resp.status_code == 200
     body = resp.text
@@ -378,6 +385,9 @@ def test_chat_confirm_emits_structured_confirmation_frame_for_a_second_interrupt
     assert frame == {
         "type": "confirmation_required",
         "id": "conf-456",
+        "conversation_id": "conv-mobile",
+        "expires_in_seconds": 300,
         "payload": {"tools": [{"name": "google_calendar", "description": "delete an event"}]},
     }
+    assert resume_calls == [("conf-123", "approve", "conv-mobile")]
     assert "data: [DONE]" in body

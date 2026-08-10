@@ -20,9 +20,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:jarvis_mobile/core/api_client.dart';
 import 'package:jarvis_mobile/core/config.dart';
+import 'package:jarvis_mobile/models/pending_confirmation.dart';
 import 'package:jarvis_mobile/providers/api_provider.dart';
 import 'package:jarvis_mobile/providers/confirmation_provider.dart';
 import 'package:jarvis_mobile/providers/settings_provider.dart';
+import 'package:jarvis_mobile/providers/state_provider.dart';
+import 'package:jarvis_mobile/providers/ws_provider.dart';
 import 'package:jarvis_mobile/screens/home_screen.dart';
 import 'package:jarvis_mobile/screens/home_shell.dart';
 
@@ -30,7 +33,9 @@ import 'package:jarvis_mobile/screens/home_shell.dart';
 /// jarvis/api.py's _confirmation_sse_frame() puts on the wire (captured from a
 /// live run against the real server on 2026-08-08).
 String confirmFrame(String id, {String description = 'run the shell command: echo hi'}) =>
-    '{"type": "confirmation_required", "id": "$id", "payload": {"tools": '
+    '{"type": "confirmation_required", "id": "$id", '
+    '"conversation_id": "conv-mobile", "expires_in_seconds": 300, '
+    '"payload": {"tools": '
     '[{"name": "shell_run", "args": {"command": "echo hi"}, "id": "call_x", '
     '"description": "$description", "execution_id": "call_x-abc"}], "count": 1}}';
 
@@ -47,11 +52,15 @@ class FakeApi extends ApiClient {
   List<List<String>> confirmFrameQueue = [];
 
   final List<String> chatCalls = [];
-  final List<({String id, String decision})> confirmCalls = [];
+  final List<({String id, String decision, String conversationId})> confirmCalls = [];
   final List<String> uploadCalls = [];
 
   @override
-  Stream<String> chatStream(String message, {String language = 'tr'}) async* {
+  Stream<String> chatStream(
+    String message, {
+    String language = 'tr',
+    String conversationId = '',
+  }) async* {
     chatCalls.add(message);
     for (final f in chatFrames) {
       yield f;
@@ -59,8 +68,16 @@ class FakeApi extends ApiClient {
   }
 
   @override
-  Stream<String> confirmStream(String confId, String decision) async* {
-    confirmCalls.add((id: confId, decision: decision));
+  Stream<String> confirmStream(
+    String confId,
+    String decision, {
+    String conversationId = '',
+  }) async* {
+    confirmCalls.add((
+      id: confId,
+      decision: decision,
+      conversationId: conversationId,
+    ));
     final frames = confirmFrameQueue.isNotEmpty
         ? confirmFrameQueue.removeAt(0)
         : const <String>[];
@@ -127,6 +144,25 @@ Future<void> pumpHome(WidgetTester tester, FakeApi api) async {
   await tester.pump();
 }
 
+Future<void> pumpShell(WidgetTester tester, FakeApi api) async {
+  tester.view.physicalSize = const Size(1080, 2400);
+  tester.view.devicePixelRatio = 3.0;
+  addTearDown(tester.view.reset);
+
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        settingsSyncProvider.overrideWithValue(_settings),
+        apiClientProvider.overrideWithValue(api),
+        stateListenerProvider.overrideWith((ref) {}),
+        wsDispatcherProvider.overrideWith((ref) {}),
+      ],
+      child: const MaterialApp(home: HomeShell()),
+    ),
+  );
+  await tester.pump();
+}
+
 /// Type into the composer and fire its onSubmitted.
 Future<void> sendTurn(WidgetTester tester, String text) async {
   await tester.enterText(find.byType(TextField).first, text);
@@ -160,6 +196,68 @@ void main() {
     // A confirmation UI attached to a screen no tab routes to passes its own
     // tests and is dead in the app. That is exactly what happened.
     expect(HomeShell.screens.first, isA<HomeScreen>());
+  });
+
+  testWidgets('another tab shows a pending indicator and CORE keeps it answerable',
+      (tester) async {
+    final api = FakeApi();
+    await pumpShell(tester, api);
+    await tester.tap(find.byKey(const Key('home-tab-1')));
+    await tester.pump();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(HomeShell)),
+    );
+    container.read(confirmationProvider.notifier).raise(
+          const PendingConfirmation(
+            id: 'internal-conf-id',
+            conversationId: 'internal-conversation-id',
+            expiresInSeconds: 300,
+            tools: [
+              ConfirmationTool(
+                name: 'shell_run',
+                description: 'run the requested shell command',
+              ),
+            ],
+          ),
+        );
+    await tester.pump();
+
+    expect(find.byKey(const Key('pending-confirmation-indicator')), findsOneWidget);
+    expect(find.textContaining('internal-conf-id'), findsNothing);
+    expect(find.textContaining('internal-conversation-id'), findsNothing);
+    expect(api.confirmCalls, isEmpty,
+        reason: 'navigation must never resolve a prompt');
+
+    await tester.tap(find.byKey(const Key('home-tab-0')));
+    await tester.pump();
+    expect(find.textContaining('run the requested shell command'), findsOneWidget);
+    expect(api.confirmCalls, isEmpty);
+  });
+
+  testWidgets('the cross-tab indicator clears when the prompt expires',
+      (tester) async {
+    final api = FakeApi();
+    await pumpShell(tester, api);
+    await tester.tap(find.byKey(const Key('home-tab-1')));
+    await tester.pump();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(HomeShell)),
+    );
+    container.read(confirmationProvider.notifier).raise(
+          const PendingConfirmation(
+            id: 'conf-expiring',
+            expiresInSeconds: 1,
+            tools: [ConfirmationTool(name: 'gmail', description: 'send an email')],
+          ),
+        );
+    await tester.pump();
+    expect(find.byKey(const Key('pending-confirmation-indicator')), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.byKey(const Key('pending-confirmation-indicator')), findsNothing);
+    expect(container.read(confirmationProvider).isPending, isFalse);
   });
 
   // ── 1. confirmation_required renders a card, never JSON ───────────────────
@@ -214,6 +312,7 @@ void main() {
     expect(api.confirmCalls, hasLength(1));
     expect(api.confirmCalls.single.id, 'conf-1');
     expect(api.confirmCalls.single.decision, 'approve');
+    expect(api.confirmCalls.single.conversationId, 'conv-mobile');
 
     expect(find.text('Komut çalıştırıldı.'), findsOneWidget);
     // Card gone, composer back.

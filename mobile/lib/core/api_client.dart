@@ -102,10 +102,18 @@ class ApiClient {
   /// this override every such turn was dropped by Dio's own timeout well
   /// before the server had a chance to answer, progress marker or not.
   /// Mirrors uploadFileStream()'s existing 5-minute override just below.
-  Stream<String> chatStream(String message, {String language = 'tr'}) async* {
+  Stream<String> chatStream(
+    String message, {
+    String language = 'tr',
+    String conversationId = '',
+  }) async* {
     final response = await _dio.post<ResponseBody>(
       '/chat/stream',
-      data: {'message': message, 'language': language},
+      data: {
+        'message': message,
+        'language': language,
+        if (conversationId.isNotEmpty) 'conversation_id': conversationId,
+      },
       options: Options(
         responseType: ResponseType.stream,
         receiveTimeout: const Duration(minutes: 5),
@@ -126,14 +134,19 @@ class ApiClient {
   /// chatStream(): tokens, a final_answer, a progress marker and even a
   /// SECOND confirmation_required can all arrive on it.
   ///
-  /// No conversation_id is sent, matching chatStream() above -- this client
-  /// does not pin a conversation, and sending one that does not match the
-  /// conversation the interrupt was raised in is refused server-side
-  /// (JarvisAgent.resume_and_stream, Paket B).
-  Stream<String> confirmStream(String confId, String decision) async* {
+  /// [conversationId] is copied from the confirmation event, never inferred
+  /// from whichever tab happens to be visible when the user answers.
+  Stream<String> confirmStream(
+    String confId,
+    String decision, {
+    String conversationId = '',
+  }) async* {
     final response = await _dio.post<ResponseBody>(
       '/chat/confirm/${Uri.encodeComponent(confId)}',
-      data: {'decision': decision},
+      data: {
+        'decision': decision,
+        if (conversationId.isNotEmpty) 'conversation_id': conversationId,
+      },
       options: Options(
         responseType: ResponseType.stream,
         receiveTimeout: const Duration(minutes: 5),

@@ -60,7 +60,11 @@ sealed class WsEvent {
         return ConfirmationRequiredEvent(
           id: j['id'] as String? ?? '',
           payload: (j['payload'] as Map<String, dynamic>?) ?? const {},
+          conversationId: j['conversation_id'] as String? ?? '',
+          expiresInSeconds: (j['expires_in_seconds'] as num?)?.toInt(),
         );
+      case 'confirmation_closed':
+        return ConfirmationClosedEvent(id: j['id'] as String? ?? '');
       case 'task_status':
         return TaskStatusEvent(
           taskId: j['task_id'] as String? ?? '',
@@ -84,5 +88,6 @@ class VaultEvent      extends WsEvent { final List<Map<String,dynamic>> entries;
 class ProgressEvent   extends WsEvent { final int jobsDone, jobsTotal, tokensIn, tokensOut; final String runtime; ProgressEvent({required this.jobsDone, required this.jobsTotal, required this.runtime, required this.tokensIn, required this.tokensOut}); }
 class SessionEvent    extends WsEvent { final String id; final String? topic; SessionEvent({required this.id, this.topic}); }
 class TaskStatusEvent extends WsEvent { final String taskId, status, progressNote; final int elapsedSec; TaskStatusEvent({required this.taskId, required this.status, required this.progressNote, required this.elapsedSec}); }
-class ConfirmationRequiredEvent extends WsEvent { final String id; final Map<String,dynamic> payload; ConfirmationRequiredEvent({required this.id, required this.payload}); }
+class ConfirmationRequiredEvent extends WsEvent { final String id, conversationId; final int? expiresInSeconds; final Map<String,dynamic> payload; ConfirmationRequiredEvent({required this.id, required this.payload, this.conversationId = '', this.expiresInSeconds}); }
+class ConfirmationClosedEvent extends WsEvent { final String id; ConfirmationClosedEvent({required this.id}); }
 class UnknownEvent    extends WsEvent { final Map<String,dynamic> raw; UnknownEvent({required this.raw}); }

@@ -66,11 +66,15 @@ void main() {
 
     test('confirmation_required still classifies correctly alongside the new kinds', () {
       final event = classifyChatChunk(
-        '{"type":"confirmation_required","id":"c-1","payload":{"tools":[]}}',
+        '{"type":"confirmation_required","id":"c-1",'
+        '"conversation_id":"conv-mobile","expires_in_seconds":300,'
+        '"payload":{"tools":[]}}',
       );
       expect(event, isA<ChatConfirmationRequired>());
       final c = event as ChatConfirmationRequired;
       expect(c.id, 'c-1');
+      expect(c.conversationId, 'conv-mobile');
+      expect(c.expiresInSeconds, 300);
       expect(c.payload, {'tools': []});
     });
 

@@ -18,6 +18,8 @@ void main() {
       final event = WsEvent.fromJson({
         'type': 'confirmation_required',
         'id': 'conf-7',
+        'conversation_id': 'conv-mobile',
+        'expires_in_seconds': 300,
         'payload': {
           'tools': [
             {'name': 'gmail', 'description': 'send an email'},
@@ -28,6 +30,8 @@ void main() {
       expect(event, isA<ConfirmationRequiredEvent>());
       final c = event as ConfirmationRequiredEvent;
       expect(c.id, 'conf-7');
+      expect(c.conversationId, 'conv-mobile');
+      expect(c.expiresInSeconds, 300);
       expect((c.payload['tools'] as List).length, 1);
     });
 
@@ -41,6 +45,15 @@ void main() {
 
     test('an unrelated frame is still UnknownEvent', () {
       expect(WsEvent.fromJson({'type': 'nope'}), isA<UnknownEvent>());
+    });
+
+    test('confirmation_closed carries only the opaque id for state cleanup', () {
+      final event = WsEvent.fromJson({
+        'type': 'confirmation_closed',
+        'id': 'conf-7',
+      });
+      expect(event, isA<ConfirmationClosedEvent>());
+      expect((event as ConfirmationClosedEvent).id, 'conf-7');
     });
   });
 }

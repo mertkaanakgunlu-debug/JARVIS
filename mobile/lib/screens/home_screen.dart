@@ -318,8 +318,12 @@ class HomeScreenState extends ConsumerState<HomeScreen> {
             // server-side and this stream ends here; the prompt goes to the
             // app-wide provider (not local state) so it survives the stream
             // that delivered it and any rebuild/tab switch.
-            final pending =
-                PendingConfirmation.fromPayload(event.id, event.payload);
+            final pending = PendingConfirmation.fromPayload(
+              event.id,
+              event.payload,
+              conversationId: event.conversationId,
+              expiresInSeconds: event.expiresInSeconds,
+            );
             if (pending != null) {
               ref.read(confirmationProvider.notifier).raise(pending);
             } else {
@@ -387,7 +391,11 @@ class HomeScreenState extends ConsumerState<HomeScreen> {
     _scrollToBottom();
 
     try {
-      await _consume(api.confirmStream(pending.id, decision));
+      await _consume(api.confirmStream(
+        pending.id,
+        decision,
+        conversationId: pending.conversationId,
+      ));
       // Clears the card -- unless the continuation raised a SECOND interrupt,
       // which resolved() leaves alone because it is id-checked.
       notifier.resolved(pending.id);

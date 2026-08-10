@@ -62,6 +62,14 @@ def _confirmation_sse_frame(marker: dict) -> str:
             "type": "confirmation_required",
             "id": marker.get("id"),
             "payload": marker.get("payload") or {},
+            **(
+                {"conversation_id": marker["conversation_id"]}
+                if marker.get("conversation_id") else {}
+            ),
+            **(
+                {"expires_in_seconds": marker["expires_in_seconds"]}
+                if marker.get("expires_in_seconds") is not None else {}
+            ),
         },
         ensure_ascii=False,
     )
@@ -743,7 +751,16 @@ async def chat(body: ChatRequest, request: Request):
         # conf_id/payload a client needs to call /chat/confirm/{conf_id}
         # was lost entirely. Not an error: a distinct, structured response.
         event_bus.state("idle")
-        return {"confirmation_required": True, "id": cr.conf_id, "payload": cr.payload}
+        return {
+            "confirmation_required": True,
+            "id": cr.conf_id,
+            "payload": cr.payload,
+            **({"conversation_id": cr.conversation_id} if cr.conversation_id else {}),
+            **(
+                {"expires_in_seconds": cr.expires_in_seconds}
+                if cr.expires_in_seconds is not None else {}
+            ),
+        }
     except Exception as e:
         event_bus.state("idle")
         raise HTTPException(status_code=500, detail=str(e))

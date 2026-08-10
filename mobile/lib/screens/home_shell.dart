@@ -5,6 +5,7 @@ import '../theme/jarvis_theme.dart';
 import '../theme/typography.dart';
 import '../providers/state_provider.dart';
 import '../providers/ws_provider.dart';
+import '../providers/confirmation_provider.dart';
 import 'home_screen.dart';
 import 'tasks_screen.dart';
 import 'schedule_screen.dart';
@@ -67,6 +68,9 @@ class _JarvisBottomNav extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final confirmationPending = ref.watch(
+      confirmationProvider.select((value) => value.isPending),
+    );
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -88,17 +92,40 @@ class _JarvisBottomNav extends ConsumerWidget {
                   final accent = active ? JarvisColors.cyanSoft : JarvisColors.inkFaint;
                   return Expanded(
                     child: GestureDetector(
+                      key: Key('home-tab-$i'),
                       onTap: () => onTap(i),
                       behavior: HitTestBehavior.opaque,
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          IconTheme(
-                            data: IconThemeData(
-                              color: accent,
-                              size: 20,
-                            ),
-                            child: _tabs[i].icon,
+                          Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              IconTheme(
+                                data: IconThemeData(
+                                  color: accent,
+                                  size: 20,
+                                ),
+                                child: _tabs[i].icon,
+                              ),
+                              if (i == 0 && confirmationPending)
+                                Positioned(
+                                  right: -6,
+                                  top: -5,
+                                  child: Semantics(
+                                    label: 'Bekleyen onay',
+                                    child: Container(
+                                      key: const Key('pending-confirmation-indicator'),
+                                      width: 8,
+                                      height: 8,
+                                      decoration: const BoxDecoration(
+                                        color: JarvisColors.amber,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                           const SizedBox(height: 5),
                           Text(

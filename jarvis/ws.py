@@ -240,9 +240,29 @@ class JarvisEventBus:
             "elapsed_sec": elapsed_sec,
         })
 
-    def confirmation_required(self, conf_id: str, payload: dict) -> None:
+    def confirmation_required(
+        self,
+        conf_id: str,
+        payload: dict,
+        *,
+        conversation_id: str = "",
+        expires_in_seconds: int | None = None,
+    ) -> None:
         """Notify HUD / mobile that a risky L3 tool call needs user approval (Phase 3)."""
-        self.emit({"type": "confirmation_required", "id": conf_id, "payload": payload})
+        self.emit({
+            "type": "confirmation_required",
+            "id": conf_id,
+            "payload": payload,
+            **({"conversation_id": conversation_id} if conversation_id else {}),
+            **(
+                {"expires_in_seconds": expires_in_seconds}
+                if expires_in_seconds is not None else {}
+            ),
+        })
+
+    def confirmation_closed(self, conf_id: str) -> None:
+        """Tell remote clients that an approval prompt is no longer answerable."""
+        self.emit({"type": "confirmation_closed", "id": conf_id})
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────

@@ -108,5 +108,16 @@ void main() {
       expect(n.state.submitting, isFalse);
       expect(n.beginSubmit('c-1'), isTrue, reason: 'retry must be possible');
     });
+
+    test('an already-expired prompt is cleared immediately', () {
+      final n = ConfirmationNotifier();
+      n.raise(PendingConfirmation(
+        id: 'c-1',
+        tools: _conf('c-1').tools,
+        expiresInSeconds: 0,
+      ));
+      expect(n.state.isPending, isFalse);
+      n.dispose();
+    });
   });
 }

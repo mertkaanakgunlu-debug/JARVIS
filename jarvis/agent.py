@@ -80,10 +80,44 @@ logger = logging.getLogger(__name__)
 
 class ConfirmationRequired(Exception):
     """Raised by chat() when LangGraph interrupts for user confirmation of an L3 tool call."""
-    def __init__(self, conf_id: str, payload: dict) -> None:
+    def __init__(
+        self,
+        conf_id: str,
+        payload: dict,
+        *,
+        conversation_id: str = "",
+        expires_in_seconds: int | None = None,
+    ) -> None:
         self.conf_id = conf_id
         self.payload = payload
+        self.conversation_id = conversation_id
+        self.expires_in_seconds = expires_in_seconds
         super().__init__(f"confirmation_required:{conf_id}")
+
+
+def _surface_confirmation(agent, conf_id: str, payload: dict, config: dict) -> dict:
+    """Broadcast and return one transport-safe confirmation marker.
+
+    The pending record already pins the owning conversation. Carrying that
+    identifier beside the opaque confirmation id lets multi-conversation
+    clients echo it to /chat/confirm without exposing it in user-facing copy.
+    """
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    conversation_id = str(configurable.get("conversation_id") or agent.session_id or "")
+    expires_in_seconds = int(getattr(agent.settings, "approval_ttl_sec", 300))
+    event_bus.confirmation_required(
+        conf_id,
+        payload,
+        conversation_id=conversation_id,
+        expires_in_seconds=expires_in_seconds,
+    )
+    return {
+        "__jarvis_confirm__": True,
+        "id": conf_id,
+        "payload": payload,
+        "conversation_id": conversation_id,
+        "expires_in_seconds": expires_in_seconds,
+    }
 
 
 # ── Faz 7: proactive self-initiation ────────────────────────────────────────
@@ -1820,8 +1854,13 @@ class JarvisAgent:
                 self._register_pending_confirmation(
                     conf_id, config, recorder, payload=payload,
                 )
-                event_bus.confirmation_required(conf_id, payload)
-                raise ConfirmationRequired(conf_id, payload) from exc
+                marker = _surface_confirmation(self, conf_id, payload, config)
+                raise ConfirmationRequired(
+                    conf_id,
+                    payload,
+                    conversation_id=marker["conversation_id"],
+                    expires_in_seconds=marker["expires_in_seconds"],
+                ) from exc
             except GraphRecursionError:
                 # Patch 1.2 (Faz 1B): the recursion limit is the last-resort
                 # loop stopper -- answer with an honest, ledger-based message
@@ -1862,8 +1901,13 @@ class JarvisAgent:
                 self._register_pending_confirmation(
                     conf_id, config, recorder, payload=payload,
                 )
-                event_bus.confirmation_required(conf_id, payload)
-                raise ConfirmationRequired(conf_id, payload)
+                marker = _surface_confirmation(self, conf_id, payload, config)
+                raise ConfirmationRequired(
+                    conf_id,
+                    payload,
+                    conversation_id=marker["conversation_id"],
+                    expires_in_seconds=marker["expires_in_seconds"],
+                )
 
             response = result.get("response", "")
             if not response:
@@ -2137,6 +2181,7 @@ class JarvisAgent:
             logger.info(
                 "[confirm] claim expired conf_id=%s age_sec=%.1f ttl_sec=%s", conf_id, age, ttl,
             )
+            event_bus.confirmation_closed(conf_id)
             return None
         logger.info(
             "[confirm] claimed conf_id=%s age_sec=%.1f ttl_sec=%s", conf_id, age, ttl,
@@ -2309,8 +2354,7 @@ class JarvisAgent:
                 self._register_pending_confirmation(
                     conf_id, config, recorder, payload=payload,
                 )
-                event_bus.confirmation_required(conf_id, payload)
-                yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
+                yield json.dumps(_surface_confirmation(self, conf_id, payload, config))
             except GraphRecursionError:
                 # Patch 1.2 (Faz 1B): same controlled stop as chat() -- the
                 # message flows out as ordinary stream tokens (no 500, no
@@ -2342,8 +2386,7 @@ class JarvisAgent:
                     self._register_pending_confirmation(
                         conf_id, config, recorder, payload=payload,
                     )
-                    event_bus.confirmation_required(conf_id, payload)
-                    yield json.dumps({"__jarvis_confirm__": True, "id": conf_id, "payload": payload})
+                    yield json.dumps(_surface_confirmation(self, conf_id, payload, config))
 
             if _confirmation_issued:
                 event_bus.state("idle")
@@ -2518,8 +2561,13 @@ class JarvisAgent:
 
         pending = pre_claimed if pre_claimed is not None else self._pending_confirmations.pop(conf_id, None)
         if pending is None:
+            event_bus.confirmation_closed(conf_id)
             yield "[ERROR: confirmation session expired or not found]"
             return
+        # The prompt is single-use and has now been claimed by this resolver.
+        # Remote indicators can disappear immediately; this does not approve,
+        # deny, or otherwise alter the graph decision below.
+        event_bus.confirmation_closed(conf_id)
         config = pending["config"]
         # The recorder chat()/chat_stream() registered in config["callbacks"]
         # before the interrupt -- the resumed half of the turn keeps feeding
@@ -2630,8 +2678,9 @@ class JarvisAgent:
                 self._register_pending_confirmation(
                     new_conf_id, config, recorder, payload=payload,
                 )
-                event_bus.confirmation_required(new_conf_id, payload)
-                yield json.dumps({"__jarvis_confirm__": True, "id": new_conf_id, "payload": payload})
+                yield json.dumps(
+                    _surface_confirmation(self, new_conf_id, payload, config)
+                )
                 event_bus.state("idle")
                 return
             except (asyncio.CancelledError, GeneratorExit):
@@ -2669,9 +2718,8 @@ class JarvisAgent:
                 self._register_pending_confirmation(
                     new_conf_id, config, recorder, payload=resumed_payload,
                 )
-                event_bus.confirmation_required(new_conf_id, resumed_payload)
                 yield json.dumps(
-                    {"__jarvis_confirm__": True, "id": new_conf_id, "payload": resumed_payload}
+                    _surface_confirmation(self, new_conf_id, resumed_payload, config)
                 )
 
             if resumed_confirmation_issued:

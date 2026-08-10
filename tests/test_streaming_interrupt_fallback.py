@@ -118,6 +118,8 @@ async def test_chat_stream_detects_an_interrupt_the_stream_never_raised(monkeypa
     marker = json.loads(chunks[0])
     assert marker["__jarvis_confirm__"] is True
     assert marker["payload"] == payload
+    assert marker["conversation_id"] == "s1"
+    assert marker["expires_in_seconds"] == agent.settings.approval_ttl_sec
     assert marker["id"] in agent._pending_confirmations
     assert agent._pending_confirmations[marker["id"]]["config"] is not None
 

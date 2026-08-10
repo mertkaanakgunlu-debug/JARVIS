@@ -66,10 +66,19 @@ final wsDispatcherProvider = Provider<void>((ref) {
         // raised while the user is on another tab must still be answerable
         // when they come back. raise() is idempotent on id, so the frequent
         // case of both legs delivering the same prompt costs nothing.
-        final pending = PendingConfirmation.fromPayload(event.id, event.payload);
+        final pending = PendingConfirmation.fromPayload(
+          event.id,
+          event.payload,
+          conversationId: event.conversationId,
+          expiresInSeconds: event.expiresInSeconds,
+        );
         if (pending != null) {
           ref.read(confirmationProvider.notifier).raise(pending);
         }
+      } else if (event is ConfirmationClosedEvent) {
+        // ID-checked: a close for the prompt just answered cannot clear a
+        // second same-turn interrupt that has already replaced it.
+        ref.read(confirmationProvider.notifier).resolved(event.id);
       }
     });
   });

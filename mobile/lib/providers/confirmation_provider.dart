@@ -17,6 +17,7 @@
 /// future call site have to honour it.
 library;
 
+import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/pending_confirmation.dart';
 
@@ -38,6 +39,8 @@ class ConfirmationState {
 class ConfirmationNotifier extends StateNotifier<ConfirmationState> {
   ConfirmationNotifier() : super(const ConfirmationState());
 
+  Timer? _expiryTimer;
+
   /// A confirmation arrived. Idempotent on id: re-delivery of the one already
   /// on screen (the SSE frame and the WS broadcast both fire for a
   /// phone-initiated turn) must not reset an in-flight submit.
@@ -47,7 +50,19 @@ class ConfirmationNotifier extends StateNotifier<ConfirmationState> {
     // this is the second-same-turn-interrupt case, where the POST that is
     // finishing belongs to the id being replaced. [resolved] is id-checked
     // precisely so that finishing POST cannot then clear this new prompt.
+    _expiryTimer?.cancel();
     state = ConfirmationState(pending: confirmation);
+    final ttl = confirmation.expiresInSeconds;
+    if (ttl != null) {
+      if (ttl <= 0) {
+        resolved(confirmation.id);
+      } else {
+        _expiryTimer = Timer(
+          Duration(seconds: ttl),
+          () => resolved(confirmation.id),
+        );
+      }
+    }
   }
 
   /// Claim the right to POST a decision for [id]. False means "do not send":
@@ -67,6 +82,8 @@ class ConfirmationNotifier extends StateNotifier<ConfirmationState> {
   /// own prompt up.
   void resolved(String id) {
     if (state.pending?.id == id) {
+      _expiryTimer?.cancel();
+      _expiryTimer = null;
       state = const ConfirmationState();
       return;
     }
@@ -79,6 +96,12 @@ class ConfirmationNotifier extends StateNotifier<ConfirmationState> {
   /// in-flight flag is released.
   void failed() {
     state = ConfirmationState(pending: state.pending);
+  }
+
+  @override
+  void dispose() {
+    _expiryTimer?.cancel();
+    super.dispose();
   }
 }
 

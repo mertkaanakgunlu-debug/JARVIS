@@ -28,9 +28,13 @@ void main() {
       final pending = PendingConfirmation.fromPayload(
         'conf-1',
         {'tools': [_tool()], 'count': 1},
+        conversationId: 'conv-mobile',
+        expiresInSeconds: 300,
       );
       expect(pending, isNotNull);
       expect(pending!.id, 'conf-1');
+      expect(pending.conversationId, 'conv-mobile');
+      expect(pending.expiresInSeconds, 300);
       expect(pending.tools.single.label, 'send an email (to=baran@example.com)');
     });
 
