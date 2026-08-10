@@ -222,3 +222,15 @@ def test_gate_verdict_is_still_completely_untouched_by_round_2():
             f"{new_field} leaked into the pre-registered gate computation -- "
             "this follow-up must stay reporting-only"
         )
+
+
+def test_finding_2_diagnostic_does_not_rewrite_the_historical_gate():
+    src = _source()
+    report_idx = src.index("def report(")
+    gate_idx = src.index("def _gate_verdict(")
+    assert "honest_failure_retried_diagnostic" in src[report_idx:gate_idx]
+    assert "honest_failure_retried_diagnostic" not in src[gate_idx:]
+    assert (
+        'eligible = [r for r in c_rows if r.get("chart_attempted") '
+        'and not r.get("chart_executed")]'
+    ) in src[gate_idx:]

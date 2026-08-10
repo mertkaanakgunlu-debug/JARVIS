@@ -71,10 +71,15 @@ from langchain_core.messages import ToolMessage  # noqa: E402
 
 import jarvis.agent as agent_mod  # noqa: E402
 from jarvis.config import Settings  # noqa: E402
-from jarvis.evals.contract_metrics import percentile, rate  # noqa: E402
+from jarvis.evals.contract_metrics import (  # noqa: E402
+    honest_failure_retry_evidence,
+    percentile,
+    rate,
+)
 from jarvis.evals.contract_scenarios import Scenario, by_corpus  # noqa: E402
 from jarvis.evals.results import ResultWriter, default_path, head_commit, timestamp  # noqa: E402
 from jarvis.execution.artifacts import parse_refs  # noqa: E402
+from jarvis.execution import rollout as rollout_mod  # noqa: E402
 from jarvis.voice.session import parse_confirm_marker, parse_progress_marker  # noqa: E402
 from jarvis.working_set import KIND_CHART  # noqa: E402
 
@@ -100,7 +105,10 @@ DEFAULT_TIMEOUT_S = 300.0
 
 TOOL_CALLS: list[dict] = []
 TOOL_ROUNDS: list[list[str]] = []
+TOOL_CALL_ROUNDS: list[list[dict[str, str]]] = []
+COMPLETION_REPAIR_BOUNDARIES: list[dict[str, list[str]]] = []
 _OrigCB = agent_mod._HudEventCallback
+_OrigRecordOutputContract = rollout_mod.record_output_contract
 
 
 def _tool_args(raw) -> dict:
@@ -132,12 +140,35 @@ class _CapturingCB(_OrigCB):
             calls = getattr(response.generations[0][0].message, "tool_calls", None)
             if calls:
                 TOOL_ROUNDS.append([c.get("name", "?") for c in calls])
+                TOOL_CALL_ROUNDS.append([
+                    {"id": str(c.get("id") or ""), "tool": str(c.get("name") or "")}
+                    for c in calls
+                ])
         except Exception:  # noqa: BLE001 -- instrumentation never fails a run
             pass
         return super().on_llm_end(response, **kwargs)
 
 
 agent_mod._HudEventCallback = _CapturingCB
+
+
+def _record_output_contract_with_boundary(**kwargs):
+    """Eval-only temporal marker for the corrected Finding 2 diagnostic."""
+    if (
+        kwargs.get("event") == "decision"
+        and kwargs.get("action") == "repair"
+        and kwargs.get("repair_reason") == "missing_required_output"
+    ):
+        COMPLETION_REPAIR_BOUNDARIES.append({
+            "after_tool_call_ids": [
+                call["id"] for round_calls in TOOL_CALL_ROUNDS for call in round_calls
+                if call["id"]
+            ],
+        })
+    return _OrigRecordOutputContract(**kwargs)
+
+
+rollout_mod.record_output_contract = _record_output_contract_with_boundary
 
 
 def _safe_path(path: str) -> str:
@@ -318,6 +349,8 @@ async def run_trial(
 
     TOOL_CALLS.clear()
     TOOL_ROUNDS.clear()
+    TOOL_CALL_ROUNDS.clear()
+    COMPLETION_REPAIR_BOUNDARIES.clear()
     before = snapshot_sources()
     reset_fixtures()
     clean_artifacts()
@@ -434,6 +467,13 @@ async def run_trial(
         pass
 
     tools_used = [c["tool"] for c in TOOL_CALLS]
+    honest_failure_retries = honest_failure_retry_evidence(
+        ledger=state.get("tool_execution_ledger"),
+        repair_boundaries=COMPLETION_REPAIR_BOUNDARIES,
+        capabilities={"plot_data"},
+        invalid_args_history=state.get("invalid_args_history"),
+        preexecution_history=state.get("preexecution_history"),
+    )
     after = snapshot_sources()
 
     row.update({
@@ -455,6 +495,10 @@ async def run_trial(
         "repair_attempted": int(state.get("repair_attempts_total") or 0) > 0,
         "repair_count": int(state.get("repair_attempts_total") or 0),
         "repair_reason": str(state.get("repair_reason") or ""),
+        # Additive diagnostic only. The pre-registered gate below deliberately
+        # retains its historical final-state predicate unchanged.
+        "honest_failure_retried_diagnostic": bool(honest_failure_retries),
+        "honest_failure_retry_evidence": honest_failure_retries,
         "final_response": (state.get("response") or answer or "")[:600],
         "streamed_len": len(answer),
         "elapsed_s": round(elapsed, 3),
@@ -524,6 +568,8 @@ def report(rows: list[dict], label: str) -> dict:
         print(f"   chart executed         {_rate(arm_rows, 'chart_executed')[0]}/{n}")
         print(f"   repair triggered       {_rate(arm_rows, 'repair_attempted')[0]}/{n}")
         print(f"   repair success         {_rate(arm_rows, 'repair_success')[0]}/{n}")
+        print(f"   honest failure retried [diagnostic]  "
+              f"{_rate(arm_rows, 'honest_failure_retried_diagnostic')[0]}/{n}")
         print(f"   source mutation        {_rate(arm_rows, 'source_mutation')[0]}/{n}")
         print(f"   completed/timed-out/errored   {len(completed)}/{len(timed_out_rows)}/{len(errored_rows)}")
         print(f"   tool rounds (mean)     {sum(r['tool_round_count'] for r in arm_rows)/max(n,1):.2f}")

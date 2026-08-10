@@ -30,7 +30,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from jarvis.config import Settings
-from jarvis.evals.contract_metrics import percentile, rate
+from jarvis.evals.contract_metrics import (
+    honest_failure_retry_evidence,
+    percentile,
+    rate,
+)
 from jarvis.evals.contract_scenarios import (
     CONTRACT_STATUSES,
     SCENARIOS,
@@ -323,3 +327,90 @@ def test_a_percentile_with_no_data_is_not_an_exception():
 def test_percentiles_use_nearest_rank():
     assert percentile([1.0, 2.0, 3.0, 4.0], 0.5) == 2.0
     assert percentile([1.0, 2.0, 3.0, 4.0], 0.9) == 4.0
+
+
+# -- Finding 2: corrected diagnostic, historical gate unchanged ----------------
+
+def _retry_evidence(
+    ledger, *, before=("failed-1",), invalid=(), blocked=(), capabilities=("plot_data",),
+):
+    return honest_failure_retry_evidence(
+        ledger=ledger,
+        repair_boundaries=[{"after_tool_call_ids": list(before)}],
+        capabilities=capabilities,
+        invalid_args_history=[{"tool_call_id": call_id} for call_id in invalid],
+        preexecution_history=[{"tool_call_id": call_id} for call_id in blocked],
+    )
+
+
+def test_corrected_diagnostic_sees_failure_repair_then_success_blind_spot():
+    """A later artifact makes the historical final-state row ineligible, but
+    cannot erase the earlier failed call from the temporal diagnostic."""
+    historical_row = {
+        "chart_attempted": True,
+        "chart_executed": True,
+        "repair_attempted": True,
+    }
+    legacy_eligible = (
+        historical_row["chart_attempted"] and not historical_row["chart_executed"]
+    )
+    ledger = [
+        {"tool": "plot_data", "tool_call_id": "failed-1", "ok": False},
+        {"tool": "plot_data", "tool_call_id": "success-2", "ok": True},
+    ]
+
+    assert legacy_eligible is False
+    assert _retry_evidence(ledger) == [{
+        "tool": "plot_data",
+        "failed_tool_call_id": "failed-1",
+        "retry_tool_call_id": "success-2",
+        "retry_ok": True,
+        "repair_index": 1,
+    }]
+
+
+@pytest.mark.parametrize("excluded_kind", ["invalid", "blocked", "user_denied"])
+def test_corrected_diagnostic_excludes_calls_that_never_executed(excluded_kind):
+    ledger_like_fixture = [
+        {"tool": "plot_data", "tool_call_id": "failed-1", "ok": False},
+        {"tool": "plot_data", "tool_call_id": "success-2", "ok": True},
+    ]
+    invalid = ("failed-1",) if excluded_kind == "invalid" else ()
+    blocked = ("failed-1",) if excluded_kind in {"blocked", "user_denied"} else ()
+
+    assert _retry_evidence(
+        ledger_like_fixture, invalid=invalid, blocked=blocked,
+    ) == []
+
+
+def test_corrected_diagnostic_does_not_relabel_missing_no_attempt_repair():
+    assert _retry_evidence(
+        [{"tool": "plot_data", "tool_call_id": "success-1", "ok": True}],
+        before=(),
+    ) == []
+
+
+def test_corrected_diagnostic_keys_same_named_calls_by_tool_call_id():
+    ledger = [
+        {"tool": "plot_data", "tool_call_id": "blocked-1", "ok": False},
+        {"tool": "plot_data", "tool_call_id": "failed-2", "ok": False},
+        {"tool": "plot_data", "tool_call_id": "success-3", "ok": True},
+    ]
+
+    evidence = _retry_evidence(
+        ledger, before=("blocked-1", "failed-2"), blocked=("blocked-1",),
+    )
+
+    assert [(e["failed_tool_call_id"], e["retry_tool_call_id"]) for e in evidence] == [
+        ("failed-2", "success-3"),
+    ]
+
+
+def test_corrected_diagnostic_excludes_unknown_outcomes():
+    ledger = [
+        {"tool": "plot_data", "tool_call_id": "failed-1", "ok": False,
+         "outcome": "unknown"},
+        {"tool": "plot_data", "tool_call_id": "success-2", "ok": True},
+    ]
+
+    assert _retry_evidence(ledger) == []
