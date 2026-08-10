@@ -286,9 +286,11 @@ word whether it resolved to the right day, which is how a one-day-early event ge
   result-binding path without touching a real external service. A post-fix real
   Gmail/calendar/Drive write E2E was deliberately **not run**. The Flutter UI
   also ran against the real server and model on a Galaxy S26 Ultra (`SM-S948B`): exactly one
-  execution on approve, zero on deny, and no raw protocol on screen. Mobile's
-  remaining confirmation limitations are the missing cross-tab indicator and
-  missing `conversation_id`, not an unrun live E2E.
+  execution on approve, zero on deny, and no raw protocol on screen. Mobile now
+  preserves the backend-pinned `conversation_id` through approve/deny, exposes
+  an app-wide cross-tab pending indicator, and clears it on completion or
+  expiry. Stable per-client conversation identity for every newly initiated
+  mobile turn remains a separate client-adoption follow-up.
 - **Voice confirmation phrasing is functional, not fully localized** — the spoken question wrapper
   is bilingual (`jarvis/voice/session.py`'s `describe_confirmation`), but the per-call description
   embedded in it (`jarvis/policy_guard.py`'s `describe_call`) is always in English technical form
