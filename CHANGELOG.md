@@ -6,6 +6,21 @@ For current architecture and feature inventory, see [ProjectState.md](ProjectSta
 
 ---
 
+## [NVIDIA NIM tournament measured; local routing retained] — 2026-08-11
+
+NVIDIA NIM role routing, observable local fallback, provider-safe tracing, and
+a real-JARVIS 20-scenario synthetic-service tournament were added. The
+authenticated account exposed Nemotron Super, Nemotron Ultra, and GLM 5.2;
+Mistral Medium 3.5 was unavailable and was not substituted. The valid live run
+found no deployable cloud winner: Super and GLM each produced a wrong-source
+satisfaction hard blocker, while Ultra fell back somewhere in the graph on
+every decision task and received zero end-to-end NVIDIA-primary successes.
+`qwen3:8b` therefore remains FAST, REASONING, LOCAL, and failure fallback. Raw
+provenance and complete measured metrics are in
+`docs/eval/nvidia_model_tournament.md`; NVIDIA production cost remains unknown.
+
+---
+
 ## [Mobile can answer an L3 confirmation; the pilot's finding-1 shapes are pinned] — 2026-08-08
 
 Three commits. The session began by verifying a claim rather than acting on it:
