@@ -30,6 +30,8 @@ def _start_meta(provider: str, model: str, *, billable=False, tier=0, node="", r
         md["langgraph_node"] = node
     if role:
         md["jarvis_role"] = role
+    md["jarvis_primary_provider"] = provider
+    md["jarvis_primary_model"] = model
     return md
 
 
@@ -132,6 +134,31 @@ def test_fallback_event_is_diagnostic_and_does_not_render_error_body():
         "exception_type": "_ProviderError",
         "error_category": "provider_unavailable",
         "http_status": 503,
+        "retry_fallback_tier": 1,
+    }]
+
+
+def test_fallback_event_survives_missing_primary_error_callback():
+    rec = LlmTraceRecorder(requested_role="reasoning")
+    fallback = uuid4()
+    metadata = _start_meta(
+        "ollama", "qwen3:8b", tier=1, node="agent", role="reasoning"
+    )
+    metadata["jarvis_primary_provider"] = "nvidia"
+    metadata["jarvis_primary_model"] = "nvidia/ultra"
+    rec.on_chat_model_start({}, None, run_id=fallback, metadata=metadata)
+    rec.on_llm_end(_llm_result(), run_id=fallback)
+
+    assert rec.turn_summary()["fallback_events"] == [{
+        "provider": "nvidia",
+        "model": "nvidia/ultra",
+        "fallback_provider": "ollama",
+        "fallback_model": "qwen3:8b",
+        "graph_node": "agent",
+        "role": "reasoning",
+        "exception_type": "UnobservedProviderError",
+        "error_category": "unobserved_provider_error",
+        "http_status": None,
         "retry_fallback_tier": 1,
     }]
 
@@ -356,10 +383,14 @@ def test_get_llm_tiers_carry_metadata():
     # billing field says unknown, not free.
     assert primary_md["jarvis_billing"] == "unknown"
     assert primary_md["jarvis_billable"] is False
+    assert primary_md["jarvis_primary_provider"] == "aistudio"
+    assert primary_md["jarvis_primary_model"] == settings.cloud_model_fallback
     assert tail_md["jarvis_provider"] == "ollama"
     assert tail_md["jarvis_tier_index"] == 1
     assert tail_md["jarvis_billing"] == "free"
     assert tail_md["jarvis_billable"] is False
+    assert tail_md["jarvis_primary_provider"] == "aistudio"
+    assert tail_md["jarvis_primary_model"] == settings.cloud_model_fallback
 
 
 # ── Faz 3.2: TTFT + cold-start diagnostics ────────────────────────────────────

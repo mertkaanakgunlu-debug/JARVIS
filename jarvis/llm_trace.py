@@ -44,6 +44,8 @@ class LlmCallTrace:
     output_tokens: int
     ok: bool
     role: str = ""       # requested provider role stamped by providers.get_llm
+    primary_provider: str = ""
+    primary_model: str = ""
     # Faz 3.2 — latency diagnostics for the thinking-on/off A/B. ttft_ms is
     # None (not 0) for non-streaming calls (/chat's ainvoke path never fires
     # on_llm_new_token) — an honest "not measured", not a fabricated value
@@ -153,6 +155,8 @@ class LlmTraceRecorder(BaseCallbackHandler):
             "tier_index": int(md.get("jarvis_tier_index", 0)),
             "node": md.get("langgraph_node", ""),
             "role": md.get("jarvis_role", self.requested_role),
+            "primary_provider": md.get("jarvis_primary_provider", provider),
+            "primary_model": md.get("jarvis_primary_model", model),
             "started": time.monotonic(),
             "cold_start": cold,
             "ttft": None,  # Faz 3.2: set by on_llm_new_token if the call streams
@@ -186,6 +190,8 @@ class LlmTraceRecorder(BaseCallbackHandler):
             tier_index=int((info or {}).get("tier_index", 0)),
             node=(info or {}).get("node", ""),
             role=(info or {}).get("role", self.requested_role),
+            primary_provider=(info or {}).get("primary_provider", ""),
+            primary_model=(info or {}).get("primary_model", ""),
             latency_ms=(time.monotonic() - started) * 1000.0 if started else 0.0,
             input_tokens=tokens_in,
             output_tokens=tokens_out,
@@ -221,6 +227,8 @@ class LlmTraceRecorder(BaseCallbackHandler):
             tier_index=int(info.get("tier_index", 0)),
             node=info.get("node", ""),
             role=info.get("role", self.requested_role),
+            primary_provider=info.get("primary_provider", ""),
+            primary_model=info.get("primary_model", ""),
             latency_ms=(time.monotonic() - info["started"]) * 1000.0,
             input_tokens=0,
             output_tokens=0,
@@ -297,14 +305,18 @@ class LlmTraceRecorder(BaseCallbackHandler):
             or any(not t.ok for t in self.traces)
         )
         fallback_events = []
+        paired_fallbacks: set[int] = set()
         for index, failed in enumerate(self.traces):
             if failed.ok:
                 continue
             fallback = next(
                 (
-                    candidate
-                    for candidate in self.traces[index + 1:]
+                    (candidate_index, candidate)
+                    for candidate_index, candidate in enumerate(
+                        self.traces[index + 1:], start=index + 1
+                    )
                     if candidate.ok
+                    and candidate_index not in paired_fallbacks
                     and candidate.node == failed.node
                     and candidate.role == failed.role
                     and candidate.tier_index > failed.tier_index
@@ -313,17 +325,38 @@ class LlmTraceRecorder(BaseCallbackHandler):
             )
             if fallback is None:
                 continue
+            fallback_index, fallback_trace = fallback
+            paired_fallbacks.add(fallback_index)
             fallback_events.append({
                 "provider": failed.provider,
                 "model": failed.model,
-                "fallback_provider": fallback.provider,
-                "fallback_model": fallback.model,
+                "fallback_provider": fallback_trace.provider,
+                "fallback_model": fallback_trace.model,
                 "graph_node": failed.node,
                 "role": failed.role,
                 "exception_type": failed.error_type,
                 "error_category": failed.error_category,
                 "http_status": failed.http_status,
-                "retry_fallback_tier": fallback.tier_index,
+                "retry_fallback_tier": fallback_trace.tier_index,
+            })
+        for fallback_index, fallback_trace in enumerate(self.traces):
+            if (
+                not fallback_trace.ok
+                or fallback_trace.tier_index <= 0
+                or fallback_index in paired_fallbacks
+            ):
+                continue
+            fallback_events.append({
+                "provider": fallback_trace.primary_provider,
+                "model": fallback_trace.primary_model,
+                "fallback_provider": fallback_trace.provider,
+                "fallback_model": fallback_trace.model,
+                "graph_node": fallback_trace.node,
+                "role": fallback_trace.role,
+                "exception_type": "UnobservedProviderError",
+                "error_category": "unobserved_provider_error",
+                "http_status": None,
+                "retry_fallback_tier": fallback_trace.tier_index,
             })
         return {
             "requested_role": self.requested_role,

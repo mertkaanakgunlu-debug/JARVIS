@@ -56,6 +56,8 @@ def test_cloud_first_fast_has_nvidia_primary_and_local_fallback_metadata():
         "jarvis_billable": False,
         "jarvis_tier_index": 0,
         "jarvis_role": "fast",
+        "jarvis_primary_provider": "nvidia",
+        "jarvis_primary_model": "nvidia/nemotron-3-super-120b-a12b",
     }
     assert _metadata(llm.fallbacks[0])["jarvis_provider"] == "ollama"
     assert _metadata(llm.fallbacks[0])["jarvis_tier_index"] == 1

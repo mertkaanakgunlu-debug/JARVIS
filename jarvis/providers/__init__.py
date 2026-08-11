@@ -157,6 +157,7 @@ def _compose(tiers: list[_Tier], tools: list | None, role: str) -> BaseChatModel
     dropping the identity metadata — so tools first, then the tags.
     """
     runnables = []
+    primary_tier = tiers[0]
     for idx, t in enumerate(tiers):
         m = t.model
         if tools:
@@ -171,6 +172,8 @@ def _compose(tiers: list[_Tier], tools: list | None, role: str) -> BaseChatModel
             "jarvis_billable": t.billing == "paid",
             "jarvis_tier_index": idx,
             "jarvis_role": role,
+            "jarvis_primary_provider": primary_tier.provider,
+            "jarvis_primary_model": primary_tier.model_id,
         })
         runnables.append(m)
     primary, *rest = runnables
