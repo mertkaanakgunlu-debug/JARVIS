@@ -1,7 +1,7 @@
 ---
 handoff_schema: 1
 branch: langgraph-migration
-covered_through_sha: 8ab0b10633a52feb44416a9a190ae5e7dda230db
+covered_through_sha: 1fa49b51c2deedecc4c9500857c2ab5e523aa85c
 ---
 
 # HANDOFF — current state
@@ -16,102 +16,87 @@ documentation commit.
 
 - The active branch is `langgraph-migration`. At preparation time on
   2026-08-11, local and remote `main` both resolved to `5f6f6ff` and remained
-  untouched. `langgraph-migration` was seven commits ahead of its remote.
-  Derive changing branch relationships live.
-- Work commit `8ab0b10` closes the reproducible empty-STT capture failure:
-  every segmented turn now emits a terminal transcript event, including an
-  empty Whisper result, and one-shot PTT/wake-word capture re-arms without
-  dispatching an empty agent turn.
-- Capture diagnostics now provide an activation-local evidence ladder across
-  device callbacks, PortAudio status/overflow, queue consumption/backlog,
-  frame contract, VAD, segmentation, buffered turn, and STT result.
-- No VAD threshold, model setting, sample-rate contract, remote-voice path,
-  TTS, NVIDIA NIM behavior, or proactive behavior changed.
-- Push authority remains owner-only. Derive remote state live before any future
-  finalize action.
+  untouched. Derive changing branch relationships live.
+- NVIDIA NIM is implemented as an optional role provider with observable
+  fallback to `qwen3:8b`; missing credentials or model construction failures do
+  not break local startup and auth-bearing errors are not logged.
+- No NVIDIA model passed the live deployment gate. Production defaults remain
+  local: FAST, REASONING, LOCAL, and failure fallback all resolve to
+  `qwen3:8b`; `nvidia_cloud_first` remains disabled.
+- The valid live tournament and its immutable artifact hash are documented in
+  `docs/eval/nvidia_model_tournament.md`.
+- Push authority remains owner-only. Derive remote and CI state live before any
+  future finalize action.
 
 ## 2. Last completed work
 
-Commit `8ab0b10` (`fix(voice): rearm capture after empty transcripts`) completed
-the deterministic localization and minimal reliability fix:
+Work through `1fa49b5` adds NVIDIA NIM provider profiles, role-aware routing,
+safe provider metadata and usage accounting, and a deterministic real-JARVIS
+model tournament:
 
-- A synthetic regression reproduced the defect: VAD detected and ended a real
-  turn, the audio buffer reached STT, Whisper returned an empty string, and the
-  engine emitted no terminal event. A finite one-shot session returned
-  `ended`; a continuously open PTT/wake-word session therefore stayed active
-  until later audio, presenting as a missed utterance.
-- The engine now emits `FinalTranscript` for every completed STT attempt. The
-  session treats a blank transcript as a terminal capture result, does not call
-  the agent, and returns `turn_complete` for one-shot capture so the activation
-  is safely re-armed.
-- Per-activation counters and recent signal evidence now distinguish callback
-  delivery, status/overflow, consumed frames, queue high-water/backlog,
-  frame-size mismatch, VAD frames/probability, speech start/end, STT attempt,
-  and non-empty STT. `/voice-status` exposes the aggregate ladder without
-  rendering raw audio.
-- Regression coverage pins the empty-STT terminal behavior, success/silence
-  ladder boundaries, activation counters, frame mismatch detection, and the
-  diagnostics API/CLI fields.
-
-### Localization disposition
-
-- Deterministic fixture evidence eliminates the VAD/segmentation/buffer seam
-  for the committed speech fixtures: real Silero produced one speech start,
-  one speech end, and one STT attempt for each fixture, with peak probabilities
-  from `0.982042` to `0.995552`.
-- A two-second aggregate-only microphone smoke delivered and consumed `63`
-  correctly sized frames with queue high-water `1`, no callback status,
-  overflow, backlog, or frame mismatch. Real Silero processed all `63` frames.
-  No raw audio was retained and no Whisper/model workload was run.
-- These observations prove the current idle-window device-to-Silero path, not
-  the cause of a historical user utterance. Historical misses predate the new
-  stage counters, so they cannot be attributed retroactively to microphone,
-  PortAudio, queue, VAD, segmentation, buffer, or Whisper without a new event.
-- The empty-STT control-flow defect is reproducible and fixed. Any remaining
-  missed-utterance report must be localized from the new per-activation ladder
-  before thresholds or model settings change.
+- Authenticated `/v1/models` exposed Nemotron Super, Nemotron Ultra, and GLM
+  5.2. Mistral Medium 3.5 was unavailable and was reported without
+  substitution.
+- The 20-scenario corpus is 18/20 Turkish and runs through the real LangGraph.
+  Gmail, Calendar, Drive, weather, files, tasks, checkpoints, memory, and audit
+  state are synthetic or scratch-isolated; no real external write is possible.
+- Tool callback arguments accept decoded mappings, JSON, or safe Python-literal
+  strings. This normalization is required for truthful argument and
+  source-binding scores.
+- The comparable 60-row shortlist found Super at 75.00% overall but with one
+  wrong-source hard blocker; GLM also had one wrong-source blocker and 36
+  rate-limited turns; Ultra used local fallback somewhere in every turn. The
+  selector returned no FAST or REASONING cloud winner, so no promotion commit
+  exists.
 
 ## 3. Operational modes and rollout decisions
 
+- Default cloud policy and NVIDIA cloud-first rollout remain off. Explicit
+  NVIDIA role configuration can use the measured model profiles and always
+  retains `qwen3:8b` as the local fallback.
+- `LOCAL` is always `qwen3:8b`; provider construction and runtime fallback are
+  visible in turn traces, including provider error types and rate-limit counts.
+- NVIDIA trial endpoints are evaluation-only under the cited trial terms. No
+  reliable public per-token production price or stable numeric account rate
+  limit was found; cost remains `unknown`.
 - Approval provenance, confirmation, safety, idempotency, execution-contract,
-  required-output, and Result Binding behavior are unchanged.
-- Mobile confirmation continuity behavior from `30071bc` remains intact.
+  required-output, and Result Binding behavior are otherwise unchanged.
 - No real Gmail, Calendar, Drive, or other external write was used.
 
 ## 4. Tests and CI
 
-Deterministic evidence collected on 2026-08-11:
+Evidence collected on 2026-08-11:
 
-- The new empty-STT regression failed before the fix with `ended !=
-  turn_complete`, then passed after the fix.
-- Focused voice tests reported `156 passed, 1 warning`.
-- Repository selector
-  `.venv\Scripts\python.exe scripts\dev_verify.py --base f4bd800225ef6ba3957f0d070743b0362ad21009 --run`
-  selected targeted verification, not full fallback. Diff check and Ruff
-  passed; pytest reported `221 passed, 5 deselected, 5 warnings`.
-- The five `voice_e2e` tests were deselected by the repository configuration;
-  no real Whisper benchmark was run while the machine was under unrelated
-  game/model load.
-- The first canonical full run had one unrelated Ollama embedding
-  `ReadTimeout`; its isolated retry passed. The successful rerun recorded
-  exact-tree evidence for `8ab0b10`: diff check and Ruff passed; pytest reported
-  `3526 passed, 5 deselected, 410 warnings in 798.21s`.
-- `git diff --check` passed.
+- Targeted provider/router/trace/scorer run
+  `.venv\Scripts\python.exe -m pytest -q tests\test_nvidia_provider.py tests\test_model_tournament.py tests\test_nvidia_tournament_scenarios.py tests\test_provider_router.py tests\test_cloud_policy.py tests\test_llm_trace.py tests\test_usage_tracker.py tests\test_no_synthetic_live_data.py tests\test_role_router.py`
+  reported `151 passed, 2 warnings`.
+- Required selector run
+  `.venv\Scripts\python.exe scripts\dev_verify.py --base fcc601b10dd41bb06322a3254aa6b273e6952a2d --run`
+  selected FULL PYTHON FALLBACK; diff check and Ruff passed, and pytest reported
+  `3551 passed, 5 deselected, 410 warnings in 594.21s`.
+- Canonical recorder run
+  `.venv\Scripts\python.exe scripts\dev_verify.py --full` passed and recorded
+  exact-tree evidence for `1fa49b5`: diff check and Ruff passed; pytest reported
+  `3551 passed, 5 deselected, 410 warnings in 564.42s`.
+- Independent `.venv\Scripts\python.exe -m ruff check jarvis scripts tests` and
+  `git diff --check` both passed.
+- Post-push GitHub CI has not yet judged this work. Read Python, Electron, and
+  Mobile jobs separately from the live run before closing the lifecycle marker.
 
 ## 5. Known open issues
 
-- A future real missed utterance still needs immediate stage-ladder capture to
-  determine whether any residual failure is device/PortAudio/queue, VAD and
-  segmentation, or Whisper. The historical symptom cannot be localized more
-  exactly from evidence that was never recorded.
+- No measured NVIDIA candidate is deployable. Super and GLM require a fix and
+  re-measurement of wrong-source behavior; Ultra requires diagnosis of why each
+  graph turn invokes local fallback before any cloud-first reconsideration.
+- Mistral Medium 3.5 was not available to this NVIDIA account.
+- NVIDIA production/commercial per-token pricing and numeric account rate
+  limits remain unknown; trial endpoints are not a production entitlement.
 - Mobile and Electron still do not persist and send a stable per-client
   `conversation_id` for every newly initiated chat/upload turn.
 - `MOBILE-ASSETS-01`: a clean clone lacks the gitignored font binaries required
   for a full mobile build/test. The wake-word ONNX model is also absent.
 - `chromadb` remains unpinned. Flutter defaults/version pinning and full
   selector coverage remain incomplete.
-- Source-binding coverage and mail/calendar live evidence remain deliberately
-  scoped; the real mailbox path was not exercised here.
 - `python_run` is confirmation-gated but not sandboxed. Proactive L2 behavior
   still relies on prompt-level mitigation.
 - `.Codex/worktrees/*` contains historical scratch worktrees with commits not
@@ -120,14 +105,14 @@ Deterministic evidence collected on 2026-08-11:
 
 ## 6. Next engineering priority
 
-Run one short, coordinated real-spoken PTT capture and inspect the stage ladder
-immediately if an utterance is missed. Replay retained test-safe audio through
-`WavAudioIO` only with owner consent; change VAD/STT behavior only after the
-counter boundary proves the responsible layer.
+Keep local routing in production. If NVIDIA evaluation resumes, first isolate
+Ultra's per-node fallback cause and Super's wrong-source case with the retained
+raw rows; re-run only after deterministic regressions cover those failures.
 
 ## 7. Human-required actions
 
-- Coordinate the short real-spoken PTT run for residual voice localization.
+- Obtain an NVIDIA production subscription and authoritative commercial quote
+  before any production traffic is enabled.
 - Complete Google OAuth re-consent when real Google integration testing resumes.
 - Supply or license the mobile font binaries needed for clean-clone builds.
 - Decide which Flutter version is canonical and whether Flutter tests join the
@@ -140,9 +125,9 @@ counter boundary proves the responsible layer.
 - Session identity is machine-authored. Never infer an ID or hand-write
   `current.json`, `close-marker.json`, or recovery JSON; use
   `scripts/claude_session_state.py` for lifecycle transitions.
-- The reusable full-verification record belongs to work commit `8ab0b10`, branch
-  `langgraph-migration`, and the current lifecycle identity. Verify it with the
-  helper before attempting to reuse it.
+- The reusable full-verification record belongs to work commit `1fa49b5`, branch
+  `langgraph-migration`, and the current lifecycle identity. The helper reported
+  it `REUSABLE` on 2026-08-11.
 - A correctly prepared close has exactly one documentation commit after the
-  covered work SHA. Derive marker and repository state live rather than trusting
-  remembered remote or CI state.
+  covered work SHA. Derive marker, repository, remote, and CI state live rather
+  than trusting remembered values.
