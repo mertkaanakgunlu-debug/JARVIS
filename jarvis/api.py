@@ -409,9 +409,10 @@ class StatusResponse(BaseModel):
     session_unpriced_tokens: int = 0
     # Patch 1.1 — clearer replacements for vertex_active's overloaded name.
     vertex_configured: bool | None = None
+    nvidia_configured: bool | None = None
     cloud_calls_allowed: bool | None = None
     # Features currently running in degraded (no-LLM) mode because the cloud
-    # policy (off/explicit) disabled their direct-Gemini call — see
+    # policy (off/explicit/roles) disabled their direct-Gemini call — see
     # jarvis/providers.degraded_features().
     degraded: list[str] = []
     # Faz 3.2 — the response-authoring call's own latency diagnostics, so a
@@ -1057,8 +1058,12 @@ async def status(request: Request):
         cloud_policy=policy,
         session_unpriced_tokens=agent.usage.session_unpriced_tokens,
         vertex_configured=agent.settings.use_vertex,
+        nvidia_configured=bool(
+            agent.settings.nvidia_api_key.get_secret_value()
+            and (agent.settings.nvidia_fast_model or agent.settings.nvidia_reasoning_model)
+        ),
         cloud_calls_allowed=(
-            policy == "auto"
+            policy in {"roles", "auto"}
             or (policy == "explicit" and agent.settings.pin_cloud_model)
         ),
         degraded=degraded_features(),

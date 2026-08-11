@@ -122,7 +122,9 @@ class UsageTracker:
         ollama="free", aistudio=Settings.ai_studio_billing_mode) — never
         guessed from the model name (the old "pro" substring guess priced
         local Ollama turns as Gemini Flash):
-          paid    — priced from _PRICING; provider=="vertex" also bumps
+          paid    — priced from _PRICING only for providers with a registered
+                    rate table (Vertex/AI Studio). Other providers remain
+                    visibly unpriced; provider=="vertex" also bumps
                     flash_turns/pro_turns, which gcp_quota.py uses for VERTEX
                     RPD-quota tracking specifically (a paid AI Studio call is
                     priced but must not pollute that Vertex counter).
@@ -146,14 +148,20 @@ class UsageTracker:
         reported = bool(tokens_in or tokens_out)
         cost = 0.0
         turn_key = None
-        if billing == "paid":
+        priced_provider = provider in {"vertex", "aistudio"}
+        if billing == "paid" and priced_provider:
             tier = _model_tier(model)
             rates = _PRICING[tier]
             cost = tokens_in * rates["in"] + tokens_out * rates["out"]
             if provider == "vertex":
                 turn_key = f"{tier}_turns"
-        unpriced_in = tokens_in if billing == "unknown" else 0
-        unpriced_out = tokens_out if billing == "unknown" else 0
+        # A provider can be known-billable while its per-token rate is not in
+        # this repository. NVIDIA hosted production pricing is currently in
+        # that class: track the tokens as unpriced instead of applying Gemini's
+        # table merely because both providers use the word "paid".
+        unpriced = billing == "unknown" or (billing == "paid" and not priced_provider)
+        unpriced_in = tokens_in if unpriced else 0
+        unpriced_out = tokens_out if unpriced else 0
 
         # Session counters are process-local by design (reset per JarvisAgent
         # instantiation) -- no cross-process sharing, safe to mutate directly.

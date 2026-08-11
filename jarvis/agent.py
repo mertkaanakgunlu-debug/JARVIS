@@ -962,6 +962,7 @@ class JarvisAgent:
                 "ollama": "Ollama, local",
                 "vertex": "Vertex",
                 "aistudio": "AI Studio",
+                "nvidia": "NVIDIA NIM",
             }.get(trace["provider"], trace["provider"])
             # Response-scoped on purpose (patch 1.1): the label describes the
             # call that authored the visible answer -- a critic/planner call
@@ -974,6 +975,8 @@ class JarvisAgent:
         s = self._effective_settings
 
         if self._last_turn_used_pro is None:
+            if s.nvidia_cloud_first and s.nvidia_fast_model:
+                return f"{s.nvidia_fast_model} (NVIDIA NIM)"
             if self._active_model_id:
                 return _label_for(self._active_model_id)
             if s.use_vertex:
@@ -981,6 +984,8 @@ class JarvisAgent:
             return s.cloud_model_label
 
         if self._last_turn_used_pro:
+            if s.nvidia_cloud_first and s.nvidia_reasoning_model:
+                return f"{s.nvidia_reasoning_model} (NVIDIA NIM, reasoning)"
             if s.use_vertex:
                 return f"{s.vertex_model_primary} (Vertex, reasoning)"
             return f"{s.cloud_model_fallback} (AI Studio, reasoning)"

@@ -222,16 +222,20 @@ def _print_banner(settings: Settings, monitor_active: bool = False) -> None:
     console.print(BANNER)
     console.print(Rule(style="gold3 dim"))
 
-    parts = [f"Local: [bold]{settings.local_model}[/bold]"]
+    parts = [f"Local/fallback: [bold]{settings.local_model}[/bold]"]
     policy = getattr(settings, "cloud_policy", "auto")
     if policy == "off":
         parts.append("Cloud: [dim]kapalı (CLOUD_POLICY=off)[/dim]")
     else:
-        cloud_model = (
-            settings.vertex_model_fast if settings.use_vertex
-            else settings.effective_cloud_model
-        )
-        tier = "Vertex" if settings.use_vertex else "AI Studio"
+        if settings.nvidia_cloud_first and settings.nvidia_fast_model:
+            cloud_model = settings.nvidia_fast_model
+            tier = "NVIDIA NIM"
+        else:
+            cloud_model = (
+                settings.vertex_model_fast if settings.use_vertex
+                else settings.effective_cloud_model
+            )
+            tier = "Vertex" if settings.use_vertex else "AI Studio"
         suffix = " (yalnız açık seçimde)" if policy == "explicit" else ""
         parts.append(f"Cloud: [bold]{cloud_model}[/bold] · {tier}{suffix}")
 
@@ -1421,11 +1425,13 @@ def run(voice: bool = False, wakeword: bool = False, ptt: bool = False, monitor:
     if (
         getattr(settings, "cloud_policy", "auto") != "off"
         and not settings.gemini_api_key
+        and not settings.nvidia_api_key.get_secret_value()
         and not settings.use_vertex
     ):
         console.print(
             "[yellow]Warning:[/yellow] CLOUD_POLICY is not 'off' but no cloud tier is "
-            "configured — set GEMINI_API_KEY or CLOUD_TIER=vertex in .env, or set "
+            "configured — set NVIDIA_API_KEY, GEMINI_API_KEY, or CLOUD_TIER=vertex "
+            "in .env, or set "
             "CLOUD_POLICY=off to run fully local."
         )
 

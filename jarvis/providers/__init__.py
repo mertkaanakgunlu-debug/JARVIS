@@ -1,27 +1,17 @@
-"""Model provider router — Faz 1 (local-first beyin + model router).
+"""Model provider router — local resilience with configurable cloud-first roles.
 
 Resolves a *role* to a concrete LangChain chat model, so graph.py and agent.py
 no longer construct `ChatGoogleGenerativeAI` directly. Roles:
 
-  fast / local / realtime — the routine executor tier. Ollama (settings.local_model,
-      e.g. qwen2.5:7b-instruct) is PRIMARY, via its OpenAI-compatible endpoint
-      (settings.ollama_api_url). Falls back to whatever cloud tiers are actually
-      configured, in order [Vertex Flash, AI Studio Flash], only on a real
-      invocation error (connection refused, model missing, etc.) — a reactive
-      `.with_fallbacks()` safety net, not the complexity-based routing below.
-      `realtime` and `local` are aliases of `fast` today; Faz 3 (local voice)
-      may give `realtime` its own latency-tuned construction later, and `local`
-      exists as an explicit "never escalate" role for future callers that need
-      to force on-device processing.
+  local — qwen3 via Ollama, always. This is the hard offline boundary.
 
-  reasoning — the escalation tier for hard reasoning (critic/planner/complex
-      queries): whatever cloud tiers are configured, in order [Vertex Pro,
-      AI Studio Gemini Flash], with local Ollama appended as the final
-      fallback. AI Studio targets cloud_model_fallback (gemini-2.5-flash,
-      1500 RPD free) and NOT cloud_model_pro (gemini-2.5-pro, 25 RPD free) —
-      the local-first pivot assumes Vertex credits are exhausted, so the
-      default escalation path must live within the free tier. See MEMORY.md's
-      "Direction: LOCAL-FIRST pivot".
+  fast / realtime — local-first by default. After a measured NVIDIA promotion,
+      nvidia_cloud_first puts the selected hosted FAST model first and keeps
+      qwen3 as the single observable invocation-error fallback.
+
+  reasoning — the escalation tier for critic/planner/complex queries. A
+      promoted NVIDIA REASONING winner is primary with qwen3 last; otherwise
+      the established Vertex/AI Studio ordering remains unchanged.
 
 Every cloud tier is CONSTRUCTED DEFENSIVELY: a tier that can't even be built
 (e.g. AI Studio with no GEMINI_API_KEY set) is logged and dropped from the
@@ -69,8 +59,6 @@ logger = logging.getLogger(__name__)
 
 Role = Literal["realtime", "reasoning", "fast", "local"]
 
-_LOCAL_ROLES = ("fast", "local", "realtime")
-
 _DEGRADED: set[str] = set()  # process-local; a feature warns at most once
 
 
@@ -83,6 +71,8 @@ def _cloud_allowed(settings: "Settings", *, pinned: bool = False) -> bool:
     explicit -> only when `pinned` (the caller is honoring an explicit user
                 selection -- switch_model()/pin_cloud_model), never for
                 automatic fallback/escalation.
+    roles    -> automatic role models/fallbacks, but no direct background
+                extractors (enforced by cloud_extractors_enabled()).
     auto     -> always -- pre-sprint behavior, unchanged.
     """
     policy = getattr(settings, "cloud_policy", "auto")
@@ -122,7 +112,7 @@ def note_degraded(feature: str) -> None:
     if feature not in _DEGRADED:
         _DEGRADED.add(feature)
         logger.warning(
-            "router: %s disabled by CLOUD_POLICY (off/explicit) -- degraded, "
+            "router: %s disabled by CLOUD_POLICY (off/explicit/roles) -- degraded, "
             "returning its empty/no-op result instead of a silent unlogged skip",
             feature,
         )
@@ -153,7 +143,7 @@ class _Tier:
     tokens, never silently asserted free (AI Studio's default).
     """
     model: BaseChatModel
-    provider: str    # "ollama" | "vertex" | "aistudio"
+    provider: str    # "ollama" | "vertex" | "aistudio" | "nvidia"
     model_id: str
     billing: str     # "free" | "paid" | "unknown"
 
@@ -198,7 +188,10 @@ def _safe_construct(label: str, factory):
     try:
         return factory()
     except Exception as exc:
-        logger.info("router: %s unavailable, skipping (%s)", label, exc)
+        # Constructor errors can include a provider client's repr. Keep enough
+        # for diagnosis without ever risking an Authorization credential in a
+        # log line.
+        logger.info("router: %s unavailable, skipping (%s)", label, type(exc).__name__)
         return None
 
 
@@ -230,6 +223,61 @@ def _make_local(
     return _Tier(model, "ollama", settings.local_model, billing="free")
 
 
+def _make_nvidia(
+    settings: "Settings",
+    model_id: str,
+    max_output_tokens: int,
+    *,
+    role: Literal["fast", "reasoning"],
+) -> _Tier:
+    """Construct one hosted NVIDIA NIM through the existing ChatOpenAI path."""
+    from langchain_openai import ChatOpenAI
+
+    from jarvis.providers.nvidia import request_profile
+
+    profile = request_profile(model_id, role)
+    api_key = settings.nvidia_api_key.get_secret_value()
+    extra_body = dict(profile.extra_body)
+    if profile.use_reasoning_budget:
+        extra_body["reasoning_budget"] = max_output_tokens
+    model = ChatOpenAI(
+        model=model_id,
+        base_url=settings.nvidia_base_url,
+        api_key=api_key,
+        max_tokens=max_output_tokens,
+        temperature=profile.temperature,
+        top_p=profile.top_p,
+        seed=profile.seed,
+        reasoning_effort=profile.reasoning_effort,
+        extra_body=extra_body or None,
+        timeout=settings.nvidia_timeout_sec,
+        max_retries=settings.nvidia_max_retries,
+        stream_usage=True,
+    )
+    return _Tier(
+        model,
+        "nvidia",
+        model_id,
+        billing=getattr(settings, "nvidia_billing_mode", "unknown"),
+    )
+
+
+def _nvidia_tier(
+    settings: "Settings", max_output_tokens: int, *, pro: bool,
+) -> _Tier | None:
+    """Build the configured role winner, or no tier for a local-only setup."""
+    if not settings.nvidia_api_key.get_secret_value():
+        return None
+    model_id = settings.nvidia_reasoning_model if pro else settings.nvidia_fast_model
+    if not model_id:
+        return None
+    role: Literal["fast", "reasoning"] = "reasoning" if pro else "fast"
+    return _safe_construct(
+        f"nvidia:{model_id}",
+        lambda: _make_nvidia(settings, model_id, max_output_tokens, role=role),
+    )
+
+
 def _cloud_tiers(
     settings: "Settings", max_output_tokens: int, *, pro: bool, pinned: bool = False,
 ) -> list[_Tier]:
@@ -252,6 +300,9 @@ def _cloud_tiers(
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     tiers: list[_Tier] = []
+    nvidia = _nvidia_tier(settings, max_output_tokens, pro=pro)
+    if nvidia is not None:
+        tiers.append(nvidia)
     if settings.use_vertex:
         vertex_model = settings.vertex_model_primary if pro else settings.vertex_model_fast
         m = _safe_construct(f"vertex:{vertex_model}", lambda: ChatGoogleGenerativeAI(
@@ -324,7 +375,17 @@ def get_llm(
     reasoning → configured cloud tiers first, local Ollama as the final
     fallback — local-first means NOTHING is cloud-mandatory, including escalation.
     """
-    if role in _LOCAL_ROLES:
+    if role == "local":
+        # LOCAL/OFFLINE is a hard provider boundary, not a hint. It never
+        # honors a cloud pin and never appends a cloud fallback.
+        effort = getattr(settings, "local_reasoning_effort", "none") or None
+        return _compose(
+            [_make_local(settings, max_output_tokens or 4096, reasoning_effort=effort)],
+            tools,
+            role,
+        )
+
+    if role in ("fast", "realtime"):
         if settings.pin_cloud_model:
             pinned_tiers = _pinned_cloud_tiers(settings, max_output_tokens or 4096)
             if pinned_tiers:
@@ -337,19 +398,47 @@ def get_llm(
         # Faz 3: routine local turns (tool execution, simple chat) run with the
         # thinking channel off — the big latency win, tool-calling unaffected.
         effort = getattr(settings, "local_reasoning_effort", "none") or None
-        tiers = [_make_local(settings, max_output_tokens or 4096, reasoning_effort=effort)]
-        tiers += _cloud_tiers(settings, max_output_tokens or 4096, pro=False)
-        logger.info("router: role=%s -> local:%s (effort=%s, cloud fallback tiers: %d)",
-                    role, settings.local_model, effort, len(tiers) - 1)
+        local = _make_local(settings, max_output_tokens or 4096, reasoning_effort=effort)
+        cloud = _cloud_tiers(settings, max_output_tokens or 4096, pro=False)
+        nvidia_first = bool(getattr(settings, "nvidia_cloud_first", False))
+        if nvidia_first and cloud and cloud[0].provider == "nvidia":
+            # A measured promotion gets one observable, deterministic fallback:
+            # the selected NIM winner -> qwen3 local. Gemini extractors and
+            # unrelated cloud tiers are not silently enabled by this switch.
+            tiers = [cloud[0], local]
+        else:
+            tiers = [local, *cloud]
+        if nvidia_first and cloud and cloud[0].provider == "nvidia":
+            logger.info(
+                "router: role=%s -> nvidia:%s then local:%s",
+                role,
+                cloud[0].model_id,
+                settings.local_model,
+            )
+        else:
+            logger.info("router: role=%s -> local:%s (effort=%s, cloud fallback tiers: %d)",
+                        role, settings.local_model, effort, len(tiers) - 1)
         return _compose(tiers, tools, role)
 
     if role == "reasoning":
         cloud = _cloud_tiers(settings, max_output_tokens or 2048, pro=True)
         # The reasoning-role local fallback keeps full thinking — it's the tier
         # you want deliberate reasoning from when no cloud is configured.
-        tiers = cloud + [_make_local(settings, max_output_tokens or 2048)]  # local Ollama is always the last resort
-        logger.info("router: role=%s -> %d cloud tier(s) then local:%s",
-                    role, len(cloud), settings.local_model)
+        local = _make_local(settings, max_output_tokens or 2048)
+        if (
+            getattr(settings, "nvidia_cloud_first", False)
+            and cloud
+            and cloud[0].provider == "nvidia"
+        ):
+            tiers = [cloud[0], local]
+        else:
+            tiers = cloud + [local]  # local Ollama is always the last resort
+        logger.info(
+            "router: role=%s -> %s then local:%s",
+            role,
+            ",".join(t.model_id for t in tiers[:-1]) or "no cloud",
+            settings.local_model,
+        )
         return _compose(tiers, tools, role)
 
     raise ValueError(f"Unknown provider role: {role!r}")

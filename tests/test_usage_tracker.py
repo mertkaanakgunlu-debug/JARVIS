@@ -211,6 +211,22 @@ def test_paid_aistudio_is_priced_but_does_not_bump_vertex_turn_counters(tmp_path
     assert tracker.session_unpriced_tokens == 0
 
 
+def test_paid_nvidia_tokens_are_unpriced_without_a_published_rate_table(tmp_path):
+    tracker = UsageTracker(tmp_path / "usage.json")
+    _record(
+        tracker,
+        provider="nvidia",
+        model="nvidia/nemotron-3-super-120b-a12b",
+        tokens_in=1200,
+        tokens_out=300,
+        billing="paid",
+    )
+
+    assert tracker.session_cost == 0.0
+    assert tracker.session_unpriced_tokens == 1500
+    assert tracker._session["by_provider"]["nvidia"]["calls"] == 1
+
+
 # ── by_provider breakdown ──────────────────────────────────────────────────────
 
 def test_by_provider_breakdown_tracks_calls_and_tokens_per_provider(tmp_path):

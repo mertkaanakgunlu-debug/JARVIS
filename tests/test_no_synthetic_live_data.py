@@ -153,9 +153,11 @@ def test_provider_labels_have_one_home():
 
     assert label_for_provider("ollama") == "Ollama"
     assert label_for_provider("local") == "Ollama"      # both vocabularies
+    assert label_for_provider("nvidia") == "NVIDIA NIM"
     assert label_for_provider("") == NO_VALUE
     assert label_for_provider(None) == NO_VALUE
     assert describe_model("ollama", "qwen3:8b") == "qwen3:8b · Ollama"
+    assert describe_model("nvidia", "z-ai/glm-5.2") == "z-ai/glm-5.2 · NVIDIA NIM"
     assert describe_model(None, None) == NO_VALUE       # no turn yet -> no claim
 
     cli_src = _strip_comments_py(_read(REPO / "jarvis" / "cli.py"))

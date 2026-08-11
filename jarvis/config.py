@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +23,18 @@ class Settings(BaseSettings):
     )
 
     gemini_api_key: str = ""
+    # NVIDIA hosted NIM. Empty credentials/models are a supported local-only
+    # configuration and must not prevent Settings or the graph from building.
+    nvidia_api_key: SecretStr = SecretStr("")
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_fast_model: str = ""
+    nvidia_reasoning_model: str = ""
+    # Rollback switch: false restores the established local-first order even
+    # when promoted NVIDIA model ids remain configured.
+    nvidia_cloud_first: bool = False
+    nvidia_billing_mode: Literal["free", "paid", "unknown"] = "unknown"
+    nvidia_timeout_sec: float = 90.0
+    nvidia_max_retries: int = 1
     tavily_api_key: str = ""
     firecrawl_api_key: str = ""   # Optional — enhances url_read/deep_web_research for JS-heavy sites
     groq_api_key: str = ""
@@ -250,9 +263,13 @@ class Settings(BaseSettings):
     #              extractor may construct/invoke a cloud model. Default —
     #              deliberate, matches the owner's live-tested decision.
     #   explicit — cloud only via a manual pin (switch_model()/pin_cloud_model).
-    #   auto     — today's pre-sprint behavior: routing/fallback decide freely.
+    #   roles    — role routing/fallback may use cloud, but legacy direct-Gemini
+    #              background extractors stay disabled. This is the NVIDIA
+    #              cloud-first production mode.
+    #   auto     — today's pre-sprint behavior: routing/fallback and legacy
+    #              background extractors decide freely.
     # Existing setups: add CLOUD_POLICY=auto to .env to restore prior behavior.
-    cloud_policy: Literal["off", "explicit", "auto"] = "off"
+    cloud_policy: Literal["off", "explicit", "roles", "auto"] = "off"
 
     # Patch 1.1: what an AI Studio (Gemini Developer API) call costs. A key
     # can be free-tier OR paid (prepaid credits / pay-as-you-go) and the

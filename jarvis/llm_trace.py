@@ -56,6 +56,8 @@ class LlmCallTrace:
     # reasoning-token breakdown — verified live, 2026-07-18).
     ttft_ms: float | None = None
     cold_start: bool = False
+    error_type: str = ""
+    rate_limited: bool = False
 
 
 # Faz 3.2 — process-lifetime "have we completed a call to this (provider,
@@ -174,6 +176,8 @@ class LlmTraceRecorder(BaseCallbackHandler):
         if info is None:
             return
         billing = info.get("billing", "unknown")
+        error_type = type(error).__name__
+        error_folded = str(error).casefold()
         self.traces.append(LlmCallTrace(
             provider=info.get("provider", "unknown"),
             model=info.get("model", ""),
@@ -187,6 +191,13 @@ class LlmTraceRecorder(BaseCallbackHandler):
             ok=False,
             ttft_ms=info.get("ttft"),
             cold_start=bool(info.get("cold_start", False)),
+            error_type=error_type,
+            rate_limited=(
+                error_type == "RateLimitError"
+                or "429" in error_folded
+                or "rate limit" in error_folded
+                or "resource_exhausted" in error_folded
+            ),
         ))
 
     # ── extraction ────────────────────────────────────────────────────────────
@@ -262,6 +273,8 @@ class LlmTraceRecorder(BaseCallbackHandler):
             "fallback_used": response_fallback_used,
             "response_fallback_used": response_fallback_used,
             "turn_had_any_fallback": turn_had_any_fallback,
+            "provider_error_types": [t.error_type for t in self.traces if t.error_type],
+            "rate_limit_errors": sum(t.rate_limited for t in self.traces),
             "calls": len(self.traces),
             "input_tokens": sum(t.input_tokens for t in ok_calls),
             "output_tokens": sum(t.output_tokens for t in ok_calls),

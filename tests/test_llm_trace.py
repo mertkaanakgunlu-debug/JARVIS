@@ -89,6 +89,8 @@ def test_failed_primary_then_fallback_success_marks_fallback_used():
     assert summary["response_fallback_used"] is True
     assert summary["turn_had_any_fallback"] is True
     assert summary["billable"] is False
+    assert summary["provider_error_types"] == ["RuntimeError"]
+    assert summary["rate_limit_errors"] == 1
 
 
 # ── Patch 1.1: response-scoped vs turn-scoped fallback ────────────────────────

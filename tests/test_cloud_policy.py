@@ -91,6 +91,17 @@ class TestPolicyAutoUnchanged:
         assert llm.runnable.model == "gemini-2.5-pro"  # vertex_model_primary tier
 
 
+class TestPolicyRolesOnly:
+    def test_roles_policy_allows_automatic_role_cloud(self):
+        settings = _settings(cloud_policy="roles")
+        llm = get_llm("reasoning", settings)
+        assert isinstance(llm, RunnableWithFallbacks)
+        assert llm.runnable.model == "gemini-2.5-pro"
+
+    def test_roles_policy_does_not_enable_background_extractors(self):
+        assert cloud_extractors_enabled(_settings(cloud_policy="roles")) is False
+
+
 # ── cloud_extractors_enabled / note_degraded / degraded_features ─────────────
 
 def test_cloud_extractors_enabled_false_under_off():

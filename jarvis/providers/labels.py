@@ -31,6 +31,7 @@ _PROVIDER_LABELS: dict[str, str] = {
     "ollama": "Ollama",
     "vertex": "Vertex",
     "aistudio": "AI Studio",
+    "nvidia": "NVIDIA NIM",
     # model-menu vocabulary — jarvis/agent.py's AVAILABLE_MODELS
     "local": "Ollama",
     "groq": "Groq",
