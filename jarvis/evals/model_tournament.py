@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 
 SCORER_VERSION = 2
+HARNESS_VERSION = 2
 FAST_P90_CEILING_MS = 15_000.0
 FAST_MATERIAL_QUALITY_GAP_PCT = 5.0
 PROMOTION_MIN_GAIN_PCT = 5.0
@@ -25,6 +26,13 @@ HARD_BLOCKERS = (
     "unknown_to_success",
     "wrong_source_satisfaction",
 )
+
+MODEL_TIMEOUT_PHRASE = "model didn't respond within"
+
+
+def is_model_timeout(text: str) -> bool:
+    """Whether the graph returned its code-authored provider timeout receipt."""
+    return MODEL_TIMEOUT_PHRASE in text.casefold()
 
 
 def reports_failure(text: str) -> bool:

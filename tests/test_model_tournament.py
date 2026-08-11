@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from jarvis.evals.model_tournament import (
     SCORER_VERSION,
+    is_model_timeout,
     normalize_tool_args,
     reports_failure,
     select_winners,
@@ -18,6 +19,13 @@ def test_scorer_v2_recognizes_truthful_not_there_failure():
     )
     assert SCORER_VERSION == 2
     assert reports_failure(answer) is True
+
+
+def test_code_authored_model_timeout_is_never_a_product_success():
+    assert is_model_timeout(
+        "I'm sorry, the model didn't respond within 90 seconds -- please try again."
+    )
+    assert not is_model_timeout("The weather tool timed out.")
 
 
 def _row(model: str, **overrides) -> dict:

@@ -38,7 +38,9 @@ import jarvis.graph.tools as graph_tools  # noqa: E402
 from jarvis.config import Settings  # noqa: E402
 from jarvis.evals.model_tournament import (  # noqa: E402
     ModelSummary,
+    HARNESS_VERSION,
     SCORER_VERSION,
+    is_model_timeout,
     normalize_tool_args,
     reports_failure,
     select_winners,
@@ -487,17 +489,20 @@ async def run_trial(model: str, scenario: TournamentScenario, run_index: int, st
     ) != len({(effect["kind"], effect["action"]) for effect in SERVICES.effects})
     unknown = any(row.get("outcome") == "unknown" for row in ledger)
     trace = agent.last_turn_trace or {}
-    task_success = _score_success(scenario, actual, values, answer)
+    model_timeout = is_model_timeout(answer)
+    task_success = not model_timeout and _score_success(scenario, actual, values, answer)
     fallback_used = bool(trace.get("turn_had_any_fallback"))
     intended_provider = "ollama" if model == BASELINE_MODEL else "nvidia"
     primary_model_succeeded = (
         trace.get("provider") == intended_provider
         and trace.get("model") == model
         and not fallback_used
+        and not model_timeout
     )
     row = {
         "stage": stage,
         "scorer_version": SCORER_VERSION,
+        "harness_version": HARNESS_VERSION,
         "model": model,
         "scenario_id": scenario.id,
         "run": run_index,
@@ -533,7 +538,8 @@ async def run_trial(model: str, scenario: TournamentScenario, run_index: int, st
         "fallback_used": fallback_used,
         "fallback_events": trace.get("fallback_events") or [],
         "rate_limited": bool(trace.get("rate_limit_errors")) or error == "RateLimitError",
-        "error_type": error,
+        "model_timeout": model_timeout,
+        "error_type": error or ("ModelTimeout" if model_timeout else ""),
         "answer_preview": answer[:300],
     }
     return row
@@ -631,6 +637,7 @@ async def _run_corrective_phase(
             "scenario_ids": list(scenario_ids),
             "runs": protocol["runs"],
             "scorer_version": SCORER_VERSION,
+            "harness_version": HARNESS_VERSION,
             "synthetic_services": True,
             "nvidia_billing": "unknown",
         },
@@ -689,6 +696,7 @@ async def main() -> int:
         metadata={
             "gate": "nvidia-model-tournament",
             "scorer_version": SCORER_VERSION,
+            "harness_version": HARNESS_VERSION,
             "head": head_commit(),
             "available_requested_models": candidates,
             "unavailable_requested_models": unavailable,
