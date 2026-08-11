@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 from jarvis.evals.model_tournament import (
+    SCORER_VERSION,
     normalize_tool_args,
+    reports_failure,
     select_winners,
     summarize_model,
 )
+
+
+def test_scorer_v2_recognizes_truthful_not_there_failure():
+    answer = (
+        "I checked the Desktop folder but missing-en.txt is not there. "
+        "<tool_call><function=shell_run></function></tool_call>"
+    )
+    assert SCORER_VERSION == 2
+    assert reports_failure(answer) is True
 
 
 def _row(model: str, **overrides) -> dict:

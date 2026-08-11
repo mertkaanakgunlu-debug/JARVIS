@@ -166,7 +166,7 @@ SCENARIOS: tuple[TournamentScenario, ...] = (
         "tr",
         (
             ExpectedTool("google_drive", {"action": "search", "query": {"$contains": ["Q3"]}}),
-            ExpectedTool("google_drive", {"action": "download", "file_id": "drive-q3"}),
+            ExpectedTool("google_drive", {"action": "read", "file_id": "drive-q3"}),
         ),
         complex=True,
         tags=("drive", "multi-step"),

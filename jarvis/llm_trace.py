@@ -43,6 +43,7 @@ class LlmCallTrace:
     input_tokens: int
     output_tokens: int
     ok: bool
+    role: str = ""       # requested provider role stamped by providers.get_llm
     # Faz 3.2 — latency diagnostics for the thinking-on/off A/B. ttft_ms is
     # None (not 0) for non-streaming calls (/chat's ainvoke path never fires
     # on_llm_new_token) — an honest "not measured", not a fabricated value
@@ -57,7 +58,39 @@ class LlmCallTrace:
     ttft_ms: float | None = None
     cold_start: bool = False
     error_type: str = ""
+    error_category: str = ""
+    http_status: int | None = None
     rate_limited: bool = False
+
+
+def _safe_error_facts(error: BaseException) -> tuple[str, int | None, bool]:
+    """Classify an invocation error without reading its body or rendering it.
+
+    Provider exception strings and response bodies can contain request data.
+    Only the exception class and a validated integer HTTP status are used.
+    """
+    error_type = type(error).__name__
+    raw_status = getattr(error, "status_code", None)
+    status = raw_status if isinstance(raw_status, int) and 100 <= raw_status <= 599 else None
+    folded_type = error_type.casefold()
+    rate_limited = status == 429 or "ratelimit" in folded_type
+    if rate_limited:
+        category = "rate_limit"
+    elif status in {401, 403} or "authentication" in folded_type or "permission" in folded_type:
+        category = "authentication"
+    elif status == 408 or "timeout" in folded_type:
+        category = "timeout"
+    elif status == 400 or "badrequest" in folded_type:
+        category = "bad_request"
+    elif status is not None and status >= 500:
+        category = "provider_unavailable"
+    elif "connection" in folded_type:
+        category = "connection"
+    elif "lengthfinishreason" in folded_type:
+        category = "response_length"
+    else:
+        category = "unknown"
+    return category, status, rate_limited
 
 
 # Faz 3.2 — process-lifetime "have we completed a call to this (provider,
@@ -119,6 +152,7 @@ class LlmTraceRecorder(BaseCallbackHandler):
             "billing": billing,
             "tier_index": int(md.get("jarvis_tier_index", 0)),
             "node": md.get("langgraph_node", ""),
+            "role": md.get("jarvis_role", self.requested_role),
             "started": time.monotonic(),
             "cold_start": cold,
             "ttft": None,  # Faz 3.2: set by on_llm_new_token if the call streams
@@ -151,6 +185,7 @@ class LlmTraceRecorder(BaseCallbackHandler):
             billing=billing,
             tier_index=int((info or {}).get("tier_index", 0)),
             node=(info or {}).get("node", ""),
+            role=(info or {}).get("role", self.requested_role),
             latency_ms=(time.monotonic() - started) * 1000.0 if started else 0.0,
             input_tokens=tokens_in,
             output_tokens=tokens_out,
@@ -177,7 +212,7 @@ class LlmTraceRecorder(BaseCallbackHandler):
             return
         billing = info.get("billing", "unknown")
         error_type = type(error).__name__
-        error_folded = str(error).casefold()
+        error_category, http_status, rate_limited = _safe_error_facts(error)
         self.traces.append(LlmCallTrace(
             provider=info.get("provider", "unknown"),
             model=info.get("model", ""),
@@ -185,6 +220,7 @@ class LlmTraceRecorder(BaseCallbackHandler):
             billing=billing,
             tier_index=int(info.get("tier_index", 0)),
             node=info.get("node", ""),
+            role=info.get("role", self.requested_role),
             latency_ms=(time.monotonic() - info["started"]) * 1000.0,
             input_tokens=0,
             output_tokens=0,
@@ -192,12 +228,9 @@ class LlmTraceRecorder(BaseCallbackHandler):
             ttft_ms=info.get("ttft"),
             cold_start=bool(info.get("cold_start", False)),
             error_type=error_type,
-            rate_limited=(
-                error_type == "RateLimitError"
-                or "429" in error_folded
-                or "rate limit" in error_folded
-                or "resource_exhausted" in error_folded
-            ),
+            error_category=error_category,
+            http_status=http_status,
+            rate_limited=rate_limited,
         ))
 
     # ── extraction ────────────────────────────────────────────────────────────
@@ -263,6 +296,35 @@ class LlmTraceRecorder(BaseCallbackHandler):
             any(t.tier_index > 0 for t in ok_calls)
             or any(not t.ok for t in self.traces)
         )
+        fallback_events = []
+        for index, failed in enumerate(self.traces):
+            if failed.ok:
+                continue
+            fallback = next(
+                (
+                    candidate
+                    for candidate in self.traces[index + 1:]
+                    if candidate.ok
+                    and candidate.node == failed.node
+                    and candidate.role == failed.role
+                    and candidate.tier_index > failed.tier_index
+                ),
+                None,
+            )
+            if fallback is None:
+                continue
+            fallback_events.append({
+                "provider": failed.provider,
+                "model": failed.model,
+                "fallback_provider": fallback.provider,
+                "fallback_model": fallback.model,
+                "graph_node": failed.node,
+                "role": failed.role,
+                "exception_type": failed.error_type,
+                "error_category": failed.error_category,
+                "http_status": failed.http_status,
+                "retry_fallback_tier": fallback.tier_index,
+            })
         return {
             "requested_role": self.requested_role,
             "role_reason": self.role_reason,
@@ -275,6 +337,7 @@ class LlmTraceRecorder(BaseCallbackHandler):
             "turn_had_any_fallback": turn_had_any_fallback,
             "provider_error_types": [t.error_type for t in self.traces if t.error_type],
             "rate_limit_errors": sum(t.rate_limited for t in self.traces),
+            "fallback_events": fallback_events,
             "calls": len(self.traces),
             "input_tokens": sum(t.input_tokens for t in ok_calls),
             "output_tokens": sum(t.output_tokens for t in ok_calls),

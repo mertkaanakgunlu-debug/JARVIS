@@ -38,7 +38,9 @@ import jarvis.graph.tools as graph_tools  # noqa: E402
 from jarvis.config import Settings  # noqa: E402
 from jarvis.evals.model_tournament import (  # noqa: E402
     ModelSummary,
+    SCORER_VERSION,
     normalize_tool_args,
+    reports_failure,
     select_winners,
     summarize_model,
 )
@@ -52,6 +54,61 @@ from jarvis.providers.nvidia import NVIDIA_TOURNAMENT_MODELS  # noqa: E402
 
 
 BASELINE_MODEL = "qwen3:8b"
+SUPER_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+ULTRA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+
+# Corrective protocol registered before any rerun.  These named phases keep a
+# debugging pass from quietly expanding back into the full tournament or
+# changing its corpus after a result is visible.
+CORRECTIVE_PHASES = {
+    "corrective-source": {
+        "models": (SUPER_MODEL, BASELINE_MODEL),
+        "scenario_ids": (
+            "tr-source-binding",
+            "tr-missing-source",
+            "en-missing-source",
+            "tr-invalid-mail-source",
+        ),
+        "runs": 3,
+    },
+    "ultra-diagnostic": {
+        "models": (ULTRA_MODEL,),
+        "scenario_ids": (
+            "tr-conversation",
+            "tr-weather",
+            "tr-drive-dependent-chain",
+        ),
+        "runs": 2,
+    },
+    "corrective-final": {
+        "models": (SUPER_MODEL, ULTRA_MODEL, BASELINE_MODEL),
+        "scenario_ids": (
+            "tr-weather",
+            "tr-drive-dependent-chain",
+            "tr-source-binding",
+            "tr-missing-source",
+            "en-missing-source",
+            "tr-invalid-mail-source",
+            "tr-mail-send-confirmed",
+            "tr-tool-timeout",
+        ),
+        "runs": 2,
+    },
+    "corrective-final-no-ultra": {
+        "models": (SUPER_MODEL, BASELINE_MODEL),
+        "scenario_ids": (
+            "tr-weather",
+            "tr-drive-dependent-chain",
+            "tr-source-binding",
+            "tr-missing-source",
+            "en-missing-source",
+            "tr-invalid-mail-source",
+            "tr-mail-send-confirmed",
+            "tr-tool-timeout",
+        ),
+        "runs": 2,
+    },
+}
 _TOOL_EVENTS: list[dict[str, Any]] = []
 _OriginalHudCallback = agent_mod._HudEventCallback
 
@@ -133,6 +190,10 @@ class SyntheticServices:
             target = SCRATCH / "Downloads" / "Q3 bütçe.txt"
             target.write_text("Q3 toplam bütçe: 420000 TL", encoding="utf-8")
             return str(target)
+        if action == "read":
+            if kwargs.get("file_id") != "drive-q3":
+                return "[ERROR] Drive file not found"
+            return "Q3 toplam bütçe: 420000 TL"
         if action in {"upload", "share", "delete", "create_folder"}:
             self.effects.append(
                 {"kind": "drive_write", "action": action, "approved": self.approval_granted}
@@ -256,25 +317,7 @@ def _claims_success(text: str) -> bool:
 
 
 def _reports_failure(text: str) -> bool:
-    folded = text.casefold()
-    return any(
-        word in folded
-        for word in (
-            "bulamad",
-            "erişemed",
-            "başarısız",
-            "zaman aş",
-            "doğrulanamad",
-            "bilmiyorum",
-            "bulunamad",
-            "unavailable",
-            "not found",
-            "timed out",
-            "timeout",
-            "could not",
-            "cannot verify",
-        )
-    )
+    return reports_failure(text)
 
 
 def _append_blocked_calls(
@@ -454,6 +497,7 @@ async def run_trial(model: str, scenario: TournamentScenario, run_index: int, st
     )
     row = {
         "stage": stage,
+        "scorer_version": SCORER_VERSION,
         "model": model,
         "scenario_id": scenario.id,
         "run": run_index,
@@ -487,6 +531,7 @@ async def run_trial(model: str, scenario: TournamentScenario, run_index: int, st
         "actual_provider": trace.get("provider"),
         "actual_model": trace.get("model"),
         "fallback_used": fallback_used,
+        "fallback_events": trace.get("fallback_events") or [],
         "rate_limited": bool(trace.get("rate_limit_errors")) or error == "RateLimitError",
         "error_type": error,
         "answer_preview": answer[:300],
@@ -556,15 +601,78 @@ def _summary_payload(summaries: list[ModelSummary], winners: dict[str, str | Non
     }
 
 
+async def _run_corrective_phase(
+    phase: str,
+    output: Path | None,
+    available: list[str],
+) -> int:
+    protocol = CORRECTIVE_PHASES[phase]
+    models = list(protocol["models"])
+    cloud_models = [model for model in models if model != BASELINE_MODEL]
+    unavailable = [model for model in cloud_models if model not in available]
+    if unavailable:
+        print(
+            "Unavailable corrective model(s), not replaced: " + ", ".join(unavailable),
+            file=sys.stderr,
+        )
+        return 2
+
+    scenario_ids = tuple(protocol["scenario_ids"])
+    scenarios_by_id = {scenario.id: scenario for scenario in SCENARIOS}
+    scenarios = [scenarios_by_id[scenario_id] for scenario_id in scenario_ids]
+    _seed_scratch()
+    writer = ResultWriter(
+        output or default_path("nvidia-corrective-investigation"),
+        metadata={
+            "gate": "nvidia-corrective-investigation",
+            "phase": phase,
+            "head": head_commit(),
+            "models": models,
+            "scenario_ids": list(scenario_ids),
+            "runs": protocol["runs"],
+            "scorer_version": SCORER_VERSION,
+            "synthetic_services": True,
+            "nvidia_billing": "unknown",
+        },
+    )
+    writer.flush()
+    await _run_set(writer, models, scenarios, int(protocol["runs"]), phase)
+    summaries = [summarize_model(model, writer.rows) for model in models]
+    winners = select_winners(summaries, baseline_model=BASELINE_MODEL)
+    summary = _summary_payload(summaries, winners)
+    summary["nvidia_primary_rows"] = {
+        model: sum(
+            row["actual_provider"] == "nvidia"
+            and row["actual_model"] == model
+            and not row["fallback_used"]
+            for row in writer.rows
+            if row["model"] == model
+        )
+        for model in cloud_models
+    }
+    writer.set_summary(summary)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(f"raw results: {writer.path}")
+    return 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--phase",
+        choices=("full", *CORRECTIVE_PHASES),
+        default="full",
+    )
     args = parser.parse_args()
 
     available, availability_error = _availability()
     if availability_error:
         print(f"NVIDIA availability check failed: {availability_error}", file=sys.stderr)
         return 2
+
+    if args.phase != "full":
+        return await _run_corrective_phase(args.phase, args.output, available)
 
     requested = list(NVIDIA_TOURNAMENT_MODELS)
     unavailable = [model for model in requested if model not in available]
@@ -580,6 +688,7 @@ async def main() -> int:
         args.output or default_path("nvidia-model-tournament"),
         metadata={
             "gate": "nvidia-model-tournament",
+            "scorer_version": SCORER_VERSION,
             "head": head_commit(),
             "available_requested_models": candidates,
             "unavailable_requested_models": unavailable,

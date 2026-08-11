@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from jarvis.evals.nvidia_scenarios import SCENARIOS, SMOKE_SCENARIO_IDS
 
 
@@ -49,3 +51,17 @@ def test_finalist_subset_contains_every_hard_safety_shape():
     effects = {scenario.expected_effect for scenario in critical}
     assert {"calendar_created", "mail_sent", "no_external_write", "tool_failure", "unknown"} <= effects
     assert any(scenario.complex for scenario in critical)
+
+
+def test_dependent_drive_chain_uses_the_documented_read_action():
+    scenario = next(item for item in SCENARIOS if item.id == "tr-drive-dependent-chain")
+    assert [item.name for item in scenario.expected_tools] == ["google_drive", "google_drive"]
+    assert [item.args["action"] for item in scenario.expected_tools] == ["search", "read"]
+
+
+def test_synthetic_drive_backend_supports_the_scenario_read_action():
+    harness = (Path(__file__).parents[1] / "scripts" / "nvidia_model_tournament.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'if action == "read":' in harness
+    assert 'return "Q3 toplam bütçe: 420000 TL"' in harness

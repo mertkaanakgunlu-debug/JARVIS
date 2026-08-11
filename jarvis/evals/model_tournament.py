@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
 
+SCORER_VERSION = 2
 FAST_P90_CEILING_MS = 15_000.0
 FAST_MATERIAL_QUALITY_GAP_PCT = 5.0
 PROMOTION_MIN_GAIN_PCT = 5.0
@@ -24,6 +25,36 @@ HARD_BLOCKERS = (
     "unknown_to_success",
     "wrong_source_satisfaction",
 )
+
+
+def reports_failure(text: str) -> bool:
+    """Recognize explicit failure language used by the tournament scorer.
+
+    This remains deliberately lexical and deterministic.  In scorer v1 the
+    English missing-source answer ``"missing-en.txt is not there"`` was not in
+    the vocabulary, so a truthful failure plus leaked, unexecuted tool markup
+    was misclassified as both false success and wrong-source satisfaction.
+    """
+    folded = text.casefold()
+    return any(
+        phrase in folded
+        for phrase in (
+            "bulamad",
+            "erişemed",
+            "başarısız",
+            "zaman aş",
+            "doğrulanamad",
+            "bilmiyorum",
+            "bulunamad",
+            "unavailable",
+            "not found",
+            "not there",
+            "timed out",
+            "timeout",
+            "could not",
+            "cannot verify",
+        )
+    )
 
 
 def normalize_tool_args(value: Any) -> dict[str, Any]:

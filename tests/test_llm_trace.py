@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage
 from jarvis.llm_trace import LlmTraceRecorder, reset_cold_start_tracking
 
 
-def _start_meta(provider: str, model: str, *, billable=False, tier=0, node=""):
+def _start_meta(provider: str, model: str, *, billable=False, tier=0, node="", role=""):
     md = {
         "jarvis_provider": provider,
         "jarvis_model": model,
@@ -28,6 +28,8 @@ def _start_meta(provider: str, model: str, *, billable=False, tier=0, node=""):
     }
     if node:
         md["langgraph_node"] = node
+    if role:
+        md["jarvis_role"] = role
     return md
 
 
@@ -70,11 +72,14 @@ def test_ollama_call_traced_with_actual_provider():
 def test_failed_primary_then_fallback_success_marks_fallback_used():
     rec = LlmTraceRecorder(requested_role="reasoning")
 
+    class _RateLimitError(RuntimeError):
+        status_code = 429
+
     rid1 = uuid4()  # vertex primary: dies (e.g. 429)
     rec.on_chat_model_start({}, None, run_id=rid1,
                             metadata=_start_meta("vertex", "gemini-2.5-pro",
                                                  billable=True, tier=0))
-    rec.on_llm_error(RuntimeError("429 RESOURCE_EXHAUSTED"), run_id=rid1)
+    rec.on_llm_error(_RateLimitError("provider body"), run_id=rid1)
 
     rid2 = uuid4()  # ollama fallback: answers
     rec.on_chat_model_start({}, None, run_id=rid2,
@@ -89,8 +94,46 @@ def test_failed_primary_then_fallback_success_marks_fallback_used():
     assert summary["response_fallback_used"] is True
     assert summary["turn_had_any_fallback"] is True
     assert summary["billable"] is False
-    assert summary["provider_error_types"] == ["RuntimeError"]
+    assert summary["provider_error_types"] == ["_RateLimitError"]
     assert summary["rate_limit_errors"] == 1
+
+
+def test_fallback_event_is_diagnostic_and_does_not_render_error_body():
+    class _ProviderError(RuntimeError):
+        status_code = 503
+
+        def __str__(self):
+            raise AssertionError("provider body must not be rendered")
+
+    rec = LlmTraceRecorder(requested_role="reasoning")
+    primary, fallback = uuid4(), uuid4()
+    rec.on_chat_model_start(
+        {}, None, run_id=primary,
+        metadata=_start_meta(
+            "nvidia", "nvidia/ultra", tier=0, node="critic", role="reasoning"
+        ),
+    )
+    rec.on_llm_error(_ProviderError("secret"), run_id=primary)
+    rec.on_chat_model_start(
+        {}, None, run_id=fallback,
+        metadata=_start_meta(
+            "ollama", "qwen3:8b", tier=1, node="critic", role="reasoning"
+        ),
+    )
+    rec.on_llm_end(_llm_result(), run_id=fallback)
+
+    assert rec.turn_summary()["fallback_events"] == [{
+        "provider": "nvidia",
+        "model": "nvidia/ultra",
+        "fallback_provider": "ollama",
+        "fallback_model": "qwen3:8b",
+        "graph_node": "critic",
+        "role": "reasoning",
+        "exception_type": "_ProviderError",
+        "error_category": "provider_unavailable",
+        "http_status": 503,
+        "retry_fallback_tier": 1,
+    }]
 
 
 # ── Patch 1.1: response-scoped vs turn-scoped fallback ────────────────────────

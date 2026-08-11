@@ -121,6 +121,7 @@ def test_a_bare_greeting_does_not_fire_four_network_calls():
 
 @pytest.mark.parametrize("query", [
     "hava durumu nasıl", "hava nasıl", "havalar nasıl olacak",
+    "Ankara'da hava şu an nasıl?", "bugün hava nasıl",
     "yarın yağmur yağacak mı", "sıcaklık kaç derece",
 ])
 def test_weather_questions_reach_the_weather_tool(query):

@@ -123,7 +123,7 @@ _DOMAIN_PATTERNS: dict[str, list[str]] = {
     # offered for a money transfer is the substring class this module's header
     # was written about.
     "weather": [
-        r"\bhava durum", r"\bhava nasıl", r"\bhavalar", r"\bsıcaklık",
+        r"\bhava durum", r"\bhava (?:şu an |bugün )?nasıl", r"\bhavalar", r"\bsıcaklık",
         r"\byağmur", r"\bkar yağ", r"\bmeteoroloji", r"\bderece mi\b",
         r"\bweather\b", r"\bforecast\b",
     ],
