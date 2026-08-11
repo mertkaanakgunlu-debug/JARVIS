@@ -6,6 +6,8 @@ deployment metrics without asking another model to judge persuasive prose.
 
 from __future__ import annotations
 
+import ast
+import json
 import math
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
@@ -22,6 +24,29 @@ HARD_BLOCKERS = (
     "unknown_to_success",
     "wrong_source_satisfaction",
 )
+
+
+def normalize_tool_args(value: Any) -> dict[str, Any]:
+    """Decode callback arguments without executing model-controlled text.
+
+    LangChain callback implementations may provide a JSON string, a Python
+    literal representation, or an already-decoded mapping.  ``literal_eval``
+    handles the second form without the code-execution risk of ``eval``.
+    """
+    if isinstance(value, dict):
+        if set(value) == {"_raw"}:
+            return normalize_tool_args(value["_raw"])
+        return value
+    if not isinstance(value, str):
+        return {"_raw": str(value)}
+    for decoder in (json.loads, ast.literal_eval):
+        try:
+            loaded = decoder(value)
+        except (ValueError, SyntaxError, json.JSONDecodeError):
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+    return {"_raw": value}
 
 
 def _percentile(values: Iterable[float], q: float) -> float | None:

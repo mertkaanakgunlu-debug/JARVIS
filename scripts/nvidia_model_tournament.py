@@ -38,6 +38,7 @@ import jarvis.graph.tools as graph_tools  # noqa: E402
 from jarvis.config import Settings  # noqa: E402
 from jarvis.evals.model_tournament import (  # noqa: E402
     ModelSummary,
+    normalize_tool_args,
     select_winners,
     summarize_model,
 )
@@ -56,15 +57,7 @@ _OriginalHudCallback = agent_mod._HudEventCallback
 
 
 def _tool_args(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            loaded = json.loads(value)
-            return loaded if isinstance(loaded, dict) else {"_raw": value}
-        except json.JSONDecodeError:
-            return {"_raw": value}
-    return {"_raw": str(value)}
+    return normalize_tool_args(value)
 
 
 class _CapturingHudCallback(_OriginalHudCallback):

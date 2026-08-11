@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from jarvis.evals.model_tournament import select_winners, summarize_model
+from jarvis.evals.model_tournament import (
+    normalize_tool_args,
+    select_winners,
+    summarize_model,
+)
 
 
 def _row(model: str, **overrides) -> dict:
@@ -59,6 +63,18 @@ def test_scorer_counts_tool_recall_precision_arguments_and_efficiency():
     assert summary.latency_p90_ms == 3_000
     assert summary.tokens_per_success == 360.0
     assert summary.successful_tasks_per_minute == 15.0
+
+
+def test_tool_args_normalize_json_and_safe_python_literal_callbacks():
+    assert normalize_tool_args('{"path": "Desktop/source-a.txt"}') == {
+        "path": "Desktop/source-a.txt"
+    }
+    assert normalize_tool_args(
+        {"_raw": "{'path': 'C:\\\\Temp\\\\Desktop\\\\source-a.txt'}"}
+    ) == {"path": "C:\\Temp\\Desktop\\source-a.txt"}
+    assert normalize_tool_args("__import__('os').system('echo unsafe')") == {
+        "_raw": "__import__('os').system('echo unsafe')"
+    }
 
 
 def test_every_hard_blocker_disqualifies_a_model():
